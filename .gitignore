@@ -1,0 +1,16 @@
+# Binaries
+bin/
+omnia
+
+# Go
+*.test
+*.out
+
+# Config (may contain secrets)
+config.yaml
+
+# State
+.local/
+
+# OS
+.DS_Store

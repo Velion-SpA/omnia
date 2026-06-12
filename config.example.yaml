@@ -1,0 +1,20 @@
+engram:
+  base_url: http://127.0.0.1:7437
+  default_project: omnia
+
+sources:
+  discord:
+    enabled: false
+    channels:
+      - id: "123456789"
+        name: dev-help
+        guild: my-server
+    project: omnia
+
+  github:
+    enabled: true
+    repos:
+      - owner/repo
+    project: omnia
+
+backfill_days: 30
