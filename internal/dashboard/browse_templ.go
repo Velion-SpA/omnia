@@ -52,7 +52,7 @@ func browsePage(params BrowseParams, views []ObsView, projects []string) templ.C
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div style=\"display: flex; align-items: flex-start; gap: 24px;\"><!-- Sidebar filters --><aside style=\"width: 200px; flex-shrink: 0;\"><div class=\"card\"><h3 style=\"font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 12px 0;\">Filters</h3><form method=\"GET\" action=\"/browse\"><div style=\"display: flex; flex-direction: column; gap: 10px;\"><div><label style=\"font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;\">Project</label> <select name=\"project\" style=\"width: 100%;\" onchange=\"this.form.submit()\"><option value=\"\">All projects</option> ")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div style=\"display: flex; align-items: flex-start; gap: 1.5rem;\"><!-- Sidebar filters --><aside style=\"width: 200px; flex-shrink: 0;\"><div class=\"card\" style=\"padding: 1rem;\"><span class=\"micro-label\" style=\"display: block; margin-bottom: 0.75rem;\">Filters</span><form method=\"GET\" action=\"/browse\"><div style=\"display: flex; flex-direction: column; gap: 0.75rem;\"><div><label class=\"micro-label\" style=\"display: block; margin-bottom: 0.25rem;\">Project</label> <select name=\"project\" style=\"width: 100%;\" onchange=\"this.form.submit()\"><option value=\"\">All projects</option> ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -121,7 +121,7 @@ func browsePage(params BrowseParams, views []ObsView, projects []string) templ.C
 					}
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "</select></div><div><label style=\"font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;\">Source</label> <select name=\"source\" style=\"width: 100%;\" onchange=\"this.form.submit()\"><option value=\"\">All sources</option> ")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "</select></div><div><label class=\"micro-label\" style=\"display: block; margin-bottom: 0.25rem;\">Source</label> <select name=\"source\" style=\"width: 100%;\" onchange=\"this.form.submit()\"><option value=\"\">All sources</option> ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -190,7 +190,7 @@ func browsePage(params BrowseParams, views []ObsView, projects []string) templ.C
 					}
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "</select></div><div><label style=\"font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;\">Kind</label> <select name=\"kind\" style=\"width: 100%;\" onchange=\"this.form.submit()\"><option value=\"\">All kinds</option> ")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "</select></div><div><label class=\"micro-label\" style=\"display: block; margin-bottom: 0.25rem;\">Kind</label> <select name=\"kind\" style=\"width: 100%;\" onchange=\"this.form.submit()\"><option value=\"\">All kinds</option> ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -272,7 +272,7 @@ func browsePage(params BrowseParams, views []ObsView, projects []string) templ.C
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 23, "\"></div></form></div></aside><!-- Main content --><div style=\"flex: 1; min-width: 0;\"><!-- Search bar --><div style=\"margin-bottom: 16px; display: flex; gap: 10px; align-items: center;\"><form method=\"GET\" action=\"/browse\" style=\"flex: 1; display: flex; gap: 8px;\"><input type=\"hidden\" name=\"project\" value=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 23, "\"></div></form></div></aside><!-- Main content --><div style=\"flex: 1; min-width: 0;\"><!-- Search bar --><div style=\"margin-bottom: 1rem;\"><form method=\"GET\" action=\"/browse\" style=\"display: flex; gap: 0.5rem; align-items: center;\"><input type=\"hidden\" name=\"project\" value=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -324,20 +324,20 @@ func browsePage(params BrowseParams, views []ObsView, projects []string) templ.C
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 27, "\" placeholder=\"Search observations...\" style=\"flex: 1;\"> <button type=\"submit\" class=\"btn btn-primary\">Search</button></form><span style=\"font-size: 12px; color: var(--text-muted); white-space: nowrap;\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 27, "\" placeholder=\"Search observations...\" style=\"flex: 1;\"> <button type=\"submit\" class=\"pill-btn pill-btn-primary\">Search</button> <span class=\"micro-label\" style=\"white-space: nowrap; margin-left: 0.25rem;\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var20 string
-			templ_7745c5c3_Var20, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d result(s)", len(views)))
+			templ_7745c5c3_Var20, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d results", len(views)))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/browse.templ`, Line: 84, Col: 124}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/browse.templ`, Line: 83, Col: 122}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var20))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 28, "</span></div><!-- Results table --><div id=\"obs-list\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 28, "</span></form></div><!-- Results table --><div id=\"obs-list\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -387,7 +387,7 @@ func obsTable(views []ObsView) templ.Component {
 				return templ_7745c5c3_Err
 			}
 		} else {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 30, "<div class=\"card\" style=\"padding: 0; overflow: hidden;\"><table style=\"width: 100%; border-collapse: collapse;\"><thead><tr style=\"border-bottom: 1px solid var(--border);\"><th style=\"padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em;\">Title</th><th style=\"padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 90px;\">Layer</th><th style=\"padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 80px;\">Source</th><th style=\"padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 100px;\">Type</th><th style=\"padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 90px;\">Updated</th></tr></thead> <tbody>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 30, "<div class=\"card\" style=\"padding: 0; overflow: hidden;\"><table class=\"data-table\"><thead><tr><th>Title</th><th style=\"width: 90px;\">Layer</th><th style=\"width: 80px;\">Source</th><th style=\"width: 100px;\">Type</th><th style=\"width: 90px;\">Updated</th></tr></thead> <tbody>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -427,7 +427,7 @@ func obsRow(v ObsView) templ.Component {
 			templ_7745c5c3_Var22 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 32, "<tr class=\"obs-row\"><td style=\"padding: 10px 16px;\"><a href=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 32, "<tr class=\"obs-row\"><td><a href=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -440,7 +440,7 @@ func obsRow(v ObsView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 33, "\" style=\"color: var(--text); font-weight: 500; font-size: 13px; display: block; margin-bottom: 2px;\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 33, "\" style=\"color: var(--text); font-weight: 500; font-size: 13px; display: block; margin-bottom: 2px; text-decoration: none;\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -458,14 +458,14 @@ func obsRow(v ObsView) templ.Component {
 			return templ_7745c5c3_Err
 		}
 		if v.HasMeta && v.Meta.Repo != "" {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 35, "<span style=\"font-size: 11px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace;\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 35, "<span style=\"font-size: 11px; color: var(--text-faint); font-family: 'JetBrains Mono', monospace;\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var25 string
 			templ_7745c5c3_Var25, templ_7745c5c3_Err = templ.JoinStringErrs(v.Meta.Repo)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/browse.templ`, Line: 128, Col: 114}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/browse.templ`, Line: 128, Col: 116}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var25))
 			if templ_7745c5c3_Err != nil {
@@ -476,7 +476,7 @@ func obsRow(v ObsView) templ.Component {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 37, "</td><td style=\"padding: 10px 16px;\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 37, "</td><td>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -491,7 +491,7 @@ func obsRow(v ObsView) templ.Component {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 40, "</td><td style=\"padding: 10px 16px;\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 40, "</td><td>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -514,12 +514,12 @@ func obsRow(v ObsView) templ.Component {
 				return templ_7745c5c3_Err
 			}
 		} else {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, "<span style=\"color: var(--text-dim); font-size: 12px;\">—</span>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, "<span style=\"color: var(--text-faint); font-size: 12px;\">—</span>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "</td><td style=\"padding: 10px 16px;\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "</td><td>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -542,19 +542,19 @@ func obsRow(v ObsView) templ.Component {
 				return templ_7745c5c3_Err
 			}
 		} else {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "<span style=\"color: var(--text-dim); font-size: 12px;\">—</span>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "<span style=\"color: var(--text-faint); font-size: 12px;\">—</span>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 48, "</td><td style=\"padding: 10px 16px; font-size: 11px; color: var(--text-muted);\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 48, "</td><td class=\"micro-label\" style=\"color: var(--text-faint);\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var28 string
 		templ_7745c5c3_Var28, templ_7745c5c3_Err = templ.JoinStringErrs(v.Age)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/browse.templ`, Line: 152, Col: 84}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/browse.templ`, Line: 152, Col: 67}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var28))
 		if templ_7745c5c3_Err != nil {
