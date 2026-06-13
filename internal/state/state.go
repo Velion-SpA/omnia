@@ -8,6 +8,9 @@ import (
 	"sync"
 )
 
+// Flush writes state to disk atomically using a write-to-tmp-then-rename strategy
+// so a crash during the write cannot corrupt the existing state file.
+
 // Store persists sync cursors as a JSON file.
 type Store struct {
 	mu      sync.Mutex
@@ -63,8 +66,14 @@ func (s *Store) Flush() error {
 	if err != nil {
 		return fmt.Errorf("marshal state: %w", err)
 	}
-	if err := os.WriteFile(s.path, data, 0o644); err != nil {
-		return fmt.Errorf("write state file: %w", err)
+	// W3: write to a temp file first, then atomically rename so a crash during
+	// the write cannot leave a corrupt state file.
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write state tmp file: %w", err)
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		return fmt.Errorf("rename state file: %w", err)
 	}
 	return nil
 }
