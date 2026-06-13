@@ -48,6 +48,14 @@ omnia sync --source github --dry-run
 omnia sync --source github --since $(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)
 ```
 
+**Note on incremental sync:** After the first run, per-repo cursors are stored in
+`~/.local/state/omnia/state.json`. On each subsequent run omnia reads these cursors
+and passes the latest `updated_at` timestamp to the GitHub API as the `since` parameter,
+so only items updated after the last sync are fetched. The cursor is only advanced after
+all sink writes succeed — if a write fails, omnia exits non-zero and does **not** move
+the cursor forward. Re-running is safe because Engram upserts on `topic_key+project`
+(no duplicates, just a revision bump).
+
 ### Sync Discord
 
 ```sh
@@ -101,9 +109,21 @@ See `docs/WHATSAPP.md` and `docs/JIRA.md` for in-progress source plans.
 Copy and edit the launchd plist:
 
 ```sh
+# 1. Build and install the binary first
+go build -o /usr/local/bin/omnia ./cmd/omnia
+
+# 2. Copy the plist and replace the token placeholders
 cp deploy/com.velion.omnia.plist ~/Library/LaunchAgents/
-# Edit the plist to set the correct binary path
+# Open the plist and replace REPLACE_WITH_YOUR_GITHUB_TOKEN and
+# REPLACE_WITH_YOUR_DISCORD_BOT_TOKEN with real values before loading.
+
+# 3. Load the agent
 launchctl load ~/Library/LaunchAgents/com.velion.omnia.plist
 ```
 
 This runs `omnia sync` every night at 2am.
+
+**Failure behavior:** If omnia exits non-zero (e.g. Engram is unreachable or a write fails),
+the state cursors are not advanced. The next scheduled run will re-fetch the same window
+and attempt to write again. Because Engram upserts by `topic_key+project`, re-ingesting
+the same items is always safe.
