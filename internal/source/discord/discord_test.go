@@ -15,6 +15,13 @@ import (
 	discord "github.com/velion/omnia/internal/source/discord"
 )
 
+// stubDiscordRouter satisfies the discord source's projectRouter interface.
+type stubDiscordRouter struct {
+	project string
+}
+
+func (r *stubDiscordRouter) ResolveDiscord(_, _ string) string { return r.project }
+
 // stubDiscordState is a minimal StateStore for discord tests.
 type stubDiscordState struct {
 	cursors map[string]string
@@ -51,7 +58,7 @@ func TestFetchChannelFromFixture(t *testing.T) {
 	defer srv.Close()
 
 	channels := []config.ChannelConfig{{ID: "123", Name: "dev-ops", Guild: "test-guild"}}
-	src := discord.NewWithBaseURL(channels, "omnia", "fake-token", nil, srv.URL)
+	src := discord.NewWithBaseURL(channels, &stubDiscordRouter{"omnia"}, "fake-token", nil, srv.URL)
 
 	items, err := src.Fetch(context.Background(), time.Time{})
 	if err != nil {
@@ -135,7 +142,7 @@ func TestDiscordMultiPagePagination(t *testing.T) {
 
 	st := newDiscordStubState()
 	channels := []config.ChannelConfig{{ID: "555", Name: "general", Guild: "my-guild"}}
-	src := discord.NewWithBaseURL(channels, "omnia", "fake-token", st, srv.URL)
+	src := discord.NewWithBaseURL(channels, &stubDiscordRouter{"omnia"}, "fake-token", st, srv.URL)
 
 	items, err := src.Fetch(context.Background(), time.Time{})
 	if err != nil {

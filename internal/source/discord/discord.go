@@ -12,6 +12,7 @@ import (
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/core"
 	"github.com/velion/omnia/internal/enrich"
+	"github.com/velion/omnia/internal/meta"
 )
 
 const (
@@ -26,6 +27,11 @@ const (
 	msgTypeDefault = 0
 	msgTypeReply   = 19
 )
+
+// projectRouter is a minimal interface to avoid circular imports.
+type projectRouter interface {
+	ResolveDiscord(channelID string, guildSlug string) string
+}
 
 // message represents a Discord message from the API.
 type message struct {
@@ -47,7 +53,7 @@ type rateLimitResponse struct {
 // Source fetches Discord channel messages and produces daily digests.
 type Source struct {
 	channels []config.ChannelConfig
-	project  string
+	router   projectRouter
 	token    string
 	client   *http.Client
 	state    core.StateStore
@@ -55,14 +61,14 @@ type Source struct {
 }
 
 // New creates a Discord Source. Token from DISCORD_BOT_TOKEN env or config.
-func New(channels []config.ChannelConfig, project, configToken string, state core.StateStore) *Source {
+func New(channels []config.ChannelConfig, router projectRouter, configToken string, state core.StateStore) *Source {
 	token := os.Getenv("DISCORD_BOT_TOKEN")
 	if token == "" {
 		token = configToken
 	}
 	return &Source{
 		channels: channels,
-		project:  project,
+		router:   router,
 		token:    token,
 		client:   &http.Client{Timeout: 30 * time.Second},
 		state:    state,
@@ -71,8 +77,8 @@ func New(channels []config.ChannelConfig, project, configToken string, state cor
 }
 
 // NewWithBaseURL creates a Source with a custom base URL (for testing).
-func NewWithBaseURL(channels []config.ChannelConfig, project, token string, state core.StateStore, baseURLOverride string) *Source {
-	s := New(channels, project, token, state)
+func NewWithBaseURL(channels []config.ChannelConfig, router projectRouter, token string, state core.StateStore, baseURLOverride string) *Source {
+	s := New(channels, router, token, state)
 	s.baseURL = baseURLOverride
 	return s
 }
@@ -155,9 +161,12 @@ func (s *Source) fetchChannel(ctx context.Context, ch config.ChannelConfig, sinc
 		byDay[day] = append(byDay[day], m)
 	}
 
+	// Resolve project for this channel.
+	project := s.router.ResolveDiscord(ch.ID, ch.Guild)
+
 	var items []core.Item
 	for day, msgs := range byDay {
-		dayItems := buildDailyDigest(ch, day, msgs, s.project)
+		dayItems := buildDailyDigest(ch, day, msgs, project)
 		items = append(items, dayItems...)
 	}
 	return items, nil
@@ -251,6 +260,7 @@ func parseDiscordRetryAfter(resp *http.Response) time.Duration {
 }
 
 // buildDailyDigest formats a set of messages into one or more Engram observations.
+// The resolved project is passed directly as a string.
 func buildDailyDigest(ch config.ChannelConfig, day string, msgs []message, project string) []core.Item {
 	guildLabel := ch.Guild
 	if guildLabel == "" {
@@ -297,20 +307,48 @@ func buildDailyDigest(ch config.ChannelConfig, day string, msgs []message, proje
 	// S4a: context header for continuation chunks.
 	contextHeader := fmt.Sprintf("<!-- #%s | %s | %s -->\n\n", ch.Name, guildLabel, day)
 
-	chunks := enrich.ChunkContent(fullContent, maxChunkRunes)
+	// Build meta struct for this digest.
+	ingestedAt := time.Now().UTC()
+	m := meta.Meta{
+		SchemaVersion: meta.SchemaVersion,
+		Source:        "discord",
+		Kind:          "message_digest",
+		Layer:         "ingested",
+		Project:       project,
+		IngestedAt:    ingestedAt,
+	}
+
+	// C3: split human-readable content into chunks, reserving budget for the meta block.
+	metaSize := len([]rune(meta.Render(m)))
+	chunkBudget := maxChunkRunes - metaSize
+
+	chunks := enrich.ChunkContent(fullContent, chunkBudget)
 
 	var items []core.Item
+	total := len(chunks)
 	for i, chunk := range chunks {
 		topicKey := normalizedBase
 		suffix := ""
 		content := chunk
-		if len(chunks) > 1 {
+		if total > 1 {
 			topicKey = fmt.Sprintf("%s-part%d", normalizedBase, i+1)
-			suffix = fmt.Sprintf(" (part %d/%d)", i+1, len(chunks))
+			suffix = fmt.Sprintf(" (part %d/%d)", i+1, total)
 			if i > 0 {
 				content = contextHeader + chunk
 			}
+			m.ChunkCurrent = i + 1
+			m.ChunkTotal = total
+		} else {
+			m.ChunkCurrent = 0
+			m.ChunkTotal = 0
 		}
+
+		// Append meta block to this chunk, ensuring it starts on its own line.
+		if !strings.HasSuffix(content, "\n") {
+			content = content + "\n"
+		}
+		content = content + meta.Render(m)
+
 		title := fmt.Sprintf("[#%s] Daily digest %s%s", ch.Name, day, suffix)
 		items = append(items, core.Item{
 			Type:      "discord-digest",
