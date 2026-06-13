@@ -28,7 +28,7 @@ project: saluvita
 | `source_id` | no | string (quoted) | PR/issue number, snowflake ID, etc. |
 | `status` | no | string | `open` \| `closed` \| `merged` \| empty for digests |
 | `author` | no | string | Primary author login/username |
-| `participants` | no | string | Comma-space joined list of all actors |
+| `participants` | no | JSON array | JSON-encoded string array, e.g. `["alice","bob"]`. JSON encoding is required so participant names containing `", "` (e.g. display names, Jira full names) round-trip losslessly. |
 | `url` | no | string | Canonical web URL |
 | `created_at` | no | RFC3339 UTC | Zero → field omitted |
 | `updated_at` | no | RFC3339 UTC | Zero → field omitted |

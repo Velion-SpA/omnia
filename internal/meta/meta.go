@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -63,7 +64,12 @@ func Render(m Meta) string {
 		sb.WriteString(fmt.Sprintf("author: %s\n", m.Author))
 	}
 	if len(m.Participants) > 0 {
-		sb.WriteString(fmt.Sprintf("participants: %s\n", strings.Join(m.Participants, ", ")))
+		// FIX-3: JSON-encode participants so names containing ", " round-trip losslessly.
+		// Format: participants: ["alice","bob"]
+		encoded, err := json.Marshal(m.Participants)
+		if err == nil {
+			sb.WriteString(fmt.Sprintf("participants: %s\n", encoded))
+		}
 	}
 	if m.URL != "" {
 		sb.WriteString(fmt.Sprintf("url: %s\n", m.URL))
@@ -87,17 +93,27 @@ func Render(m Meta) string {
 }
 
 // Parse extracts the omnia-meta block from observation content.
-// Returns (Meta, true) if a valid block is found; (Meta{}, false) otherwise.
+// Returns (Meta, true) if a valid, complete block is found; (Meta{}, false) otherwise.
+//
+// Separation contract: a block is only considered valid if it contains the mandatory
+// fields schema_version, source, and kind. This prevents a curated human note that
+// merely quotes an ```omnia-meta snippet from being misclassified as an ingested
+// observation. Combined with scanning for the LAST fence occurrence, this ensures
+// derived-vs-curated separation is robust even when PR bodies embed fake blocks.
+//
 // The parser is tolerant: unknown fields are silently ignored (forward compatibility).
 func Parse(content string) (Meta, bool) {
+	// Normalize CRLF to LF so Windows-encoded content parses correctly.
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 	lines := strings.Split(content, "\n")
 
-	// Find the opening fence line.
+	// FIX-1: Find the LAST opening fence line, not the first.
+	// Omnia always appends the meta block at the end; an earlier occurrence in the
+	// body (e.g. from a PR description quoting the format) must be ignored.
 	startIdx := -1
 	for i, line := range lines {
 		if strings.TrimSpace(line) == blockFence {
-			startIdx = i
-			break
+			startIdx = i // keep overwriting — we want the last match
 		}
 	}
 	if startIdx < 0 {
@@ -151,8 +167,13 @@ func Parse(content string) (Meta, bool) {
 		case "author":
 			m.Author = value
 		case "participants":
+			// FIX-3: participants are JSON-encoded to support names containing ", ".
+			// Format: ["alice","bob"] — fall back to empty slice on parse error.
 			if value != "" {
-				m.Participants = strings.Split(value, ", ")
+				var parts []string
+				if err := json.Unmarshal([]byte(value), &parts); err == nil {
+					m.Participants = parts
+				}
 			}
 		case "url":
 			m.URL = value
@@ -184,6 +205,14 @@ func Parse(content string) (Meta, bool) {
 			}
 		// Unknown keys are silently ignored (forward compatibility).
 		}
+	}
+
+	// FIX-2: Mandatory field validation — separation contract.
+	// A block missing schema_version, source, or kind is not a valid ingested block.
+	// This makes it safe for the semantic index backfill to call Parse on all
+	// Engram observations without misclassifying curated human notes.
+	if m.SchemaVersion == 0 || m.Source == "" || m.Kind == "" {
+		return Meta{}, false
 	}
 
 	return m, true
