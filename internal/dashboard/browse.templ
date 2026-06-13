@@ -1,0 +1,164 @@
+package dashboard
+
+import "fmt"
+
+// BrowseParams holds the filter state for the browse page.
+type BrowseParams struct {
+	Project string
+	Source  string
+	Kind    string
+	Query   string
+}
+
+// browsePage renders the observation list/browse view.
+templ browsePage(params BrowseParams, views []ObsView, projects []string) {
+	@layout("Browse") {
+		<div style="display: flex; align-items: flex-start; gap: 24px;">
+			<!-- Sidebar filters -->
+			<aside style="width: 200px; flex-shrink: 0;">
+				<div class="card">
+					<h3 style="font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 12px 0;">Filters</h3>
+					<form method="GET" action="/browse">
+						<div style="display: flex; flex-direction: column; gap: 10px;">
+							<div>
+								<label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Project</label>
+								<select name="project" style="width: 100%;" onchange="this.form.submit()">
+									<option value="">All projects</option>
+									for _, p := range projects {
+										if p == params.Project {
+											<option value={ p } selected>{ p }</option>
+										} else {
+											<option value={ p }>{ p }</option>
+										}
+									}
+								</select>
+							</div>
+							<div>
+								<label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Source</label>
+								<select name="source" style="width: 100%;" onchange="this.form.submit()">
+									<option value="">All sources</option>
+									for _, s := range []string{"github", "discord", "jira", "whatsapp"} {
+										if s == params.Source {
+											<option value={ s } selected>{ s }</option>
+										} else {
+											<option value={ s }>{ s }</option>
+										}
+									}
+								</select>
+							</div>
+							<div>
+								<label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Kind</label>
+								<select name="kind" style="width: 100%;" onchange="this.form.submit()">
+									<option value="">All kinds</option>
+									for _, k := range []string{"pull_request", "issue", "commit_digest", "message_digest"} {
+										if k == params.Kind {
+											<option value={ k } selected>{ k }</option>
+										} else {
+											<option value={ k }>{ k }</option>
+										}
+									}
+								</select>
+							</div>
+							<input type="hidden" name="q" value={ params.Query }/>
+						</div>
+					</form>
+				</div>
+			</aside>
+			<!-- Main content -->
+			<div style="flex: 1; min-width: 0;">
+				<!-- Search bar -->
+				<div style="margin-bottom: 16px; display: flex; gap: 10px; align-items: center;">
+					<form method="GET" action="/browse" style="flex: 1; display: flex; gap: 8px;">
+						<input type="hidden" name="project" value={ params.Project }/>
+						<input type="hidden" name="source" value={ params.Source }/>
+						<input type="hidden" name="kind" value={ params.Kind }/>
+						<input
+							type="search"
+							name="q"
+							value={ params.Query }
+							placeholder="Search observations..."
+							style="flex: 1;"
+						/>
+						<button type="submit" class="btn btn-primary">Search</button>
+					</form>
+					<span style="font-size: 12px; color: var(--text-muted); white-space: nowrap;">{ fmt.Sprintf("%d result(s)", len(views)) }</span>
+				</div>
+				<!-- Results table -->
+				<div id="obs-list">
+					@obsTable(views)
+				</div>
+			</div>
+		</div>
+	}
+}
+
+// obsTable renders the observation rows (also used by HTMX partial updates).
+templ obsTable(views []ObsView) {
+	if len(views) == 0 {
+		@emptyState("No observations found. Try a different filter or search term.")
+	} else {
+		<div class="card" style="padding: 0; overflow: hidden;">
+			<table style="width: 100%; border-collapse: collapse;">
+				<thead>
+					<tr style="border-bottom: 1px solid var(--border);">
+						<th style="padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em;">Title</th>
+						<th style="padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 90px;">Layer</th>
+						<th style="padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 80px;">Source</th>
+						<th style="padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 100px;">Type</th>
+						<th style="padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 90px;">Updated</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, v := range views {
+						@obsRow(v)
+					}
+				</tbody>
+			</table>
+		</div>
+	}
+}
+
+templ obsRow(v ObsView) {
+	<tr class="obs-row">
+		<td style="padding: 10px 16px;">
+			<a href={ templ.SafeURL(fmt.Sprintf("/detail/%d", v.Obs.ID)) } style="color: var(--text); font-weight: 500; font-size: 13px; display: block; margin-bottom: 2px;">
+				{ truncateTitle(v.Obs.Title) }
+			</a>
+			if v.HasMeta && v.Meta.Repo != "" {
+				<span style="font-size: 11px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace;">{ v.Meta.Repo }</span>
+			}
+		</td>
+		<td style="padding: 10px 16px;">
+			if v.HasMeta {
+				<span class="badge badge-ingested">ingested</span>
+			} else {
+				<span class="badge badge-curated">curated</span>
+			}
+		</td>
+		<td style="padding: 10px 16px;">
+			if v.HasMeta && v.Meta.Source != "" {
+				<span class="badge badge-source">{ v.Meta.Source }</span>
+			} else {
+				<span style="color: var(--text-dim); font-size: 12px;">—</span>
+			}
+		</td>
+		<td style="padding: 10px 16px;">
+			if v.Obs.Type != "" {
+				<span class="badge badge-type">{ v.Obs.Type }</span>
+			} else {
+				<span style="color: var(--text-dim); font-size: 12px;">—</span>
+			}
+		</td>
+		<td style="padding: 10px 16px; font-size: 11px; color: var(--text-muted);">{ v.Age }</td>
+	</tr>
+}
+
+// truncateTitle trims long titles for the list view.
+func truncateTitle(s string) string {
+	const max = 80
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}

@@ -1,0 +1,300 @@
+package dashboard
+
+// layout renders the outer HTML shell shared by every page.
+templ layout(title string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="UTF-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+			<title>{ title } — Omnia</title>
+			<!-- Inter font -->
+			<link rel="preconnect" href="https://fonts.googleapis.com"/>
+			<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+			<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+			<!-- Tailwind CDN (play) -->
+			<script src="https://cdn.tailwindcss.com"></script>
+			<!-- HTMX CDN -->
+			<script src="https://unpkg.com/htmx.org@1.9.12" integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2uQ8DmUoPGesGEV/isNNm0+QMqKTmHKKfJ" crossorigin="anonymous"></script>
+			<!-- Design tokens and global styles -->
+			<style>
+				:root {
+					--accent: #2dd4bf;
+					--accent-dim: #0d9488;
+					--bg: #0d1117;
+					--bg-card: #161b22;
+					--bg-input: #1c2128;
+					--border: #30363d;
+					--text: #e6edf3;
+					--text-muted: #7d8590;
+					--text-dim: #484f58;
+					--badge-ingested: #164e63;
+					--badge-ingested-text: #67e8f9;
+					--badge-curated: #1e3a5f;
+					--badge-curated-text: #93c5fd;
+				}
+
+				* { box-sizing: border-box; }
+
+				body {
+					background: var(--bg);
+					color: var(--text);
+					font-family: 'Inter', system-ui, sans-serif;
+					font-size: 14px;
+					line-height: 1.6;
+					margin: 0;
+				}
+
+				code, pre, .mono {
+					font-family: 'JetBrains Mono', 'Fira Code', monospace;
+					font-size: 12px;
+				}
+
+				a { color: var(--accent); text-decoration: none; }
+				a:hover { text-decoration: underline; }
+
+				/* Scrollbar styling */
+				::-webkit-scrollbar { width: 6px; }
+				::-webkit-scrollbar-track { background: var(--bg); }
+				::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+				/* Custom components */
+				.card {
+					background: var(--bg-card);
+					border: 1px solid var(--border);
+					border-radius: 8px;
+					padding: 20px;
+				}
+
+				.badge {
+					display: inline-flex;
+					align-items: center;
+					padding: 2px 8px;
+					border-radius: 4px;
+					font-size: 11px;
+					font-weight: 500;
+					letter-spacing: 0.03em;
+				}
+
+				.badge-ingested {
+					background: var(--badge-ingested);
+					color: var(--badge-ingested-text);
+				}
+
+				.badge-curated {
+					background: var(--badge-curated);
+					color: var(--badge-curated-text);
+				}
+
+				.badge-source {
+					background: #1a2433;
+					color: #94a3b8;
+					border: 1px solid #2d3a4a;
+				}
+
+				.badge-type {
+					background: #1f1a2e;
+					color: #c4b5fd;
+					border: 1px solid #3b2f6e;
+				}
+
+				.badge-status-open   { background: #0f2d1a; color: #4ade80; }
+				.badge-status-closed { background: #2d1a0f; color: #f87171; }
+				.badge-status-merged { background: #2e1a40; color: #d8b4fe; }
+
+				.nav-item {
+					color: var(--text-muted);
+					padding: 6px 12px;
+					border-radius: 6px;
+					font-size: 13px;
+					font-weight: 500;
+					transition: color 0.15s, background 0.15s;
+				}
+				.nav-item:hover { color: var(--text); background: rgba(255,255,255,0.05); text-decoration: none; }
+				.nav-item.active { color: var(--accent); }
+
+				.btn {
+					display: inline-flex;
+					align-items: center;
+					gap: 6px;
+					padding: 6px 14px;
+					border-radius: 6px;
+					font-size: 13px;
+					font-weight: 500;
+					cursor: pointer;
+					border: 1px solid var(--border);
+					background: var(--bg-card);
+					color: var(--text);
+					transition: background 0.15s, border-color 0.15s;
+				}
+				.btn:hover { background: rgba(255,255,255,0.07); border-color: var(--accent); }
+				.btn-danger { border-color: #dc2626; color: #f87171; }
+				.btn-danger:hover { background: rgba(220,38,38,0.1); }
+				.btn-primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
+				.btn-primary:hover { background: var(--accent-dim); border-color: var(--accent-dim); }
+
+				input[type="text"], input[type="search"], textarea, select {
+					background: var(--bg-input);
+					border: 1px solid var(--border);
+					color: var(--text);
+					border-radius: 6px;
+					padding: 6px 12px;
+					font-family: inherit;
+					font-size: 13px;
+					outline: none;
+					transition: border-color 0.15s;
+				}
+				input:focus, textarea:focus, select:focus {
+					border-color: var(--accent);
+				}
+
+				.content-prose {
+					color: var(--text);
+					line-height: 1.75;
+					white-space: pre-wrap;
+					word-break: break-word;
+				}
+
+				.htmx-indicator { opacity: 0; transition: opacity 0.2s; }
+				.htmx-request .htmx-indicator { opacity: 1; }
+
+				.spinner {
+					display: inline-block;
+					width: 14px;
+					height: 14px;
+					border: 2px solid var(--border);
+					border-top-color: var(--accent);
+					border-radius: 50%;
+					animation: spin 0.6s linear infinite;
+				}
+				@keyframes spin { to { transform: rotate(360deg); } }
+
+				.modal-backdrop {
+					position: fixed; inset: 0;
+					background: rgba(0,0,0,0.7);
+					display: flex; align-items: center; justify-content: center;
+					z-index: 50;
+				}
+				.modal {
+					background: var(--bg-card);
+					border: 1px solid var(--border);
+					border-radius: 10px;
+					padding: 28px;
+					max-width: 440px;
+					width: 90%;
+				}
+
+				/* Log line styling */
+				.log-line { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); }
+				.log-line:hover { color: var(--text); }
+
+				/* Divider */
+				.divider { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+
+				/* Sidebar nav section */
+				.nav-section-label {
+					font-size: 10px;
+					font-weight: 600;
+					letter-spacing: 0.08em;
+					color: var(--text-dim);
+					text-transform: uppercase;
+					padding: 8px 12px 4px;
+				}
+
+				/* Table rows */
+				.obs-row {
+					border-bottom: 1px solid var(--border);
+					transition: background 0.12s;
+				}
+				.obs-row:hover { background: rgba(255,255,255,0.03); }
+				.obs-row:last-child { border-bottom: none; }
+
+				/* Key-value panel */
+				.kv-row { display: flex; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--border); align-items: flex-start; }
+				.kv-row:last-child { border-bottom: none; }
+				.kv-key { color: var(--text-muted); font-size: 11px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; min-width: 100px; padding-top: 2px; }
+				.kv-val { color: var(--text); font-size: 13px; }
+			</style>
+			<script>
+				// Tailwind config for custom colors matching our CSS vars
+				tailwind.config = {
+					theme: {
+						extend: {
+							colors: {
+								bg: '#0d1117',
+								card: '#161b22',
+								border: '#30363d',
+								accent: '#2dd4bf',
+							}
+						}
+					}
+				}
+			</script>
+		</head>
+		<body class="min-h-screen flex flex-col">
+			<!-- Top navigation bar -->
+			<header style="background: var(--bg-card); border-bottom: 1px solid var(--border);" class="sticky top-0 z-40">
+				<div class="max-w-screen-xl mx-auto px-6 flex items-center h-12 gap-6">
+					<!-- Wordmark -->
+					<a href="/" class="flex items-center gap-3 shrink-0" style="text-decoration: none;">
+						<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+							<circle cx="10" cy="10" r="9" stroke="#2dd4bf" stroke-width="1.5"/>
+							<circle cx="10" cy="10" r="4" fill="#2dd4bf" opacity="0.8"/>
+							<line x1="10" y1="1" x2="10" y2="4" stroke="#2dd4bf" stroke-width="1.5"/>
+							<line x1="10" y1="16" x2="10" y2="19" stroke="#2dd4bf" stroke-width="1.5"/>
+							<line x1="1" y1="10" x2="4" y2="10" stroke="#2dd4bf" stroke-width="1.5"/>
+							<line x1="16" y1="10" x2="19" y2="10" stroke="#2dd4bf" stroke-width="1.5"/>
+						</svg>
+						<span style="font-weight: 700; font-size: 15px; color: var(--text); letter-spacing: -0.02em;">Omnia</span>
+						<span style="font-size: 10px; color: var(--text-dim); font-weight: 500; letter-spacing: 0.05em; margin-left: -4px;">unified knowledge</span>
+					</a>
+					<!-- Nav links -->
+					<nav class="flex items-center gap-1 ml-2">
+						<a href="/" class="nav-item">Overview</a>
+						<a href="/browse" class="nav-item">Browse</a>
+						<a href="/sync" class="nav-item">Sync Status</a>
+					</nav>
+					<!-- Spacer -->
+					<div class="flex-1"></div>
+					<!-- Engram health indicator -->
+					<div id="health-indicator" class="flex items-center gap-2" style="font-size: 12px; color: var(--text-muted);">
+						<span style="width:6px;height:6px;border-radius:50%;background:var(--accent);display:inline-block;"></span>
+						<span>Engram</span>
+					</div>
+				</div>
+			</header>
+			<!-- Page content -->
+			<main class="flex-1 max-w-screen-xl mx-auto w-full px-6 py-8">
+				{ children... }
+			</main>
+			<!-- Footer -->
+			<footer style="border-top: 1px solid var(--border);" class="py-4 px-6">
+				<div class="max-w-screen-xl mx-auto" style="font-size: 11px; color: var(--text-dim);">
+					Omnia dashboard — reads Engram via HTTP API — no writes without your action
+				</div>
+			</footer>
+		</body>
+	</html>
+}
+
+// pageTitle is a small helper for consistent H1 rendering.
+templ pageTitle(text string) {
+	<h1 style="font-size: 20px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; margin: 0 0 24px 0;">{ text }</h1>
+}
+
+// errorBanner renders an error message in a styled banner.
+templ errorBanner(msg string) {
+	<div style="background: #2d1a0f; border: 1px solid #7f1d1d; border-radius: 8px; padding: 12px 16px; color: #f87171; font-size: 13px; margin-bottom: 16px;">
+		{ msg }
+	</div>
+}
+
+// emptyState renders a "no results" message.
+templ emptyState(msg string) {
+	<div style="text-align: center; padding: 60px 0; color: var(--text-dim);">
+		<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin: 0 auto 12px; display: block; opacity: 0.4;">
+			<path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z"/>
+		</svg>
+		<p style="font-size: 14px; color: var(--text-muted);">{ msg }</p>
+	</div>
+}

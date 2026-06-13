@@ -1,0 +1,53 @@
+package dashboard
+
+// syncStatusPage is the dedicated /sync route with full detail.
+templ syncStatusPage(status SyncStatus) {
+	@layout("Sync Status") {
+		@pageTitle("Sync Status")
+		<div style="display: flex; flex-direction: column; gap: 20px;">
+			<!-- State file card -->
+			<div class="card">
+				<h2 style="font-size: 14px; font-weight: 700; margin: 0 0 16px 0;">Cursors</h2>
+				<p style="font-size: 12px; color: var(--text-muted); margin: 0 0 14px 0;">
+					State file: <code class="mono">{ status.StateFile }</code>
+				</p>
+				if status.Missing {
+					<div style="padding: 12px 16px; background: #1e1a0f; border: 1px solid #78350f; border-radius: 6px; color: #fbbf24; font-size: 13px;">
+						State file not found. Run <code class="mono">omnia sync</code> to create it.
+					</div>
+				} else if len(status.Cursors) == 0 {
+					<p style="color: var(--text-muted); font-size: 13px;">No cursors recorded yet.</p>
+				} else {
+					<div style="display: flex; flex-direction: column; gap: 8px;">
+						for _, c := range status.Cursors {
+							<div style="display: grid; grid-template-columns: 80px 1fr 1fr 110px; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-input); border-radius: 6px;">
+								<span class="badge badge-source">{ c.Source }</span>
+								<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text);">{ c.Repo }</span>
+								<span style="font-size: 11px; color: var(--text-dim); font-family: monospace;">{ c.Timestamp }</span>
+								<span style="font-size: 11px; color: var(--text-muted); text-align: right;">{ c.Age }</span>
+							</div>
+						}
+					</div>
+				}
+			</div>
+			<!-- Log card -->
+			<div class="card">
+				<h2 style="font-size: 14px; font-weight: 700; margin: 0 0 12px 0;">Recent Log</h2>
+				<p style="font-size: 12px; color: var(--text-muted); margin: 0 0 14px 0;">
+					Log file: <code class="mono">{ status.LogFile }</code>
+				</p>
+				if len(status.LogLines) == 0 {
+					<div style="padding: 12px 16px; background: var(--bg-input); border-radius: 6px; color: var(--text-muted); font-size: 13px;">
+						No log file found. Omnia logs to stderr only (no file logger configured in v1).
+					</div>
+				} else {
+					<div style="background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 14px; max-height: 400px; overflow-y: auto;">
+						for _, line := range status.LogLines {
+							<div class="log-line" style="padding: 1px 0;">{ line }</div>
+						}
+					</div>
+				}
+			</div>
+		</div>
+	}
+}
