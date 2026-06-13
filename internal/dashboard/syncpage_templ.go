@@ -42,51 +42,47 @@ func syncStatusPage(status SyncStatus) templ.Component {
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = pageTitle("Sync Status").Render(ctx, templ_7745c5c3_Buffer)
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, " <div style=\"display: flex; flex-direction: column; gap: 20px;\"><!-- State file card --><div class=\"card\"><h2 style=\"font-size: 14px; font-weight: 700; margin: 0 0 16px 0;\">Cursors</h2><p style=\"font-size: 12px; color: var(--text-muted); margin: 0 0 14px 0;\">State file: <code class=\"mono\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<h1 style=\"font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;\">Sync Status</h1><div style=\"display: flex; flex-direction: column; gap: 1.25rem;\"><!-- Cursors card --><div class=\"card\"><span class=\"micro-label\" style=\"display: block; margin-bottom: 0.25rem;\">SYNC CURSORS</span><p style=\"font-size: 11px; color: var(--text-faint); margin: 0 0 1rem 0; font-family: 'JetBrains Mono', monospace;\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var3 string
 			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(status.StateFile)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 12, Col: 54}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 11, Col: 138}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</code></p>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</p>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			if status.Missing {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<div style=\"padding: 12px 16px; background: #1e1a0f; border: 1px solid #78350f; border-radius: 6px; color: #fbbf24; font-size: 13px;\">State file not found. Run <code class=\"mono\">omnia sync</code> to create it.</div>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<div style=\"padding: 0.75rem 1rem; background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.2); border-radius: 0.5rem; color: var(--warn); font-size: 13px;\">State file not found. Run <code style=\"font-family: 'JetBrains Mono', monospace;\">omnia sync</code> to create it.</div>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			} else if len(status.Cursors) == 0 {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<p style=\"color: var(--text-muted); font-size: 13px;\">No cursors recorded yet.</p>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<p style=\"color: var(--text-dim); font-size: 13px;\">No cursors recorded yet.</p>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			} else {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "<div style=\"display: flex; flex-direction: column; gap: 8px;\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "<div style=\"display: flex; flex-direction: column; gap: 4px;\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				for _, c := range status.Cursors {
-					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<div style=\"display: grid; grid-template-columns: 80px 1fr 1fr 110px; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-input); border-radius: 6px;\"><span class=\"badge badge-source\">")
+					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<div style=\"display: grid; grid-template-columns: 80px 1fr 1fr 110px; align-items: center; gap: 0.75rem; padding: 0.625rem 0.875rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem;\"><span class=\"badge badge-source\">")
 					if templ_7745c5c3_Err != nil {
 						return templ_7745c5c3_Err
 					}
 					var templ_7745c5c3_Var4 string
 					templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(c.Source)
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 24, Col: 51}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 22, Col: 51}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 					if templ_7745c5c3_Err != nil {
@@ -99,33 +95,33 @@ func syncStatusPage(status SyncStatus) templ.Component {
 					var templ_7745c5c3_Var5 string
 					templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(c.Repo)
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 25, Col: 109}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 23, Col: 109}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 					if templ_7745c5c3_Err != nil {
 						return templ_7745c5c3_Err
 					}
-					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "</span> <span style=\"font-size: 11px; color: var(--text-dim); font-family: monospace;\">")
+					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "</span> <span class=\"micro-label\" style=\"color: var(--text-faint);\">")
 					if templ_7745c5c3_Err != nil {
 						return templ_7745c5c3_Err
 					}
 					var templ_7745c5c3_Var6 string
 					templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(c.Timestamp)
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 26, Col: 100}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 24, Col: 81}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 					if templ_7745c5c3_Err != nil {
 						return templ_7745c5c3_Err
 					}
-					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</span> <span style=\"font-size: 11px; color: var(--text-muted); text-align: right;\">")
+					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</span> <span style=\"font-size: 12px; color: var(--text-dim); text-align: right;\">")
 					if templ_7745c5c3_Err != nil {
 						return templ_7745c5c3_Err
 					}
 					var templ_7745c5c3_Var7 string
 					templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(c.Age)
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 27, Col: 91}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 25, Col: 89}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var7))
 					if templ_7745c5c3_Err != nil {
@@ -141,30 +137,30 @@ func syncStatusPage(status SyncStatus) templ.Component {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "</div><!-- Log card --><div class=\"card\"><h2 style=\"font-size: 14px; font-weight: 700; margin: 0 0 12px 0;\">Recent Log</h2><p style=\"font-size: 12px; color: var(--text-muted); margin: 0 0 14px 0;\">Log file: <code class=\"mono\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "</div><!-- Log card --><div class=\"card\"><span class=\"micro-label\" style=\"display: block; margin-bottom: 0.25rem;\">SYNC LOG</span><p style=\"font-size: 11px; color: var(--text-faint); margin: 0 0 1rem 0; font-family: 'JetBrains Mono', monospace;\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var8 string
 			templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(status.LogFile)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 37, Col: 50}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 34, Col: 136}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "</code></p>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "</p>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			if len(status.LogLines) == 0 {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "<div style=\"padding: 12px 16px; background: var(--bg-input); border-radius: 6px; color: var(--text-muted); font-size: 13px;\">No log file found. Omnia logs to stderr only (no file logger configured in v1).</div>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "<div style=\"padding: 0.75rem 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem; color: var(--text-dim); font-size: 13px;\">No log file found. Omnia logs to stderr only (no file logger configured in v1).</div>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			} else {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "<div style=\"background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 14px; max-height: 400px; overflow-y: auto;\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "<div class=\"content-prose\" style=\"max-height: 400px;\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
@@ -176,7 +172,7 @@ func syncStatusPage(status SyncStatus) templ.Component {
 					var templ_7745c5c3_Var9 string
 					templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(line)
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 46, Col: 59}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/syncpage.templ`, Line: 42, Col: 59}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
 					if templ_7745c5c3_Err != nil {

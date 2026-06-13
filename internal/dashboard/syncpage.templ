@@ -3,28 +3,26 @@ package dashboard
 // syncStatusPage is the dedicated /sync route with full detail.
 templ syncStatusPage(status SyncStatus) {
 	@layout("Sync Status") {
-		@pageTitle("Sync Status")
-		<div style="display: flex; flex-direction: column; gap: 20px;">
-			<!-- State file card -->
+		<h1 style="font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;">Sync Status</h1>
+		<div style="display: flex; flex-direction: column; gap: 1.25rem;">
+			<!-- Cursors card -->
 			<div class="card">
-				<h2 style="font-size: 14px; font-weight: 700; margin: 0 0 16px 0;">Cursors</h2>
-				<p style="font-size: 12px; color: var(--text-muted); margin: 0 0 14px 0;">
-					State file: <code class="mono">{ status.StateFile }</code>
-				</p>
+				<span class="micro-label" style="display: block; margin-bottom: 0.25rem;">SYNC CURSORS</span>
+				<p style="font-size: 11px; color: var(--text-faint); margin: 0 0 1rem 0; font-family: 'JetBrains Mono', monospace;">{ status.StateFile }</p>
 				if status.Missing {
-					<div style="padding: 12px 16px; background: #1e1a0f; border: 1px solid #78350f; border-radius: 6px; color: #fbbf24; font-size: 13px;">
-						State file not found. Run <code class="mono">omnia sync</code> to create it.
+					<div style="padding: 0.75rem 1rem; background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.2); border-radius: 0.5rem; color: var(--warn); font-size: 13px;">
+						State file not found. Run <code style="font-family: 'JetBrains Mono', monospace;">omnia sync</code> to create it.
 					</div>
 				} else if len(status.Cursors) == 0 {
-					<p style="color: var(--text-muted); font-size: 13px;">No cursors recorded yet.</p>
+					<p style="color: var(--text-dim); font-size: 13px;">No cursors recorded yet.</p>
 				} else {
-					<div style="display: flex; flex-direction: column; gap: 8px;">
+					<div style="display: flex; flex-direction: column; gap: 4px;">
 						for _, c := range status.Cursors {
-							<div style="display: grid; grid-template-columns: 80px 1fr 1fr 110px; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-input); border-radius: 6px;">
+							<div style="display: grid; grid-template-columns: 80px 1fr 1fr 110px; align-items: center; gap: 0.75rem; padding: 0.625rem 0.875rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem;">
 								<span class="badge badge-source">{ c.Source }</span>
 								<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text);">{ c.Repo }</span>
-								<span style="font-size: 11px; color: var(--text-dim); font-family: monospace;">{ c.Timestamp }</span>
-								<span style="font-size: 11px; color: var(--text-muted); text-align: right;">{ c.Age }</span>
+								<span class="micro-label" style="color: var(--text-faint);">{ c.Timestamp }</span>
+								<span style="font-size: 12px; color: var(--text-dim); text-align: right;">{ c.Age }</span>
 							</div>
 						}
 					</div>
@@ -32,16 +30,14 @@ templ syncStatusPage(status SyncStatus) {
 			</div>
 			<!-- Log card -->
 			<div class="card">
-				<h2 style="font-size: 14px; font-weight: 700; margin: 0 0 12px 0;">Recent Log</h2>
-				<p style="font-size: 12px; color: var(--text-muted); margin: 0 0 14px 0;">
-					Log file: <code class="mono">{ status.LogFile }</code>
-				</p>
+				<span class="micro-label" style="display: block; margin-bottom: 0.25rem;">SYNC LOG</span>
+				<p style="font-size: 11px; color: var(--text-faint); margin: 0 0 1rem 0; font-family: 'JetBrains Mono', monospace;">{ status.LogFile }</p>
 				if len(status.LogLines) == 0 {
-					<div style="padding: 12px 16px; background: var(--bg-input); border-radius: 6px; color: var(--text-muted); font-size: 13px;">
+					<div style="padding: 0.75rem 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem; color: var(--text-dim); font-size: 13px;">
 						No log file found. Omnia logs to stderr only (no file logger configured in v1).
 					</div>
 				} else {
-					<div style="background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 14px; max-height: 400px; overflow-y: auto;">
+					<div class="content-prose" style="max-height: 400px;">
 						for _, line := range status.LogLines {
 							<div class="log-line" style="padding: 1px 0;">{ line }</div>
 						}

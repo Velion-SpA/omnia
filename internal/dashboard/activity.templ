@@ -8,21 +8,21 @@ import (
 // activityPage renders the audit log newest-first.
 templ activityPage(entries []audit.Entry) {
 	@layout("Activity") {
-		@pageTitle("Activity Log")
+		<h1 style="font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;">Activity Log</h1>
 		if len(entries) == 0 {
 			@emptyState("No activity recorded yet. Edits and deletes will appear here.")
 		} else {
 			<div class="card" style="padding: 0; overflow: hidden;">
-				<table style="width: 100%; border-collapse: collapse;">
+				<table class="data-table">
 					<thead>
-						<tr style="border-bottom: 1px solid var(--border);">
-							<th style="padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 160px;">Time</th>
-							<th style="padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 80px;">Actor</th>
-							<th style="padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 110px;">Action</th>
-							<th style="padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 80px;">Obs</th>
-							<th style="padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 80px;">Project</th>
-							<th style="padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em;">Summary</th>
-							<th style="padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; width: 60px;">Result</th>
+						<tr>
+							<th style="width: 160px;">Time</th>
+							<th style="width: 80px;">Actor</th>
+							<th style="width: 110px;">Action</th>
+							<th style="width: 80px;">Obs</th>
+							<th style="width: 80px;">Project</th>
+							<th>Summary</th>
+							<th style="width: 60px;">Result</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -38,19 +38,19 @@ templ activityPage(entries []audit.Entry) {
 
 templ activityRow(e audit.Entry) {
 	<tr class="obs-row">
-		<td style="padding: 10px 16px; font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; white-space: nowrap;">{ e.Ts }</td>
-		<td style="padding: 10px 16px; font-size: 12px; color: var(--text-muted);">{ e.Actor }</td>
-		<td style="padding: 10px 16px;">
+		<td class="micro-label" style="color: var(--text-faint); white-space: nowrap;">{ e.Ts }</td>
+		<td style="font-size: 12px; color: var(--text-dim);">{ e.Actor }</td>
+		<td>
 			@actionBadge(e.Action)
 		</td>
-		<td style="padding: 10px 16px; font-size: 12px;">
-			<a href={ templ.SafeURL(fmt.Sprintf("/detail/%d", e.ObservationID)) } style="color: var(--accent); font-family: 'JetBrains Mono', monospace; font-size: 11px;">
+		<td>
+			<a href={ templ.SafeURL(fmt.Sprintf("/detail/%d", e.ObservationID)) } style="color: var(--calypso); font-family: 'JetBrains Mono', monospace; font-size: 11px;">
 				{ fmt.Sprintf("#%d", e.ObservationID) }
 			</a>
 		</td>
-		<td style="padding: 10px 16px; font-size: 12px; color: var(--text-muted);">{ e.Project }</td>
-		<td style="padding: 10px 16px; font-size: 12px; color: var(--text-muted);">{ e.Summary }</td>
-		<td style="padding: 10px 16px;">
+		<td style="font-size: 12px; color: var(--text-dim);">{ e.Project }</td>
+		<td style="font-size: 12px; color: var(--text-dim);">{ e.Summary }</td>
+		<td>
 			@resultBadge(e.Result)
 		</td>
 	</tr>
@@ -59,11 +59,11 @@ templ activityRow(e audit.Entry) {
 templ actionBadge(a audit.Action) {
 	switch a {
 		case audit.ActionEdit:
-			<span class="badge" style="background: #1f2d1a; color: #86efac; border: 1px solid #1f4c2a;">edit</span>
+			<span class="badge badge-ok">edit</span>
 		case audit.ActionSoftDelete:
 			<span class="badge badge-type">soft_delete</span>
 		case audit.ActionHardDelete:
-			<span class="badge" style="background: #2d1a0f; color: #f87171; border: 1px solid #7f1d1d;">hard_delete</span>
+			<span class="badge badge-bad">hard_delete</span>
 		default:
 			<span class="badge badge-source">{ string(a) }</span>
 	}
@@ -72,8 +72,8 @@ templ actionBadge(a audit.Action) {
 templ resultBadge(result string) {
 	switch result {
 		case "ok":
-			<span class="badge" style="background: #0f2d1a; color: #4ade80;">ok</span>
+			<span class="badge badge-ok">ok</span>
 		default:
-			<span class="badge" style="background: #2d1a0f; color: #f87171;">{ result }</span>
+			<span class="badge badge-bad">{ result }</span>
 	}
 }

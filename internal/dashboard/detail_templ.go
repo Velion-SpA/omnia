@@ -49,7 +49,7 @@ func detailPage(v ObsView, backURL string, lastAudit *audit.Entry) templ.Compone
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<!-- Breadcrumb --> <div style=\"margin-bottom: 20px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted);\"><a href=\"/\">Overview</a> <span>›</span> <a href=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<!-- Breadcrumb --> <div style=\"display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1.25rem;\"><a href=\"/\" class=\"micro-label\" style=\"color: var(--text-dim);\">Overview</a> <span style=\"color: var(--text-faint);\">›</span> <a href=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -62,33 +62,33 @@ func detailPage(v ObsView, backURL string, lastAudit *audit.Entry) templ.Compone
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\" class=\"micro-label\" style=\"color: var(--text-dim);\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var4 string
 			templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(v.Obs.Project)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 17, Col: 80}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 17, Col: 132}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</a> <span>›</span> <span style=\"color: var(--text-dim);\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</a> <span style=\"color: var(--text-faint);\">›</span> <span class=\"micro-label\" style=\"color: var(--text-faint);\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var5 string
 			templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("obs/%d", v.Obs.ID))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 19, Col: 74}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 19, Col: 96}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</span></div><div style=\"display: flex; gap: 24px; align-items: flex-start;\"><!-- Main content column --><div style=\"flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 20px;\"><!-- Title + layer badge --><div id=\"obs-title-section\"><div style=\"display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap;\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</span></div><div style=\"display: flex; gap: 1.5rem; align-items: flex-start;\"><!-- Main content column --><div style=\"flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1.25rem;\"><!-- Title + badges --><div id=\"obs-title-section\"><div style=\"display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; flex-wrap: wrap;\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -156,14 +156,14 @@ func detailPage(v ObsView, backURL string, lastAudit *audit.Entry) templ.Compone
 				}
 			}
 			if v.Obs.Type != "" {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "<span class=\"badge\" style=\"background: #1f2d1a; color: #86efac; border: 1px solid #1f4c2a;\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "<span class=\"badge badge-ok\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var8 string
 				templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(v.Obs.Type)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 42, Col: 111}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 42, Col: 48}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 				if templ_7745c5c3_Err != nil {
@@ -174,20 +174,20 @@ func detailPage(v ObsView, backURL string, lastAudit *audit.Entry) templ.Compone
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "</div><h1 id=\"obs-title-text\" style=\"font-size: 18px; font-weight: 700; color: var(--text); margin: 0; letter-spacing: -0.02em; line-height: 1.4;\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "</div><h1 id=\"obs-title-text\" style=\"font-size: 20px; font-weight: 700; color: var(--text); margin: 0; letter-spacing: -0.02em; line-height: 1.35;\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var9 string
 			templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(v.Obs.Title)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 45, Col: 159}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 45, Col: 160}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "</h1></div><!-- Content --><div class=\"card\"><h2 style=\"font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 14px 0;\">Content</h2><div class=\"content-prose\" id=\"obs-content-text\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "</h1></div><!-- Content card --><div class=\"card\"><span class=\"micro-label\" style=\"display: block; margin-bottom: 0.875rem;\">Content</span><div class=\"content-prose\" id=\"obs-content-text\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -216,7 +216,7 @@ func detailPage(v ObsView, backURL string, lastAudit *audit.Entry) templ.Compone
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 19, "</div></div><!-- Right sidebar: meta panel --><aside style=\"width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 16px;\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 19, "</div></div><!-- Right sidebar: meta panel --><aside style=\"width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 1rem;\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -224,14 +224,14 @@ func detailPage(v ObsView, backURL string, lastAudit *audit.Entry) templ.Compone
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 20, "<!-- Observation metadata --><div class=\"card\"><h3 style=\"font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 12px 0;\">Record</h3><div class=\"kv-row\"><span class=\"kv-key\">ID</span> <span class=\"kv-val mono\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 20, "<!-- Record card --><div class=\"card\"><span class=\"micro-label\" style=\"display: block; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--calypso-dim);\">RECORD</span><div class=\"kv-row\"><span class=\"kv-key\">ID</span> <span class=\"kv-val\" style=\"font-family: 'JetBrains Mono', monospace; font-size: 12px;\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var11 string
 			templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d", v.Obs.ID))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 71, Col: 61}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 71, Col: 123}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 			if templ_7745c5c3_Err != nil {
@@ -255,14 +255,14 @@ func detailPage(v ObsView, backURL string, lastAudit *audit.Entry) templ.Compone
 				return templ_7745c5c3_Err
 			}
 			if v.Obs.TopicKey != "" {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 23, "<div class=\"kv-row\"><span class=\"kv-key\">Topic</span> <span class=\"kv-val mono\" style=\"word-break: break-all; font-size: 11px;\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 23, "<div class=\"kv-row\"><span class=\"kv-key\">Topic</span> <span class=\"kv-val\" style=\"font-family: 'JetBrains Mono', monospace; font-size: 11px; word-break: break-all;\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var13 string
 				templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs(v.Obs.TopicKey)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 80, Col: 97}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 80, Col: 134}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
 				if templ_7745c5c3_Err != nil {
@@ -317,14 +317,14 @@ func detailPage(v ObsView, backURL string, lastAudit *audit.Entry) templ.Compone
 				return templ_7745c5c3_Err
 			}
 			if lastAudit != nil {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 29, "<div class=\"kv-row\"><span class=\"kv-key\">Last edit</span> <span class=\"kv-val\" style=\"font-size: 12px; color: var(--text-muted);\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 29, "<div class=\"kv-row\"><span class=\"kv-key\">Last edit</span> <span class=\"kv-val\" style=\"font-size: 12px; color: var(--text-dim);\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var17 string
 				templ_7745c5c3_Var17, templ_7745c5c3_Err = templ.JoinStringErrs(lastAudit.Actor)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 98, Col: 96}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 98, Col: 94}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var17))
 				if templ_7745c5c3_Err != nil {
@@ -337,7 +337,7 @@ func detailPage(v ObsView, backURL string, lastAudit *audit.Entry) templ.Compone
 				var templ_7745c5c3_Var18 string
 				templ_7745c5c3_Var18, templ_7745c5c3_Err = templ.JoinStringErrs(lastAudit.Ts)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 98, Col: 116}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 98, Col: 114}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var18))
 				if templ_7745c5c3_Err != nil {
@@ -484,19 +484,19 @@ func metaPanel(v ObsView) templ.Component {
 		}
 		ctx = templ.ClearChildren(ctx)
 		if v.HasMeta {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, "<div class=\"card\"><h3 style=\"font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 12px 0;\">Omnia Meta</h3>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, "<div class=\"card\"><span class=\"micro-label\" style=\"display: block; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--calypso-dim);\">Omnia Meta</span> ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			if v.Meta.Repo != "" {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "<div class=\"kv-row\"><span class=\"kv-key\">Repo</span> <span class=\"kv-val mono\" style=\"font-size: 12px;\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "<div class=\"kv-row\"><span class=\"kv-key\">Repo</span> <span class=\"kv-val\" style=\"font-family: 'JetBrains Mono', monospace; font-size: 12px;\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var25 string
 				templ_7745c5c3_Var25, templ_7745c5c3_Err = templ.JoinStringErrs(v.Meta.Repo)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 128, Col: 69}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 128, Col: 106}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var25))
 				if templ_7745c5c3_Err != nil {
@@ -569,7 +569,7 @@ func metaPanel(v ObsView) templ.Component {
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 51, "\" target=\"_blank\" rel=\"noopener\" class=\"kv-val\" style=\"font-size: 12px; word-break: break-all;\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 51, "\" target=\"_blank\" rel=\"noopener\" class=\"kv-val\" style=\"font-size: 12px; word-break: break-all; color: var(--calypso);\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
@@ -588,14 +588,14 @@ func metaPanel(v ObsView) templ.Component {
 				}
 			}
 			if v.Meta.SourceID != "" {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 53, "<div class=\"kv-row\"><span class=\"kv-key\">Source ID</span> <span class=\"kv-val mono\" style=\"font-size: 12px;\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 53, "<div class=\"kv-row\"><span class=\"kv-key\">Source ID</span> <span class=\"kv-val\" style=\"font-family: 'JetBrains Mono', monospace; font-size: 12px;\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var30 string
 				templ_7745c5c3_Var30, templ_7745c5c3_Err = templ.JoinStringErrs(v.Meta.SourceID)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 158, Col: 73}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 158, Col: 110}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var30))
 				if templ_7745c5c3_Err != nil {
@@ -664,14 +664,14 @@ func metaPanel(v ObsView) templ.Component {
 				}
 			}
 			if v.Meta.ChunkCurrent > 0 {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 61, "<div class=\"kv-row\"><span class=\"kv-key\">Chunk</span> <span class=\"kv-val mono\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 61, "<div class=\"kv-row\"><span class=\"kv-key\">Chunk</span> <span class=\"kv-val\" style=\"font-family: 'JetBrains Mono', monospace;\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var34 string
 				templ_7745c5c3_Var34, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d / %d", v.Meta.ChunkCurrent, v.Meta.ChunkTotal))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 182, Col: 95}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/detail.templ`, Line: 182, Col: 140}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var34))
 				if templ_7745c5c3_Err != nil {
@@ -713,7 +713,7 @@ func editToggleButton(id int) templ.Component {
 			templ_7745c5c3_Var35 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 64, "<button class=\"btn\" hx-get=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 64, "<button class=\"pill-btn pill-btn-secondary\" hx-get=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -726,7 +726,7 @@ func editToggleButton(id int) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 65, "\" hx-target=\"#edit-section\" hx-swap=\"innerHTML\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7\"></path> <path d=\"M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z\"></path></svg> Edit</button>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 65, "\" hx-target=\"#edit-section\" hx-swap=\"innerHTML\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7\"></path> <path d=\"M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z\"></path></svg> Edit</button>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -756,7 +756,7 @@ func editForm(v ObsView) templ.Component {
 			templ_7745c5c3_Var37 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 66, "<div class=\"card\" style=\"border-color: var(--accent);\"><h3 style=\"font-size: 13px; font-weight: 600; color: var(--text); margin: 0 0 16px 0;\">Edit Observation</h3><form hx-patch=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 66, "<div class=\"card\" style=\"border-color: var(--calypso-dim);\"><span class=\"micro-label\" style=\"display: block; margin-bottom: 1rem;\">Edit Observation</span><form hx-patch=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -769,7 +769,7 @@ func editForm(v ObsView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 67, "\" hx-target=\"#edit-section\" hx-swap=\"innerHTML\" style=\"display: flex; flex-direction: column; gap: 12px;\"><div><label style=\"font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;\">Title</label> <input type=\"text\" name=\"title\" value=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 67, "\" hx-target=\"#edit-section\" hx-swap=\"innerHTML\" style=\"display: flex; flex-direction: column; gap: 0.75rem;\"><div><label class=\"micro-label\" style=\"display: block; margin-bottom: 0.25rem;\">Title</label> <input type=\"text\" name=\"title\" value=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -782,7 +782,7 @@ func editForm(v ObsView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 68, "\" style=\"width: 100%;\"></div><div><label style=\"font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;\">Type</label> <select name=\"type\" style=\"width: 100%;\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 68, "\" style=\"width: 100%;\"></div><div><label class=\"micro-label\" style=\"display: block; margin-bottom: 0.25rem;\">Type</label> <select name=\"type\" style=\"width: 100%;\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -851,7 +851,7 @@ func editForm(v ObsView) templ.Component {
 				}
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 75, "</select></div><div><label style=\"font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;\">Content</label> <textarea name=\"content\" rows=\"12\" style=\"width: 100%; font-family: 'JetBrains Mono', monospace; font-size: 12px; resize: vertical;\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 75, "</select></div><div><label class=\"micro-label\" style=\"display: block; margin-bottom: 0.25rem;\">Content</label> <textarea name=\"content\" rows=\"12\" style=\"width: 100%; font-family: 'JetBrains Mono', monospace; font-size: 12px; resize: vertical;\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -864,7 +864,7 @@ func editForm(v ObsView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 76, "</textarea></div><div style=\"display: flex; gap: 8px; justify-content: flex-end;\"><button type=\"button\" class=\"btn\" hx-get=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 76, "</textarea></div><div style=\"display: flex; gap: 0.5rem; justify-content: flex-end;\"><button type=\"button\" class=\"pill-btn pill-btn-secondary\" hx-get=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -877,7 +877,7 @@ func editForm(v ObsView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 77, "\" hx-target=\"#edit-section\" hx-swap=\"innerHTML\">Cancel</button> <button type=\"submit\" class=\"btn btn-primary\"><span class=\"htmx-indicator spinner\"></span> Save</button></div></form></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 77, "\" hx-target=\"#edit-section\" hx-swap=\"innerHTML\">Cancel</button> <button type=\"submit\" class=\"pill-btn pill-btn-primary\"><span class=\"htmx-indicator spinner\"></span> Save</button></div></form></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -907,7 +907,7 @@ func editSuccess(id int) templ.Component {
 			templ_7745c5c3_Var46 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 78, "<div style=\"display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: #0f2d1a; border: 1px solid #166534; border-radius: 6px; color: #4ade80; font-size: 13px;\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\"><polyline points=\"20 6 9 17 4 12\"></polyline></svg> Saved successfully. <button class=\"btn\" style=\"margin-left: auto; padding: 4px 10px; font-size: 12px;\" hx-get=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 78, "<div style=\"display: flex; align-items: center; gap: 0.5rem; padding: 0.625rem 0.875rem; background: rgba(52,211,153,0.08); border: 1px solid rgba(52,211,153,0.2); border-radius: 0.5rem; color: var(--ok); font-size: 13px;\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\"><polyline points=\"20 6 9 17 4 12\"></polyline></svg> Saved successfully. <button class=\"pill-btn pill-btn-secondary\" style=\"margin-left: auto; padding: 2px 0.75rem; font-size: 12px;\" hx-get=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -950,7 +950,7 @@ func deleteButton(id int, title string) templ.Component {
 			templ_7745c5c3_Var48 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 80, "<button class=\"btn btn-danger\" hx-get=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 80, "<button class=\"pill-btn pill-btn-danger\" hx-get=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -963,7 +963,7 @@ func deleteButton(id int, title string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 81, "\" hx-target=\"#delete-section\" hx-swap=\"innerHTML\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><polyline points=\"3 6 5 6 21 6\"></polyline> <path d=\"M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6\"></path> <path d=\"M10 11v6M14 11v6\"></path> <path d=\"M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2\"></path></svg> Delete</button>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 81, "\" hx-target=\"#delete-section\" hx-swap=\"innerHTML\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><polyline points=\"3 6 5 6 21 6\"></polyline> <path d=\"M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6\"></path> <path d=\"M10 11v6M14 11v6\"></path> <path d=\"M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2\"></path></svg> Delete</button>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -993,7 +993,7 @@ func deleteConfirm(id int, title string) templ.Component {
 			templ_7745c5c3_Var50 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 82, "<div class=\"card\" style=\"border-color: #7f1d1d;\"><h3 style=\"font-size: 13px; font-weight: 600; color: #f87171; margin: 0 0 10px 0;\">Delete observation?</h3><p style=\"font-size: 13px; color: var(--text-muted); margin: 0 0 16px 0;\"><strong style=\"color: var(--text);\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 82, "<div class=\"card\" style=\"border-color: rgba(251,113,133,0.3);\"><h3 style=\"font-size: 13px; font-weight: 600; color: var(--bad); margin: 0 0 0.625rem 0;\">Delete observation?</h3><p style=\"font-size: 13px; color: var(--text-dim); margin: 0 0 1rem 0;\"><strong style=\"color: var(--text);\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -1006,7 +1006,7 @@ func deleteConfirm(id int, title string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 83, "</strong></p><p style=\"font-size: 12px; color: var(--text-dim); margin: 0 0 16px 0;\">Soft delete marks it hidden. Hard delete is permanent and cannot be undone.</p><div style=\"display: flex; gap: 8px; flex-wrap: wrap;\"><button class=\"btn\" hx-get=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 83, "</strong></p><p style=\"font-size: 12px; color: var(--text-faint); margin: 0 0 1rem 0;\">Soft delete marks it hidden. Hard delete is permanent and cannot be undone.</p><div style=\"display: flex; gap: 0.5rem; flex-wrap: wrap;\"><button class=\"pill-btn pill-btn-secondary\" hx-get=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -1019,7 +1019,7 @@ func deleteConfirm(id int, title string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 84, "\" hx-target=\"#delete-section\" hx-swap=\"innerHTML\">Cancel</button> <button class=\"btn btn-danger\" hx-delete=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 84, "\" hx-target=\"#delete-section\" hx-swap=\"innerHTML\">Cancel</button> <button class=\"pill-btn pill-btn-danger\" hx-delete=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -1032,7 +1032,7 @@ func deleteConfirm(id int, title string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 85, "\" hx-target=\"#delete-section\" hx-swap=\"innerHTML\">Soft delete</button> <button class=\"btn btn-danger\" style=\"background: rgba(220,38,38,0.15);\" hx-delete=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 85, "\" hx-target=\"#delete-section\" hx-swap=\"innerHTML\">Soft delete</button> <button class=\"pill-btn pill-btn-danger\" style=\"background: rgba(251,113,133,0.12);\" hx-delete=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -1075,7 +1075,7 @@ func deleteSuccess(hard bool) templ.Component {
 			templ_7745c5c3_Var55 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 87, "<div style=\"padding: 10px 14px; background: #1a1a2e; border: 1px solid #30363d; border-radius: 6px; color: var(--text-muted); font-size: 13px; display: flex; align-items: center; gap: 8px;\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\"><polyline points=\"20 6 9 17 4 12\"></polyline></svg> ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 87, "<div style=\"padding: 0.625rem 0.875rem; background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: 0.5rem; color: var(--text-dim); font-size: 13px; display: flex; align-items: center; gap: 0.5rem;\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\"><polyline points=\"20 6 9 17 4 12\"></polyline></svg> ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -1090,7 +1090,7 @@ func deleteSuccess(hard bool) templ.Component {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 90, "<a href=\"/browse\" style=\"margin-left: auto; font-size: 12px; color: var(--accent);\">Back to browse →</a></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 90, "<a href=\"/browse\" style=\"margin-left: auto; font-size: 12px; color: var(--calypso);\">Back to browse →</a></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
