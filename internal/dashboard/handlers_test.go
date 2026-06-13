@@ -435,6 +435,148 @@ func TestFormatAge(t *testing.T) {
 	}
 }
 
+func TestHandleDelete_SoftAudited(t *testing.T) {
+	fe := newFakeEngram()
+	var deletedURL string
+	fe.mux.HandleFunc("/observations/55", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletedURL = r.URL.String()
+			delete(fe.observations, 55)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// GET
+		o, ok := fe.observations[55]
+		if !ok {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(o)
+	})
+	fe.add(sampleObs(55, "omnia"))
+
+	dir := t.TempDir()
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", dir)
+	defer os.Setenv("HOME", origHome)
+
+	dashServer := newTestServerOnly(t, fe)
+	req, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/obs/55", dashServer.URL), nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	if strings.Contains(deletedURL, "hard=true") {
+		t.Errorf("soft delete should NOT include hard=true, got URL: %s", deletedURL)
+	}
+}
+
+func TestHandleDelete_HardAudited(t *testing.T) {
+	fe := newFakeEngram()
+	var deletedURL string
+	fe.mux.HandleFunc("/observations/56", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletedURL = r.URL.String()
+			delete(fe.observations, 56)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		o, ok := fe.observations[56]
+		if !ok {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(o)
+	})
+	fe.add(sampleObs(56, "omnia"))
+
+	dir := t.TempDir()
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", dir)
+	defer os.Setenv("HOME", origHome)
+
+	dashServer := newTestServerOnly(t, fe)
+	req, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/obs/56?hard=true", dashServer.URL), nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE hard: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(deletedURL, "hard=true") {
+		t.Errorf("hard delete should include hard=true, got URL: %s", deletedURL)
+	}
+}
+
+func TestActorResolution(t *testing.T) {
+	fe := newFakeEngram()
+	engServer := fe.server()
+	t.Cleanup(engServer.Close)
+	logger := newSlogLogger()
+
+	srv := NewServer(Config{
+		Port:      0,
+		EngramURL: engServer.URL,
+		Actor:     "config-actor",
+	}, logger)
+
+	req, _ := http.NewRequest("GET", "/", nil)
+	req.Header.Set("X-Omnia-Actor", "header-actor")
+	got := srv.resolveActor(req)
+	if got != "header-actor" {
+		t.Errorf("expected header-actor, got %q", got)
+	}
+
+	req2, _ := http.NewRequest("GET", "/", nil)
+	got2 := srv.resolveActor(req2)
+	if got2 != "config-actor" {
+		t.Errorf("expected config-actor, got %q", got2)
+	}
+
+	srv3 := NewServer(Config{Port: 0, EngramURL: engServer.URL, Actor: ""}, logger)
+	origUser := os.Getenv("USER")
+	os.Setenv("USER", "env-user")
+	defer os.Setenv("USER", origUser)
+	req3, _ := http.NewRequest("GET", "/", nil)
+	got3 := srv3.resolveActor(req3)
+	if got3 != "env-user" {
+		t.Errorf("expected env-user, got %q", got3)
+	}
+}
+
+func TestActivityPage_Renders(t *testing.T) {
+	fe := newFakeEngram()
+	dashServer := newTestServerOnly(t, fe)
+
+	dir := t.TempDir()
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", dir)
+	defer os.Setenv("HOME", origHome)
+
+	resp, err := http.Get(dashServer.URL + "/activity")
+	if err != nil {
+		t.Fatalf("GET /activity: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Activity") {
+		t.Error("expected 'Activity' in activity page")
+	}
+}
+
 // --- Constructor helpers for tests ---
 
 func newTestServerOnly(t *testing.T, fe *fakeEngram) *httptest.Server {
