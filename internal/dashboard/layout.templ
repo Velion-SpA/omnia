@@ -8,223 +8,299 @@ templ layout(title string) {
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 			<title>{ title } — Omnia</title>
-			<!-- Inter font -->
+			<!-- Inter + JetBrains Mono -->
 			<link rel="preconnect" href="https://fonts.googleapis.com"/>
 			<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-			<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
-			<!-- Tailwind CDN (play) -->
+			<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+			<!-- Tailwind CDN -->
 			<script src="https://cdn.tailwindcss.com"></script>
 			<!-- HTMX CDN -->
 			<script src="https://unpkg.com/htmx.org@1.9.12" integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2uQ8DmUoPGesGEV/isNNm0+QMqKTmHKKfJ" crossorigin="anonymous"></script>
 			<!-- Design tokens and global styles -->
 			<style>
 				:root {
-					--accent: #2dd4bf;
-					--accent-dim: #0d9488;
-					--bg: #0d1117;
-					--bg-card: #161b22;
-					--bg-input: #1c2128;
-					--border: #30363d;
-					--text: #e6edf3;
-					--text-muted: #7d8590;
-					--text-dim: #484f58;
-					--badge-ingested: #164e63;
-					--badge-ingested-text: #67e8f9;
-					--badge-curated: #1e3a5f;
-					--badge-curated-text: #93c5fd;
+					--bg:            #0a0c12;
+					--surface:       #111620;
+					--surface-2:     #181e2e;
+					--border:        rgba(255,255,255,0.08);
+					--border-strong: rgba(255,255,255,0.14);
+					--text:          #e8ecf2;
+					--text-dim:      #8a97ad;
+					--text-faint:    #5a6577;
+					--silver:        #c2cad6;
+					--calypso:       #22d3ee;
+					--calypso-dim:   #0e7490;
+					--ok:            #34d399;
+					--warn:          #fbbf24;
+					--bad:           #fb7185;
+					--radius:        0.75rem;
 				}
 
-				* { box-sizing: border-box; }
+				*, *::before, *::after { box-sizing: border-box; }
 
 				body {
-					background: var(--bg);
-					color: var(--text);
+					margin: 0;
 					font-family: 'Inter', system-ui, sans-serif;
 					font-size: 14px;
 					line-height: 1.6;
-					margin: 0;
+					color: var(--text);
+					background: var(--bg);
 				}
 
-				code, pre, .mono {
-					font-family: 'JetBrains Mono', 'Fira Code', monospace;
-					font-size: 12px;
-				}
-
-				a { color: var(--accent); text-decoration: none; }
+				a { color: var(--calypso); text-decoration: none; }
 				a:hover { text-decoration: underline; }
 
-				/* Scrollbar styling */
+				/* Scrollbar */
 				::-webkit-scrollbar { width: 6px; }
 				::-webkit-scrollbar-track { background: var(--bg); }
-				::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+				::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
 
-				/* Custom components */
-				.card {
-					background: var(--bg-card);
-					border: 1px solid var(--border);
-					border-radius: 8px;
-					padding: 20px;
+				/* ── Micro label — signature mono detail ── */
+				.micro-label {
+					font-family: 'JetBrains Mono', ui-monospace, monospace;
+					font-size: 10px;
+					letter-spacing: 0.14em;
+					text-transform: uppercase;
+					color: var(--text-dim);
+					font-weight: 500;
 				}
 
+				/* ── Cards ── */
+				.card {
+					background: var(--surface);
+					border: 1px solid var(--border);
+					border-radius: var(--radius);
+					padding: 1.25rem;
+					box-shadow: 0 12px 30px rgba(4,9,18,0.35);
+				}
+
+				.card-elevated {
+					background: var(--surface-2);
+					border: 1px solid var(--border-strong);
+					border-radius: var(--radius);
+					padding: 1rem;
+					box-shadow: 0 8px 20px rgba(4,9,18,0.3);
+				}
+
+				/* ── Pill buttons ── */
+				.pill-btn {
+					display: inline-flex;
+					align-items: center;
+					gap: 0.375rem;
+					padding: 0.375rem 1rem;
+					border-radius: 9999px;
+					font-size: 13px;
+					font-weight: 600;
+					cursor: pointer;
+					border: none;
+					transition: opacity 0.15s, transform 0.1s;
+					font-family: inherit;
+				}
+				.pill-btn:active { transform: scale(0.97); }
+				.pill-btn-primary { background: var(--calypso); color: #0a0c12; }
+				.pill-btn-primary:hover { opacity: 0.88; text-decoration: none; }
+				.pill-btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border-strong); }
+				.pill-btn-secondary:hover { border-color: var(--calypso); color: var(--calypso); text-decoration: none; }
+				.pill-btn-danger { background: transparent; color: var(--bad); border: 1px solid var(--bad); }
+				.pill-btn-danger:hover { background: rgba(251,113,133,0.1); text-decoration: none; }
+
+				/* Legacy .btn aliases — keep for HTMX partial compatibility */
+				.btn { display: inline-flex; align-items: center; gap: 6px; padding: 0.375rem 1rem; border-radius: 9999px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text); transition: opacity 0.15s, border-color 0.15s; font-family: inherit; }
+				.btn:hover { border-color: var(--calypso); color: var(--calypso); text-decoration: none; }
+				.btn-danger { border-color: var(--bad); color: var(--bad); background: transparent; }
+				.btn-danger:hover { background: rgba(251,113,133,0.1); }
+				.btn-primary { background: var(--calypso); color: #0a0c12; border-color: var(--calypso); }
+				.btn-primary:hover { opacity: 0.88; color: #0a0c12; }
+
+				/* ── Badges ── */
 				.badge {
 					display: inline-flex;
 					align-items: center;
-					padding: 2px 8px;
+					gap: 4px;
+					padding: 2px 7px;
 					border-radius: 4px;
 					font-size: 11px;
-					font-weight: 500;
-					letter-spacing: 0.03em;
+					font-weight: 700;
+					letter-spacing: 0.06em;
+					text-transform: uppercase;
+				}
+				.badge-ingested { background: rgba(34,211,238,0.12); color: var(--calypso); border: 1px solid rgba(34,211,238,0.2); }
+				.badge-curated  { background: rgba(194,202,214,0.1); color: var(--silver); border: 1px solid rgba(194,202,214,0.15); }
+				.badge-source   { background: var(--surface-2); color: var(--text-dim); border: 1px solid var(--border-strong); }
+				.badge-type     { background: rgba(139,92,246,0.12); color: #a78bfa; border: 1px solid rgba(139,92,246,0.2); }
+				.badge-ok       { background: rgba(52,211,153,0.12); color: var(--ok); border: 1px solid rgba(52,211,153,0.2); }
+				.badge-warn     { background: rgba(251,191,36,0.12); color: var(--warn); border: 1px solid rgba(251,191,36,0.2); }
+				.badge-bad      { background: rgba(251,113,133,0.12); color: var(--bad); border: 1px solid rgba(251,113,133,0.2); }
+				.badge-status-open   { background: rgba(52,211,153,0.12); color: var(--ok); border: 1px solid rgba(52,211,153,0.2); }
+				.badge-status-closed { background: rgba(251,113,133,0.12); color: var(--bad); border: 1px solid rgba(251,113,133,0.2); }
+				.badge-status-merged { background: rgba(139,92,246,0.12); color: #a78bfa; border: 1px solid rgba(139,92,246,0.2); }
+
+				/* ── Live dot ── */
+				.live-dot {
+					display: inline-block;
+					width: 6px;
+					height: 6px;
+					border-radius: 50%;
+					background: var(--calypso);
+					animation: pulse-dot 2s ease-in-out infinite;
+					flex-shrink: 0;
+				}
+				.live-dot-ok  { background: var(--ok); }
+				.live-dot-bad { background: var(--bad); }
+				@keyframes pulse-dot {
+					0%, 100% { opacity: 1; }
+					50%       { opacity: 0.4; }
 				}
 
-				.badge-ingested {
-					background: var(--badge-ingested);
-					color: var(--badge-ingested-text);
-				}
-
-				.badge-curated {
-					background: var(--badge-curated);
-					color: var(--badge-curated-text);
-				}
-
-				.badge-source {
-					background: #1a2433;
-					color: #94a3b8;
-					border: 1px solid #2d3a4a;
-				}
-
-				.badge-type {
-					background: #1f1a2e;
-					color: #c4b5fd;
-					border: 1px solid #3b2f6e;
-				}
-
-				.badge-status-open   { background: #0f2d1a; color: #4ade80; }
-				.badge-status-closed { background: #2d1a0f; color: #f87171; }
-				.badge-status-merged { background: #2e1a40; color: #d8b4fe; }
-
+				/* ── Nav item ── */
 				.nav-item {
-					color: var(--text-muted);
-					padding: 6px 12px;
-					border-radius: 6px;
+					display: inline-flex;
+					align-items: center;
+					padding: 0.375rem 0.75rem;
+					border-radius: 9999px;
 					font-size: 13px;
 					font-weight: 500;
+					color: var(--text-dim);
+					text-decoration: none;
 					transition: color 0.15s, background 0.15s;
 				}
 				.nav-item:hover { color: var(--text); background: rgba(255,255,255,0.05); text-decoration: none; }
-				.nav-item.active { color: var(--accent); }
+				.nav-item.active { color: var(--calypso); background: rgba(34,211,238,0.08); }
 
-				.btn {
-					display: inline-flex;
-					align-items: center;
-					gap: 6px;
-					padding: 6px 14px;
-					border-radius: 6px;
-					font-size: 13px;
+				/* ── Data table ── */
+				.data-table { width: 100%; border-collapse: collapse; }
+				.data-table th {
+					font-family: 'JetBrains Mono', ui-monospace, monospace;
+					font-size: 10px;
+					letter-spacing: 0.14em;
+					text-transform: uppercase;
+					color: var(--text-faint);
 					font-weight: 500;
-					cursor: pointer;
-					border: 1px solid var(--border);
-					background: var(--bg-card);
-					color: var(--text);
-					transition: background 0.15s, border-color 0.15s;
+					padding: 0.5rem 1rem;
+					text-align: left;
+					border-bottom: 1px solid var(--border);
 				}
-				.btn:hover { background: rgba(255,255,255,0.07); border-color: var(--accent); }
-				.btn-danger { border-color: #dc2626; color: #f87171; }
-				.btn-danger:hover { background: rgba(220,38,38,0.1); }
-				.btn-primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
-				.btn-primary:hover { background: var(--accent-dim); border-color: var(--accent-dim); }
+				.data-table td {
+					padding: 0.625rem 1rem;
+					border-bottom: 1px solid var(--border);
+					vertical-align: middle;
+				}
+				.data-table tbody tr:hover td { background: var(--surface-2); }
+				.data-table tbody tr:last-child td { border-bottom: none; }
 
-				input[type="text"], input[type="search"], textarea, select {
-					background: var(--bg-input);
-					border: 1px solid var(--border);
-					color: var(--text);
-					border-radius: 6px;
-					padding: 6px 12px;
-					font-family: inherit;
-					font-size: 13px;
-					outline: none;
-					transition: border-color 0.15s;
+				/* ── KV rows ── */
+				.kv-row { display: flex; gap: 0.5rem; padding: 0.375rem 0; border-bottom: 1px solid var(--border); }
+				.kv-row:last-child { border-bottom: none; }
+				.kv-key {
+					font-family: 'JetBrains Mono', ui-monospace, monospace;
+					font-size: 10px;
+					letter-spacing: 0.12em;
+					text-transform: uppercase;
+					color: var(--text-dim);
+					font-weight: 500;
+					min-width: 90px;
+					flex-shrink: 0;
+					padding-top: 2px;
 				}
-				input:focus, textarea:focus, select:focus {
-					border-color: var(--accent);
-				}
+				.kv-val { color: var(--text); font-size: 13px; word-break: break-word; }
 
+				/* ── Obs row (browse table, keep class for test compat) ── */
+				.obs-row { cursor: pointer; }
+				.obs-row:hover td { background: var(--surface-2); }
+
+				/* ── Content / log ── */
 				.content-prose {
-					color: var(--text);
-					line-height: 1.75;
 					white-space: pre-wrap;
 					word-break: break-word;
+					font-family: 'JetBrains Mono', ui-monospace, monospace;
+					font-size: 13px;
+					line-height: 1.7;
+					color: var(--text);
+					background: var(--surface-2);
+					border: 1px solid var(--border);
+					border-radius: 0.5rem;
+					padding: 1rem;
+					max-height: 60vh;
+					overflow-y: auto;
 				}
+				.log-line {
+					font-family: 'JetBrains Mono', ui-monospace, monospace;
+					font-size: 12px;
+					color: var(--text-dim);
+					line-height: 1.6;
+				}
+				.log-line:hover { color: var(--text); }
 
-				.htmx-indicator { opacity: 0; transition: opacity 0.2s; }
-				.htmx-request .htmx-indicator { opacity: 1; }
-
+				/* ── HTMX spinner ── */
+				.htmx-indicator { display: none; }
+				.htmx-request .htmx-indicator { display: inline-flex; align-items: center; }
 				.spinner {
-					display: inline-block;
-					width: 14px;
-					height: 14px;
-					border: 2px solid var(--border);
-					border-top-color: var(--accent);
+					width: 14px; height: 14px;
+					border: 2px solid var(--border-strong);
+					border-top-color: var(--calypso);
 					border-radius: 50%;
 					animation: spin 0.6s linear infinite;
 				}
 				@keyframes spin { to { transform: rotate(360deg); } }
 
+				/* ── Modal ── */
 				.modal-backdrop {
 					position: fixed; inset: 0;
-					background: rgba(0,0,0,0.7);
-					display: flex; align-items: center; justify-content: center;
+					background: rgba(0,0,0,0.6);
+					backdrop-filter: blur(4px);
 					z-index: 50;
+					display: flex; align-items: center; justify-content: center;
 				}
 				.modal {
-					background: var(--bg-card);
-					border: 1px solid var(--border);
-					border-radius: 10px;
-					padding: 28px;
-					max-width: 440px;
-					width: 90%;
+					background: var(--surface);
+					border: 1px solid var(--border-strong);
+					border-radius: var(--radius);
+					padding: 1.5rem;
+					max-width: 480px; width: 100%;
+					box-shadow: 0 20px 60px rgba(0,0,0,0.5);
 				}
 
-				/* Log line styling */
-				.log-line { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); }
-				.log-line:hover { color: var(--text); }
+				/* ── Divider ── */
+				.divider { height: 1px; background: var(--border); margin: 1rem 0; border: none; }
 
-				/* Divider */
-				.divider { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
-
-				/* Sidebar nav section */
-				.nav-section-label {
-					font-size: 10px;
-					font-weight: 600;
-					letter-spacing: 0.08em;
-					color: var(--text-dim);
-					text-transform: uppercase;
-					padding: 8px 12px 4px;
+				/* ── Inputs ── */
+				input[type="text"], input[type="search"], select, textarea {
+					background: var(--surface-2);
+					border: 1px solid var(--border-strong);
+					border-radius: 0.5rem;
+					color: var(--text);
+					padding: 0.375rem 0.75rem;
+					font-size: 13px;
+					font-family: inherit;
+					outline: none;
+					transition: border-color 0.15s, box-shadow 0.15s;
 				}
-
-				/* Table rows */
-				.obs-row {
-					border-bottom: 1px solid var(--border);
-					transition: background 0.12s;
+				input[type="text"]:focus, input[type="search"]:focus, select:focus, textarea:focus {
+					border-color: var(--calypso);
+					box-shadow: 0 0 0 2px rgba(34,211,238,0.15);
 				}
-				.obs-row:hover { background: rgba(255,255,255,0.03); }
-				.obs-row:last-child { border-bottom: none; }
+				select option { background: var(--surface-2); }
 
-				/* Key-value panel */
-				.kv-row { display: flex; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--border); align-items: flex-start; }
-				.kv-row:last-child { border-bottom: none; }
-				.kv-key { color: var(--text-muted); font-size: 11px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; min-width: 100px; padding-top: 2px; }
-				.kv-val { color: var(--text); font-size: 13px; }
+				/* ── Header halo ── */
+				.header-halo {
+					position: absolute;
+					pointer-events: none;
+					border-radius: 50%;
+					filter: blur(60px);
+					opacity: 0.06;
+				}
 			</style>
 			<script>
-				// Tailwind config for custom colors matching our CSS vars
 				tailwind.config = {
 					theme: {
 						extend: {
 							colors: {
-								bg: '#0d1117',
-								card: '#161b22',
-								border: '#30363d',
-								accent: '#2dd4bf',
+								bg: '#0a0c12',
+								surface: '#111620',
+								'surface-2': '#181e2e',
+								calypso: '#22d3ee',
+								'calypso-dim': '#0e7490',
+								silver: '#c2cad6',
 							}
 						}
 					}
@@ -233,45 +309,41 @@ templ layout(title string) {
 		</head>
 		<body class="min-h-screen flex flex-col">
 			<!-- Top navigation bar -->
-			<header style="background: var(--bg-card); border-bottom: 1px solid var(--border);" class="sticky top-0 z-40">
-				<div class="max-w-screen-xl mx-auto px-6 flex items-center h-12 gap-6">
+			<header style="position: sticky; top: 0; z-index: 40; background: var(--surface); border-bottom: 1px solid var(--border); backdrop-filter: blur(12px); overflow: hidden;">
+				<!-- Halo accent -->
+				<div class="header-halo" style="width: 300px; height: 300px; background: var(--calypso); top: -180px; left: 60px;"></div>
+				<div style="max-width: 1280px; margin: 0 auto; padding: 0 1.5rem; display: flex; align-items: center; height: 52px; gap: 1.5rem;">
 					<!-- Wordmark -->
-					<a href="/" class="flex items-center gap-3 shrink-0" style="text-decoration: none;">
-						<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-							<circle cx="10" cy="10" r="9" stroke="#2dd4bf" stroke-width="1.5"/>
-							<circle cx="10" cy="10" r="4" fill="#2dd4bf" opacity="0.8"/>
-							<line x1="10" y1="1" x2="10" y2="4" stroke="#2dd4bf" stroke-width="1.5"/>
-							<line x1="10" y1="16" x2="10" y2="19" stroke="#2dd4bf" stroke-width="1.5"/>
-							<line x1="1" y1="10" x2="4" y2="10" stroke="#2dd4bf" stroke-width="1.5"/>
-							<line x1="16" y1="10" x2="19" y2="10" stroke="#2dd4bf" stroke-width="1.5"/>
-						</svg>
-						<span style="font-weight: 700; font-size: 15px; color: var(--text); letter-spacing: -0.02em;">Omnia</span>
-						<span style="font-size: 10px; color: var(--text-dim); font-weight: 500; letter-spacing: 0.05em; margin-left: -4px;">unified knowledge</span>
+					<a href="/" style="display: flex; align-items: center; gap: 0.625rem; text-decoration: none; flex-shrink: 0;">
+						<div style="width: 8px; height: 8px; border-radius: 2px; background: var(--calypso); flex-shrink: 0;"></div>
+						<span style="font-weight: 800; font-size: 15px; color: var(--text); letter-spacing: -0.02em;">OMNIA</span>
+						<span class="micro-label" style="margin-left: 2px; color: var(--text-faint);">unified knowledge</span>
 					</a>
 					<!-- Nav links -->
-					<nav class="flex items-center gap-1 ml-2">
-						<a href="/" class="nav-item">Overview</a>
-						<a href="/browse" class="nav-item">Browse</a>
-						<a href="/sync" class="nav-item">Sync Status</a>
-						<a href="/activity" class="nav-item">Activity</a>
+					<nav style="display: flex; align-items: center; gap: 2px; margin-left: 0.5rem;">
+						<a href="/" class="nav-item" hx-boost="true">Overview</a>
+						<a href="/browse" class="nav-item" hx-boost="true">Browse</a>
+						<a href="/sync" class="nav-item" hx-boost="true">Sync</a>
+						<a href="/activity" class="nav-item" hx-boost="true">Activity</a>
 					</nav>
 					<!-- Spacer -->
-					<div class="flex-1"></div>
-					<!-- Engram health indicator -->
-					<div id="health-indicator" class="flex items-center gap-2" style="font-size: 12px; color: var(--text-muted);">
-						<span style="width:6px;height:6px;border-radius:50%;background:var(--accent);display:inline-block;"></span>
-						<span>Engram</span>
+					<div style="flex: 1;"></div>
+					<!-- Engram status indicator -->
+					<div id="health-indicator" style="display: flex; align-items: center; gap: 0.5rem;">
+						<span class="live-dot live-dot-ok"></span>
+						<span class="micro-label">Engram</span>
+						<span class="micro-label" style="color: var(--ok);">ONLINE</span>
 					</div>
 				</div>
 			</header>
 			<!-- Page content -->
-			<main class="flex-1 max-w-screen-xl mx-auto w-full px-6 py-8">
+			<main style="flex: 1; max-width: 1280px; margin: 0 auto; width: 100%; padding: 2rem 1.5rem;">
 				{ children... }
 			</main>
 			<!-- Footer -->
-			<footer style="border-top: 1px solid var(--border);" class="py-4 px-6">
-				<div class="max-w-screen-xl mx-auto" style="font-size: 11px; color: var(--text-dim);">
-					Omnia dashboard — reads Engram via HTTP API — no writes without your action
+			<footer style="border-top: 1px solid var(--border); padding: 1rem 1.5rem;">
+				<div style="max-width: 1280px; margin: 0 auto;">
+					<span class="micro-label">OMNIA — UNIFIED KNOWLEDGE LAYER</span>
 				</div>
 			</footer>
 		</body>
@@ -280,22 +352,22 @@ templ layout(title string) {
 
 // pageTitle is a small helper for consistent H1 rendering.
 templ pageTitle(text string) {
-	<h1 style="font-size: 20px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; margin: 0 0 24px 0;">{ text }</h1>
+	<h1 style="font-size: 20px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;">{ text }</h1>
 }
 
 // errorBanner renders an error message in a styled banner.
 templ errorBanner(msg string) {
-	<div style="background: #2d1a0f; border: 1px solid #7f1d1d; border-radius: 8px; padding: 12px 16px; color: #f87171; font-size: 13px; margin-bottom: 16px;">
+	<div style="background: rgba(251,113,133,0.1); border: 1px solid rgba(251,113,133,0.25); border-radius: var(--radius); padding: 0.75rem 1rem; color: var(--bad); font-size: 13px; margin-bottom: 1rem;">
 		{ msg }
 	</div>
 }
 
 // emptyState renders a "no results" message.
 templ emptyState(msg string) {
-	<div style="text-align: center; padding: 60px 0; color: var(--text-dim);">
-		<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin: 0 auto 12px; display: block; opacity: 0.4;">
+	<div style="text-align: center; padding: 4rem 0; color: var(--text-faint);">
+		<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin: 0 auto 0.75rem; display: block; opacity: 0.35;">
 			<path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z"/>
 		</svg>
-		<p style="font-size: 14px; color: var(--text-muted);">{ msg }</p>
+		<p style="font-size: 14px; color: var(--text-dim);">{ msg }</p>
 	</div>
 }
