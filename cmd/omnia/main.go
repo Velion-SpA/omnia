@@ -95,6 +95,9 @@ func runSync(configPath string, dryRun bool, sourceFilter, sinceStr string) erro
 
 	sessionDir := repoRoot()
 
+	// Build per-item project router from config.
+	router := config.NewRouter(cfg.Routes, cfg.Engram.DefaultProject)
+
 	// Build sources.
 	var sources []core.Source
 
@@ -103,12 +106,8 @@ func runSync(configPath string, dryRun bool, sourceFilter, sinceStr string) erro
 		if cfg.Sources.GitHub.Token == "" && os.Getenv("GITHUB_TOKEN") == "" {
 			// New() will try `gh auth token` as fallback; check after construction.
 		}
-		project := cfg.Sources.GitHub.Project
-		if project == "" {
-			project = cfg.Engram.DefaultProject
-		}
 		// W4: pass token from config; New() applies env → config → gh fallback precedence.
-		src := github.New(cfg.Sources.GitHub.Repos, project, cfg.Sources.GitHub.Token, st)
+		src := github.New(cfg.Sources.GitHub.Repos, router, cfg.Sources.GitHub.Token, st)
 		src.SetBackfillDays(cfg.BackfillDays)
 
 		// S6: startup validation — ensure a token resolved.
@@ -121,8 +120,12 @@ func runSync(configPath string, dryRun bool, sourceFilter, sinceStr string) erro
 		sources = append(sources, src)
 
 		if !dryRun {
-			if err := sink.EnsureSession(ctx, project, sessionDir); err != nil {
-				logger.Warn("could not ensure engram session", "project", project, "error", err)
+			// Ensure sessions for all configured repos.
+			for _, repo := range cfg.Sources.GitHub.Repos {
+				project := router.ResolveGitHub(repo)
+				if err := sink.EnsureSession(ctx, project, sessionDir); err != nil {
+					logger.Warn("could not ensure engram session", "project", project, "error", err)
+				}
 			}
 		}
 	}
@@ -132,17 +135,17 @@ func runSync(configPath string, dryRun bool, sourceFilter, sinceStr string) erro
 		if cfg.Sources.Discord.Token == "" && os.Getenv("DISCORD_BOT_TOKEN") == "" {
 			return fmt.Errorf("discord source is enabled but no token found; set DISCORD_BOT_TOKEN or discord.token in config")
 		}
-		project := cfg.Sources.Discord.Project
-		if project == "" {
-			project = cfg.Engram.DefaultProject
-		}
 		// W4: pass token from config; New() applies env → config precedence.
-		src := discord.New(cfg.Sources.Discord.Channels, project, cfg.Sources.Discord.Token, st)
+		src := discord.New(cfg.Sources.Discord.Channels, router, cfg.Sources.Discord.Token, st)
 		sources = append(sources, src)
 
 		if !dryRun {
-			if err := sink.EnsureSession(ctx, project, sessionDir); err != nil {
-				logger.Warn("could not ensure engram session", "project", project, "error", err)
+			// Ensure sessions for all configured channels.
+			for _, ch := range cfg.Sources.Discord.Channels {
+				project := router.ResolveDiscord(ch.ID, ch.Guild)
+				if err := sink.EnsureSession(ctx, project, sessionDir); err != nil {
+					logger.Warn("could not ensure engram session", "project", project, "error", err)
+				}
 			}
 		}
 	}

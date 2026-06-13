@@ -14,6 +14,13 @@ import (
 	github "github.com/velion/omnia/internal/source/github"
 )
 
+// stubRouter satisfies the github source's projectRouter interface.
+type stubRouter struct {
+	project string
+}
+
+func (r *stubRouter) ResolveGitHub(_ string) string { return r.project }
+
 // captureSink captures items instead of writing to Engram.
 type captureSink struct {
 	items []core.Item
@@ -93,7 +100,7 @@ func TestE2EDryRunPipeline(t *testing.T) {
 	defer srv.Close()
 
 	sink := &captureSink{}
-	src := github.NewWithBaseURL([]string{"acme/service"}, "omnia", "", nil, srv.URL)
+	src := github.NewWithBaseURL([]string{"acme/service"}, &stubRouter{"omnia"}, "", nil, srv.URL)
 
 	pipeline := core.NewPipeline([]core.Source{src}, sink, &noopState{}, false, 30, nil)
 	if err := pipeline.Run(context.Background(), core.RunOptions{}); err != nil {
@@ -170,7 +177,7 @@ func TestPipelineCursorRoundTrip(t *testing.T) {
 	defer srv.Close()
 
 	st := newTrackingState()
-	src := github.NewWithBaseURL([]string{repo}, "omnia", "", st, srv.URL)
+	src := github.NewWithBaseURL([]string{repo}, &stubRouter{"omnia"}, "", st, srv.URL)
 	sink := &captureSink{}
 	pipeline := core.NewPipeline([]core.Source{src}, sink, st, false, 30, nil)
 
@@ -247,7 +254,7 @@ func TestFailedSinkWriteBlocksCursorFlush(t *testing.T) {
 	defer srv.Close()
 
 	st := newTrackingState()
-	src := github.NewWithBaseURL([]string{"acme/svc"}, "omnia", "", st, srv.URL)
+	src := github.NewWithBaseURL([]string{"acme/svc"}, &stubRouter{"omnia"}, "", st, srv.URL)
 	sink := &failSink{}
 
 	pipeline := core.NewPipeline([]core.Source{src}, sink, st, false, 30, nil)
