@@ -7,6 +7,8 @@ package github
 import (
 	"strings"
 	"testing"
+
+	"github.com/velion/omnia/internal/meta"
 )
 
 // TestFormatIssueSingleChunk verifies that a short issue produces exactly one item
@@ -108,6 +110,71 @@ func TestFormatIssueLargeBodyChunks(t *testing.T) {
 	for i := 1; i < len(items); i++ {
 		if !strings.HasPrefix(items[i].Content, "<!--") {
 			t.Errorf("item %d (continuation) missing context header; starts: %.40s", i, items[i].Content)
+		}
+	}
+}
+
+// TestChunkedIssueHasMetaBlockInEachChunk verifies that every chunk produced by
+// formatIssue contains a parseable omnia-meta block with the correct fields (Task 9).
+func TestChunkedIssueHasMetaBlockInEachChunk(t *testing.T) {
+	bigBody := strings.Repeat("b", 5000) // at truncation cap
+
+	// 23 comments × 2000-char body exceeds a single 45k-rune chunk.
+	var comments []comment
+	for i := 0; i < 23; i++ {
+		comments = append(comments, comment{
+			Body: strings.Repeat("c", 2000),
+			User: struct {
+				Login string `json:"login"`
+			}{Login: "reviewer"},
+		})
+	}
+
+	iss := issue{
+		Number:  42,
+		Title:   "Large PR for meta test",
+		State:   "open",
+		HTMLURL: "https://github.com/org/repo/issues/42",
+		Body:    bigBody,
+		User:    struct{ Login string `json:"login"` }{Login: "author"},
+	}
+
+	items := formatIssue(iss, comments, "org", "repo", "myproject")
+	if len(items) < 2 {
+		t.Fatalf("expected >= 2 chunks for large content, got %d item(s)", len(items))
+	}
+
+	for i, item := range items {
+		m, ok := meta.Parse(item.Content)
+		if !ok {
+			t.Errorf("chunk %d: meta.Parse returned false — no omnia-meta block found", i+1)
+			continue
+		}
+
+		// Chunk-specific assertions.
+		if len(items) > 1 {
+			wantCurrent := i + 1
+			wantTotal := len(items)
+			if m.ChunkCurrent != wantCurrent {
+				t.Errorf("chunk %d: ChunkCurrent = %d, want %d", i+1, m.ChunkCurrent, wantCurrent)
+			}
+			if m.ChunkTotal != wantTotal {
+				t.Errorf("chunk %d: ChunkTotal = %d, want %d", i+1, m.ChunkTotal, wantTotal)
+			}
+		}
+
+		// Common field assertions.
+		if m.Kind != "issue" {
+			t.Errorf("chunk %d: Kind = %q, want %q", i+1, m.Kind, "issue")
+		}
+		if m.Layer != "ingested" {
+			t.Errorf("chunk %d: Layer = %q, want %q", i+1, m.Layer, "ingested")
+		}
+		if m.Source != "github" {
+			t.Errorf("chunk %d: Source = %q, want %q", i+1, m.Source, "github")
+		}
+		if m.Project != "myproject" {
+			t.Errorf("chunk %d: Project = %q, want %q", i+1, m.Project, "myproject")
 		}
 	}
 }

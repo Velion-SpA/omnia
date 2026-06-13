@@ -12,6 +12,7 @@ import (
 
 	"github.com/velion/omnia/internal/core"
 	"github.com/velion/omnia/internal/enrich"
+	"github.com/velion/omnia/internal/meta"
 )
 
 const (
@@ -29,6 +30,11 @@ const (
 	// is safe because the Engram sink upserts by topic_key (idempotent).
 	cursorOverlap = 10 * time.Minute
 )
+
+// projectRouter is a minimal interface to avoid circular imports.
+type projectRouter interface {
+	ResolveGitHub(ownerRepo string) string
+}
 
 // issue represents a GitHub issue or PR from the API.
 type issue struct {
@@ -72,17 +78,17 @@ type comment struct {
 
 // Source fetches GitHub issues and PRs.
 type Source struct {
-	repos       []string
-	project     string
-	token       string
+	repos        []string
+	router       projectRouter
+	token        string
 	backfillDays int
-	client      *http.Client
-	state       core.StateStore
-	baseURL     string
+	client       *http.Client
+	state        core.StateStore
+	baseURL      string
 }
 
 // New creates a GitHub Source. Token resolution: GITHUB_TOKEN env → configToken → `gh auth token`.
-func New(repos []string, project string, configToken string, state core.StateStore) *Source {
+func New(repos []string, router projectRouter, configToken string, state core.StateStore) *Source {
 	token := os.Getenv("GITHUB_TOKEN")
 	if token == "" {
 		token = configToken
@@ -94,7 +100,7 @@ func New(repos []string, project string, configToken string, state core.StateSto
 	}
 	return &Source{
 		repos:        repos,
-		project:      project,
+		router:       router,
 		token:        token,
 		backfillDays: 30,
 		client:       &http.Client{Timeout: 30 * time.Second},
@@ -104,8 +110,8 @@ func New(repos []string, project string, configToken string, state core.StateSto
 }
 
 // NewWithBaseURL creates a Source with a custom base URL (for testing).
-func NewWithBaseURL(repos []string, project, configToken string, state core.StateStore, baseURLOverride string) *Source {
-	s := New(repos, project, configToken, state)
+func NewWithBaseURL(repos []string, router projectRouter, configToken string, state core.StateStore, baseURLOverride string) *Source {
+	s := New(repos, router, configToken, state)
 	s.baseURL = baseURLOverride
 	return s
 }
@@ -180,11 +186,14 @@ func (s *Source) fetchRepo(ctx context.Context, repo string, since time.Time) ([
 		}
 	}
 
+	// Resolve project once per repo (same for all items from this repo).
+	project := s.router.ResolveGitHub(repo)
+
 	var items []core.Item
 	for _, iss := range allIssues {
 		comments, _ := s.fetchComments(ctx, owner, repoName, iss.Number)
 		// C3: formatIssue may produce multiple chunked items.
-		issueItems := formatIssue(iss, comments, owner, repoName, s.project)
+		issueItems := formatIssue(iss, comments, owner, repoName, project)
 		items = append(items, issueItems...)
 
 		// Update cursor to the latest updated_at seen for this repo.
@@ -301,13 +310,16 @@ func (s *Source) fetchComments(ctx context.Context, owner, repo string, number i
 // C3: if the formatted content exceeds 45k runes it is split into multiple
 // Items with topic_key suffixes "-part1", "-part2", etc. Each continuation chunk
 // carries a brief context header so the content is useful in isolation (S4a).
+// The resolved project (already routed) is passed directly as a string.
 func formatIssue(iss issue, comments []comment, owner, repo, project string) []core.Item {
 	isPR := iss.PullRequest != nil
 	itemType := "github-issue"
 	topicPrefix := "issue"
+	kind := "issue"
 	if isPR {
 		itemType = "github-pr"
 		topicPrefix = "pr"
+		kind = "pull_request"
 	}
 
 	rawTopicKey := fmt.Sprintf("github/%s-%s/%s-%d", owner, repo, topicPrefix, iss.Number)
@@ -396,21 +408,63 @@ func formatIssue(iss issue, comments []comment, owner, repo, project string) []c
 	contextHeader := fmt.Sprintf("<!-- %s/%s | %s#%d | %s -->\n\n",
 		owner, repo, topicPrefix, iss.Number, iss.UpdatedAt.Format("2006-01-02"))
 
+	// Build the meta struct. IngestedAt is set once per call so all chunks share the same value.
+	ingestedAt := time.Now().UTC()
+	ownerRepo := owner + "/" + repo
+	m := meta.Meta{
+		SchemaVersion: meta.SchemaVersion,
+		Source:        "github",
+		Kind:          kind,
+		Layer:         "ingested",
+		Project:       project,
+		Repo:          ownerRepo,
+		SourceID:      fmt.Sprintf("%d", iss.Number),
+		Status:        iss.State,
+		Author:        iss.User.Login,
+		Participants:  participants,
+		URL:           iss.HTMLURL,
+		CreatedAt:     iss.CreatedAt,
+		UpdatedAt:     iss.UpdatedAt,
+		IngestedAt:    ingestedAt,
+	}
+
+	// C3: split human-readable content into chunks, reserving budget for the meta block.
+	// The meta block size may vary slightly by chunk (chunk field changes), so we compute
+	// the budget using a representative render (no chunk field for single-chunk; with
+	// placeholder chunk for multi-chunk estimation).
+	metaSize := len([]rune(meta.Render(m)))
+	chunkBudget := maxChunkRunes - metaSize
+
 	// C3: chunk using enrich.ChunkContent; pass a header for continuation chunks.
-	chunks := enrich.ChunkContent(fullContent, maxChunkRunes)
+	chunks := enrich.ChunkContent(fullContent, chunkBudget)
 
 	var items []core.Item
+	total := len(chunks)
 	for i, chunk := range chunks {
 		topicKey := normalizedBase
 		suffix := ""
 		content := chunk
-		if len(chunks) > 1 {
+		if total > 1 {
 			topicKey = fmt.Sprintf("%s-part%d", normalizedBase, i+1)
-			suffix = fmt.Sprintf(" (part %d/%d)", i+1, len(chunks))
+			suffix = fmt.Sprintf(" (part %d/%d)", i+1, total)
 			if i > 0 {
 				content = contextHeader + chunk
 			}
+			// Set chunk metadata.
+			m.ChunkCurrent = i + 1
+			m.ChunkTotal = total
+		} else {
+			// Single chunk: no chunk field.
+			m.ChunkCurrent = 0
+			m.ChunkTotal = 0
 		}
+
+		// Append meta block to this chunk, ensuring it starts on its own line.
+		if !strings.HasSuffix(content, "\n") {
+			content = content + "\n"
+		}
+		content = content + meta.Render(m)
+
 		itemTitle := title
 		if suffix != "" {
 			itemTitle = title + suffix

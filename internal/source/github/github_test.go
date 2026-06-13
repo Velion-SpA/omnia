@@ -13,6 +13,13 @@ import (
 	github "github.com/velion/omnia/internal/source/github"
 )
 
+// stubRouter satisfies projectRouter by returning a fixed project string.
+type stubRouter struct {
+	project string
+}
+
+func (r *stubRouter) ResolveGitHub(_ string) string { return r.project }
+
 // stubState is a minimal StateStore for tests.
 type stubState struct {
 	cursors map[string]string
@@ -65,7 +72,7 @@ func TestFetchRepoFromFixture(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := github.NewWithBaseURL([]string{"velion/api"}, "omnia", "", nil, srv.URL)
+	src := github.NewWithBaseURL([]string{"velion/api"}, &stubRouter{"omnia"}, "", nil, srv.URL)
 	items, err := src.FetchAll(context.Background())
 	if err != nil {
 		t.Fatalf("Fetch failed: %v", err)
@@ -108,7 +115,7 @@ func TestPRDetection(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := github.NewWithBaseURL([]string{"velion/api"}, "omnia", "", nil, srv.URL)
+	src := github.NewWithBaseURL([]string{"velion/api"}, &stubRouter{"omnia"}, "", nil, srv.URL)
 	items, err := src.FetchAll(context.Background())
 	if err != nil {
 		t.Fatalf("Fetch failed: %v", err)
@@ -157,7 +164,7 @@ func TestCursorConsumption(t *testing.T) {
 	defer srv.Close()
 
 	st := newStubState(map[string]string{"github:acme/repo": storedCursor})
-	src := github.NewWithBaseURL([]string{"acme/repo"}, "omnia", "", st, srv.URL)
+	src := github.NewWithBaseURL([]string{"acme/repo"}, &stubRouter{"omnia"}, "", st, srv.URL)
 
 	_, err := src.Fetch(context.Background(), time.Time{})
 	if err != nil {
