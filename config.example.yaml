@@ -2,21 +2,25 @@ engram:
   base_url: http://127.0.0.1:7437
   default_project: omnia
 
+# Per-origin project routing.
+# Resolution order: routes map → default (repo name / guild slug) → default_project.
+# github key format: github/{owner}/{repo}
+# discord key format: discord/{channel_id}
+routes:
+  github/arratiabenjamin/saluvita: saluvita
+  # discord/123456789: saluvita
+
 sources:
   discord:
     enabled: false
-    # token: "your-bot-token-here"  # or set DISCORD_BOT_TOKEN env var
     channels:
       - id: "123456789"
         name: dev-help
         guild: my-server
-    project: omnia
 
   github:
     enabled: true
-    # token: "ghp_..."  # or set GITHUB_TOKEN env var (or use `gh auth token` fallback)
     repos:
       - owner/repo
-    project: omnia
 
 backfill_days: 30

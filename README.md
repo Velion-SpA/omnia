@@ -73,18 +73,35 @@ omnia --source discord sync
 omnia status
 ```
 
+## Per-project routing
+
+By default, Omnia routes GitHub items to the repo name (without owner) as the Engram project, and Discord items to the guild slug. You can override this with the `routes` map:
+
+```yaml
+routes:
+  github/arratiabenjamin/saluvita: saluvita   # explicit override
+  # discord/123456789: saluvita
+```
+
+Resolution order per item: `routes` map → default derivation (repo name / guild slug) → `engram.default_project`. Project names are normalized to lowercase. This means a PR from `arratiabenjamin/saluvita` lands in the `saluvita` project — the same project Engram detects when a developer opens that repo in Claude Code.
+
+## Structured metadata (omnia-meta)
+
+Every observation Omnia writes ends with a fenced `omnia-meta` block containing structured metadata: source, kind, project, author, participants, URL, timestamps, and chunk info. The block is machine-facing and appended to every chunk so each chunk is independently parseable. It is the foundation for the future Omnia index (vector search + structured filters).
+
+See [docs/METADATA.md](docs/METADATA.md) for the full field reference and versioning policy.
+
 ## Config reference
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `engram.base_url` | `http://127.0.0.1:7437` | Engram daemon URL |
-| `engram.default_project` | `omnia` | Default Engram project |
+| `engram.default_project` | `omnia` | Default Engram project (last-resort fallback) |
+| `routes` | `{}` | Per-origin project routing map |
 | `sources.github.enabled` | `false` | Enable GitHub ingestion |
 | `sources.github.repos` | `[]` | List of `owner/repo` strings |
-| `sources.github.project` | `omnia` | Engram project for GitHub items |
 | `sources.discord.enabled` | `false` | Enable Discord ingestion |
 | `sources.discord.channels` | `[]` | List of `{id, name, guild}` |
-| `sources.discord.project` | `omnia` | Engram project for Discord items |
 | `backfill_days` | `30` | Days to look back on first run |
 
 ## Architecture
