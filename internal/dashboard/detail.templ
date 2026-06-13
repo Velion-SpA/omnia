@@ -3,10 +3,12 @@ package dashboard
 import (
 	"fmt"
 	"strings"
+
+	"github.com/velion/omnia/internal/audit"
 )
 
 // detailPage renders a single observation with its meta panel, edit form, and delete action.
-templ detailPage(v ObsView, backURL string) {
+templ detailPage(v ObsView, backURL string, lastAudit *audit.Entry) {
 	@layout(v.Obs.Title) {
 		<!-- Breadcrumb -->
 		<div style="margin-bottom: 20px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted);">
@@ -90,6 +92,12 @@ templ detailPage(v ObsView, backURL string) {
 						<span class="kv-key">Updated</span>
 						<span class="kv-val" style="font-size: 12px;">{ v.Age }</span>
 					</div>
+					if lastAudit != nil {
+						<div class="kv-row">
+							<span class="kv-key">Last edit</span>
+							<span class="kv-val" style="font-size: 12px; color: var(--text-muted);">{ lastAudit.Actor } · { lastAudit.Ts }</span>
+						</div>
+					}
 				</div>
 			</aside>
 		</div>

@@ -6,15 +6,22 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/velion/omnia/internal/audit"
 )
 
 // Config holds the runtime configuration for the dashboard server.
 type Config struct {
 	Port      int
 	EngramURL string
+	// Actor is the provisional identity used in audit log entries.
+	// Resolution order: X-Omnia-Actor request header → this field → USER env var → "unknown".
+	// This is PROVISIONAL — replaced by per-user tokens in the Omnia gateway phase.
+	Actor string
 }
 
 // Server is the Omnia dashboard HTTP server.
@@ -74,6 +81,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /browse", s.handleBrowse)
 	mux.HandleFunc("GET /detail/{id}", s.handleDetail)
 	mux.HandleFunc("GET /sync", s.handleSyncStatus)
+	mux.HandleFunc("GET /activity", s.handleActivity)
 
 	// HTMX API fragments
 	mux.HandleFunc("GET /api/obs/{id}/edit-form", s.handleEditForm)
@@ -191,7 +199,12 @@ func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {
 		backURL = "/browse"
 	}
 
-	if err := detailPage(v, backURL).Render(ctx, w); err != nil {
+	var lastAudit *audit.Entry
+	if entries, err := audit.EntriesForObservation(id); err == nil && len(entries) > 0 {
+		lastAudit = &entries[0]
+	}
+
+	if err := detailPage(v, backURL, lastAudit).Render(ctx, w); err != nil {
 		s.logger.Error("render detail", "err", err)
 	}
 }
@@ -244,6 +257,15 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read old observation to capture project and old title for audit.
+	oldObs, err := s.client.GetObservation(ctx, id)
+	if err != nil {
+		http.Error(w, "observation not found", http.StatusNotFound)
+		return
+	}
+	oldTitle := oldObs.Title
+	project := oldObs.Project
+
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
@@ -253,14 +275,35 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 	content := r.FormValue("content")
 	obsType := r.FormValue("type")
 
+	actor := s.resolveActor(r)
+
 	if err := s.client.PatchObservation(ctx, id, title, content, obsType); err != nil {
 		s.logger.Error("patch observation", "id", id, "err", err)
+		audit.Append(audit.Entry{
+			Ts:            audit.Now(),
+			Actor:         actor,
+			Action:        audit.ActionEdit,
+			ObservationID: id,
+			Project:       project,
+			Summary:       truncateSummary(fmt.Sprintf("title: %s → %s", oldTitle, title), 120),
+			Result:        "error",
+		})
 		errMsg := fmt.Sprintf("Failed to save: %v", err)
 		if rErr := errorBanner(errMsg).Render(ctx, w); rErr != nil {
 			s.logger.Error("render error banner", "err", rErr)
 		}
 		return
 	}
+
+	audit.Append(audit.Entry{
+		Ts:            audit.Now(),
+		Actor:         actor,
+		Action:        audit.ActionEdit,
+		ObservationID: id,
+		Project:       project,
+		Summary:       truncateSummary(fmt.Sprintf("title: %s → %s", oldTitle, title), 120),
+		Result:        "ok",
+	})
 
 	if err := editSuccess(id).Render(ctx, w); err != nil {
 		s.logger.Error("render edit success", "err", err)
@@ -311,8 +354,32 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	hard := strings.ToLower(r.URL.Query().Get("hard")) == "true"
 
+	// Read old observation to capture project and title for audit.
+	oldObs, err := s.client.GetObservation(ctx, id)
+	if err != nil {
+		http.Error(w, "observation not found", http.StatusNotFound)
+		return
+	}
+	obsTitle := oldObs.Title
+	project := oldObs.Project
+
+	actor := s.resolveActor(r)
+	action := audit.ActionSoftDelete
+	if hard {
+		action = audit.ActionHardDelete
+	}
+
 	if err := s.client.DeleteObservation(ctx, id, hard); err != nil {
 		s.logger.Error("delete observation", "id", id, "err", err)
+		audit.Append(audit.Entry{
+			Ts:            audit.Now(),
+			Actor:         actor,
+			Action:        action,
+			ObservationID: id,
+			Project:       project,
+			Summary:       truncateSummary(obsTitle, 80),
+			Result:        "error",
+		})
 		errMsg := fmt.Sprintf("Failed to delete: %v", err)
 		if rErr := errorBanner(errMsg).Render(ctx, w); rErr != nil {
 			s.logger.Error("render error banner", "err", rErr)
@@ -320,9 +387,56 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	audit.Append(audit.Entry{
+		Ts:            audit.Now(),
+		Actor:         actor,
+		Action:        action,
+		ObservationID: id,
+		Project:       project,
+		Summary:       truncateSummary(obsTitle, 80),
+		Result:        "ok",
+	})
+
 	if err := deleteSuccess(hard).Render(ctx, w); err != nil {
 		s.logger.Error("render delete success", "err", err)
 	}
+}
+
+func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	entries, err := audit.Read(200)
+	if err != nil {
+		s.logger.Warn("read audit log", "err", err)
+	}
+	if err := activityPage(entries).Render(ctx, w); err != nil {
+		s.logger.Error("render activity", "err", err)
+	}
+}
+
+// resolveActor returns the provisional identity for an HTTP request.
+// Resolution order: X-Omnia-Actor header → cfg.Actor → USER env var → "unknown".
+// NOTE: This is provisional identity only — no authentication. Replaced by
+// per-user tokens in the Omnia gateway phase.
+func (s *Server) resolveActor(r *http.Request) string {
+	if v := r.Header.Get("X-Omnia-Actor"); v != "" {
+		return v
+	}
+	if s.cfg.Actor != "" {
+		return s.cfg.Actor
+	}
+	if v := os.Getenv("USER"); v != "" {
+		return v
+	}
+	return "unknown"
+}
+
+// truncateSummary truncates a summary string to max runes.
+func truncateSummary(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // parseID extracts the {id} path value and parses it as an integer.

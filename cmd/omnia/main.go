@@ -178,6 +178,7 @@ func runDashboard(args []string, configPath string) error {
 	fs := flag.NewFlagSet("dashboard", flag.ContinueOnError)
 	port := fs.Int("port", 7799, "port to listen on (localhost only)")
 	engramURL := fs.String("engram", "", "Engram daemon URL (defaults to config value)")
+	actor := fs.String("actor", "", "provisional actor identity for audit log (default: USER env var)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -198,6 +199,7 @@ func runDashboard(args []string, configPath string) error {
 	srv := dashboard.NewServer(dashboard.Config{
 		Port:      *port,
 		EngramURL: resolvedEngram,
+		Actor:     *actor,
 	}, logger)
 
 	ctx := context.Background()
