@@ -3,6 +3,7 @@ package main_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,6 +33,40 @@ func (n *noopState) GetCursor(source, key string) (string, bool) { return "", fa
 func (n *noopState) SetCursor(source, key, value string) error   { return nil }
 func (n *noopState) Flush() error                                 { return nil }
 
+// trackingState records whether Flush was called and delegates GetCursor/SetCursor to an inner map.
+type trackingState struct {
+	cursors   map[string]string
+	flushed   bool
+}
+
+func newTrackingState() *trackingState {
+	return &trackingState{cursors: make(map[string]string)}
+}
+
+func (s *trackingState) GetCursor(source, key string) (string, bool) {
+	v, ok := s.cursors[source+":"+key]
+	return v, ok
+}
+
+func (s *trackingState) SetCursor(source, key, value string) error {
+	s.cursors[source+":"+key] = value
+	return nil
+}
+
+func (s *trackingState) Flush() error {
+	s.flushed = true
+	return nil
+}
+
+// failSink always returns an error on Write, simulating a persistent sink failure.
+type failSink struct{}
+
+func (f *failSink) Write(_ context.Context, _ core.Item) error {
+	return errors.New("sink unavailable")
+}
+
+func (f *failSink) Health(_ context.Context) error { return nil }
+
 func TestE2EDryRunPipeline(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -60,7 +95,7 @@ func TestE2EDryRunPipeline(t *testing.T) {
 	sink := &captureSink{}
 	src := github.NewWithBaseURL([]string{"acme/service"}, "omnia", "", nil, srv.URL)
 
-	pipeline := core.NewPipeline([]core.Source{src}, sink, &noopState{}, false, nil)
+	pipeline := core.NewPipeline([]core.Source{src}, sink, &noopState{}, false, 30, nil)
 	if err := pipeline.Run(context.Background(), core.RunOptions{}); err != nil {
 		t.Fatalf("pipeline run failed: %v", err)
 	}
@@ -77,5 +112,47 @@ func TestE2EDryRunPipeline(t *testing.T) {
 	}
 	if !strings.Contains(item.TopicKey, "acme-service/issue-1") {
 		t.Errorf("topic_key %q should contain acme-service/issue-1", item.TopicKey)
+	}
+}
+
+// TestFailedSinkWriteBlocksCursorFlush verifies that when a sink write fails
+// (even after the built-in retry), the state Flush is not called for that source,
+// keeping the cursor at its previous value so the next run re-fetches the window (C2).
+func TestFailedSinkWriteBlocksCursorFlush(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/comments"):
+			w.Write([]byte("[]"))
+		case strings.Contains(r.URL.Path, "/issues"):
+			issue := map[string]interface{}{
+				"number":     2,
+				"title":      "Some issue",
+				"state":      "open",
+				"html_url":   "https://github.com/acme/svc/issues/2",
+				"body":       "body",
+				"user":       map[string]string{"login": "bob"},
+				"labels":     []interface{}{},
+				"assignees":  []interface{}{},
+				"created_at": time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
+				"updated_at": time.Now().Format(time.RFC3339),
+			}
+			json.NewEncoder(w).Encode([]interface{}{issue})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	st := newTrackingState()
+	src := github.NewWithBaseURL([]string{"acme/svc"}, "omnia", "", st, srv.URL)
+	sink := &failSink{}
+
+	pipeline := core.NewPipeline([]core.Source{src}, sink, st, false, 30, nil)
+	err := pipeline.Run(context.Background(), core.RunOptions{})
+	if err == nil {
+		t.Fatal("expected non-nil error when sink writes fail")
+	}
+	if st.flushed {
+		t.Error("state Flush must not be called when sink writes fail for a source")
 	}
 }
