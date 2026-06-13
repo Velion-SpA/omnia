@@ -39,7 +39,7 @@ templ detailPage(v ObsView, backURL string, lastAudit *audit.Entry) {
 							<span class="badge badge-curated">curated</span>
 						}
 						if v.Obs.Type != "" {
-							<span class="badge badge-ok">{ v.Obs.Type }</span>
+							<span class="badge badge-type">{ v.Obs.Type }</span>
 						}
 					</div>
 					<h1 id="obs-title-text" style="font-size: 20px; font-weight: 700; color: var(--text); margin: 0; letter-spacing: -0.02em; line-height: 1.35;">{ v.Obs.Title }</h1>

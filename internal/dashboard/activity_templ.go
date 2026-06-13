@@ -233,7 +233,7 @@ func actionBadge(a audit.Action) templ.Component {
 				return templ_7745c5c3_Err
 			}
 		case audit.ActionSoftDelete:
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "<span class=\"badge badge-type\">soft_delete</span>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "<span class=\"badge badge-source\">soft_delete</span>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

@@ -6,21 +6,7 @@ import "fmt"
 templ overviewPage(projects []ProjectStats, engUp bool, status SyncStatus) {
 	@layout("Overview") {
 		<!-- Page heading -->
-		<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem;">
-			<h1 style="font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0;">Overview</h1>
-			<!-- Engram status strip -->
-			<div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0.75rem; background: var(--surface); border: 1px solid var(--border); border-radius: 9999px;">
-				if engUp {
-					<span class="live-dot live-dot-ok"></span>
-					<span class="micro-label">ENGRAM</span>
-					<span class="micro-label" style="color: var(--ok);">ONLINE</span>
-				} else {
-					<span class="live-dot live-dot-bad"></span>
-					<span class="micro-label">ENGRAM</span>
-					<span class="micro-label" style="color: var(--bad);">OFFLINE</span>
-				}
-			</div>
-		</div>
+		<h1 style="font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;">Overview</h1>
 		<!-- Project cards grid -->
 		if len(projects) == 0 {
 			@emptyState("No Omnia projects found. Run \"omnia sync\" to ingest data.")
