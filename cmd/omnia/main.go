@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/velion/omnia/internal/config"
@@ -179,19 +180,36 @@ func runDashboard(args []string, configPath string) error {
 	port := fs.Int("port", 7799, "port to listen on (localhost only)")
 	engramURL := fs.String("engram", "", "Engram daemon URL (defaults to config value)")
 	actor := fs.String("actor", "", "provisional actor identity for audit log (default: USER env var)")
+	projectsFlag := fs.String("projects", "", "comma-separated extra project names to show in dashboard")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	// Resolve Engram URL: flag > config > hardcoded default.
-	resolvedEngram := *engramURL
-	if resolvedEngram == "" {
-		if cfg, err := config.Load(configPath); err == nil {
+	// Load config to pull Engram URL, routes, and projects list.
+	var (
+		resolvedEngram   = *engramURL
+		configProjects   []string
+		configRoutes     map[string]string
+	)
+	if cfg, err := config.Load(configPath); err == nil {
+		if resolvedEngram == "" {
 			resolvedEngram = cfg.Engram.BaseURL
 		}
+		configProjects = cfg.Projects
+		configRoutes = cfg.Routes
 	}
 	if resolvedEngram == "" {
 		resolvedEngram = "http://127.0.0.1:7437"
+	}
+
+	// --projects flag augments the config list.
+	if *projectsFlag != "" {
+		for _, p := range strings.Split(*projectsFlag, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				configProjects = append(configProjects, p)
+			}
+		}
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -200,6 +218,8 @@ func runDashboard(args []string, configPath string) error {
 		Port:      *port,
 		EngramURL: resolvedEngram,
 		Actor:     *actor,
+		Projects:  configProjects,
+		Routes:    configRoutes,
 	}, logger)
 
 	ctx := context.Background()

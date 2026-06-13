@@ -14,6 +14,10 @@ type Config struct {
 	Sources      SourcesConfig     `yaml:"sources"`
 	BackfillDays int               `yaml:"backfill_days"`
 	Routes       map[string]string `yaml:"routes"`
+	// Projects is an explicit list of Engram project names to show in the
+	// dashboard. The dashboard merges this list with "omnia" and the projects
+	// derived from the routes map — whichever yields more projects wins.
+	Projects []string `yaml:"projects"`
 }
 
 type EngramConfig struct {

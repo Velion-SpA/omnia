@@ -22,6 +22,14 @@ type Config struct {
 	// Resolution order: X-Omnia-Actor request header → this field → USER env var → "unknown".
 	// This is PROVISIONAL — replaced by per-user tokens in the Omnia gateway phase.
 	Actor string
+	// Projects is the explicit list of Engram projects to surface in the UI.
+	// knownProjects() always includes "omnia" and any route targets from Routes
+	// in addition to this slice. Duplicates are removed; result is sorted.
+	Projects []string
+	// Routes is the raw config.Routes map (key = "github/{owner}/{repo}" etc.,
+	// value = Engram project name). The dashboard uses it to surface every
+	// routing target as a known project automatically.
+	Routes map[string]string
 }
 
 // Server is the Omnia dashboard HTTP server.
@@ -100,8 +108,8 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	engUp := s.client.Health(ctx) == nil
 	syncStatus := loadSyncStatus()
 
-	// Determine projects: use known projects from state plus "omnia" default.
-	projectNames := knownProjects(syncStatus)
+	// Determine projects: union of config.Projects, routes targets, and "omnia" default.
+	projectNames := knownProjects(syncStatus, s.cfg)
 
 	var stats []ProjectStats
 	for _, proj := range projectNames {
@@ -131,7 +139,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 
 	// Derive list of available projects.
 	syncStatus := loadSyncStatus()
-	projectNames := knownProjects(syncStatus)
+	projectNames := knownProjects(syncStatus, s.cfg)
 
 	// Load observations.
 	searchQuery := params.Query

@@ -577,6 +577,116 @@ func TestActivityPage_Renders(t *testing.T) {
 	}
 }
 
+// --- knownProjects tests ---
+
+func TestKnownProjects_AlwaysIncludesOmnia(t *testing.T) {
+	got := knownProjects(SyncStatus{}, Config{})
+	if len(got) == 0 {
+		t.Fatal("expected at least one project")
+	}
+	found := false
+	for _, p := range got {
+		if p == "omnia" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'omnia' in result, got %v", got)
+	}
+}
+
+func TestKnownProjects_UnionWithConfigProjects(t *testing.T) {
+	cfg := Config{
+		Projects: []string{"workly", "trackly", "homelab"},
+	}
+	got := knownProjects(SyncStatus{}, cfg)
+
+	want := map[string]bool{
+		"omnia":   true,
+		"workly":  true,
+		"trackly": true,
+		"homelab": true,
+	}
+	for _, p := range got {
+		delete(want, p)
+	}
+	if len(want) > 0 {
+		t.Errorf("missing projects in result: %v (got: %v)", want, got)
+	}
+}
+
+func TestKnownProjects_UnionWithRouteTargets(t *testing.T) {
+	cfg := Config{
+		Routes: map[string]string{
+			"github/arratiabenjamin/saluvita":  "saluvita",
+			"github/arratiabenjamin/velion-web": "velion-web",
+		},
+	}
+	got := knownProjects(SyncStatus{}, cfg)
+
+	want := map[string]bool{
+		"omnia":     true,
+		"saluvita":  true,
+		"velion-web": true,
+	}
+	for _, p := range got {
+		delete(want, p)
+	}
+	if len(want) > 0 {
+		t.Errorf("missing route-derived projects: %v (got: %v)", want, got)
+	}
+}
+
+func TestKnownProjects_DeduplicatesAndSorts(t *testing.T) {
+	cfg := Config{
+		Projects: []string{"omnia", "workly", "omnia", "trackly"},
+		Routes: map[string]string{
+			"github/x/workly": "workly", // duplicate of Projects entry
+		},
+	}
+	got := knownProjects(SyncStatus{}, cfg)
+
+	// No duplicates.
+	seen := map[string]int{}
+	for _, p := range got {
+		seen[p]++
+	}
+	for p, count := range seen {
+		if count > 1 {
+			t.Errorf("project %q appears %d times, want 1", p, count)
+		}
+	}
+
+	// Sorted.
+	for i := 1; i < len(got); i++ {
+		if got[i] < got[i-1] {
+			t.Errorf("result not sorted at index %d: %v", i, got)
+		}
+	}
+}
+
+func TestKnownProjects_DropsEmptyStrings(t *testing.T) {
+	cfg := Config{
+		Projects: []string{"", "workly", "  ", ""},
+		Routes: map[string]string{
+			"github/x/y": "",
+		},
+	}
+	got := knownProjects(SyncStatus{}, cfg)
+	for _, p := range got {
+		if p == "" || strings.TrimSpace(p) == "" {
+			t.Errorf("empty/blank project in result: %q", p)
+		}
+	}
+}
+
+func TestKnownProjects_EmptyConfigYieldsOmnia(t *testing.T) {
+	got := knownProjects(SyncStatus{}, Config{})
+	if len(got) != 1 || got[0] != "omnia" {
+		t.Errorf("empty config: expected [omnia], got %v", got)
+	}
+}
+
 // --- Constructor helpers for tests ---
 
 func newTestServerOnly(t *testing.T, fe *fakeEngram) *httptest.Server {

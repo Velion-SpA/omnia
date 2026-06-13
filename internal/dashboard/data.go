@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"sort"
+	"strings"
 
 	"github.com/velion/omnia/internal/meta"
 )
@@ -121,18 +122,37 @@ func computeProjectStats(project string, views []ObsView) ProjectStats {
 	return stats
 }
 
-// knownProjects returns the set of known Engram projects that have Omnia data.
-// Since Engram has no "list projects" endpoint, we derive the list from the
-// state.json cursors (each cursor's project = the routing target) plus a default
-// "omnia" project. Callers may augment this with config if available.
-func knownProjects(status SyncStatus) []string {
+// knownProjects returns the deduplicated, sorted set of Engram project names
+// that the dashboard should display. The set is the UNION of:
+//   - the hard-coded "omnia" default
+//   - cfg.Projects (explicit list from config yaml or --projects flag)
+//   - all routing targets from cfg.Routes (values of the routes map)
+//
+// Empty strings are dropped. The result is always sorted alphabetically.
+// status is kept as a parameter for future use (e.g. cursor-derived projects).
+func knownProjects(status SyncStatus, cfg Config) []string {
 	seen := map[string]struct{}{"omnia": {}}
-	for _, c := range status.Cursors {
-		// The cursor key tells us source:repo but NOT the project name.
-		// Without config, we can't recover the project from the cursor alone.
-		// We include "omnia" as the canonical fallback and note this limitation.
-		_ = c
+
+	// From explicit projects list.
+	for _, p := range cfg.Projects {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			seen[p] = struct{}{}
+		}
 	}
+
+	// From routing targets.
+	for _, target := range cfg.Routes {
+		target = strings.TrimSpace(target)
+		if target != "" {
+			seen[target] = struct{}{}
+		}
+	}
+
+	// status.Cursors gives us source:repo keys, but without config we can't map
+	// those to project names — so we leave them for a future improvement.
+	_ = status
+
 	var projects []string
 	for p := range seen {
 		projects = append(projects, p)
