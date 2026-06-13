@@ -6,8 +6,11 @@
     <string>com.velion.omnia</string>
     <key>ProgramArguments</key>
     <array>
-        <!-- Build the binary first: go build -o /usr/local/bin/omnia ./cmd/omnia -->
-        <string>/usr/local/bin/omnia</string>
+        <!-- Build: go build -o ~/.local/bin/omnia ./cmd/omnia -->
+        <!-- launchd does not expand ~ — replace /Users/yourname with your actual home directory -->
+        <string>/Users/benja/.local/bin/omnia</string>
+        <string>--source</string>
+        <string>github</string>
         <string>sync</string>
     </array>
     <key>StartCalendarInterval</key>
@@ -17,19 +20,20 @@
         <key>Minute</key>
         <integer>0</integer>
     </dict>
+    <!-- Replace /Users/benja with your home directory in the paths below -->
     <key>StandardOutPath</key>
-    <string>/tmp/omnia.log</string>
+    <string>/Users/benja/Library/Logs/omnia/omnia.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/omnia-error.log</string>
+    <string>/Users/benja/Library/Logs/omnia/omnia.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <!-- Replace the placeholder values below with your actual tokens before loading -->
-        <key>GITHUB_TOKEN</key>
-        <string>REPLACE_WITH_YOUR_GITHUB_TOKEN</string>
-        <key>DISCORD_BOT_TOKEN</key>
-        <string>REPLACE_WITH_YOUR_DISCORD_BOT_TOKEN</string>
+        <!-- GitHub token: omit to rely on `gh auth token` fallback (requires gh in PATH above) -->
+        <!-- To set explicitly: add GITHUB_TOKEN key with your token value -->
+        <!-- Discord bot token: set when enabling discord source -->
+        <!-- <key>DISCORD_BOT_TOKEN</key> -->
+        <!-- <string>your-discord-bot-token-here</string> -->
     </dict>
 </dict>
 </plist>
