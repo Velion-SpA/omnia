@@ -22,6 +22,12 @@ const (
 	// maxBaseKeyLen ensures base + "-partNN" stays ≤ 120 chars after normalization.
 	// We reserve 7 chars for "-part99" to cover up to 99 parts safely.
 	maxBaseKeyLen = 113
+	// cursorOverlap is subtracted from the stored cursor when computing the "since"
+	// parameter for GitHub's list API. GitHub's list index can lag the real updated_at
+	// by 30 s or more, so a plain cursor+1s advance risks permanently missing items
+	// that were updated during the propagation window. Re-fetching a 10-minute overlap
+	// is safe because the Engram sink upserts by topic_key (idempotent).
+	cursorOverlap = 10 * time.Minute
 )
 
 // issue represents a GitHub issue or PR from the API.
@@ -130,9 +136,10 @@ func (s *Source) Fetch(ctx context.Context, since time.Time) ([]core.Item, error
 			if cursor, ok := s.state.GetCursor("github", repo); ok {
 				t, err := time.Parse(time.RFC3339, cursor)
 				if err == nil {
-					// GitHub's since filter is inclusive (>=). Advance by one second so
-					// the item whose updated_at equals the stored cursor is not re-fetched.
-					repoSince = t.Add(time.Second)
+					// Subtract cursorOverlap so items updated during GitHub's list-index
+					// propagation window (>30 s, sometimes minutes) are not missed.
+					// Re-fetching already-seen items is free: the sink upserts by topic_key.
+					repoSince = t.Add(-cursorOverlap)
 				}
 			}
 		}

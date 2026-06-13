@@ -198,22 +198,23 @@ func TestPipelineCursorRoundTrip(t *testing.T) {
 	}
 
 	// Run 2 — cursor already stored; pipeline must pass zero to Fetch so the source
-	// reads the cursor.  The stub server must receive the cursor as the since param,
-	// and the pipeline must write 0 items.
+	// reads the cursor. The source applies a 10-minute overlap window (cursor-10m) to
+	// cover GitHub list-index propagation lag. The stub returns 0 items for run 2.
+	// Re-fetching boundary items is safe because the sink upserts by topic_key.
 	sink.items = nil
 	st.flushed = false
 	if err := pipeline.Run(context.Background(), core.RunOptions{}); err != nil {
 		t.Fatalf("run 2 failed: %v", err)
 	}
 
-	// The source advances the cursor by 1s before passing it to GitHub (since is inclusive >=).
+	// The source subtracts 10m from the cursor (overlap window to cover index lag).
 	cursorTime, _ := time.Parse(time.RFC3339, storedCursor)
-	wantRun2Since := cursorTime.Add(time.Second).UTC().Format(time.RFC3339)
+	wantRun2Since := cursorTime.Add(-10 * time.Minute).UTC().Format(time.RFC3339)
 	if run2SinceReceived != wantRun2Since {
-		t.Errorf("run 2: server received since=%q, want cursor+1s %q", run2SinceReceived, wantRun2Since)
+		t.Errorf("run 2: server received since=%q, want cursor-10m %q", run2SinceReceived, wantRun2Since)
 	}
 	if len(sink.items) != 0 {
-		t.Errorf("run 2: want 0 items (cursor consumed), got %d", len(sink.items))
+		t.Errorf("run 2: want 0 items (stub returned none), got %d", len(sink.items))
 	}
 }
 
