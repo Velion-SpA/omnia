@@ -1,0 +1,190 @@
+package meta
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Schema version — bump when fields are added (parser stays backward-tolerant).
+const SchemaVersion = 1
+
+// Meta holds the structured metadata appended to every Omnia observation.
+// The block is machine-facing; it does NOT replace human-readable sections.
+type Meta struct {
+	SchemaVersion int       // always 1 for now
+	Source        string    // github | discord | jira | whatsapp
+	Kind          string    // pull_request | issue | commit_digest | message_digest
+	Layer         string    // ingested (always for Omnia output; curated omits the block)
+	Project       string    // Engram project name
+	Repo          string    // github: owner/repo; discord: guild/channel; empty otherwise
+	SourceID      string    // PR/issue number, message snowflake, etc.
+	Status        string    // open | closed | merged | "" for digests
+	Author        string    // primary author login/username
+	Participants  []string  // all actors (deduplicated)
+	URL           string    // canonical web URL; empty if not applicable
+	CreatedAt     time.Time // zero if unknown
+	UpdatedAt     time.Time // zero if unknown
+	IngestedAt    time.Time // set by the caller to time.Now()
+	// Chunk info — only set when an observation is part of a multi-chunk sequence.
+	ChunkCurrent int // 0 means not chunked; ≥1 means "chunk N of Total"
+	ChunkTotal   int // 0 means not chunked
+}
+
+const blockFence = "```omnia-meta"
+const blockClose = "```"
+
+// Render produces the fenced omnia-meta block to append to observation content.
+// The block is always a complete, parseable unit — safe to append to any chunk.
+func Render(m Meta) string {
+	var sb strings.Builder
+	sb.WriteString(blockFence)
+	sb.WriteByte('\n')
+
+	// Always-emitted fields.
+	sb.WriteString(fmt.Sprintf("schema_version: %d\n", m.SchemaVersion))
+	sb.WriteString(fmt.Sprintf("source: %s\n", m.Source))
+	sb.WriteString(fmt.Sprintf("kind: %s\n", m.Kind))
+	sb.WriteString(fmt.Sprintf("layer: %s\n", m.Layer))
+	sb.WriteString(fmt.Sprintf("project: %s\n", m.Project))
+
+	// Optional fields — only emit if non-zero/non-empty.
+	if m.Repo != "" {
+		sb.WriteString(fmt.Sprintf("repo: %s\n", m.Repo))
+	}
+	if m.SourceID != "" {
+		sb.WriteString(fmt.Sprintf("source_id: %q\n", m.SourceID))
+	}
+	if m.Status != "" {
+		sb.WriteString(fmt.Sprintf("status: %s\n", m.Status))
+	}
+	if m.Author != "" {
+		sb.WriteString(fmt.Sprintf("author: %s\n", m.Author))
+	}
+	if len(m.Participants) > 0 {
+		sb.WriteString(fmt.Sprintf("participants: %s\n", strings.Join(m.Participants, ", ")))
+	}
+	if m.URL != "" {
+		sb.WriteString(fmt.Sprintf("url: %s\n", m.URL))
+	}
+	if !m.CreatedAt.IsZero() {
+		sb.WriteString(fmt.Sprintf("created_at: %s\n", m.CreatedAt.UTC().Format(time.RFC3339)))
+	}
+	if !m.UpdatedAt.IsZero() {
+		sb.WriteString(fmt.Sprintf("updated_at: %s\n", m.UpdatedAt.UTC().Format(time.RFC3339)))
+	}
+	if !m.IngestedAt.IsZero() {
+		sb.WriteString(fmt.Sprintf("ingested_at: %s\n", m.IngestedAt.UTC().Format(time.RFC3339)))
+	}
+	if m.ChunkCurrent > 0 {
+		sb.WriteString(fmt.Sprintf("chunk: %d/%d\n", m.ChunkCurrent, m.ChunkTotal))
+	}
+
+	sb.WriteString(blockClose)
+	sb.WriteByte('\n')
+	return sb.String()
+}
+
+// Parse extracts the omnia-meta block from observation content.
+// Returns (Meta, true) if a valid block is found; (Meta{}, false) otherwise.
+// The parser is tolerant: unknown fields are silently ignored (forward compatibility).
+func Parse(content string) (Meta, bool) {
+	lines := strings.Split(content, "\n")
+
+	// Find the opening fence line.
+	startIdx := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == blockFence {
+			startIdx = i
+			break
+		}
+	}
+	if startIdx < 0 {
+		return Meta{}, false
+	}
+
+	// Find the closing fence line (must come after the opening fence).
+	endIdx := -1
+	for i := startIdx + 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == blockClose {
+			endIdx = i
+			break
+		}
+	}
+	if endIdx < 0 {
+		return Meta{}, false
+	}
+
+	// Parse key: value lines between fences.
+	var m Meta
+	for _, line := range lines[startIdx+1 : endIdx] {
+		idx := strings.Index(line, ": ")
+		if idx < 0 {
+			// Try key: with nothing after (shouldn't happen, but be tolerant).
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		value := strings.TrimSpace(line[idx+2:])
+
+		switch key {
+		case "schema_version":
+			v, err := strconv.Atoi(value)
+			if err == nil {
+				m.SchemaVersion = v
+			}
+		case "source":
+			m.Source = value
+		case "kind":
+			m.Kind = value
+		case "layer":
+			m.Layer = value
+		case "project":
+			m.Project = value
+		case "repo":
+			m.Repo = value
+		case "source_id":
+			// Strip surrounding double quotes.
+			m.SourceID = strings.Trim(value, `"`)
+		case "status":
+			m.Status = value
+		case "author":
+			m.Author = value
+		case "participants":
+			if value != "" {
+				m.Participants = strings.Split(value, ", ")
+			}
+		case "url":
+			m.URL = value
+		case "created_at":
+			t, err := time.Parse(time.RFC3339, value)
+			if err == nil {
+				m.CreatedAt = t
+			}
+		case "updated_at":
+			t, err := time.Parse(time.RFC3339, value)
+			if err == nil {
+				m.UpdatedAt = t
+			}
+		case "ingested_at":
+			t, err := time.Parse(time.RFC3339, value)
+			if err == nil {
+				m.IngestedAt = t
+			}
+		case "chunk":
+			// Parse N/T format.
+			parts := strings.SplitN(value, "/", 2)
+			if len(parts) == 2 {
+				cur, err1 := strconv.Atoi(parts[0])
+				tot, err2 := strconv.Atoi(parts[1])
+				if err1 == nil && err2 == nil {
+					m.ChunkCurrent = cur
+					m.ChunkTotal = tot
+				}
+			}
+		// Unknown keys are silently ignored (forward compatibility).
+		}
+	}
+
+	return m, true
+}
