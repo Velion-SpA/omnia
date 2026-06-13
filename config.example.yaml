@@ -5,6 +5,7 @@ engram:
 sources:
   discord:
     enabled: false
+    # token: "your-bot-token-here"  # or set DISCORD_BOT_TOKEN env var
     channels:
       - id: "123456789"
         name: dev-help
@@ -13,6 +14,7 @@ sources:
 
   github:
     enabled: true
+    # token: "ghp_..."  # or set GITHUB_TOKEN env var (or use `gh auth token` fallback)
     repos:
       - owner/repo
     project: omnia

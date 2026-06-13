@@ -6,6 +6,7 @@
     <string>com.velion.omnia</string>
     <key>ProgramArguments</key>
     <array>
+        <!-- Build the binary first: go build -o /usr/local/bin/omnia ./cmd/omnia -->
         <string>/usr/local/bin/omnia</string>
         <string>sync</string>
     </array>
@@ -24,6 +25,11 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- Replace the placeholder values below with your actual tokens before loading -->
+        <key>GITHUB_TOKEN</key>
+        <string>REPLACE_WITH_YOUR_GITHUB_TOKEN</string>
+        <key>DISCORD_BOT_TOKEN</key>
+        <string>REPLACE_WITH_YOUR_DISCORD_BOT_TOKEN</string>
     </dict>
 </dict>
 </plist>

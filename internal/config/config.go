@@ -26,6 +26,7 @@ type SourcesConfig struct {
 
 type DiscordConfig struct {
 	Enabled  bool            `yaml:"enabled"`
+	Token    string          `yaml:"token"`
 	Channels []ChannelConfig `yaml:"channels"`
 	Project  string          `yaml:"project"`
 }
@@ -38,6 +39,7 @@ type ChannelConfig struct {
 
 type GitHubConfig struct {
 	Enabled bool     `yaml:"enabled"`
+	Token   string   `yaml:"token"`
 	Repos   []string `yaml:"repos"`
 	Project string   `yaml:"project"`
 }

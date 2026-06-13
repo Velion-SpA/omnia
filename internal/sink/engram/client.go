@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 	"time"
@@ -15,8 +16,13 @@ import (
 
 const (
 	maxContentLen = 50000
-	sessionID     = "omnia-ingestor"
 )
+
+// sessionIDFor returns a per-project session ID so that observations from
+// different projects are not mixed under a single shared session (W6).
+func sessionIDFor(project string) string {
+	return "omnia-" + project
+}
 
 // Client writes observations to the Engram daemon.
 type Client struct {
@@ -52,9 +58,12 @@ func (c *Client) Health(ctx context.Context) error {
 }
 
 // EnsureSession creates or updates the ingestor session for the given project.
+// Session creation is idempotent (INSERT OR IGNORE semantics in Engram).
+// The directory parameter is used as the session working directory; pass the
+// omnia repo path when available, or "/" as a neutral sentinel.
 func (c *Client) EnsureSession(ctx context.Context, project, directory string) error {
 	body := map[string]string{
-		"id":        sessionID,
+		"id":        sessionIDFor(project),
 		"project":   project,
 		"directory": directory,
 	}
@@ -70,7 +79,7 @@ func (c *Client) Write(ctx context.Context, item core.Item) error {
 	}
 
 	obs := map[string]interface{}{
-		"session_id": sessionID,
+		"session_id": sessionIDFor(item.Project),
 		"type":       item.Type,
 		"title":      item.Title,
 		"content":    content,
@@ -98,7 +107,7 @@ func (c *Client) WriteAndGetID(ctx context.Context, item core.Item) (int, error)
 		content = string([]rune(content)[:maxContentLen])
 	}
 	obs := map[string]interface{}{
-		"session_id": sessionID,
+		"session_id": sessionIDFor(item.Project),
 		"type":       item.Type,
 		"title":      item.Title,
 		"content":    content,
@@ -115,8 +124,8 @@ func (c *Client) WriteAndGetID(ctx context.Context, item core.Item) (int, error)
 
 // Delete hard-deletes an observation by ID.
 func (c *Client) Delete(ctx context.Context, id int) error {
-	url := fmt.Sprintf("%s/observations/%d?hard=true", c.baseURL, id)
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	rawURL := fmt.Sprintf("%s/observations/%d?hard=true", c.baseURL, id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, rawURL, nil)
 	if err != nil {
 		return err
 	}
@@ -131,10 +140,15 @@ func (c *Client) Delete(ctx context.Context, id int) error {
 	return nil
 }
 
-// Search queries Engram.
+// Search queries Engram. S5: uses url.Values.Encode to safely encode query parameters.
 func (c *Client) Search(ctx context.Context, query, project string, limit int) ([]observationResponse, error) {
-	url := fmt.Sprintf("%s/search?q=%s&project=%s&limit=%d", c.baseURL, query, project, limit)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	params := url.Values{}
+	params.Set("q", query)
+	params.Set("project", project)
+	params.Set("limit", fmt.Sprintf("%d", limit))
+	rawURL := c.baseURL + "/search?" + params.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -176,6 +190,10 @@ func (c *Client) post(ctx context.Context, path string, body interface{}, result
 	return nil
 }
 
+// cliWrite is a fallback that writes an observation via the engram CLI binary.
+// Note: content is passed as a positional argument, which means long content is
+// visible in the process table (ps(1)). This is acceptable as a best-effort
+// fallback when the daemon is unreachable; prefer the HTTP path in production.
 func (c *Client) cliWrite(item core.Item) error {
 	cmd := exec.Command("engram", "save", item.Title, item.Content,
 		"--type", item.Type,

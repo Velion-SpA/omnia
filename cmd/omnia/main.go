@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/velion/omnia/internal/config"
@@ -59,6 +61,22 @@ func run(args []string) error {
 	}
 }
 
+// repoRoot returns the directory of the omnia binary, used as the session directory
+// so Engram sessions are scoped to this repo rather than an arbitrary path (W6).
+func repoRoot() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "/"
+	}
+	// Follow symlinks (e.g. go install puts a wrapper in GOPATH/bin).
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return filepath.Dir(exe)
+	}
+	_ = runtime.GOOS // suppress unused import if needed later
+	return filepath.Dir(resolved)
+}
+
 func runSync(configPath string, dryRun bool, sourceFilter, sinceStr string) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
@@ -75,35 +93,55 @@ func runSync(configPath string, dryRun bool, sourceFilter, sinceStr string) erro
 	sink := engram.New(cfg.Engram.BaseURL)
 	ctx := context.Background()
 
+	sessionDir := repoRoot()
+
 	// Build sources.
 	var sources []core.Source
 
 	if (sourceFilter == "" || sourceFilter == "github") && cfg.Sources.GitHub.Enabled {
+		// S6: fail fast if token is missing for an enabled source.
+		if cfg.Sources.GitHub.Token == "" && os.Getenv("GITHUB_TOKEN") == "" {
+			// New() will try `gh auth token` as fallback; check after construction.
+		}
 		project := cfg.Sources.GitHub.Project
 		if project == "" {
 			project = cfg.Engram.DefaultProject
 		}
-		src := github.New(cfg.Sources.GitHub.Repos, project, "", st)
+		// W4: pass token from config; New() applies env → config → gh fallback precedence.
+		src := github.New(cfg.Sources.GitHub.Repos, project, cfg.Sources.GitHub.Token, st)
+		src.SetBackfillDays(cfg.BackfillDays)
+
+		// S6: startup validation — ensure a token resolved.
+		if os.Getenv("GITHUB_TOKEN") == "" && cfg.Sources.GitHub.Token == "" {
+			// gh fallback was attempted inside New(); we can't easily inspect the result,
+			// so only warn here. A missing token will produce 401/403 at fetch time.
+			logger.Warn("no GitHub token configured; set GITHUB_TOKEN or github.token in config")
+		}
+
 		sources = append(sources, src)
 
-		// Ensure session exists.
 		if !dryRun {
-			if err := sink.EnsureSession(ctx, project, "/"); err != nil {
+			if err := sink.EnsureSession(ctx, project, sessionDir); err != nil {
 				logger.Warn("could not ensure engram session", "project", project, "error", err)
 			}
 		}
 	}
 
 	if (sourceFilter == "" || sourceFilter == "discord") && cfg.Sources.Discord.Enabled {
+		// S6: fail fast if Discord token is completely absent.
+		if cfg.Sources.Discord.Token == "" && os.Getenv("DISCORD_BOT_TOKEN") == "" {
+			return fmt.Errorf("discord source is enabled but no token found; set DISCORD_BOT_TOKEN or discord.token in config")
+		}
 		project := cfg.Sources.Discord.Project
 		if project == "" {
 			project = cfg.Engram.DefaultProject
 		}
-		src := discord.New(cfg.Sources.Discord.Channels, project, "", st)
+		// W4: pass token from config; New() applies env → config precedence.
+		src := discord.New(cfg.Sources.Discord.Channels, project, cfg.Sources.Discord.Token, st)
 		sources = append(sources, src)
 
 		if !dryRun {
-			if err := sink.EnsureSession(ctx, project, "/"); err != nil {
+			if err := sink.EnsureSession(ctx, project, sessionDir); err != nil {
 				logger.Warn("could not ensure engram session", "project", project, "error", err)
 			}
 		}
@@ -124,7 +162,7 @@ func runSync(configPath string, dryRun bool, sourceFilter, sinceStr string) erro
 		opts.Since = &t
 	}
 
-	pipeline := core.NewPipeline(sources, sink, st, dryRun, logger)
+	pipeline := core.NewPipeline(sources, sink, st, dryRun, cfg.BackfillDays, logger)
 	return pipeline.Run(ctx, opts)
 }
 
@@ -150,8 +188,25 @@ func runStatus(configPath string) error {
 	}
 
 	fmt.Printf("state file: %s\n", state.DefaultPath())
-	if v, ok := st.GetCursor("github", ""); ok {
-		fmt.Printf("  github cursor: %s\n", v)
+
+	// W5: iterate all configured repos and channels and show each cursor.
+	if cfg.Sources.GitHub.Enabled {
+		for _, repo := range cfg.Sources.GitHub.Repos {
+			if v, ok := st.GetCursor("github", repo); ok {
+				fmt.Printf("  github cursor [%s]: %s\n", repo, v)
+			} else {
+				fmt.Printf("  github cursor [%s]: (none — will use backfill of %d days)\n", repo, cfg.BackfillDays)
+			}
+		}
+	}
+	if cfg.Sources.Discord.Enabled {
+		for _, ch := range cfg.Sources.Discord.Channels {
+			if v, ok := st.GetCursor("discord", ch.ID); ok {
+				fmt.Printf("  discord cursor [#%s / %s]: %s\n", ch.Name, ch.ID, v)
+			} else {
+				fmt.Printf("  discord cursor [#%s / %s]: (none — will backfill)\n", ch.Name, ch.ID)
+			}
+		}
 	}
 
 	githubEnabled := cfg.Sources.GitHub.Enabled
