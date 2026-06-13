@@ -3,6 +3,7 @@ package enrich_test
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/velion/omnia/internal/enrich"
 )
@@ -56,6 +57,31 @@ func TestChunkContent(t *testing.T) {
 				t.Errorf("ChunkContent round-trip failed: got %q, want %q", joined, tt.content)
 			}
 		})
+	}
+}
+
+// TestNormalizeTopicKeyMultibyteAccents verifies FIX-4: a string of multibyte
+// (accented) characters longer than 120 runes is truncated safely. The result
+// must be valid UTF-8 and at most 120 runes long.
+func TestNormalizeTopicKeyMultibyteAccents(t *testing.T) {
+	// "ñ" is a 2-byte UTF-8 rune — use 130 of them to exceed the 120-rune limit.
+	input := strings.Repeat("ñ", 130)
+	got := enrich.NormalizeTopicKey(input)
+
+	// Result must be valid UTF-8.
+	if !utf8.ValidString(got) {
+		t.Error("NormalizeTopicKey produced invalid UTF-8 for multibyte input")
+	}
+
+	// Result must be at most 120 runes.
+	runes := []rune(got)
+	if len(runes) > 120 {
+		t.Errorf("NormalizeTopicKey result is %d runes, want ≤ 120", len(runes))
+	}
+
+	// Result must not be empty (ñ is a letter, so all runes are kept).
+	if len(runes) == 0 {
+		t.Error("NormalizeTopicKey produced empty result for non-empty multibyte input")
 	}
 }
 

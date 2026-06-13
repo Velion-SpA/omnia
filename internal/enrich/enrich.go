@@ -27,8 +27,10 @@ func NormalizeTopicKey(raw string) string {
 		}
 	}
 	result := b.String()
-	if len(result) > 120 {
-		result = result[:120]
+	// FIX-4: rune-safe truncation — byte-slicing can split multibyte characters,
+	// producing invalid UTF-8. Convert to rune slice first.
+	if r := []rune(result); len(r) > 120 {
+		result = string(r[:120])
 	}
 	return result
 }
