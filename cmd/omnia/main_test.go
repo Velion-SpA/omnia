@@ -115,6 +115,108 @@ func TestE2EDryRunPipeline(t *testing.T) {
 	}
 }
 
+// TestPipelineCursorRoundTrip is an integration-level test that drives the PIPELINE
+// (not the source directly) twice with a stub HTTP server and a capture sink.
+//
+// Run 1: no cursor → server returns N items → pipeline stores cursors and writes items.
+// Run 2: cursor stored → server asserts it received the cursor value as the "since"
+//
+//	query param → server returns 0 items → pipeline writes 0 items.
+//
+// This catches the regression where pipeline.runSource always passed now-backfillDays
+// to Fetch instead of zero, making the cursor-reading branch in each source unreachable.
+func TestPipelineCursorRoundTrip(t *testing.T) {
+	const repo = "acme/pipes"
+	issuedAt := time.Date(2024, 3, 15, 12, 0, 0, 0, time.UTC)
+	issuedAtStr := issuedAt.UTC().Format(time.RFC3339)
+
+	// run1SinceReceived is what the server saw during run 1.
+	// run2SinceReceived is what the server saw during run 2; it must equal the cursor.
+	var run1SinceReceived, run2SinceReceived string
+	callCount := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/comments"):
+			w.Write([]byte("[]"))
+		case strings.Contains(r.URL.Path, "/issues"):
+			since := r.URL.Query().Get("since")
+			callCount++
+			if callCount == 1 {
+				run1SinceReceived = since
+				// Return one issue updated at issuedAt so a cursor is stored.
+				issue := map[string]interface{}{
+					"number":     55,
+					"title":      "roundtrip issue",
+					"state":      "open",
+					"html_url":   "https://github.com/acme/pipes/issues/55",
+					"body":       "body",
+					"user":       map[string]string{"login": "eve"},
+					"labels":     []interface{}{},
+					"assignees":  []interface{}{},
+					"created_at": issuedAtStr,
+					"updated_at": issuedAtStr,
+				}
+				json.NewEncoder(w).Encode([]interface{}{issue})
+			} else {
+				run2SinceReceived = since
+				// No new items after the cursor.
+				json.NewEncoder(w).Encode([]interface{}{})
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	st := newTrackingState()
+	src := github.NewWithBaseURL([]string{repo}, "omnia", "", st, srv.URL)
+	sink := &captureSink{}
+	pipeline := core.NewPipeline([]core.Source{src}, sink, st, false, 30, nil)
+
+	// Run 1 — no cursor, should backfill.
+	if err := pipeline.Run(context.Background(), core.RunOptions{}); err != nil {
+		t.Fatalf("run 1 failed: %v", err)
+	}
+	if len(sink.items) != 1 {
+		t.Fatalf("run 1: want 1 item, got %d", len(sink.items))
+	}
+
+	// Cursor must have been stored after run 1.
+	storedCursor, ok := st.GetCursor("github", repo)
+	if !ok {
+		t.Fatal("run 1: expected cursor to be stored in state")
+	}
+	if storedCursor != issuedAtStr {
+		t.Errorf("run 1: stored cursor = %q, want %q", storedCursor, issuedAtStr)
+	}
+
+	// Run 1's since should be a backfill timestamp (not zero, not cursor).
+	// We only assert it is non-empty and is a valid RFC3339 time.
+	if _, err := time.Parse(time.RFC3339, run1SinceReceived); err != nil {
+		t.Errorf("run 1: server received invalid since=%q: %v", run1SinceReceived, err)
+	}
+
+	// Run 2 — cursor already stored; pipeline must pass zero to Fetch so the source
+	// reads the cursor.  The stub server must receive the cursor as the since param,
+	// and the pipeline must write 0 items.
+	sink.items = nil
+	st.flushed = false
+	if err := pipeline.Run(context.Background(), core.RunOptions{}); err != nil {
+		t.Fatalf("run 2 failed: %v", err)
+	}
+
+	// The source advances the cursor by 1s before passing it to GitHub (since is inclusive >=).
+	cursorTime, _ := time.Parse(time.RFC3339, storedCursor)
+	wantRun2Since := cursorTime.Add(time.Second).UTC().Format(time.RFC3339)
+	if run2SinceReceived != wantRun2Since {
+		t.Errorf("run 2: server received since=%q, want cursor+1s %q", run2SinceReceived, wantRun2Since)
+	}
+	if len(sink.items) != 0 {
+		t.Errorf("run 2: want 0 items (cursor consumed), got %d", len(sink.items))
+	}
+}
+
 // TestFailedSinkWriteBlocksCursorFlush verifies that when a sink write fails
 // (even after the built-in retry), the state Flush is not called for that source,
 // keeping the cursor at its previous value so the next run re-fetches the window (C2).

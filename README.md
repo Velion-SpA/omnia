@@ -36,16 +36,20 @@ cp config.example.yaml ~/.config/omnia/config.yaml
 
 ### Sync GitHub
 
+> **Note:** Global flags (`--source`, `--dry-run`, `--since`, `--config`) must come
+> **before** the subcommand, e.g. `omnia --source github sync`.
+> Flags placed after the subcommand are treated as arguments and silently ignored.
+
 ```sh
 # Uses GITHUB_TOKEN env var, or gh auth token fallback
 export GITHUB_TOKEN=$(gh auth token)
-omnia sync --source github
+omnia --source github sync
 
 # Dry run (preview without writing)
-omnia sync --source github --dry-run
+omnia --source github --dry-run sync
 
 # Sync only issues updated in the last 7 days
-omnia sync --source github --since $(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)
+omnia --source github --since $(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ) sync
 ```
 
 **Note on incremental sync:** After the first run, per-repo cursors are stored in
@@ -60,7 +64,7 @@ the cursor forward. Re-running is safe because Engram upserts on `topic_key+proj
 
 ```sh
 export DISCORD_BOT_TOKEN=your_bot_token
-omnia sync --source discord
+omnia --source discord sync
 ```
 
 ### Check status

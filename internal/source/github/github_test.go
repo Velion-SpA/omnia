@@ -123,9 +123,12 @@ func TestPRDetection(t *testing.T) {
 
 // TestCursorConsumption verifies that a stored cursor is used as the lower bound
 // for the next run (C1). The stub server records the "since" query param; we
-// confirm it matches the stored cursor value.
+// confirm it is cursor+1s (GitHub since is inclusive, so we advance by one second
+// to avoid re-fetching the item whose updated_at equals the stored cursor).
 func TestCursorConsumption(t *testing.T) {
 	storedCursor := "2024-06-01T00:00:00Z"
+	cursorTime, _ := time.Parse(time.RFC3339, storedCursor)
+	wantSince := cursorTime.Add(time.Second).UTC().Format(time.RFC3339)
 
 	var receivedSince string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -161,8 +164,8 @@ func TestCursorConsumption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Fetch failed: %v", err)
 	}
-	if receivedSince != storedCursor {
-		t.Errorf("server received since=%q, want stored cursor %q", receivedSince, storedCursor)
+	if receivedSince != wantSince {
+		t.Errorf("server received since=%q, want cursor+1s %q", receivedSince, wantSince)
 	}
 }
 

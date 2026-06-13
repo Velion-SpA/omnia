@@ -64,15 +64,21 @@ func (p *Pipeline) Run(ctx context.Context, opts RunOptions) error {
 // ensuring the next run re-fetches the same window. Because Engram upserts on
 // topic_key+project, re-ingesting an already-saved window is safe and idempotent.
 func (p *Pipeline) runSource(ctx context.Context, src Source, opts RunOptions) error {
-	// C1: resolve since — explicit override wins, then per-source cursor, then backfill.
+	// C1: resolve since — explicit --since override wins; otherwise pass zero so
+	// each source reads its own per-repo/per-channel cursor.  Sources fall back to
+	// now-backfillDays when no cursor exists (GitHub: github.go Fetch; Discord:
+	// discord.go fetchChannel via timeToSnowflake).
 	var since time.Time
 	if opts.Since != nil {
 		since = *opts.Since
-	} else {
-		since = p.resolveSince(src.Name())
 	}
+	// zero means "let the source decide via its stored cursor"
 
-	p.logger.Info("fetching", "source", src.Name(), "since", since.Format(time.RFC3339))
+	sinceLog := "cursor"
+	if !since.IsZero() {
+		sinceLog = since.Format(time.RFC3339)
+	}
+	p.logger.Info("fetching", "source", src.Name(), "since", sinceLog)
 	items, err := src.Fetch(ctx, since)
 	if err != nil {
 		return fmt.Errorf("fetch from %s: %w", src.Name(), err)
@@ -111,10 +117,3 @@ func (p *Pipeline) runSource(ctx context.Context, src Source, opts RunOptions) e
 	return nil
 }
 
-// resolveSince returns the appropriate since time for a source.
-// For the GitHub source the cursor is per-repo and managed inside the source itself;
-// for sources like Discord the state store holds per-channel cursors. This method
-// provides the top-level fallback when no cursor exists at all.
-func (p *Pipeline) resolveSince(sourceName string) time.Time {
-	return time.Now().AddDate(0, 0, -p.backfillDays)
-}

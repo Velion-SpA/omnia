@@ -130,7 +130,9 @@ func (s *Source) Fetch(ctx context.Context, since time.Time) ([]core.Item, error
 			if cursor, ok := s.state.GetCursor("github", repo); ok {
 				t, err := time.Parse(time.RFC3339, cursor)
 				if err == nil {
-					repoSince = t
+					// GitHub's since filter is inclusive (>=). Advance by one second so
+					// the item whose updated_at equals the stored cursor is not re-fetched.
+					repoSince = t.Add(time.Second)
 				}
 			}
 		}
