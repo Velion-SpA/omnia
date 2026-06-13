@@ -12,6 +12,7 @@ import (
 
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/core"
+	"github.com/velion/omnia/internal/dashboard"
 	engram "github.com/velion/omnia/internal/sink/engram"
 	discord "github.com/velion/omnia/internal/source/discord"
 	github "github.com/velion/omnia/internal/source/github"
@@ -56,8 +57,10 @@ func run(args []string) error {
 		return runSync(*configPath, *dryRun, *sourceFlag, *sinceFlag)
 	case "status":
 		return runStatus(*configPath)
+	case "dashboard":
+		return runDashboard(args[1:], *configPath)
 	default:
-		return fmt.Errorf("unknown subcommand %q (use: sync, status)", subcommand)
+		return fmt.Errorf("unknown subcommand %q (use: sync, status, dashboard)", subcommand)
 	}
 }
 
@@ -167,6 +170,38 @@ func runSync(configPath string, dryRun bool, sourceFilter, sinceStr string) erro
 
 	pipeline := core.NewPipeline(sources, sink, st, dryRun, cfg.BackfillDays, logger)
 	return pipeline.Run(ctx, opts)
+}
+
+// runDashboard starts the Omnia web UI dashboard.
+// Usage: omnia dashboard [--port 7799] [--engram http://127.0.0.1:7437]
+func runDashboard(args []string, configPath string) error {
+	fs := flag.NewFlagSet("dashboard", flag.ContinueOnError)
+	port := fs.Int("port", 7799, "port to listen on (localhost only)")
+	engramURL := fs.String("engram", "", "Engram daemon URL (defaults to config value)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Resolve Engram URL: flag > config > hardcoded default.
+	resolvedEngram := *engramURL
+	if resolvedEngram == "" {
+		if cfg, err := config.Load(configPath); err == nil {
+			resolvedEngram = cfg.Engram.BaseURL
+		}
+	}
+	if resolvedEngram == "" {
+		resolvedEngram = "http://127.0.0.1:7437"
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	srv := dashboard.NewServer(dashboard.Config{
+		Port:      *port,
+		EngramURL: resolvedEngram,
+	}, logger)
+
+	ctx := context.Background()
+	return srv.Start(ctx)
 }
 
 func runStatus(configPath string) error {
