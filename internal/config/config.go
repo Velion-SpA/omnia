@@ -4,14 +4,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Engram       EngramConfig  `yaml:"engram"`
-	Sources      SourcesConfig `yaml:"sources"`
-	BackfillDays int           `yaml:"backfill_days"`
+	Engram       EngramConfig      `yaml:"engram"`
+	Sources      SourcesConfig     `yaml:"sources"`
+	BackfillDays int               `yaml:"backfill_days"`
+	Routes       map[string]string `yaml:"routes"`
 }
 
 type EngramConfig struct {
@@ -42,6 +44,57 @@ type GitHubConfig struct {
 	Token   string   `yaml:"token"`
 	Repos   []string `yaml:"repos"`
 	Project string   `yaml:"project"`
+}
+
+// Router resolves the Engram project for a given ingestion origin.
+// Resolution order: explicit routes map → default derivation → fallback.
+type Router struct {
+	routes         map[string]string // from config.Routes
+	defaultProject string            // config.Engram.DefaultProject (last-resort fallback only)
+}
+
+// NewRouter creates a Router from the config routes map and fallback default project.
+func NewRouter(routes map[string]string, defaultProject string) *Router {
+	r := &Router{
+		routes:         make(map[string]string),
+		defaultProject: normalizeProject(defaultProject),
+	}
+	for k, v := range routes {
+		r.routes[k] = normalizeProject(v)
+	}
+	return r
+}
+
+// ResolveGitHub returns the project for a GitHub repo (format: "owner/repo").
+// Key tried: "github/{owner}/{repo}" → falls back to repo name (without owner) → defaultProject.
+func (r *Router) ResolveGitHub(ownerRepo string) string {
+	key := "github/" + ownerRepo
+	if p, ok := r.routes[key]; ok {
+		return p
+	}
+	// Default: repo name without owner.
+	parts := strings.SplitN(ownerRepo, "/", 2)
+	if len(parts) == 2 && parts[1] != "" {
+		return normalizeProject(parts[1])
+	}
+	return r.defaultProject
+}
+
+// ResolveDiscord returns the project for a Discord channel (format: channel ID as string).
+// Key tried: "discord/{channelID}" → falls back to guild slug → defaultProject.
+func (r *Router) ResolveDiscord(channelID string, guildSlug string) string {
+	key := "discord/" + channelID
+	if p, ok := r.routes[key]; ok {
+		return p
+	}
+	if guildSlug != "" {
+		return normalizeProject(guildSlug)
+	}
+	return r.defaultProject
+}
+
+func normalizeProject(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // DefaultPath returns the default config file path.
