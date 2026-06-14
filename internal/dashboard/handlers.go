@@ -141,37 +141,43 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	syncStatus := loadSyncStatus()
 	projectNames := knownProjects(syncStatus, s.cfg)
 
-	// Load observations.
-	searchQuery := params.Query
-	if searchQuery == "" {
-		searchQuery = ingestedTerm
-	}
-
-	raw, err := s.client.Search(ctx, searchQuery, params.Project, 300)
-	if err != nil {
-		s.logger.Warn("browse search failed", "err", err)
-		raw = nil
-	}
-
-	// If user searched with custom query, also get curated via the same project query.
-	if params.Query != "" {
-		curated, err := s.client.Search(ctx, params.Query, params.Project, 100)
-		if err == nil {
-			seen := map[int]struct{}{}
-			for _, o := range raw {
-				seen[o.ID] = struct{}{}
-			}
-			for _, o := range curated {
-				if _, ok := seen[o.ID]; !ok {
-					raw = append(raw, o)
-				}
-			}
+	// Load observations. Keep the browse list consistent with the overview counts:
+	// when a project is selected without a free-text query, reuse the same two-search
+	// loader the overview uses (ingested term + project name) so curated-only projects
+	// (e.g. workly, trackly, homelab) are not missed. Engram has no "list all by
+	// project" endpoint, so this FTS workaround is the best available until Omnia's
+	// own index lands.
+	var allViews []ObsView
+	switch {
+	case params.Query != "":
+		// Free-text search within the (optional) project.
+		raw, err := s.client.Search(ctx, params.Query, params.Project, 300)
+		if err != nil {
+			s.logger.Warn("browse search failed", "err", err)
+		}
+		for _, o := range raw {
+			allViews = append(allViews, enrichObs(o))
+		}
+	case params.Project != "":
+		// No query, project selected: reuse the overview loader for consistent results.
+		v, err := loadProjectObs(ctx, s.client, params.Project, 300)
+		if err != nil {
+			s.logger.Warn("browse project load failed", "err", err)
+		}
+		allViews = v
+	default:
+		// No query, no project: ingested observations across all projects.
+		raw, err := s.client.Search(ctx, ingestedTerm, "", 300)
+		if err != nil {
+			s.logger.Warn("browse search failed", "err", err)
+		}
+		for _, o := range raw {
+			allViews = append(allViews, enrichObs(o))
 		}
 	}
 
-	views := make([]ObsView, 0, len(raw))
-	for _, o := range raw {
-		v := enrichObs(o)
+	views := make([]ObsView, 0, len(allViews))
+	for _, v := range allViews {
 		// Apply client-side filters.
 		if params.Source != "" && v.Meta.Source != params.Source {
 			continue
