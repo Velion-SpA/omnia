@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	_ "modernc.org/sqlite" // register "sqlite" driver
@@ -51,10 +52,18 @@ type TypeCount struct {
 // Limit defaults to 200 when 0; Offset defaults to 0 when negative.
 type Filter struct {
 	Project string
-	Type    string
-	Scope   string
-	Limit   int
-	Offset  int
+	// CanonicalProject, when non-empty, matches rows WHERE LOWER(TRIM(project)) = LOWER(TRIM(?)).
+	// Handles case-only variants (homelab, Homelab, HOMELAB → same result set).
+	// Takes priority over Project when both are set.
+	CanonicalProject string
+	// RawProjects, when non-empty, matches rows WHERE project IN (?, ...).
+	// Used for alias expansion when multiple distinct raw names map to one canonical.
+	// Ignored when CanonicalProject is set.
+	RawProjects []string
+	Type        string
+	Scope       string
+	Limit       int
+	Offset      int
 }
 
 // DB is a read-only connection to an Engram SQLite database.
@@ -268,14 +277,29 @@ func (d *DB) Count(ctx context.Context, f Filter) (int, error) {
 // buildWhere constructs a parameterized WHERE clause from a Filter.
 // The returned clause always includes "deleted_at IS NULL".
 // User values are appended to args as parameters — never interpolated.
+// Priority for project matching: CanonicalProject > RawProjects > Project.
 func buildWhere(f Filter) (string, []any) {
 	clauses := []string{"deleted_at IS NULL"}
 	var args []any
 
-	if f.Project != "" {
+	switch {
+	case f.CanonicalProject != "":
+		clauses = append(clauses, "LOWER(TRIM(project)) = LOWER(TRIM(?))")
+		args = append(args, f.CanonicalProject)
+	case len(f.RawProjects) > 0:
+		placeholders := make([]string, len(f.RawProjects))
+		for i := range f.RawProjects {
+			placeholders[i] = "?"
+		}
+		clauses = append(clauses, "project IN ("+strings.Join(placeholders, ", ")+")")
+		for _, p := range f.RawProjects {
+			args = append(args, p)
+		}
+	case f.Project != "":
 		clauses = append(clauses, "project = ?")
 		args = append(args, f.Project)
 	}
+
 	if f.Type != "" {
 		clauses = append(clauses, "type = ?")
 		args = append(args, f.Type)
@@ -286,4 +310,31 @@ func buildWhere(f Filter) (string, []any) {
 	}
 
 	return strings.Join(clauses, " AND "), args
+}
+
+// ProjectsCanonical returns the same projects as Projects but with each raw
+// project name run through the provided canonicalize function. Counts for
+// names that collapse to the same canonical key are summed.
+// Ordered by count descending, then canonical name ascending.
+func (d *DB) ProjectsCanonical(ctx context.Context, canonicalize func(string) string) ([]ProjectCount, error) {
+	raw, err := d.Projects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int)
+	for _, pc := range raw {
+		key := canonicalize(pc.Name)
+		counts[key] += pc.Count
+	}
+	out := make([]ProjectCount, 0, len(counts))
+	for name, count := range counts {
+		out = append(out, ProjectCount{Name: name, Count: count})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
 }
