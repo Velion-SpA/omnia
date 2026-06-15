@@ -78,7 +78,7 @@ func Open(dataDir string) (*DB, error) {
 
 	// Read-only SQLite URI. Path values from resolveDataDir are system paths
 	// (no user input), so direct concatenation is safe here.
-	dsn := "file:" + path + "?mode=ro&_busy_timeout=5000"
+	dsn := "file:" + path + "?mode=ro&_pragma=busy_timeout(5000)"
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
