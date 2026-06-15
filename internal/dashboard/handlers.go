@@ -134,6 +134,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		Project: q.Get("project"),
 		Source:  q.Get("source"),
 		Kind:    q.Get("kind"),
+		Type:    q.Get("type"),
 		Query:   q.Get("q"),
 	}
 
@@ -176,6 +177,10 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Compute distinct types from the full loaded set (before client-side filters)
+	// so the Category dropdown always shows every available type in the current context.
+	types := distinctTypes(allViews)
+
 	views := make([]ObsView, 0, len(allViews))
 	for _, v := range allViews {
 		// Apply client-side filters.
@@ -185,10 +190,13 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		if params.Kind != "" && v.Meta.Kind != params.Kind {
 			continue
 		}
+		if params.Type != "" && v.Obs.Type != params.Type {
+			continue
+		}
 		views = append(views, v)
 	}
 
-	if err := browsePage(params, views, projectNames).Render(ctx, w); err != nil {
+	if err := browsePage(params, views, projectNames, types).Render(ctx, w); err != nil {
 		s.logger.Error("render browse", "err", err)
 	}
 }
