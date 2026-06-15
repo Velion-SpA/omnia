@@ -201,6 +201,24 @@ func mergeProjectNames(a, b []string) []string {
 	return result
 }
 
+// knownProjectsCanonical returns the result of knownProjects with each name
+// run through canonicalize (alias lookup + case-fold). Duplicates produced by
+// canonicalization are removed; result is sorted.
+func knownProjectsCanonical(status SyncStatus, cfg Config) []string {
+	raw := knownProjects(status, cfg)
+	canonicalize := canonicalizerFunc(cfg.ProjectAliases)
+	seen := make(map[string]struct{}, len(raw))
+	for _, n := range raw {
+		seen[canonicalize(n)] = struct{}{}
+	}
+	result := make([]string, 0, len(seen))
+	for n := range seen {
+		result = append(result, n)
+	}
+	sort.Strings(result)
+	return result
+}
+
 // knownProjects returns the deduplicated, sorted set of Engram project names
 // that the dashboard should display. The set is the UNION of:
 //   - the hard-coded "omnia" default

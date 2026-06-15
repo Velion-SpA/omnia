@@ -18,6 +18,13 @@ type Config struct {
 	// dashboard. The dashboard merges this list with "omnia" and the projects
 	// derived from the routes map — whichever yields more projects wins.
 	Projects []string `yaml:"projects"`
+	// ProjectHidden lists canonical project names to hide from the dashboard entirely.
+	// Values are matched after canonicalization (alias lookup + lowercase+trim).
+	ProjectHidden []string `yaml:"project_hidden"`
+	// ProjectAliases maps raw project variant names to their canonical name.
+	// Used for non-case-fold merges (e.g., "NUDGE Sistema" -> "nudge").
+	// Leave empty; add entries only when needed.
+	ProjectAliases map[string]string `yaml:"project_aliases"`
 }
 
 type EngramConfig struct {

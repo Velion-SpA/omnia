@@ -37,6 +37,13 @@ type Config struct {
 	// If the DB cannot be opened, the dashboard logs a warning and falls back to
 	// HTTP/FTS for structural queries — the dashboard runs without the DB.
 	EngramDataDir string
+	// ProjectHidden is the list of canonical project names to exclude from all dashboard views.
+	// Values are canonicalized (lowercase+trim + alias lookup) before matching.
+	// Populated from ~/.config/omnia/config.yaml's project_hidden list.
+	ProjectHidden []string
+	// ProjectAliases is an optional map of raw project name → canonical name for
+	// non-case-fold merges. Leave empty; populated from project_aliases in config.yaml.
+	ProjectAliases map[string]string
 }
 
 // Server is the Omnia dashboard HTTP server.
@@ -133,7 +140,9 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 	if stats == nil {
 		// FTS fallback: DB unavailable or all DB queries failed.
-		projectNames := knownProjects(syncStatus, s.cfg)
+		projectNames := knownProjectsCanonical(syncStatus, s.cfg)
+		hidden := hiddenSet(s.cfg.ProjectHidden, s.cfg.ProjectAliases)
+		projectNames = filterHidden(projectNames, hidden)
 		for _, proj := range projectNames {
 			views, err := loadProjectObs(ctx, s.client, proj, 200)
 			if err != nil {
@@ -150,25 +159,27 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 // overviewStatsFromDB builds ProjectStats for all projects using the SQLite DB.
-// Returns nil if db.Projects fails, signaling the caller to fall back to FTS.
+// Returns nil if db.ProjectsCanonical fails, signaling the caller to fall back to FTS.
 func (s *Server) overviewStatsFromDB(ctx context.Context, syncStatus SyncStatus) []ProjectStats {
-	dbProjectCounts, err := s.db.Projects(ctx)
+	canonicalize := canonicalizerFunc(s.cfg.ProjectAliases)
+	hidden := hiddenSet(s.cfg.ProjectHidden, s.cfg.ProjectAliases)
+
+	dbProjectCounts, err := s.db.ProjectsCanonical(ctx, canonicalize)
 	if err != nil {
-		s.logger.Warn("engramdb.Projects failed", "err", err)
+		s.logger.Warn("engramdb.ProjectsCanonical failed", "err", err)
 		return nil
 	}
 
-	// Merge DB projects with config-derived projects so config-declared projects
-	// remain visible even when they have no observations yet in the DB.
 	dbNames := make([]string, 0, len(dbProjectCounts))
 	for _, pc := range dbProjectCounts {
 		dbNames = append(dbNames, pc.Name)
 	}
-	merged := mergeProjectNames(dbNames, knownProjects(syncStatus, s.cfg))
+	merged := mergeProjectNames(dbNames, knownProjectsCanonical(syncStatus, s.cfg))
+	merged = filterHidden(merged, hidden)
 
 	stats := make([]ProjectStats, 0, len(merged))
 	for _, proj := range merged {
-		dbObs, err := s.db.List(ctx, engramdb.Filter{Project: proj, Limit: 2000})
+		dbObs, err := s.db.List(ctx, engramdb.Filter{CanonicalProject: proj, Limit: 2000})
 		if err != nil {
 			s.logger.Warn("engramdb.List failed for project", "project", proj, "err", err)
 			dbObs = nil
@@ -268,34 +279,37 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 }
 
 // effectiveProjectNames returns the sorted, deduplicated union of DB-derived
-// project names and config-derived names. Falls back to config-only when the
-// DB is unavailable or its query fails.
+// canonical project names and config-derived names, with hidden projects removed.
+// Falls back to config-only when the DB is unavailable or its query fails.
 func (s *Server) effectiveProjectNames(ctx context.Context, syncStatus SyncStatus) []string {
-	cfgNames := knownProjects(syncStatus, s.cfg)
+	canonicalize := canonicalizerFunc(s.cfg.ProjectAliases)
+	hidden := hiddenSet(s.cfg.ProjectHidden, s.cfg.ProjectAliases)
+	cfgNames := knownProjectsCanonical(syncStatus, s.cfg)
 	if s.db == nil {
-		return cfgNames
+		return filterHidden(cfgNames, hidden)
 	}
-	dbProjects, err := s.db.Projects(ctx)
+	dbProjects, err := s.db.ProjectsCanonical(ctx, canonicalize)
 	if err != nil {
-		s.logger.Warn("engramdb.Projects failed in effectiveProjectNames", "err", err)
-		return cfgNames
+		s.logger.Warn("engramdb.ProjectsCanonical failed in effectiveProjectNames", "err", err)
+		return filterHidden(cfgNames, hidden)
 	}
 	dbNames := make([]string, 0, len(dbProjects))
 	for _, pc := range dbProjects {
 		dbNames = append(dbNames, pc.Name)
 	}
-	return mergeProjectNames(dbNames, cfgNames)
+	merged := mergeProjectNames(dbNames, cfgNames)
+	return filterHidden(merged, hidden)
 }
 
 // browseFromDB loads and enriches observations for the browse page using the
-// SQLite DB. Project and Type are pushed to SQL for exact filtering; Source
-// and Kind are applied client-side after meta.Parse.
+// SQLite DB. CanonicalProject and Type are pushed to SQL for exact filtering;
+// Source and Kind are applied client-side after meta.Parse.
 // Returns (nil, nil, false) on any DB error so the caller can fall back.
 func (s *Server) browseFromDB(ctx context.Context, params BrowseParams) ([]ObsView, []string, bool) {
 	dbObs, err := s.db.List(ctx, engramdb.Filter{
-		Project: params.Project,
-		Type:    params.Type,
-		Limit:   1000,
+		CanonicalProject: params.Project,
+		Type:             params.Type,
+		Limit:            1000,
 	})
 	if err != nil {
 		s.logger.Warn("engramdb.List failed", "err", err)
@@ -315,19 +329,19 @@ func (s *Server) browseFromDB(ctx context.Context, params BrowseParams) ([]ObsVi
 		views = append(views, v)
 	}
 
-	// Types for the Category dropdown: project-scoped when a project is selected,
-	// global otherwise. Sorted alphabetically for consistent UI ordering.
-	var dbTypes []engramdb.TypeCount
+	// Types for the Category dropdown: derive from the loaded view set when a
+	// project is selected (canonical match may span multiple raw names);
+	// query the DB globally otherwise.
+	var types []string
 	if params.Project != "" {
-		dbTypes, _ = s.db.TypesByProject(ctx, params.Project)
+		types = distinctTypes(views)
 	} else {
-		dbTypes, _ = s.db.Types(ctx)
+		dbTypes, _ := s.db.Types(ctx)
+		for _, tc := range dbTypes {
+			types = append(types, tc.Name)
+		}
+		sort.Strings(types)
 	}
-	types := make([]string, 0, len(dbTypes))
-	for _, tc := range dbTypes {
-		types = append(types, tc.Name)
-	}
-	sort.Strings(types)
 
 	return views, types, true
 }

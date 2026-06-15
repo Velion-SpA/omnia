@@ -188,9 +188,11 @@ func runDashboard(args []string, configPath string) error {
 
 	// Load config to pull Engram URL, routes, and projects list.
 	var (
-		resolvedEngram   = *engramURL
-		configProjects   []string
-		configRoutes     map[string]string
+		resolvedEngram = *engramURL
+		configProjects []string
+		configRoutes   map[string]string
+		configHidden   []string
+		configAliases  map[string]string
 	)
 	if cfg, err := config.Load(configPath); err == nil {
 		if resolvedEngram == "" {
@@ -198,6 +200,8 @@ func runDashboard(args []string, configPath string) error {
 		}
 		configProjects = cfg.Projects
 		configRoutes = cfg.Routes
+		configHidden = cfg.ProjectHidden
+		configAliases = cfg.ProjectAliases
 	}
 	if resolvedEngram == "" {
 		resolvedEngram = "http://127.0.0.1:7437"
@@ -216,12 +220,14 @@ func runDashboard(args []string, configPath string) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	srv := dashboard.NewServer(dashboard.Config{
-		Port:          *port,
-		EngramURL:     resolvedEngram,
-		EngramDataDir: *engramDB,
-		Actor:         *actor,
-		Projects:      configProjects,
-		Routes:        configRoutes,
+		Port:           *port,
+		EngramURL:      resolvedEngram,
+		EngramDataDir:  *engramDB,
+		Actor:          *actor,
+		Projects:       configProjects,
+		Routes:         configRoutes,
+		ProjectHidden:  configHidden,
+		ProjectAliases: configAliases,
 	}, logger)
 
 	ctx := context.Background()
