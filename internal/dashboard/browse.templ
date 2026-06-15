@@ -7,11 +7,21 @@ type BrowseParams struct {
 	Project string
 	Source  string
 	Kind    string
+	Type    string // observation type / category (e.g. "architecture", "decision")
 	Query   string
 }
 
+// browseTypeURL returns the URL to filter browse results by a given type,
+// preserving the current project when available.
+func browseTypeURL(obsProject, obsType string) string {
+	if obsProject != "" {
+		return fmt.Sprintf("/browse?project=%s&type=%s", obsProject, obsType)
+	}
+	return fmt.Sprintf("/browse?type=%s", obsType)
+}
+
 // browsePage renders the observation list/browse view.
-templ browsePage(params BrowseParams, views []ObsView, projects []string) {
+templ browsePage(params BrowseParams, views []ObsView, projects []string, types []string) {
 	@layout("Browse") {
 		<div style="display: flex; align-items: flex-start; gap: 1.5rem;">
 			<!-- Sidebar filters -->
@@ -59,6 +69,19 @@ templ browsePage(params BrowseParams, views []ObsView, projects []string) {
 									}
 								</select>
 							</div>
+							<div>
+								<label class="micro-label" style="display: block; margin-bottom: 0.25rem;">Category</label>
+								<select name="type" style="width: 100%;" onchange="this.form.submit()">
+									<option value="">All categories</option>
+									for _, t := range types {
+										if t == params.Type {
+											<option value={ t } selected>{ t }</option>
+										} else {
+											<option value={ t }>{ t }</option>
+										}
+									}
+								</select>
+							</div>
 							<input type="hidden" name="q" value={ params.Query }/>
 						</div>
 					</form>
@@ -72,6 +95,7 @@ templ browsePage(params BrowseParams, views []ObsView, projects []string) {
 						<input type="hidden" name="project" value={ params.Project }/>
 						<input type="hidden" name="source" value={ params.Source }/>
 						<input type="hidden" name="kind" value={ params.Kind }/>
+						<input type="hidden" name="type" value={ params.Type }/>
 						<input
 							type="search"
 							name="q"
@@ -144,7 +168,7 @@ templ obsRow(v ObsView) {
 		</td>
 		<td>
 			if v.Obs.Type != "" {
-				<span class="badge badge-type">{ v.Obs.Type }</span>
+				<a href={ templ.SafeURL(browseTypeURL(v.Obs.Project, v.Obs.Type)) } class="badge badge-type" style="text-decoration: none;">{ v.Obs.Type }</a>
 			} else {
 				<span style="color: var(--text-faint); font-size: 12px;">—</span>
 			}
