@@ -577,6 +577,155 @@ func TestActivityPage_Renders(t *testing.T) {
 	}
 }
 
+// --- Type filter and category tests ---
+
+func TestHandleBrowse_TypeFilter_OnlyMatchingTypeReturned(t *testing.T) {
+	fe := newFakeEngram()
+
+	arch := sampleObs(100, "omnia")
+	arch.Type = "architecture"
+	fe.add(arch)
+
+	dec := sampleObs(101, "omnia")
+	dec.Type = "decision"
+	fe.add(dec)
+
+	dashServer := newTestServerOnly(t, fe)
+
+	resp, err := http.Get(dashServer.URL + "/browse?project=omnia&type=architecture")
+	if err != nil {
+		t.Fatalf("GET /browse?type=architecture: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "feat: add feature 100") {
+		t.Error("expected architecture obs in results when type=architecture")
+	}
+	if strings.Contains(bodyStr, "feat: add feature 101") {
+		t.Error("decision obs should be filtered out when type=architecture")
+	}
+}
+
+func TestHandleBrowse_TypeFilter_CombinedWithProject(t *testing.T) {
+	fe := newFakeEngram()
+
+	o1 := sampleObs(200, "omnia")
+	o1.Type = "bugfix"
+	fe.add(o1)
+
+	o2 := sampleObs(201, "omnia")
+	o2.Type = "bugfix"
+	fe.add(o2)
+
+	o3 := sampleObs(202, "omnia")
+	o3.Type = "pattern"
+	fe.add(o3)
+
+	dashServer := newTestServerOnly(t, fe)
+
+	resp, err := http.Get(dashServer.URL + "/browse?project=omnia&type=bugfix")
+	if err != nil {
+		t.Fatalf("GET /browse?project=omnia&type=bugfix: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "feat: add feature 200") {
+		t.Error("expected obs 200 in results")
+	}
+	if !strings.Contains(bodyStr, "feat: add feature 201") {
+		t.Error("expected obs 201 in results")
+	}
+	if strings.Contains(bodyStr, "feat: add feature 202") {
+		t.Error("pattern obs should be excluded when type=bugfix")
+	}
+}
+
+func TestDistinctTypes_SortedAndDeduped(t *testing.T) {
+	views := []ObsView{
+		{Obs: Observation{Type: "decision"}},
+		{Obs: Observation{Type: "architecture"}},
+		{Obs: Observation{Type: "decision"}}, // duplicate
+		{Obs: Observation{Type: ""}},          // empty — must be excluded
+		{Obs: Observation{Type: "bugfix"}},
+	}
+	got := distinctTypes(views)
+	want := []string{"architecture", "bugfix", "decision"}
+	if len(got) != len(want) {
+		t.Fatalf("distinctTypes: got %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("index %d: got %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+func TestDistinctTypes_EmptyViews(t *testing.T) {
+	got := distinctTypes(nil)
+	if len(got) != 0 {
+		t.Errorf("expected empty slice for nil views, got %v", got)
+	}
+}
+
+func TestComputeProjectStats_ByType(t *testing.T) {
+	views := []ObsView{
+		{Obs: Observation{Type: "architecture"}, HasMeta: false},
+		{Obs: Observation{Type: "architecture"}, HasMeta: false},
+		{Obs: Observation{Type: "decision"}, HasMeta: false},
+		{Obs: Observation{Type: ""}, HasMeta: false}, // empty type — not counted
+	}
+	stats := computeProjectStats("omnia", views)
+	if stats.ByType["architecture"] != 2 {
+		t.Errorf("expected ByType[architecture]=2, got %d", stats.ByType["architecture"])
+	}
+	if stats.ByType["decision"] != 1 {
+		t.Errorf("expected ByType[decision]=1, got %d", stats.ByType["decision"])
+	}
+	if _, ok := stats.ByType[""]; ok {
+		t.Error("empty type should not appear in ByType map")
+	}
+}
+
+func TestSortedTypeCounts_ByCountDescThenName(t *testing.T) {
+	m := map[string]int{
+		"bugfix":       1,
+		"architecture": 3,
+		"decision":     3,
+		"pattern":      2,
+	}
+	got := sortedTypeCounts(m)
+	if len(got) != 4 {
+		t.Fatalf("expected 4 entries, got %d", len(got))
+	}
+	// Tied at 3: architecture < decision alphabetically → architecture first
+	if got[0].Name != "architecture" || got[0].Count != 3 {
+		t.Errorf("got[0] = %+v, want {architecture 3}", got[0])
+	}
+	if got[1].Name != "decision" || got[1].Count != 3 {
+		t.Errorf("got[1] = %+v, want {decision 3}", got[1])
+	}
+	if got[2].Name != "pattern" || got[2].Count != 2 {
+		t.Errorf("got[2] = %+v, want {pattern 2}", got[2])
+	}
+	if got[3].Name != "bugfix" || got[3].Count != 1 {
+		t.Errorf("got[3] = %+v, want {bugfix 1}", got[3])
+	}
+}
+
+func TestSortedTypeCounts_EmptyMap(t *testing.T) {
+	got := sortedTypeCounts(map[string]int{})
+	if len(got) != 0 {
+		t.Errorf("expected empty slice, got %v", got)
+	}
+}
+
 // --- knownProjects tests ---
 
 func TestKnownProjects_AlwaysIncludesOmnia(t *testing.T) {
