@@ -847,6 +847,9 @@ func newTestServerOnly(t *testing.T, fe *fakeEngram) *httptest.Server {
 	srv := NewServer(Config{
 		Port:      0,
 		EngramURL: engServer.URL,
+		// Point to an empty temp dir so engramdb.Open fails fast and falls back
+		// to the fake Engram HTTP server — tests must not touch the real DB.
+		EngramDataDir: t.TempDir(),
 	}, logger)
 
 	mux := http.NewServeMux()

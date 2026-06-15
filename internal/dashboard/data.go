@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/velion/omnia/internal/engramdb"
 	"github.com/velion/omnia/internal/meta"
 )
 
@@ -159,6 +160,45 @@ func computeProjectStats(project string, views []ObsView) ProjectStats {
 		}
 	}
 	return stats
+}
+
+// obsFromDB converts an engramdb.Observation into the dashboard's Observation
+// type. Fields unavailable in the SQLite schema (SyncID, SessionID,
+// RevisionCount, DuplicateCount, LastSeenAt, Rank) are left at zero values.
+func obsFromDB(o engramdb.Observation) Observation {
+	return Observation{
+		ID:        o.ID,
+		Type:      o.Type,
+		Title:     o.Title,
+		Content:   o.Content,
+		Project:   o.Project,
+		Scope:     o.Scope,
+		TopicKey:  o.TopicKey,
+		CreatedAt: o.CreatedAt,
+		UpdatedAt: o.UpdatedAt,
+	}
+}
+
+// mergeProjectNames merges two slices of project names into a sorted,
+// deduplicated result. Empty or blank entries are dropped.
+func mergeProjectNames(a, b []string) []string {
+	seen := make(map[string]struct{})
+	for _, n := range a {
+		if n = strings.TrimSpace(n); n != "" {
+			seen[n] = struct{}{}
+		}
+	}
+	for _, n := range b {
+		if n = strings.TrimSpace(n); n != "" {
+			seen[n] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for n := range seen {
+		result = append(result, n)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // knownProjects returns the deduplicated, sorted set of Engram project names

@@ -7,11 +7,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/velion/omnia/internal/audit"
+	"github.com/velion/omnia/internal/engramdb"
 )
 
 // Config holds the runtime configuration for the dashboard server.
@@ -30,22 +32,37 @@ type Config struct {
 	// value = Engram project name). The dashboard uses it to surface every
 	// routing target as a known project automatically.
 	Routes map[string]string
+	// EngramDataDir is the directory containing engram.db (passed to engramdb.Open).
+	// Resolution order: this field → $ENGRAM_DATA_DIR → ~/.engram.
+	// If the DB cannot be opened, the dashboard logs a warning and falls back to
+	// HTTP/FTS for structural queries — the dashboard runs without the DB.
+	EngramDataDir string
 }
 
 // Server is the Omnia dashboard HTTP server.
 type Server struct {
 	cfg    Config
 	client *engramClient
+	db     *engramdb.DB // nil when unavailable; dashboard falls back to HTTP/FTS
 	logger *slog.Logger
 }
 
 // NewServer creates a new dashboard Server.
+// It attempts to open the Engram SQLite DB for structural queries; if that
+// fails it logs a warning and the dashboard continues using HTTP/FTS.
 func NewServer(cfg Config, logger *slog.Logger) *Server {
-	return &Server{
+	s := &Server{
 		cfg:    cfg,
 		client: newEngramClient(cfg.EngramURL),
 		logger: logger,
 	}
+	db, err := engramdb.Open(cfg.EngramDataDir)
+	if err != nil {
+		logger.Warn("engramdb unavailable; structural queries fall back to HTTP/FTS", "err", err)
+	} else {
+		s.db = db
+	}
+	return s
 }
 
 // Start binds to localhost and serves until ctx is cancelled.
@@ -108,22 +125,61 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	engUp := s.client.Health(ctx) == nil
 	syncStatus := loadSyncStatus()
 
-	// Determine projects: union of config.Projects, routes targets, and "omnia" default.
-	projectNames := knownProjects(syncStatus, s.cfg)
-
+	// Prefer the structural DB path for exact counts and type breakdowns.
 	var stats []ProjectStats
-	for _, proj := range projectNames {
-		views, err := loadProjectObs(ctx, s.client, proj, 200)
-		if err != nil {
-			s.logger.Warn("failed to load project obs", "project", proj, "err", err)
-			views = nil
+	if s.db != nil {
+		stats = s.overviewStatsFromDB(ctx, syncStatus)
+	}
+
+	if stats == nil {
+		// FTS fallback: DB unavailable or all DB queries failed.
+		projectNames := knownProjects(syncStatus, s.cfg)
+		for _, proj := range projectNames {
+			views, err := loadProjectObs(ctx, s.client, proj, 200)
+			if err != nil {
+				s.logger.Warn("failed to load project obs", "project", proj, "err", err)
+				views = nil
+			}
+			stats = append(stats, computeProjectStats(proj, views))
 		}
-		stats = append(stats, computeProjectStats(proj, views))
 	}
 
 	if err := overviewPage(stats, engUp, syncStatus).Render(ctx, w); err != nil {
 		s.logger.Error("render overview", "err", err)
 	}
+}
+
+// overviewStatsFromDB builds ProjectStats for all projects using the SQLite DB.
+// Returns nil if db.Projects fails, signaling the caller to fall back to FTS.
+func (s *Server) overviewStatsFromDB(ctx context.Context, syncStatus SyncStatus) []ProjectStats {
+	dbProjectCounts, err := s.db.Projects(ctx)
+	if err != nil {
+		s.logger.Warn("engramdb.Projects failed", "err", err)
+		return nil
+	}
+
+	// Merge DB projects with config-derived projects so config-declared projects
+	// remain visible even when they have no observations yet in the DB.
+	dbNames := make([]string, 0, len(dbProjectCounts))
+	for _, pc := range dbProjectCounts {
+		dbNames = append(dbNames, pc.Name)
+	}
+	merged := mergeProjectNames(dbNames, knownProjects(syncStatus, s.cfg))
+
+	stats := make([]ProjectStats, 0, len(merged))
+	for _, proj := range merged {
+		dbObs, err := s.db.List(ctx, engramdb.Filter{Project: proj, Limit: 2000})
+		if err != nil {
+			s.logger.Warn("engramdb.List failed for project", "project", proj, "err", err)
+			dbObs = nil
+		}
+		views := make([]ObsView, len(dbObs))
+		for i, o := range dbObs {
+			views[i] = enrichObs(obsFromDB(o))
+		}
+		stats = append(stats, computeProjectStats(proj, views))
+	}
+	return stats
 }
 
 func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
@@ -138,16 +194,27 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		Query:   q.Get("q"),
 	}
 
-	// Derive list of available projects.
 	syncStatus := loadSyncStatus()
-	projectNames := knownProjects(syncStatus, s.cfg)
+	// Sidebar project list: union of DB projects + config projects.
+	projectNames := s.effectiveProjectNames(ctx, syncStatus)
 
-	// Load observations. Keep the browse list consistent with the overview counts:
-	// when a project is selected without a free-text query, reuse the same two-search
-	// loader the overview uses (ingested term + project name) so curated-only projects
-	// (e.g. workly, trackly, homelab) are not missed. Engram has no "list all by
-	// project" endpoint, so this FTS workaround is the best available until Omnia's
-	// own index lands.
+	// Structural path: DB available and no free-text query.
+	// Project and Type filters are pushed to SQL; Source and Kind are applied
+	// client-side (they live in the parsed omnia-meta block, not DB columns).
+	if s.db != nil && params.Query == "" {
+		views, types, ok := s.browseFromDB(ctx, params)
+		if ok {
+			if err := browsePage(params, views, projectNames, types).Render(ctx, w); err != nil {
+				s.logger.Error("render browse", "err", err)
+			}
+			return
+		}
+		s.logger.Warn("engramdb browse failed; falling back to HTTP/FTS")
+	}
+
+	// FTS fallback: free-text query, or DB unavailable / errored.
+	// For free-text queries this is correct behavior — FTS is exactly what they need.
+	// For structural queries it is a best-effort workaround (see loadProjectObs).
 	var allViews []ObsView
 	switch {
 	case params.Query != "":
@@ -160,7 +227,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 			allViews = append(allViews, enrichObs(o))
 		}
 	case params.Project != "":
-		// No query, project selected: reuse the overview loader for consistent results.
+		// No query, project selected: use the two-search loader for consistency.
 		v, err := loadProjectObs(ctx, s.client, params.Project, 300)
 		if err != nil {
 			s.logger.Warn("browse project load failed", "err", err)
@@ -178,12 +245,11 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Compute distinct types from the full loaded set (before client-side filters)
-	// so the Category dropdown always shows every available type in the current context.
+	// so the Category dropdown shows every available type in the current context.
 	types := distinctTypes(allViews)
 
 	views := make([]ObsView, 0, len(allViews))
 	for _, v := range allViews {
-		// Apply client-side filters.
 		if params.Source != "" && v.Meta.Source != params.Source {
 			continue
 		}
@@ -199,6 +265,71 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	if err := browsePage(params, views, projectNames, types).Render(ctx, w); err != nil {
 		s.logger.Error("render browse", "err", err)
 	}
+}
+
+// effectiveProjectNames returns the sorted, deduplicated union of DB-derived
+// project names and config-derived names. Falls back to config-only when the
+// DB is unavailable or its query fails.
+func (s *Server) effectiveProjectNames(ctx context.Context, syncStatus SyncStatus) []string {
+	cfgNames := knownProjects(syncStatus, s.cfg)
+	if s.db == nil {
+		return cfgNames
+	}
+	dbProjects, err := s.db.Projects(ctx)
+	if err != nil {
+		s.logger.Warn("engramdb.Projects failed in effectiveProjectNames", "err", err)
+		return cfgNames
+	}
+	dbNames := make([]string, 0, len(dbProjects))
+	for _, pc := range dbProjects {
+		dbNames = append(dbNames, pc.Name)
+	}
+	return mergeProjectNames(dbNames, cfgNames)
+}
+
+// browseFromDB loads and enriches observations for the browse page using the
+// SQLite DB. Project and Type are pushed to SQL for exact filtering; Source
+// and Kind are applied client-side after meta.Parse.
+// Returns (nil, nil, false) on any DB error so the caller can fall back.
+func (s *Server) browseFromDB(ctx context.Context, params BrowseParams) ([]ObsView, []string, bool) {
+	dbObs, err := s.db.List(ctx, engramdb.Filter{
+		Project: params.Project,
+		Type:    params.Type,
+		Limit:   1000,
+	})
+	if err != nil {
+		s.logger.Warn("engramdb.List failed", "err", err)
+		return nil, nil, false
+	}
+
+	// Enrich and apply meta-only filters (Source, Kind) client-side.
+	views := make([]ObsView, 0, len(dbObs))
+	for _, o := range dbObs {
+		v := enrichObs(obsFromDB(o))
+		if params.Source != "" && v.Meta.Source != params.Source {
+			continue
+		}
+		if params.Kind != "" && v.Meta.Kind != params.Kind {
+			continue
+		}
+		views = append(views, v)
+	}
+
+	// Types for the Category dropdown: project-scoped when a project is selected,
+	// global otherwise. Sorted alphabetically for consistent UI ordering.
+	var dbTypes []engramdb.TypeCount
+	if params.Project != "" {
+		dbTypes, _ = s.db.TypesByProject(ctx, params.Project)
+	} else {
+		dbTypes, _ = s.db.Types(ctx)
+	}
+	types := make([]string, 0, len(dbTypes))
+	for _, tc := range dbTypes {
+		types = append(types, tc.Name)
+	}
+	sort.Strings(types)
+
+	return views, types, true
 }
 
 func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {

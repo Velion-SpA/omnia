@@ -179,6 +179,7 @@ func runDashboard(args []string, configPath string) error {
 	fs := flag.NewFlagSet("dashboard", flag.ContinueOnError)
 	port := fs.Int("port", 7799, "port to listen on (localhost only)")
 	engramURL := fs.String("engram", "", "Engram daemon URL (defaults to config value)")
+	engramDB := fs.String("engram-db", "", "path to directory containing engram.db (default: $ENGRAM_DATA_DIR or ~/.engram)")
 	actor := fs.String("actor", "", "provisional actor identity for audit log (default: USER env var)")
 	projectsFlag := fs.String("projects", "", "comma-separated extra project names to show in dashboard")
 	if err := fs.Parse(args); err != nil {
@@ -215,11 +216,12 @@ func runDashboard(args []string, configPath string) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	srv := dashboard.NewServer(dashboard.Config{
-		Port:      *port,
-		EngramURL: resolvedEngram,
-		Actor:     *actor,
-		Projects:  configProjects,
-		Routes:    configRoutes,
+		Port:          *port,
+		EngramURL:     resolvedEngram,
+		EngramDataDir: *engramDB,
+		Actor:         *actor,
+		Projects:      configProjects,
+		Routes:        configRoutes,
 	}, logger)
 
 	ctx := context.Background()
