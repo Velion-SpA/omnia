@@ -38,6 +38,45 @@ func enrichObs(obs Observation) ObsView {
 	}
 }
 
+// TypeCount pairs a type name with its observation count.
+type TypeCount struct {
+	Name  string
+	Count int
+}
+
+// sortedTypeCounts returns a slice of TypeCount sorted by count descending,
+// then by name ascending for ties. Used by the overview card and browse filter.
+func sortedTypeCounts(m map[string]int) []TypeCount {
+	result := make([]TypeCount, 0, len(m))
+	for name, count := range m {
+		result = append(result, TypeCount{Name: name, Count: count})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Count != result[j].Count {
+			return result[i].Count > result[j].Count
+		}
+		return result[i].Name < result[j].Name
+	})
+	return result
+}
+
+// distinctTypes returns a sorted slice of non-empty, deduplicated observation
+// types from the provided views. Used to populate the browse Category dropdown.
+func distinctTypes(views []ObsView) []string {
+	seen := map[string]struct{}{}
+	for _, v := range views {
+		if v.Obs.Type != "" {
+			seen[v.Obs.Type] = struct{}{}
+		}
+	}
+	types := make([]string, 0, len(seen))
+	for t := range seen {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	return types
+}
+
 // browseTermForProject returns a broad search term that reliably retrieves
 // omnia-ingested observations for a given project. We use "schema_version: 1"
 // because every ingested observation contains this line in its omnia-meta block.
