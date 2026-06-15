@@ -59,6 +59,19 @@ templ projectCard(p ProjectStats) {
 				</div>
 			</div>
 		}
+		<!-- Categories (curated observation types: architecture, decision, bugfix, etc.) -->
+		if len(p.ByType) > 0 {
+			<div style="margin-bottom: 0.625rem;">
+				<span class="micro-label" style="display: block; margin-bottom: 0.375rem;">Categories</span>
+				<div style="display: flex; flex-wrap: wrap; gap: 0.375rem;">
+					for _, tc := range sortedTypeCounts(p.ByType) {
+						<a href={ templ.SafeURL("/browse?project=" + p.Name + "&type=" + tc.Name) } class="badge badge-type" style="text-decoration: none;">
+							{ tc.Name } <span style="opacity: 0.6;">×{ fmt.Sprintf("%d", tc.Count) }</span>
+						</a>
+					}
+				</div>
+			</div>
+		}
 		<!-- Browse link -->
 		<div style="margin-top: auto; padding-top: 0.75rem; text-align: right;">
 			<a href={ templ.SafeURL("/browse?project=" + p.Name) } style="font-size: 12px; color: var(--calypso); font-weight: 500;">Browse →</a>
