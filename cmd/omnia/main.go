@@ -193,6 +193,7 @@ func runDashboard(args []string, configPath string) error {
 		configRoutes   map[string]string
 		configHidden   []string
 		configAliases  map[string]string
+		configGroups   map[string][]string
 	)
 	if cfg, err := config.Load(configPath); err == nil {
 		if resolvedEngram == "" {
@@ -202,6 +203,7 @@ func runDashboard(args []string, configPath string) error {
 		configRoutes = cfg.Routes
 		configHidden = cfg.ProjectHidden
 		configAliases = cfg.ProjectAliases
+		configGroups = cfg.ProjectGroups
 	}
 	if resolvedEngram == "" {
 		resolvedEngram = "http://127.0.0.1:7437"
@@ -228,6 +230,7 @@ func runDashboard(args []string, configPath string) error {
 		Routes:         configRoutes,
 		ProjectHidden:  configHidden,
 		ProjectAliases: configAliases,
+		ProjectGroups:  configGroups,
 	}, logger)
 
 	ctx := context.Background()
