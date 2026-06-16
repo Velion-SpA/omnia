@@ -76,12 +76,9 @@ templ overviewPage(data OverviewData) {
 				if len(data.ByType) == 0 {
 					<p style="color: var(--text-2); font-size: 10px;">No type data available.</p>
 				} else {
-					<!-- Bar chart — rendered via inline script below -->
+					<!-- Bar chart — rendered via inline script below. ByType is capped to 8 by buildOverviewData. -->
 					<div id="type-bars">
-						for i, tc := range data.ByType {
-							if i >= 8 {
-								break
-							}
+						for _, tc := range data.ByType {
 							<div class="cat-row">
 								<div class="cat-meta">
 									<span class="cat-name">{ tc.Name }</span>

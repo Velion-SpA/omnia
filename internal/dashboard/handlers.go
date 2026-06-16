@@ -238,6 +238,11 @@ func (s *Server) buildOverviewData(ctx context.Context, stats []ProjectStats, sy
 		}
 		byType = sortedTypeCounts(agg)
 	}
+	// Cap to the top 8 types — the Memory Types panel renders at most 8 bars.
+	const maxTypeBars = 8
+	if len(byType) > maxTypeBars {
+		byType = byType[:maxTypeBars]
+	}
 
 	// Live feed: most recent observations from DB.
 	var liveFeed []FeedItem
