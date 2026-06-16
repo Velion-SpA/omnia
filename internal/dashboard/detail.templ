@@ -47,8 +47,8 @@ templ detailPage(v ObsView, backURL string, lastAudit *audit.Entry) {
 				<!-- Content card -->
 				<div class="card">
 					<span class="micro-label" style="display: block; margin-bottom: 0.875rem;">Content</span>
-					<div class="content-prose" id="obs-content-text">
-						{ stripMetaBlock(v.Obs.Content) }
+					<div class="prose" id="obs-content-text">
+						@templ.Raw(renderMarkdownSafe(stripMetaBlock(v.Obs.Content)))
 					</div>
 				</div>
 				<!-- Edit form (HTMX inline swap) -->

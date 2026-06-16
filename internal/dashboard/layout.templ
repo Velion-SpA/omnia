@@ -232,6 +232,126 @@ templ layout(title string) {
 					max-height: 60vh;
 					overflow-y: auto;
 				}
+
+				/* ── Prose (rendered Markdown content) ── */
+				.prose {
+					max-width: 70ch;
+					color: var(--text);
+					line-height: 1.65;
+					font-size: 14px;
+				}
+				.prose h1, .prose h2, .prose h3, .prose h4 {
+					color: var(--text);
+					font-weight: 700;
+					letter-spacing: -0.02em;
+					margin-top: 1.5em;
+					margin-bottom: 0.5em;
+					line-height: 1.3;
+				}
+				.prose h1 { font-size: 1.375em; }
+				.prose h2 { font-size: 1.2em; color: var(--silver); }
+				.prose h3 { font-size: 1.05em; color: var(--silver); }
+				.prose h4 { font-size: 0.95em; color: var(--text-dim); font-weight: 600; }
+				.prose p {
+					margin-top: 0;
+					margin-bottom: 0.875em;
+				}
+				.prose strong {
+					font-weight: 600;
+					color: var(--text);
+				}
+				.prose em {
+					color: var(--silver);
+					font-style: italic;
+				}
+				.prose ul, .prose ol {
+					padding-left: 1.5em;
+					margin-bottom: 0.875em;
+				}
+				.prose li {
+					margin-bottom: 0.25em;
+				}
+				.prose li > ul, .prose li > ol {
+					margin-top: 0.25em;
+					margin-bottom: 0.25em;
+				}
+				.prose code {
+					font-family: 'JetBrains Mono', ui-monospace, monospace;
+					font-size: 0.85em;
+					background: var(--surface-2);
+					color: var(--calypso);
+					padding: 0.15em 0.4em;
+					border-radius: 0.3em;
+					border: 1px solid var(--border);
+				}
+				.prose pre {
+					background: var(--surface-2);
+					border: 1px solid var(--border-strong);
+					border-radius: 0.5rem;
+					padding: 1rem;
+					overflow-x: auto;
+					margin-bottom: 1em;
+					line-height: 1.6;
+				}
+				.prose pre code {
+					background: transparent;
+					color: var(--text);
+					padding: 0;
+					border: none;
+					font-size: 0.82em;
+				}
+				.prose a {
+					color: var(--calypso);
+					text-decoration: none;
+				}
+				.prose a:hover {
+					text-decoration: underline;
+				}
+				.prose blockquote {
+					border-left: 3px solid var(--calypso-dim);
+					margin: 0 0 0.875em 0;
+					padding: 0.5em 0 0.5em 1em;
+					color: var(--text-dim);
+					font-style: italic;
+				}
+				.prose table {
+					width: 100%;
+					border-collapse: collapse;
+					margin-bottom: 1em;
+					font-size: 13px;
+				}
+				.prose table th {
+					font-family: 'JetBrains Mono', ui-monospace, monospace;
+					font-size: 10px;
+					letter-spacing: 0.12em;
+					text-transform: uppercase;
+					color: var(--text-dim);
+					padding: 0.5em 0.75em;
+					border-bottom: 1px solid var(--border-strong);
+					text-align: left;
+				}
+				.prose table td {
+					padding: 0.5em 0.75em;
+					border-bottom: 1px solid var(--border);
+					color: var(--text);
+					vertical-align: top;
+				}
+				.prose table tbody tr:hover td {
+					background: var(--surface-2);
+				}
+				.prose hr {
+					border: none;
+					border-top: 1px solid var(--border);
+					margin: 1.5em 0;
+				}
+				/* Wikilinks: styled as subtle spans — not clickable (no routing target yet) */
+				.prose .wikilink {
+					color: var(--text-dim);
+					border-bottom: 1px dashed var(--border-strong);
+					cursor: default;
+					font-style: italic;
+				}
+
 				.log-line {
 					font-family: 'JetBrains Mono', ui-monospace, monospace;
 					font-size: 12px;
