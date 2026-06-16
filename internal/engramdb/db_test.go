@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/velion/omnia/internal/engramdb"
@@ -67,6 +68,11 @@ func createTestDB(t *testing.T) string {
 		{6, "", "No type", "content-6", "homelab", "project", "", "2024-01-11 00:00:00", "2024-01-12 00:00:00", false},
 		// NULL project: live row, should appear in List (no project filter) but NOT in Projects()
 		{7, "decision", "Null-project row", "content-7", "", "project", "", "2024-01-13 00:00:00", "2024-01-14 00:00:00", false},
+		// Case-variant rows for canonicalization tests (IDs ≥ 100)
+		{100, "decision", "Homelab title", "content-100", "Homelab", "project", "", "2024-02-01 00:00:00", "2024-02-02 00:00:00", false},
+		{101, "decision", "HOMELAB title", "content-101", "HOMELAB", "project", "", "2024-02-03 00:00:00", "2024-02-04 00:00:00", false},
+		{102, "decision", "velion-web title", "content-102", "velion-web", "project", "", "2024-02-05 00:00:00", "2024-02-06 00:00:00", false},
+		{103, "decision", "velion title", "content-103", "velion", "project", "", "2024-02-07 00:00:00", "2024-02-08 00:00:00", false},
 	}
 
 	for _, f := range fixtures {
@@ -208,14 +214,15 @@ func TestTypes_CountsAcrossProjects(t *testing.T) {
 
 	// Live obs with types:
 	//   architecture: ids 1 (workly), 4 (trackly) → 2
-	//   decision:     ids 2 (workly), 7 (null-project) → 2  (id 5 deleted)
+	//   decision:     ids 2 (workly), 7 (null-project), 100 (Homelab), 101 (HOMELAB),
+	//                 102 (velion-web), 103 (velion) → 6  (id 5 deleted)
 	//   bugfix:       id 3 (trackly) → 1
 	//   empty type:   id 6 (homelab) → excluded
 	if byName["architecture"] != 2 {
 		t.Errorf("Types[architecture]: got %d, want 2", byName["architecture"])
 	}
-	if byName["decision"] != 2 {
-		t.Errorf("Types[decision]: got %d, want 2 (id 5 deleted, id 7 null-project counted)", byName["decision"])
+	if byName["decision"] != 6 {
+		t.Errorf("Types[decision]: got %d, want 6 (id 5 deleted; ids 100,101,102,103 added)", byName["decision"])
 	}
 	if byName["bugfix"] != 1 {
 		t.Errorf("Types[bugfix]: got %d, want 1", byName["bugfix"])
@@ -285,13 +292,13 @@ func TestList_AllLiveCount(t *testing.T) {
 	db := openTestDB(t, dir)
 	ctx := context.Background()
 
-	// Live: ids 1,2,3,4,6,7 (id 5 deleted) → 6 rows.
+	// Live: ids 1,2,3,4,6,7,100,101,102,103 (id 5 deleted) → 10 rows.
 	obs, err := db.List(ctx, engramdb.Filter{Limit: 200})
 	if err != nil {
 		t.Fatalf("List(all): %v", err)
 	}
-	if len(obs) != 6 {
-		t.Errorf("List(all): got %d rows, want 6", len(obs))
+	if len(obs) != 10 {
+		t.Errorf("List(all): got %d rows, want 10", len(obs))
 	}
 }
 
@@ -359,7 +366,7 @@ func TestCount_MatchesListLen(t *testing.T) {
 		{"workly", engramdb.Filter{Project: "workly"}, 2},
 		{"trackly", engramdb.Filter{Project: "trackly"}, 2},
 		{"homelab", engramdb.Filter{Project: "homelab"}, 1},
-		{"all", engramdb.Filter{}, 6},
+		{"all", engramdb.Filter{}, 10},
 		{"workly+architecture", engramdb.Filter{Project: "workly", Type: "architecture"}, 1},
 	}
 
@@ -373,5 +380,97 @@ func TestCount_MatchesListLen(t *testing.T) {
 				t.Errorf("Count(%q): got %d, want %d", tc.name, n, tc.want)
 			}
 		})
+	}
+}
+
+// --- ProjectsCanonical ---
+
+func TestProjectsCanonical_CaseVariantsCollapse(t *testing.T) {
+	dir := createTestDB(t)
+	db := openTestDB(t, dir)
+	counts, err := db.ProjectsCanonical(context.Background(), func(s string) string {
+		return strings.ToLower(strings.TrimSpace(s))
+	})
+	if err != nil {
+		t.Fatalf("ProjectsCanonical: %v", err)
+	}
+	// Build a map for easy lookup
+	m := make(map[string]int)
+	for _, pc := range counts {
+		m[pc.Name] = pc.Count
+	}
+	// homelab (existing id=6) + Homelab (id=100) + HOMELAB (id=101) should collapse
+	if m["homelab"] < 3 {
+		t.Errorf("homelab canonical count = %d, want >= 3 (ids 6,100,101)", m["homelab"])
+	}
+	// velion and velion-web must remain distinct
+	if _, ok := m["velion"]; !ok {
+		t.Error("velion should be present as distinct canonical")
+	}
+	if _, ok := m["velion-web"]; !ok {
+		t.Error("velion-web should be present as distinct canonical")
+	}
+	if m["velion"] == m["velion"]+m["velion-web"] {
+		t.Error("velion and velion-web must not be collapsed")
+	}
+}
+
+func TestList_CanonicalProject_MatchesAllCaseVariants(t *testing.T) {
+	dir := createTestDB(t)
+	db := openTestDB(t, dir)
+	obs, err := db.List(context.Background(), engramdb.Filter{CanonicalProject: "homelab"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	// Should match: existing homelab row (id=6) + Homelab (id=100) + HOMELAB (id=101) = 3
+	if len(obs) < 3 {
+		t.Errorf("got %d rows for CanonicalProject=homelab, want >= 3", len(obs))
+	}
+	// Verify all returned rows have homelab-like project names
+	for _, o := range obs {
+		if strings.ToLower(strings.TrimSpace(o.Project)) != "homelab" {
+			t.Errorf("unexpected project %q in homelab canonical results", o.Project)
+		}
+	}
+}
+
+func TestList_CanonicalProject_DoesNotMergeDistinctProjects(t *testing.T) {
+	dir := createTestDB(t)
+	db := openTestDB(t, dir)
+	obs, err := db.List(context.Background(), engramdb.Filter{CanonicalProject: "velion"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	// Should match only id=103 (velion), NOT id=102 (velion-web)
+	for _, o := range obs {
+		if o.Project == "velion-web" {
+			t.Error("velion-web should not appear in velion canonical results")
+		}
+	}
+	found := false
+	for _, o := range obs {
+		if o.Project == "velion" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("velion project not found in canonical velion results")
+	}
+}
+
+func TestList_RawProjects_ORMatch(t *testing.T) {
+	dir := createTestDB(t)
+	db := openTestDB(t, dir)
+	obs, err := db.List(context.Background(), engramdb.Filter{RawProjects: []string{"workly", "trackly"}})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(obs) < 2 {
+		t.Errorf("got %d rows for RawProjects=[workly,trackly], want >= 2", len(obs))
+	}
+	for _, o := range obs {
+		if o.Project != "workly" && o.Project != "trackly" {
+			t.Errorf("unexpected project %q in RawProjects results", o.Project)
+		}
 	}
 }
