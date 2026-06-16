@@ -118,6 +118,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /detail/{id}", s.handleDetail)
 	mux.HandleFunc("GET /sync", s.handleSyncStatus)
 	mux.HandleFunc("GET /activity", s.handleActivity)
+	mux.HandleFunc("GET /graph", s.handleGraph)
 
 	// HTMX API fragments
 	mux.HandleFunc("GET /api/obs/{id}/edit-form", s.handleEditForm)
@@ -136,24 +137,20 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	engUp := s.client.Health(ctx) == nil
 	syncStatus := loadSyncStatus()
 
-	// Prefer the structural DB path for exact counts and type breakdowns.
+	// Load project stats (existing logic preserved).
 	var stats []ProjectStats
 	if s.db != nil {
 		stats = s.overviewStatsFromDB(ctx, syncStatus)
 	}
-
 	if stats == nil {
-		// FTS fallback: DB unavailable or all DB queries failed.
 		projectNames := knownProjectsCanonical(syncStatus, s.cfg)
 		hidden := hiddenSet(s.cfg.ProjectHidden, s.cfg.ProjectAliases)
 		projectNames = filterHidden(projectNames, hidden)
-		// Exclude group children from top-level overview — they are shown inside the parent card.
 		projectNames = filterGroupChildren(projectNames, s.groups)
 		for _, proj := range projectNames {
 			var views []ObsView
 			var err error
 			if s.groups.IsParent(proj) {
-				// Load parent's own obs plus each child's obs, then deduplicate.
 				views, err = loadProjectObs(ctx, s.client, proj, 200)
 				if err == nil {
 					for _, child := range s.groups.Children(proj) {
@@ -179,8 +176,117 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := overviewPage(stats, engUp, syncStatus).Render(ctx, w); err != nil {
+	// Sort stats by count descending.
+	sort.Slice(stats, func(i, j int) bool {
+		return stats[i].Total > stats[j].Total
+	})
+
+	// Build OverviewData.
+	canonicalize := canonicalizerFunc(s.cfg.ProjectAliases)
+	data := s.buildOverviewData(ctx, stats, syncStatus, engUp, canonicalize)
+
+	if err := overviewPage(data).Render(ctx, w); err != nil {
 		s.logger.Error("render overview", "err", err)
+	}
+}
+
+// buildOverviewData assembles the OverviewData struct from already-loaded stats,
+// plus live feed and type breakdown from the DB (when available).
+func (s *Server) buildOverviewData(ctx context.Context, stats []ProjectStats, syncStatus SyncStatus, engUp bool, canonicalize func(string) string) OverviewData {
+	// Total memories = sum of project totals (group parents include children).
+	var totalMem int
+	for _, p := range stats {
+		totalMem += p.Total
+	}
+
+	// Last sync: most recent cursor by timestamp.
+	var lastSync, lastSyncSource string
+	for _, c := range syncStatus.Cursors {
+		if lastSync == "" || c.Timestamp > lastSync {
+			lastSync = c.Timestamp
+			lastSyncSource = c.Source
+		}
+	}
+	lastSyncAge := ""
+	if lastSync != "" {
+		// Use the Age already computed by loadSyncStatus.
+		for _, c := range syncStatus.Cursors {
+			if c.Timestamp == lastSync {
+				lastSyncAge = c.Age
+				break
+			}
+		}
+	}
+
+	// Type breakdown from DB (or aggregate from stats as fallback).
+	var byType []TypeCount
+	if s.db != nil {
+		if types, err := s.db.Types(ctx); err == nil {
+			byType = make([]TypeCount, len(types))
+			for i, t := range types {
+				byType[i] = TypeCount{Name: t.Name, Count: t.Count}
+			}
+		}
+	}
+	if byType == nil {
+		// Aggregate from stats.
+		agg := map[string]int{}
+		for _, p := range stats {
+			for t, cnt := range p.ByType {
+				agg[t] += cnt
+			}
+		}
+		byType = sortedTypeCounts(agg)
+	}
+
+	// Live feed: most recent observations from DB.
+	var liveFeed []FeedItem
+	if s.db != nil {
+		obs, err := s.db.List(ctx, engramdb.Filter{Limit: 8})
+		if err == nil {
+			for _, o := range obs {
+				title := o.Title
+				if title == "" {
+					// Truncate content as fallback title.
+					title = o.Content
+					if len([]rune(title)) > 80 {
+						title = string([]rune(title)[:80]) + "…"
+					}
+				}
+				liveFeed = append(liveFeed, FeedItem{
+					ID:      o.ID,
+					Title:   title,
+					Type:    o.Type,
+					Project: canonicalize(o.Project),
+					Age:     formatAge(o.UpdatedAt),
+				})
+			}
+		}
+	}
+
+	// Sources: aggregate from stats.
+	var githubCount, discordCount, curatedCount int
+	for _, p := range stats {
+		githubCount += p.BySource["github"]
+		discordCount += p.BySource["discord"]
+		curatedCount += p.Curated
+	}
+	sources := []SourceStat{
+		{Name: "GitHub", Sub: "PRs · commits · reviews", IconKey: "github", Count: githubCount},
+		{Name: "Discord", Sub: "digests · threads · mentions", IconKey: "discord", Count: discordCount},
+		{Name: "Claude Code", Sub: "sessions · fixes · decisions", IconKey: "claude", Count: curatedCount},
+	}
+
+	return OverviewData{
+		Projects:       stats,
+		TotalMemories:  totalMem,
+		TotalProjects:  len(stats),
+		LastSync:       lastSyncAge,
+		LastSyncSource: lastSyncSource,
+		ByType:         byType,
+		LiveFeed:       liveFeed,
+		Sources:        sources,
+		EngUp:          engUp,
 	}
 }
 
@@ -802,6 +908,13 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := activityPage(entries).Render(ctx, w); err != nil {
 		s.logger.Error("render activity", "err", err)
+	}
+}
+
+func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if err := graphPage().Render(ctx, w); err != nil {
+		s.logger.Error("render graph", "err", err)
 	}
 }
 
