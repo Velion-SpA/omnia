@@ -25,6 +25,11 @@ type Config struct {
 	// Used for non-case-fold merges (e.g., "NUDGE Sistema" -> "nudge").
 	// Leave empty; add entries only when needed.
 	ProjectAliases map[string]string `yaml:"project_aliases"`
+	// ProjectGroups defines the two-level parent→children hierarchy.
+	// Key = parent canonical; value = []child canonicals.
+	// Children are hidden from the top-level overview and aggregated into the parent.
+	// A child must not also be a parent; self-referential entries are ignored.
+	ProjectGroups map[string][]string `yaml:"project_groups"`
 }
 
 type EngramConfig struct {
