@@ -430,19 +430,22 @@ func (s *Server) effectiveProjectNames(ctx context.Context, syncStatus SyncStatu
 	hidden := hiddenSet(s.cfg.ProjectHidden, s.cfg.ProjectAliases)
 	cfgNames := knownProjectsCanonical(syncStatus, s.cfg)
 	if s.db == nil {
-		return filterHidden(cfgNames, hidden)
+		// Hide group children too: they are reached via the sub-project nav, not the dropdown.
+		return filterGroupChildren(filterHidden(cfgNames, hidden), s.groups)
 	}
 	dbProjects, err := s.db.ProjectsCanonical(ctx, canonicalize)
 	if err != nil {
 		s.logger.Warn("engramdb.ProjectsCanonical failed in effectiveProjectNames", "err", err)
-		return filterHidden(cfgNames, hidden)
+		return filterGroupChildren(filterHidden(cfgNames, hidden), s.groups)
 	}
 	dbNames := make([]string, 0, len(dbProjects))
 	for _, pc := range dbProjects {
 		dbNames = append(dbNames, pc.Name)
 	}
 	merged := mergeProjectNames(dbNames, cfgNames)
-	return filterHidden(merged, hidden)
+	// Hide group children: the Project dropdown shows only parents + standalone projects;
+	// children are navigated via the sub-project nav bar.
+	return filterGroupChildren(filterHidden(merged, hidden), s.groups)
 }
 
 // expandCanonical returns all raw DB project names that canonicalize to the
