@@ -1,6 +1,10 @@
 package dashboard
 
-import "fmt"
+import (
+	"fmt"
+	"net/url"
+	"strings"
+)
 
 // BrowseParams holds the filter state for the browse page.
 type BrowseParams struct {
@@ -10,6 +14,93 @@ type BrowseParams struct {
 	Kind    string
 	Type    string // observation type / category (e.g. "architecture", "decision")
 	Query   string
+}
+
+// buildBrowseURL encodes BrowseParams as a /browse URL, omitting empty fields.
+func buildBrowseURL(p BrowseParams) string {
+	v := url.Values{}
+	if p.Project != "" {
+		v.Set("project", p.Project)
+	}
+	if p.Sub != "" {
+		v.Set("sub", p.Sub)
+	}
+	if p.Source != "" {
+		v.Set("source", p.Source)
+	}
+	if p.Kind != "" {
+		v.Set("kind", p.Kind)
+	}
+	if p.Type != "" {
+		v.Set("type", p.Type)
+	}
+	if p.Query != "" {
+		v.Set("q", p.Query)
+	}
+	s := v.Encode()
+	if s == "" {
+		return "/browse"
+	}
+	return "/browse?" + s
+}
+
+// chipToggleURL returns a browse URL with the named filter field toggled.
+// val="" always clears the field; a non-empty val toggles off if already active,
+// otherwise sets it (replacing any previous value for that field).
+func chipToggleURL(p BrowseParams, field, val string) string {
+	switch field {
+	case "source":
+		if val == "" || p.Source == val {
+			p.Source = ""
+		} else {
+			p.Source = val
+		}
+	case "kind":
+		if val == "" || p.Kind == val {
+			p.Kind = ""
+		} else {
+			p.Kind = val
+		}
+	case "type":
+		if val == "" || p.Type == val {
+			p.Type = ""
+		} else {
+			p.Type = val
+		}
+	}
+	return buildBrowseURL(p)
+}
+
+// activeFilterSuffix returns " · X · Y" when metadata filters are active, else "".
+func activeFilterSuffix(p BrowseParams) string {
+	var parts []string
+	if p.Source != "" {
+		parts = append(parts, p.Source)
+	}
+	if p.Kind != "" {
+		parts = append(parts, p.Kind)
+	}
+	if p.Type != "" {
+		parts = append(parts, p.Type)
+	}
+	if p.Query != "" {
+		parts = append(parts, fmt.Sprintf("%q", p.Query))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " · " + strings.Join(parts, " · ")
+}
+
+// hasActiveFilters reports whether any non-project filter is set.
+func hasActiveFilters(p BrowseParams) bool {
+	return p.Source != "" || p.Kind != "" || p.Type != "" || p.Query != ""
+}
+
+// clearFiltersURL returns a browse URL with source/kind/type/q cleared,
+// preserving project and sub.
+func clearFiltersURL(p BrowseParams) string {
+	return buildBrowseURL(BrowseParams{Project: p.Project, Sub: p.Sub})
 }
 
 // browseTypeURL returns the URL to filter browse results by a given type,
@@ -24,78 +115,98 @@ func browseTypeURL(obsProject, obsType string) string {
 // browsePage renders the observation list/browse view.
 templ browsePage(params BrowseParams, views []ObsView, projects []string, types []string, groupNav *GroupNav) {
 	@layout("Browse") {
-		<div style="display: flex; align-items: flex-start; gap: 1.5rem;">
-			<!-- Sidebar filters -->
-			<aside style="width: 200px; flex-shrink: 0;">
-				<div class="card" style="padding: 1rem;">
-					<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">Filters</span>
+		<!-- Page header -->
+		<div style="display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 1.5rem;">
+			<h1 style="font-size: 20px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; margin: 0;">Browse</h1>
+			<span class="micro-label" style="color: var(--text-faint);">knowledge base</span>
+		</div>
+		<!-- Filter panel -->
+		<div class="card" style="margin-bottom: 1.25rem; padding: 1.25rem;">
+			<span class="micro-label" style="display: block; margin-bottom: 1rem;">Filters</span>
+			<!-- Primary row: Project select · Source chips · Kind chips -->
+			<div class="browse-filter-grid">
+				<!-- Project (styled select — many values) -->
+				<div class="filter-section">
+					<label class="micro-label filter-label" for="proj-select">Project</label>
 					<form method="GET" action="/browse">
-						<div style="display: flex; flex-direction: column; gap: 0.75rem;">
-							<div>
-								<label class="micro-label" style="display: block; margin-bottom: 0.25rem;">Project</label>
-								<select name="project" style="width: 100%;" onchange="this.form.submit()">
-									<option value="">All projects</option>
-									for _, p := range projects {
-										if p == params.Project {
-											<option value={ p } selected>{ p }</option>
-										} else {
-											<option value={ p }>{ p }</option>
-										}
-									}
-								</select>
-							</div>
-							<div>
-								<label class="micro-label" style="display: block; margin-bottom: 0.25rem;">Source</label>
-								<select name="source" style="width: 100%;" onchange="this.form.submit()">
-									<option value="">All sources</option>
-									for _, s := range []string{"github", "discord", "jira", "whatsapp"} {
-										if s == params.Source {
-											<option value={ s } selected>{ s }</option>
-										} else {
-											<option value={ s }>{ s }</option>
-										}
-									}
-								</select>
-							</div>
-							<div>
-								<label class="micro-label" style="display: block; margin-bottom: 0.25rem;">Kind</label>
-								<select name="kind" style="width: 100%;" onchange="this.form.submit()">
-									<option value="">All kinds</option>
-									for _, k := range []string{"pull_request", "issue", "commit_digest", "message_digest"} {
-										if k == params.Kind {
-											<option value={ k } selected>{ k }</option>
-										} else {
-											<option value={ k }>{ k }</option>
-										}
-									}
-								</select>
-							</div>
-							<div>
-								<label class="micro-label" style="display: block; margin-bottom: 0.25rem;">Category</label>
-								<select name="type" style="width: 100%;" onchange="this.form.submit()">
-									<option value="">All categories</option>
-									for _, t := range types {
-										if t == params.Type {
-											<option value={ t } selected>{ t }</option>
-										} else {
-											<option value={ t }>{ t }</option>
-										}
-									}
-								</select>
-							</div>
-							<input type="hidden" name="q" value={ params.Query }/>
-						</div>
+						<input type="hidden" name="source" value={ params.Source }/>
+						<input type="hidden" name="kind" value={ params.Kind }/>
+						<input type="hidden" name="type" value={ params.Type }/>
+						<input type="hidden" name="q" value={ params.Query }/>
+						<select id="proj-select" name="project" class="filter-select" onchange="this.form.submit()" aria-label="Filter by project">
+							<option value="">All projects</option>
+							for _, p := range projects {
+								if p == params.Project {
+									<option value={ p } selected>{ p }</option>
+								} else {
+									<option value={ p }>{ p }</option>
+								}
+							}
+						</select>
 					</form>
 				</div>
-			</aside>
-			<!-- Main content -->
-			<div style="flex: 1; min-width: 0;">
-				<!-- Sub-project nav row (group parents only) -->
-				if groupNav != nil {
-					@groupNavBar(*groupNav)
+				<!-- Source chips (few values — toggle pills) -->
+				<div class="filter-section">
+					<span class="micro-label filter-label">Source</span>
+					<div class="chip-row" role="group" aria-label="Filter by source">
+						<a
+							href={ templ.SafeURL(chipToggleURL(params, "source", "")) }
+							class={ "filter-chip", templ.KV("filter-chip-active", params.Source == "") }
+							aria-pressed={ fmt.Sprintf("%v", params.Source == "") }
+						>All</a>
+						for _, s := range []string{"github", "discord", "jira", "whatsapp"} {
+							<a
+								href={ templ.SafeURL(chipToggleURL(params, "source", s)) }
+								class={ "filter-chip", templ.KV("filter-chip-active", params.Source == s) }
+								aria-pressed={ fmt.Sprintf("%v", params.Source == s) }
+							>{ s }</a>
+						}
+					</div>
+				</div>
+				<!-- Kind chips (few values — toggle pills) -->
+				<div class="filter-section">
+					<span class="micro-label filter-label">Kind</span>
+					<div class="chip-row" role="group" aria-label="Filter by kind">
+						<a
+							href={ templ.SafeURL(chipToggleURL(params, "kind", "")) }
+							class={ "filter-chip", templ.KV("filter-chip-active", params.Kind == "") }
+							aria-pressed={ fmt.Sprintf("%v", params.Kind == "") }
+						>All</a>
+						for _, k := range []string{"pull_request", "issue", "commit_digest", "message_digest"} {
+							<a
+								href={ templ.SafeURL(chipToggleURL(params, "kind", k)) }
+								class={ "filter-chip", templ.KV("filter-chip-active", params.Kind == k) }
+								aria-pressed={ fmt.Sprintf("%v", params.Kind == k) }
+							>{ k }</a>
+						}
+					</div>
+				</div>
+			</div>
+			<!-- Secondary row: Category chips + Search -->
+			<div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); display: flex; gap: 2rem; align-items: flex-end; flex-wrap: wrap;">
+				if len(types) > 0 {
+					<!-- Category chips (dynamic from DB — toggle pills) -->
+					<div class="filter-section" style="flex: 1; min-width: 0;">
+						<span class="micro-label filter-label">Category</span>
+						<div class="chip-row" style="flex-wrap: wrap;" role="group" aria-label="Filter by category">
+							<a
+								href={ templ.SafeURL(chipToggleURL(params, "type", "")) }
+								class={ "filter-chip", templ.KV("filter-chip-active", params.Type == "") }
+								aria-pressed={ fmt.Sprintf("%v", params.Type == "") }
+							>All</a>
+							for _, t := range types {
+								<a
+									href={ templ.SafeURL(chipToggleURL(params, "type", t)) }
+									class={ "filter-chip", templ.KV("filter-chip-active", params.Type == t) }
+									aria-pressed={ fmt.Sprintf("%v", params.Type == t) }
+								>{ t }</a>
+							}
+						</div>
+					</div>
 				}
-				<!-- Search bar -->
-				<div style="margin-bottom: 1rem;">
+				<!-- Free-text search -->
+				<div class="filter-section" style="flex-shrink: 0;">
+					<label class="micro-label filter-label" for="browse-search">Search</label>
 					<form method="GET" action="/browse" style="display: flex; gap: 0.5rem; align-items: center;">
 						<input type="hidden" name="project" value={ params.Project }/>
 						<input type="hidden" name="sub" value={ params.Sub }/>
@@ -103,34 +214,46 @@ templ browsePage(params BrowseParams, views []ObsView, projects []string, types 
 						<input type="hidden" name="kind" value={ params.Kind }/>
 						<input type="hidden" name="type" value={ params.Type }/>
 						<input
+							id="browse-search"
 							type="search"
 							name="q"
 							value={ params.Query }
 							placeholder="Search observations..."
-							style="flex: 1;"
+							style="width: 260px;"
 						/>
 						<button type="submit" class="pill-btn pill-btn-primary">Search</button>
-						<span class="micro-label" style="white-space: nowrap; margin-left: 0.25rem;">{ fmt.Sprintf("%d results", len(views)) }</span>
 					</form>
 				</div>
-				<!-- Results table -->
-				<div id="obs-list">
-					@obsTable(views)
-				</div>
 			</div>
+		</div>
+		<!-- Sub-project nav (group parents only) -->
+		if groupNav != nil {
+			@groupNavBar(*groupNav)
+		}
+		<!-- Results -->
+		<div id="obs-list">
+			<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.625rem; padding: 0 0.25rem;">
+				<span class="micro-label">
+					{ fmt.Sprintf("%d results", len(views)) }{ activeFilterSuffix(params) }
+				</span>
+				if hasActiveFilters(params) {
+					<a href={ templ.SafeURL(clearFiltersURL(params)) } class="micro-label" style="color: var(--calypso); text-transform: none; text-decoration: none; letter-spacing: 0.08em;">clear ×</a>
+				}
+			</div>
+			@obsTable(views)
 		</div>
 	}
 }
 
 // groupNavBar renders the sub-project navigation row for group parent browse views.
 templ groupNavBar(nav GroupNav) {
-	<div style="margin-bottom: 1rem; padding: 0.75rem 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-		<span class="micro-label" style="margin-right: 0.25rem;">SUB-PROJECTS</span>
+	<div class="subproject-nav">
+		<span class="micro-label subproject-nav-label">Sub-Projects</span>
 		for _, item := range nav.Items {
 			if item.IsActive {
-				<span class="badge" style="background: var(--calypso); color: #fff;">{ item.Label }</span>
+				<span class="subproject-tab subproject-tab-active">{ item.Label }</span>
 			} else {
-				<a href={ templ.SafeURL(item.URL) } class="badge badge-type" style="text-decoration: none;">{ item.Label }</a>
+				<a href={ templ.SafeURL(item.URL) } class="subproject-tab">{ item.Label }</a>
 			}
 		}
 	</div>
