@@ -17,6 +17,12 @@ type ObsView struct {
 	Age     string // human-readable updated_at age
 }
 
+// SubProjectStat holds a child project's display name and total count.
+type SubProjectStat struct {
+	Name  string
+	Count int
+}
+
 // ProjectStats holds per-project counts for the overview page.
 type ProjectStats struct {
 	Name       string
@@ -26,6 +32,10 @@ type ProjectStats struct {
 	BySource   map[string]int
 	ByType     map[string]int
 	ByKind     map[string]int
+	// IsGroup is true when this is a group parent card with sub-projects.
+	IsGroup     bool
+	SubProjects []SubProjectStat // per-child counts (only when IsGroup=true)
+	CoreCount   int              // parent's own observations count (only when IsGroup=true)
 }
 
 // enrichObs parses the omnia-meta block from an observation and returns an ObsView.
@@ -160,6 +170,57 @@ func computeProjectStats(project string, views []ObsView) ProjectStats {
 		}
 	}
 	return stats
+}
+
+// dedupeViews removes duplicate ObsView entries by observation ID.
+func dedupeViews(views []ObsView) []ObsView {
+	seen := make(map[int]struct{}, len(views))
+	out := make([]ObsView, 0, len(views))
+	for _, v := range views {
+		if _, ok := seen[v.Obs.ID]; !ok {
+			seen[v.Obs.ID] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// computeGroupProjectStats builds a ProjectStats for a group parent by splitting
+// the combined view set into core (parent-only) and per-child buckets.
+// The base totals (Total, Ingested, Curated, BySource, ByType, ByKind) reflect
+// the entire group; IsGroup, CoreCount, and SubProjects hold the split.
+func computeGroupProjectStats(parent string, views []ObsView, g *GroupIndex, aliases map[string]string) ProjectStats {
+	canonicalize := canonicalizerFunc(aliases)
+
+	children := g.Children(parent)
+	childCounts := make(map[string]int, len(children))
+	for _, c := range children {
+		childCounts[c] = 0
+	}
+
+	var coreCount int
+	for _, v := range views {
+		c := canonicalize(v.Obs.Project)
+		if c == parent {
+			coreCount++
+		} else if _, isChild := childCounts[c]; isChild {
+			childCounts[c]++
+		}
+	}
+
+	subProjects := make([]SubProjectStat, 0, len(children))
+	for _, child := range children {
+		subProjects = append(subProjects, SubProjectStat{
+			Name:  child,
+			Count: childCounts[child],
+		})
+	}
+
+	base := computeProjectStats(parent, views)
+	base.IsGroup = true
+	base.SubProjects = subProjects
+	base.CoreCount = coreCount
+	return base
 }
 
 // obsFromDB converts an engramdb.Observation into the dashboard's Observation
