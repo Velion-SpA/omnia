@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/velion/omnia/internal/engramdb"
 	"github.com/velion/omnia/internal/meta"
@@ -33,9 +34,10 @@ type ProjectStats struct {
 	ByType     map[string]int
 	ByKind     map[string]int
 	// IsGroup is true when this is a group parent card with sub-projects.
-	IsGroup     bool
-	SubProjects []SubProjectStat // per-child counts (only when IsGroup=true)
-	CoreCount   int              // parent's own observations count (only when IsGroup=true)
+	IsGroup        bool
+	SubProjects    []SubProjectStat // per-child counts (only when IsGroup=true)
+	CoreCount      int              // parent's own observations count (only when IsGroup=true)
+	LatestUpdateAt string
 }
 
 // enrichObs parses the omnia-meta block from an observation and returns an ObsView.
@@ -168,6 +170,9 @@ func computeProjectStats(project string, views []ObsView) ProjectStats {
 		if v.Obs.Type != "" {
 			stats.ByType[v.Obs.Type]++
 		}
+		if v.Obs.UpdatedAt > stats.LatestUpdateAt {
+			stats.LatestUpdateAt = v.Obs.UpdatedAt
+		}
 	}
 	return stats
 }
@@ -278,6 +283,68 @@ func knownProjectsCanonical(status SyncStatus, cfg Config) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+// FeedItem is a recent observation for the Live Feed panel.
+type FeedItem struct {
+	ID      int
+	Title   string
+	Type    string
+	Project string // canonical name
+	Age     string
+}
+
+// SourceStat holds aggregated counts for one ingestion source.
+type SourceStat struct {
+	Name    string
+	Sub     string
+	IconKey string // "github" | "discord" | "claude"
+	Count   int
+}
+
+// OverviewData bundles all data needed by the overview/home page.
+type OverviewData struct {
+	Projects       []ProjectStats
+	TotalMemories  int
+	TotalProjects  int
+	LastSync       string   // human-readable age, e.g. "2 min ago"
+	LastSyncSource string   // e.g. "github"
+	ByType         []TypeCount
+	LiveFeed       []FeedItem
+	Sources        []SourceStat
+	EngUp          bool
+}
+
+// isFresh returns true when the updated_at timestamp is within 30 days.
+func isFresh(updatedAt string) bool {
+	if updatedAt == "" {
+		return false
+	}
+	t, err := time.ParseInLocation("2006-01-02 15:04:05", updatedAt, time.UTC)
+	if err != nil {
+		return false
+	}
+	return time.Since(t) <= 30*24*time.Hour
+}
+
+// typeColor returns a CSS hex color for a given observation type label.
+func typeColor(t string) string {
+	switch t {
+	case "architecture":
+		return "#22d3ee"
+	case "decision":
+		return "#38bdf8"
+	case "bugfix":
+		return "#60a5fa"
+	case "discovery":
+		return "#818cf8"
+	case "config":
+		return "#a78bfa"
+	case "pattern":
+		return "#c084fc"
+	default:
+		return "#8a9ab5"
+	}
 }
 
 // knownProjects returns the deduplicated, sorted set of Engram project names
