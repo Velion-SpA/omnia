@@ -72,6 +72,24 @@ templ projectCard(p ProjectStats) {
 				</div>
 			</div>
 		}
+		<!-- Sub-projects (group parents only) -->
+		if p.IsGroup && len(p.SubProjects) > 0 {
+			<div style="margin-bottom: 0.625rem;">
+				<span class="micro-label" style="display: block; margin-bottom: 0.375rem;">SUB-PROJECTS</span>
+				<div style="display: flex; flex-wrap: wrap; gap: 0.375rem;">
+					if p.CoreCount > 0 {
+						<a href={ templ.SafeURL("/browse?project=" + p.Name + "&sub=core") } class="badge" style="background: var(--surface-3); color: var(--text-dim); text-decoration: none;">
+							{ p.Name } (core) <span style="color: var(--text-faint);">×{ fmt.Sprintf("%d", p.CoreCount) }</span>
+						</a>
+					}
+					for _, sp := range p.SubProjects {
+						<a href={ templ.SafeURL("/browse?project=" + p.Name + "&sub=" + sp.Name) } class="badge" style="background: var(--surface-3); color: var(--text-dim); text-decoration: none;">
+							{ sp.Name } <span style="color: var(--text-faint);">×{ fmt.Sprintf("%d", sp.Count) }</span>
+						</a>
+					}
+				</div>
+			</div>
+		}
 		<!-- Browse link -->
 		<div style="margin-top: auto; padding-top: 0.75rem; text-align: right;">
 			<a href={ templ.SafeURL("/browse?project=" + p.Name) } style="font-size: 12px; color: var(--calypso); font-weight: 500;">Browse →</a>
