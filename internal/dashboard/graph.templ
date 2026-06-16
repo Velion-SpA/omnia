@@ -1,0 +1,19 @@
+package dashboard
+
+// graphPage renders the knowledge graph placeholder.
+templ graphPage() {
+	@layout("Graph") {
+		<div style="display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 60vh; text-align: center; gap: 16px;">
+			<svg width="64" height="64" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" style="opacity: 0.35;">
+				<circle cx="18" cy="18" r="16.5" stroke="rgba(34,211,238,0.4)" stroke-width="1"/>
+				<circle cx="18" cy="18" r="11.5" stroke="rgba(34,211,238,0.25)" stroke-width="0.75" stroke-dasharray="3 2.5"/>
+				<circle cx="18" cy="18" r="5" fill="rgba(34,211,238,0.4)"/>
+			</svg>
+			<div style="font-family: var(--display); font-weight: 800; font-size: 28px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text);">Knowledge Graph</div>
+			<div style="font-size: 11px; color: var(--text-2); letter-spacing: 0.08em; max-width: 320px; line-height: 1.6;">
+				Interactive memory graph coming soon — visualize connections across your knowledge base.
+			</div>
+			<a href="/" class="nav-link" style="margin-top: 8px;">← Back to Overview</a>
+		</div>
+	}
+}
