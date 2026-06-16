@@ -5,6 +5,7 @@ import "fmt"
 // BrowseParams holds the filter state for the browse page.
 type BrowseParams struct {
 	Project string
+	Sub     string // sub-project filter: "" = all, "core" = parent only, else child canonical
 	Source  string
 	Kind    string
 	Type    string // observation type / category (e.g. "architecture", "decision")
@@ -21,7 +22,7 @@ func browseTypeURL(obsProject, obsType string) string {
 }
 
 // browsePage renders the observation list/browse view.
-templ browsePage(params BrowseParams, views []ObsView, projects []string, types []string) {
+templ browsePage(params BrowseParams, views []ObsView, projects []string, types []string, groupNav *GroupNav) {
 	@layout("Browse") {
 		<div style="display: flex; align-items: flex-start; gap: 1.5rem;">
 			<!-- Sidebar filters -->
@@ -89,10 +90,15 @@ templ browsePage(params BrowseParams, views []ObsView, projects []string, types 
 			</aside>
 			<!-- Main content -->
 			<div style="flex: 1; min-width: 0;">
+				<!-- Sub-project nav row (group parents only) -->
+				if groupNav != nil {
+					@groupNavBar(*groupNav)
+				}
 				<!-- Search bar -->
 				<div style="margin-bottom: 1rem;">
 					<form method="GET" action="/browse" style="display: flex; gap: 0.5rem; align-items: center;">
 						<input type="hidden" name="project" value={ params.Project }/>
+						<input type="hidden" name="sub" value={ params.Sub }/>
 						<input type="hidden" name="source" value={ params.Source }/>
 						<input type="hidden" name="kind" value={ params.Kind }/>
 						<input type="hidden" name="type" value={ params.Type }/>
@@ -114,6 +120,20 @@ templ browsePage(params BrowseParams, views []ObsView, projects []string, types 
 			</div>
 		</div>
 	}
+}
+
+// groupNavBar renders the sub-project navigation row for group parent browse views.
+templ groupNavBar(nav GroupNav) {
+	<div style="margin-bottom: 1rem; padding: 0.75rem 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+		<span class="micro-label" style="margin-right: 0.25rem;">SUB-PROJECTS</span>
+		for _, item := range nav.Items {
+			if item.IsActive {
+				<span class="badge" style="background: var(--calypso); color: #fff;">{ item.Label }</span>
+			} else {
+				<a href={ templ.SafeURL(item.URL) } class="badge badge-type" style="text-decoration: none;">{ item.Label }</a>
+			}
+		}
+	</div>
 }
 
 // obsTable renders the observation rows (also used by HTMX partial updates).
