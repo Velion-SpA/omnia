@@ -298,6 +298,100 @@ templ layout(title string) {
 					filter: blur(60px);
 					opacity: 0.06;
 				}
+
+				/* ── Browse filter panel ── */
+				.browse-filter-grid {
+					display: flex;
+					gap: 2rem;
+					align-items: flex-start;
+					flex-wrap: wrap;
+				}
+				.filter-section {
+					display: flex;
+					flex-direction: column;
+					gap: 0.5rem;
+					min-width: 0;
+				}
+				.filter-label { /* inherits micro-label styles */ }
+				.filter-select { min-width: 160px; }
+
+				/* ── Filter chips ── */
+				.chip-row {
+					display: flex;
+					gap: 0.375rem;
+					align-items: center;
+				}
+				.filter-chip {
+					display: inline-flex;
+					align-items: center;
+					padding: 0.25rem 0.625rem;
+					border-radius: 9999px;
+					font-size: 11px;
+					font-weight: 500;
+					font-family: 'JetBrains Mono', ui-monospace, monospace;
+					letter-spacing: 0.04em;
+					color: var(--text-dim);
+					background: var(--surface-2);
+					border: 1px solid var(--border);
+					text-decoration: none;
+					transition: color 0.15s, border-color 0.15s, background 0.15s;
+					white-space: nowrap;
+				}
+				.filter-chip:hover {
+					color: var(--silver);
+					border-color: var(--border-strong);
+					text-decoration: none;
+				}
+				.filter-chip-active {
+					color: var(--calypso) !important;
+					border-color: rgba(34,211,238,0.25) !important;
+					background: rgba(34,211,238,0.07) !important;
+				}
+
+				/* ── Sub-project tab nav ── */
+				.subproject-nav {
+					display: flex;
+					align-items: center;
+					gap: 0.625rem;
+					margin-bottom: 1.25rem;
+					padding: 0.75rem 1rem;
+					background: var(--surface);
+					border: 1px solid var(--border);
+					border-radius: var(--radius);
+					flex-wrap: wrap;
+				}
+				.subproject-nav-label {
+					padding-right: 0.75rem;
+					border-right: 1px solid var(--border);
+					margin-right: 0.125rem;
+					flex-shrink: 0;
+				}
+				.subproject-tab {
+					display: inline-flex;
+					align-items: center;
+					padding: 0.25rem 0.75rem;
+					border-radius: 9999px;
+					font-size: 12px;
+					font-weight: 500;
+					color: var(--text-dim);
+					background: transparent;
+					border: 1px solid transparent;
+					text-decoration: none;
+					cursor: default;
+					transition: color 0.15s, border-color 0.15s, background 0.15s;
+				}
+				a.subproject-tab { cursor: pointer; }
+				a.subproject-tab:hover {
+					color: var(--text);
+					border-color: var(--border-strong);
+					background: var(--surface-2);
+					text-decoration: none;
+				}
+				.subproject-tab-active {
+					color: var(--calypso) !important;
+					border-color: rgba(34,211,238,0.25) !important;
+					background: rgba(34,211,238,0.07) !important;
+				}
 			</style>
 			<script>
 				tailwind.config = {
