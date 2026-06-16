@@ -44,6 +44,8 @@ type Config struct {
 	// ProjectAliases is an optional map of raw project name → canonical name for
 	// non-case-fold merges. Leave empty; populated from project_aliases in config.yaml.
 	ProjectAliases map[string]string
+	// ProjectGroups is the project_groups map from config.yaml.
+	ProjectGroups map[string][]string
 }
 
 // Server is the Omnia dashboard HTTP server.
@@ -52,6 +54,7 @@ type Server struct {
 	client *engramClient
 	db     *engramdb.DB // nil when unavailable; dashboard falls back to HTTP/FTS
 	logger *slog.Logger
+	groups *GroupIndex
 }
 
 // NewServer creates a new dashboard Server.
@@ -63,6 +66,7 @@ func NewServer(cfg Config, logger *slog.Logger) *Server {
 		client: newEngramClient(cfg.EngramURL),
 		logger: logger,
 	}
+	s.groups = newGroupIndex(cfg.ProjectGroups, logger)
 	db, err := engramdb.Open(cfg.EngramDataDir)
 	if err != nil {
 		logger.Warn("engramdb unavailable; structural queries fall back to HTTP/FTS", "err", err)
@@ -143,13 +147,35 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		projectNames := knownProjectsCanonical(syncStatus, s.cfg)
 		hidden := hiddenSet(s.cfg.ProjectHidden, s.cfg.ProjectAliases)
 		projectNames = filterHidden(projectNames, hidden)
+		// Exclude group children from top-level overview — they are shown inside the parent card.
+		projectNames = filterGroupChildren(projectNames, s.groups)
 		for _, proj := range projectNames {
-			views, err := loadProjectObs(ctx, s.client, proj, 200)
+			var views []ObsView
+			var err error
+			if s.groups.IsParent(proj) {
+				// Load parent's own obs plus each child's obs, then deduplicate.
+				views, err = loadProjectObs(ctx, s.client, proj, 200)
+				if err == nil {
+					for _, child := range s.groups.Children(proj) {
+						childViews, childErr := loadProjectObs(ctx, s.client, child, 200)
+						if childErr == nil {
+							views = append(views, childViews...)
+						}
+					}
+					views = dedupeViews(views)
+				}
+			} else {
+				views, err = loadProjectObs(ctx, s.client, proj, 200)
+			}
 			if err != nil {
 				s.logger.Warn("failed to load project obs", "project", proj, "err", err)
 				views = nil
 			}
-			stats = append(stats, computeProjectStats(proj, views))
+			if s.groups.IsParent(proj) {
+				stats = append(stats, computeGroupProjectStats(proj, views, s.groups, s.cfg.ProjectAliases))
+			} else {
+				stats = append(stats, computeProjectStats(proj, views))
+			}
 		}
 	}
 
@@ -159,27 +185,74 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 // overviewStatsFromDB builds ProjectStats for all projects using the SQLite DB.
-// Returns nil if db.ProjectsCanonical fails, signaling the caller to fall back to FTS.
+// Returns nil if db.Projects fails, signaling the caller to fall back to FTS.
+//
+// It builds a canonical→rawNames map in one db.Projects call so that aliased
+// canonicals (e.g. "velion") retrieve ALL raw variants via SQL IN rather than
+// LOWER(TRIM(project)) = ?, which would miss structurally different raw names
+// like "01.- velion".
 func (s *Server) overviewStatsFromDB(ctx context.Context, syncStatus SyncStatus) []ProjectStats {
 	canonicalize := canonicalizerFunc(s.cfg.ProjectAliases)
 	hidden := hiddenSet(s.cfg.ProjectHidden, s.cfg.ProjectAliases)
 
-	dbProjectCounts, err := s.db.ProjectsCanonical(ctx, canonicalize)
+	rawAll, err := s.db.Projects(ctx)
 	if err != nil {
-		s.logger.Warn("engramdb.ProjectsCanonical failed", "err", err)
+		s.logger.Warn("engramdb.Projects failed", "err", err)
 		return nil
 	}
 
-	dbNames := make([]string, 0, len(dbProjectCounts))
-	for _, pc := range dbProjectCounts {
-		dbNames = append(dbNames, pc.Name)
+	// Build canonical → raw names map so List queries use RawProjects (exact IN)
+	// instead of CanonicalProject (LOWER(TRIM) = ?) — the latter misses aliased
+	// raw names that don't reduce to the canonical via case-fold alone.
+	type canonInfo struct {
+		rawNames []string
+	}
+	canonMap := make(map[string]*canonInfo, len(rawAll))
+	for _, pc := range rawAll {
+		key := canonicalize(pc.Name)
+		if canonMap[key] == nil {
+			canonMap[key] = &canonInfo{}
+		}
+		canonMap[key].rawNames = append(canonMap[key].rawNames, pc.Name)
+	}
+
+	// Build a flat []string of all raw DB project names for group expansion.
+	rawAllNames := make([]string, len(rawAll))
+	for i, pc := range rawAll {
+		rawAllNames[i] = pc.Name
+	}
+
+	dbNames := make([]string, 0, len(canonMap))
+	for name := range canonMap {
+		dbNames = append(dbNames, name)
 	}
 	merged := mergeProjectNames(dbNames, knownProjectsCanonical(syncStatus, s.cfg))
 	merged = filterHidden(merged, hidden)
+	// Exclude group children from top-level overview — they appear inside the parent card.
+	merged = filterGroupChildren(merged, s.groups)
 
 	stats := make([]ProjectStats, 0, len(merged))
 	for _, proj := range merged {
-		dbObs, err := s.db.List(ctx, engramdb.Filter{CanonicalProject: proj, Limit: 2000})
+		f := engramdb.Filter{Limit: 2000}
+		if s.groups.IsParent(proj) {
+			// For a group parent, fetch observations for the whole group
+			// (parent raw names + all children raw names) in a single SQL IN.
+			groupRaw := s.groups.groupRawNames(proj, rawAllNames, s.cfg.ProjectAliases)
+			if len(groupRaw) > 0 {
+				f.RawProjects = groupRaw
+			} else {
+				f.CanonicalProject = proj
+			}
+		} else if info, ok := canonMap[proj]; ok && len(info.rawNames) > 0 {
+			// Use exact IN for aliased canonicals — CanonicalProject would miss
+			// raw names that don't case-fold to the canonical (e.g. "01.- velion").
+			f.RawProjects = info.rawNames
+		} else {
+			// Config-only project (not yet in DB); CanonicalProject covers any
+			// future case-only variants written into the DB later.
+			f.CanonicalProject = proj
+		}
+		dbObs, err := s.db.List(ctx, f)
 		if err != nil {
 			s.logger.Warn("engramdb.List failed for project", "project", proj, "err", err)
 			dbObs = nil
@@ -188,7 +261,11 @@ func (s *Server) overviewStatsFromDB(ctx context.Context, syncStatus SyncStatus)
 		for i, o := range dbObs {
 			views[i] = enrichObs(obsFromDB(o))
 		}
-		stats = append(stats, computeProjectStats(proj, views))
+		if s.groups.IsParent(proj) {
+			stats = append(stats, computeGroupProjectStats(proj, views, s.groups, s.cfg.ProjectAliases))
+		} else {
+			stats = append(stats, computeProjectStats(proj, views))
+		}
 	}
 	return stats
 }
@@ -199,6 +276,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 
 	params := BrowseParams{
 		Project: q.Get("project"),
+		Sub:     q.Get("sub"),
 		Source:  q.Get("source"),
 		Kind:    q.Get("kind"),
 		Type:    q.Get("type"),
@@ -209,13 +287,45 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	// Sidebar project list: union of DB projects + config projects.
 	projectNames := s.effectiveProjectNames(ctx, syncStatus)
 
+	// Build group nav when the selected project is a group parent.
+	var groupNav *GroupNav
+	if s.groups.IsParent(params.Project) {
+		items := []GroupNavItem{
+			{
+				Sub:      "",
+				Label:    "All",
+				URL:      "/browse?project=" + params.Project,
+				IsActive: params.Sub == "",
+			},
+			{
+				Sub:      "core",
+				Label:    params.Project + " (core)",
+				URL:      "/browse?project=" + params.Project + "&sub=core",
+				IsActive: params.Sub == "core",
+			},
+		}
+		for _, child := range s.groups.Children(params.Project) {
+			items = append(items, GroupNavItem{
+				Sub:      child,
+				Label:    child,
+				URL:      "/browse?project=" + params.Project + "&sub=" + child,
+				IsActive: params.Sub == child,
+			})
+		}
+		groupNav = &GroupNav{
+			Parent:    params.Project,
+			ActiveSub: params.Sub,
+			Items:     items,
+		}
+	}
+
 	// Structural path: DB available and no free-text query.
 	// Project and Type filters are pushed to SQL; Source and Kind are applied
 	// client-side (they live in the parsed omnia-meta block, not DB columns).
 	if s.db != nil && params.Query == "" {
 		views, types, ok := s.browseFromDB(ctx, params)
 		if ok {
-			if err := browsePage(params, views, projectNames, types).Render(ctx, w); err != nil {
+			if err := browsePage(params, views, projectNames, types, groupNav).Render(ctx, w); err != nil {
 				s.logger.Error("render browse", "err", err)
 			}
 			return
@@ -238,12 +348,46 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 			allViews = append(allViews, enrichObs(o))
 		}
 	case params.Project != "":
-		// No query, project selected: use the two-search loader for consistency.
-		v, err := loadProjectObs(ctx, s.client, params.Project, 300)
-		if err != nil {
-			s.logger.Warn("browse project load failed", "err", err)
+		// No query, project selected.
+		if s.groups.IsParent(params.Project) {
+			switch params.Sub {
+			case "core":
+				// Parent's own observations only.
+				v, err := loadProjectObs(ctx, s.client, params.Project, 300)
+				if err != nil {
+					s.logger.Warn("browse project load failed", "project", params.Project, "err", err)
+				}
+				allViews = v
+			case "":
+				// All: parent + all children, deduplicated.
+				v, err := loadProjectObs(ctx, s.client, params.Project, 300)
+				if err != nil {
+					s.logger.Warn("browse project load failed", "project", params.Project, "err", err)
+				}
+				allViews = v
+				for _, child := range s.groups.Children(params.Project) {
+					childViews, childErr := loadProjectObs(ctx, s.client, child, 300)
+					if childErr == nil {
+						allViews = append(allViews, childViews...)
+					}
+				}
+				allViews = dedupeViews(allViews)
+			default:
+				// A specific child canonical.
+				v, err := loadProjectObs(ctx, s.client, params.Sub, 300)
+				if err != nil {
+					s.logger.Warn("browse project load failed", "project", params.Sub, "err", err)
+				}
+				allViews = v
+			}
+		} else {
+			// Non-group project: load normally.
+			v, err := loadProjectObs(ctx, s.client, params.Project, 300)
+			if err != nil {
+				s.logger.Warn("browse project load failed", "err", err)
+			}
+			allViews = v
 		}
-		allViews = v
 	default:
 		// No query, no project: ingested observations across all projects.
 		raw, err := s.client.Search(ctx, ingestedTerm, "", 300)
@@ -273,7 +417,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		views = append(views, v)
 	}
 
-	if err := browsePage(params, views, projectNames, types).Render(ctx, w); err != nil {
+	if err := browsePage(params, views, projectNames, types, groupNav).Render(ctx, w); err != nil {
 		s.logger.Error("render browse", "err", err)
 	}
 }
@@ -301,16 +445,94 @@ func (s *Server) effectiveProjectNames(ctx context.Context, syncStatus SyncStatu
 	return filterHidden(merged, hidden)
 }
 
+// expandCanonical returns all raw DB project names that canonicalize to the
+// given canonical name using the configured alias map. This is used to build
+// the RawProjects filter for List queries so that aliased canonicals fetch ALL
+// their raw variants (e.g. "velion" → ["01.- velion", "01.- Velion", "velion"]).
+// Returns nil (not an error) when the DB has no raw names for that canonical —
+// callers fall back to CanonicalProject in that case.
+func (s *Server) expandCanonical(ctx context.Context, canonical string) ([]string, error) {
+	raw, err := s.db.Projects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(raw))
+	for i, pc := range raw {
+		names[i] = pc.Name
+	}
+	return rawProjectsForCanonical(canonical, names, s.cfg.ProjectAliases), nil
+}
+
 // browseFromDB loads and enriches observations for the browse page using the
-// SQLite DB. CanonicalProject and Type are pushed to SQL for exact filtering;
+// SQLite DB. Project (expanded to raw names) and Type are pushed to SQL;
 // Source and Kind are applied client-side after meta.Parse.
 // Returns (nil, nil, false) on any DB error so the caller can fall back.
+//
+// When a project is selected, expandCanonical resolves the canonical to its raw
+// DB project names and passes them via RawProjects (exact IN). This ensures that
+// aliased canonicals like "velion" retrieve "01.- velion" and "01.- Velion" rows
+// that CanonicalProject's LOWER(TRIM) = ? would miss.
 func (s *Server) browseFromDB(ctx context.Context, params BrowseParams) ([]ObsView, []string, bool) {
-	dbObs, err := s.db.List(ctx, engramdb.Filter{
-		CanonicalProject: params.Project,
-		Type:             params.Type,
-		Limit:            1000,
-	})
+	f := engramdb.Filter{
+		Type:  params.Type,
+		Limit: 1000,
+	}
+	if params.Project != "" {
+		if s.groups.IsParent(params.Project) {
+			// For group parents, load the raw DB project name list once and
+			// apply the sub-project filter to determine which raw names to query.
+			rawAll, err := s.db.Projects(ctx)
+			if err != nil {
+				s.logger.Warn("engramdb.Projects failed in group browse", "err", err)
+				return nil, nil, false
+			}
+			rawAllNames := make([]string, len(rawAll))
+			for i, pc := range rawAll {
+				rawAllNames[i] = pc.Name
+			}
+			switch params.Sub {
+			case "core":
+				// Parent's own raw names only (no children).
+				rawNames := s.groups.coreRawNames(params.Project, rawAllNames, s.cfg.ProjectAliases)
+				if len(rawNames) > 0 {
+					f.RawProjects = rawNames
+				} else {
+					f.CanonicalProject = params.Project
+				}
+			case "":
+				// All: parent + all children raw names.
+				rawNames := s.groups.groupRawNames(params.Project, rawAllNames, s.cfg.ProjectAliases)
+				if len(rawNames) > 0 {
+					f.RawProjects = rawNames
+				} else {
+					f.CanonicalProject = params.Project
+				}
+			default:
+				// A specific child canonical.
+				rawNames := rawProjectsForCanonical(params.Sub, rawAllNames, s.cfg.ProjectAliases)
+				if len(rawNames) > 0 {
+					f.RawProjects = rawNames
+				} else {
+					f.CanonicalProject = params.Sub
+				}
+			}
+		} else {
+			rawNames, err := s.expandCanonical(ctx, params.Project)
+			if err != nil {
+				s.logger.Warn("engramdb.expandCanonical failed", "err", err)
+				return nil, nil, false
+			}
+			if len(rawNames) > 0 {
+				f.RawProjects = rawNames
+			} else {
+				// Project exists in config but not yet in DB; CanonicalProject
+				// handles future case-only variants correctly.
+				f.CanonicalProject = params.Project
+			}
+		}
+	}
+
+	dbObs, err := s.db.List(ctx, f)
 	if err != nil {
 		s.logger.Warn("engramdb.List failed", "err", err)
 		return nil, nil, false
