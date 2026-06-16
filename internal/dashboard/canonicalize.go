@@ -11,14 +11,37 @@ func caseFoldKey(name string) string {
 // canonicalizeProject resolves a raw project name to its canonical form.
 // Resolution order:
 //  1. Explicit alias from aliasMap (exact match on raw name)
-//  2. Lowercase + trim (case-fold)
+//  2. Explicit alias from aliasMap (match on lowercase+trim of raw name)
+//  3. Lowercase + trim (case-fold)
 func canonicalizeProject(name string, aliasMap map[string]string) string {
 	if aliasMap != nil {
 		if canonical, ok := aliasMap[name]; ok {
 			return canonical
 		}
+		// Also try the case-folded key so variant cases match the same alias
+		// without requiring duplicate entries in the map.
+		// Example: alias map has "01.- velion"→"velion"; raw name "01.- Velion"
+		// misses the exact lookup but hits on caseFoldKey → "01.- velion" → "velion".
+		if canonical, ok := aliasMap[caseFoldKey(name)]; ok {
+			return canonical
+		}
 	}
 	return caseFoldKey(name)
+}
+
+// rawProjectsForCanonical returns the subset of rawNames (actual DB project names)
+// whose canonical form equals the given canonical after applying aliasMap and case-folding.
+// Used to expand an alias target back to raw DB names for SQL IN queries so that
+// aliased canonicals (e.g. "velion") fetch ALL their raw variants
+// ("01.- velion", "01.- Velion", "velion", …) instead of only case-fold matches.
+func rawProjectsForCanonical(canonical string, rawNames []string, aliasMap map[string]string) []string {
+	var out []string
+	for _, name := range rawNames {
+		if canonicalizeProject(name, aliasMap) == canonical {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // canonicalizerFunc returns a canonicalize func(string) string bound to aliasMap.
