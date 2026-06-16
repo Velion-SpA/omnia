@@ -3,6 +3,7 @@ package dashboard
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -110,6 +111,146 @@ func browseTypeURL(obsProject, obsType string) string {
 		return fmt.Sprintf("/browse?project=%s&type=%s", obsProject, obsType)
 	}
 	return fmt.Sprintf("/browse?type=%s", obsType)
+}
+
+// reOmniaMeta matches an omnia-meta fenced code block (including its delimiters).
+var reOmniaMeta = regexp.MustCompile("(?s)```omnia-meta.*?```")
+
+// snippet extracts a short plain-text preview (≤140 runes) from an observation's
+// content. Strategy:
+//  1. Strip the omnia-meta fenced block.
+//  2. If a "## Body" / "## Summary" / "## Description" section exists, prefer
+//     its text (the GitHub PR ingester stores the real description there).
+//  3. Skip markdown headings, blockquotes, code fences, and metadata bullets
+//     ("- Key: value" with a single-word key).
+//  4. Strip bold/italic markers and the engram mem_save label prefixes.
+//  5. Collapse whitespace and ellipsize at 140 runes.
+func snippet(content string) string {
+	// 1. Remove omnia-meta fenced block.
+	s := reOmniaMeta.ReplaceAllString(content, "")
+
+	// 2. Prefer body section if present (ingested PR/issue content).
+	for _, section := range []string{"## Body\n", "## Summary\n", "## Description\n"} {
+		if idx := strings.Index(s, section); idx >= 0 {
+			s = s[idx+len(section):]
+			break
+		}
+	}
+
+	// 3. Process line-by-line.
+	lines := strings.Split(s, "\n")
+	var parts []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Skip markdown headings.
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Skip blockquotes (GitHub callouts and regular quotes).
+		if strings.HasPrefix(line, ">") {
+			continue
+		}
+		// Skip fenced code block delimiters.
+		if strings.HasPrefix(line, "```") {
+			continue
+		}
+		// Skip metadata bullet lines: "- Key: value" where key has no spaces.
+		if strings.HasPrefix(line, "- ") {
+			pair := strings.SplitN(line[2:], ": ", 2)
+			if len(pair) == 2 && !strings.Contains(pair[0], " ") {
+				continue
+			}
+		}
+		// Strip bold markers (**text** → text).
+		line = strings.ReplaceAll(line, "**", "")
+		// Strip remaining single-asterisk italic markers.
+		line = strings.ReplaceAll(line, "*", "")
+		// Strip inline code backticks.
+		line = strings.ReplaceAll(line, "`", "")
+		// Strip structured label prefixes from the engram mem_save convention
+		// ("**What**: …" → after bold strip becomes "What: …").
+		for _, label := range []string{"What: ", "Why: ", "Where: ", "Learned: ", "How: "} {
+			if strings.HasPrefix(line, label) {
+				line = strings.TrimPrefix(line, label)
+			}
+		}
+		line = strings.TrimSpace(line)
+		if line != "" {
+			parts = append(parts, line)
+		}
+	}
+	s = strings.Join(parts, " ")
+
+	// 4. Collapse runs of whitespace.
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	s = strings.TrimSpace(s)
+
+	// 5. Truncate to 140 runes.
+	const maxRunes = 140
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes]) + "…"
+}
+
+// typeGlyphSVG returns a monoline 12×12 SVG icon for the given observation type.
+// All glyphs use currentColor and stroke only — no rainbow; palette-consistent
+// with silver/calypso. Unknown types get a small circle.
+func typeGlyphSVG(t string) string {
+	switch t {
+	case "architecture":
+		// Hexagon
+		return `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round" aria-hidden="true"><polygon points="6,1 10.5,3.5 10.5,8.5 6,11 1.5,8.5 1.5,3.5"/></svg>`
+	case "decision":
+		// Diamond
+		return `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round" aria-hidden="true"><polygon points="6,1.2 10.8,6 6,10.8 1.2,6"/></svg>`
+	case "github-pr":
+		// Branch fork
+		return `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" aria-hidden="true"><circle cx="3" cy="3" r="1.3"/><circle cx="3" cy="9" r="1.3"/><circle cx="9" cy="3" r="1.3"/><line x1="3" y1="4.3" x2="3" y2="7.7"/><path d="M9 4.3 C9 6.5 5 6.5 5 8"/><line x1="5" y1="8" x2="3.1" y2="8"/></svg>`
+	case "bugfix":
+		// Lightning bolt
+		return `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="7,1.5 4,6.5 6.5,6.5 5,10.5 8,5.5 5.5,5.5"/></svg>`
+	case "discovery":
+		// Eye
+		return `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" aria-hidden="true"><path d="M1.5 6 C3 3 9 3 10.5 6 C9 9 3 9 1.5 6 Z"/><circle cx="6" cy="6" r="1.5"/></svg>`
+	case "config":
+		// Dual sliders
+		return `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" aria-hidden="true"><line x1="1.5" y1="3.5" x2="10.5" y2="3.5"/><line x1="1.5" y1="8.5" x2="10.5" y2="8.5"/><circle cx="4" cy="3.5" r="1.3" fill="var(--bg)"/><circle cx="8" cy="8.5" r="1.3" fill="var(--bg)"/></svg>`
+	case "pattern":
+		// 3×3 dot grid
+		return `<svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><circle cx="3" cy="3" r="1"/><circle cx="6" cy="3" r="1"/><circle cx="9" cy="3" r="1"/><circle cx="3" cy="6" r="1"/><circle cx="6" cy="6" r="1"/><circle cx="9" cy="6" r="1"/><circle cx="3" cy="9" r="1"/><circle cx="6" cy="9" r="1"/><circle cx="9" cy="9" r="1"/></svg>`
+	case "reference":
+		// Bookmark
+		return `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 1.5 H9.5 V10.5 L6 8.5 L2.5 10.5 Z"/></svg>`
+	case "session_summary":
+		// Document with lines
+		return `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" aria-hidden="true"><rect x="1.5" y="1" width="9" height="10" rx="1"/><line x1="3.5" y1="4" x2="8.5" y2="4"/><line x1="3.5" y1="6" x2="8.5" y2="6"/><line x1="3.5" y1="8" x2="6.5" y2="8"/></svg>`
+	case "passive":
+		// Concentric circles (ambient/passive)
+		return `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><circle cx="6" cy="6" r="4.5"/><circle cx="6" cy="6" r="1.5" fill="currentColor" stroke="none"/></svg>`
+	case "learning":
+		// Open book
+		return `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" aria-hidden="true"><path d="M6 3 C4 2 2 2.5 1.5 3 L1.5 9.5 C2 9 4 8.5 6 9.5"/><path d="M6 3 C8 2 10 2.5 10.5 3 L10.5 9.5 C10 9 8 8.5 6 9.5"/><line x1="6" y1="3" x2="6" y2="9.5"/></svg>`
+	default:
+		// Small circle — unknown type
+		return `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><circle cx="6" cy="6" r="4"/></svg>`
+	}
+}
+
+// truncateTitle trims long titles for the list view.
+func truncateTitle(s string) string {
+	const max = 80
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
 
 // browsePage renders the observation list/browse view.
@@ -240,7 +381,7 @@ templ browsePage(params BrowseParams, views []ObsView, projects []string, types 
 					<a href={ templ.SafeURL(clearFiltersURL(params)) } class="micro-label" style="color: var(--calypso); text-transform: none; text-decoration: none; letter-spacing: 0.08em;">clear ×</a>
 				}
 			</div>
-			@obsTable(views)
+			@obsCardFeed(views)
 		</div>
 	}
 }
@@ -259,73 +400,87 @@ templ groupNavBar(nav GroupNav) {
 	</div>
 }
 
-// obsTable renders the observation rows (also used by HTMX partial updates).
-templ obsTable(views []ObsView) {
+// obsCardFeed renders the observation list as a rich card feed.
+// Replaces the old obsTable; called from browsePage and HTMX partial updates.
+templ obsCardFeed(views []ObsView) {
 	if len(views) == 0 {
 		@emptyState("No observations found. Try a different filter or search term.")
 	} else {
-		<div class="card" style="padding: 0; overflow: hidden;">
-			<table class="data-table">
-				<thead>
-					<tr>
-						<th>Title</th>
-						<th style="width: 90px;">Layer</th>
-						<th style="width: 80px;">Source</th>
-						<th style="width: 100px;">Type</th>
-						<th style="width: 90px;">Updated</th>
-					</tr>
-				</thead>
-				<tbody>
-					for _, v := range views {
-						@obsRow(v)
-					}
-				</tbody>
-			</table>
+		<div class="panel panel-results bracketed">
+			<div class="feed-header">
+				<span class="density-label">View</span>
+				<div class="density-toggle">
+					<button class="density-btn density-btn-active" data-density="comfortable" onclick="omniaSetDensity('comfortable')">comfortable</button>
+					<button class="density-btn" data-density="compact" onclick="omniaSetDensity('compact')">compact</button>
+				</div>
+			</div>
+			<div class="memory-feed comfortable" id="memory-feed">
+				for _, v := range views {
+					@obsCard(v)
+				}
+			</div>
 		</div>
+		<script>
+			function omniaSetDensity(d) {
+				document.querySelectorAll('.density-btn').forEach(function(b) {
+					b.classList.toggle('density-btn-active', b.dataset.density === d);
+				});
+				var feed = document.getElementById('memory-feed');
+				if (feed) { feed.className = 'memory-feed ' + d; }
+			}
+		</script>
 	}
 }
 
-templ obsRow(v ObsView) {
-	<tr class="obs-row">
-		<td>
-			<a href={ templ.SafeURL(fmt.Sprintf("/detail/%d", v.Obs.ID)) } style="color: var(--text); font-weight: 500; font-size: 13px; display: block; margin-bottom: 2px; text-decoration: none;">
-				{ truncateTitle(v.Obs.Title) }
-			</a>
-			if v.HasMeta && v.Meta.Repo != "" {
-				<span style="font-size: 11px; color: var(--text-faint); font-family: 'JetBrains Mono', monospace;">{ v.Meta.Repo }</span>
+// obsCard renders a single memory card in the browse feed.
+// The entire card is an anchor to /detail/{id}.
+templ obsCard(v ObsView) {
+	<a href={ templ.SafeURL(fmt.Sprintf("/detail/%d", v.Obs.ID)) } class="memory-card">
+		<div class={ "card-accent-bar", templ.KV("ingested", v.HasMeta), templ.KV("curated", !v.HasMeta) }></div>
+		<div class="card-body">
+			<div class="card-title-row">
+				<span class="card-type-glyph">
+					@templ.Raw(typeGlyphSVG(v.Obs.Type))
+				</span>
+				<span class="card-title">{ truncateTitle(v.Obs.Title) }</span>
+			</div>
+			if snip := snippet(v.Obs.Content); snip != "" {
+				<p class="card-snippet">{ snip }</p>
 			}
-		</td>
-		<td>
-			if v.HasMeta {
-				<span class="badge badge-ingested">ingested</span>
-			} else {
-				<span class="badge badge-curated">curated</span>
-			}
-		</td>
-		<td>
-			if v.HasMeta && v.Meta.Source != "" {
-				<span class="badge badge-source">{ v.Meta.Source }</span>
-			} else {
-				<span style="color: var(--text-faint); font-size: 12px;">—</span>
-			}
-		</td>
-		<td>
-			if v.Obs.Type != "" {
-				<a href={ templ.SafeURL(browseTypeURL(v.Obs.Project, v.Obs.Type)) } class="badge badge-type" style="text-decoration: none;">{ v.Obs.Type }</a>
-			} else {
-				<span style="color: var(--text-faint); font-size: 12px;">—</span>
-			}
-		</td>
-		<td class="micro-label" style="color: var(--text-faint);">{ v.Age }</td>
-	</tr>
+			<div class="card-meta">
+				if v.Obs.Type != "" {
+					<span class="meta-type">{ v.Obs.Type }</span>
+					<span class="meta-dot"></span>
+				}
+				if v.HasMeta && v.Meta.Source != "" {
+					@obsSourceChip(v.Meta.Source)
+					<span class="meta-dot"></span>
+				}
+				if v.HasMeta {
+					<span class="meta-layer ingested"><span class="meta-pip"></span>ingested</span>
+				} else {
+					<span class="meta-layer curated"><span class="meta-pip"></span>curated</span>
+				}
+				<span class="meta-time">{ v.Age }</span>
+			</div>
+		</div>
+	</a>
 }
 
-// truncateTitle trims long titles for the list view.
-func truncateTitle(s string) string {
-	const max = 80
-	r := []rune(s)
-	if len(r) <= max {
-		return s
+// obsSourceChip renders a source indicator with a small inline icon.
+templ obsSourceChip(source string) {
+	switch source {
+	case "github":
+		<span class="meta-source">
+			@templ.Raw(`<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0012 2z"/></svg>`)
+			github
+		</span>
+	case "discord":
+		<span class="meta-source">
+			@templ.Raw(`<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.37a19.791 19.791 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.736 19.736 0 003.677 4.37a.07.07 0 00-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028 14.09 14.09 0 001.226-1.994.076.076 0 00-.041-.106 13.107 13.107 0 01-1.872-.892.077.077 0 01-.008-.128 10.2 10.2 0 00.372-.292.074.074 0 01.077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.01c.12.098.246.198.373.292a.077.077 0 01-.006.127 12.299 12.299 0 01-1.873.892.077.077 0 00-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 00.084.028 19.839 19.839 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 00-.031-.03z"/></svg>`)
+			discord
+		</span>
+	default:
+		<span class="meta-source">{ source }</span>
 	}
-	return string(r[:max]) + "…"
 }
