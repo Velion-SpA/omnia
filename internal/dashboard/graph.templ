@@ -409,18 +409,30 @@ templ graphPage(view GraphView) {
 					projects.forEach(function (p, i) { colorOf[p] = i < PALETTE.length ? PALETTE[i] : DEFAULT_COLOR; });
 					function projColor(p) { return colorOf[p] || DEFAULT_COLOR; }
 
-					// ── Cluster anchors: one per present project, on a ring around centre.
-					// Pulling each node toward its project anchor yields readable, Obsidian-
-					// style communities while keeping the whole graph compact and centred.
-					var anchors = {};
+					// ── Cluster packing: give each project its OWN circle (area ∝ node
+					// count) and pack them so no two overlap. Reserving real space per
+					// project is what separates the islands — a shared ring let big
+					// clusters bleed into their neighbours. Anchoring each node to its
+					// circle then keeps every project in its own region.
+					var anchors = {};      // project → {x, y} cluster centre
+					var clusterRadius = {}; // project → packed circle radius
 					function computeAnchors() {
 						var cx = W / 2, cy = H / 2;
-						var R = Math.min(W, H) * 0.44;
-						var P = projects.length;
-						projects.forEach(function (p, i) {
-							if (P === 1) { anchors[p] = { x: cx, y: cy }; return; }
-							var a = (i / P) * Math.PI * 2 - Math.PI / 2;
-							anchors[p] = { x: cx + Math.cos(a) * R, y: cy + Math.sin(a) * R };
+						if (projects.length === 1) {
+							anchors[projects[0]] = { x: cx, y: cy };
+							clusterRadius[projects[0]] = Math.min(W, H) * 0.32;
+							return;
+						}
+						// Circle radius per project: sqrt(count) keeps AREA proportional,
+						// plus padding so packed islands sit apart instead of touching.
+						var circles = projects.map(function (p) {
+							return { p: p, r: 52 + Math.sqrt(counts[p]) * 16 };
+						});
+						d3.packSiblings(circles);          // assigns x,y; no overlaps
+						var enc = d3.packEnclose(circles); // bounding circle of the pack
+						circles.forEach(function (c) {
+							anchors[c.p] = { x: cx + (c.x - enc.x), y: cy + (c.y - enc.y) };
+							clusterRadius[c.p] = c.r;
 						});
 					}
 					computeAnchors();
@@ -441,11 +453,12 @@ templ graphPage(view GraphView) {
 					var labelCut = byDeg.length ? Math.max(3, byDeg[Math.min(byDeg.length - 1, 25)].degree) : 3;
 					var labelIds = new Set(byDeg.filter(function (d) { return d.degree >= labelCut; }).slice(0, 30).map(function (d) { return d.id; }));
 
-					// Seed near anchors for fast convergence.
+					// Seed inside each project's circle for fast, in-place convergence.
 					nodes.forEach(function (n) {
 						var a = anchors[n.project] || { x: W / 2, y: H / 2 };
-						n.x = a.x + (Math.random() - 0.5) * 90;
-						n.y = a.y + (Math.random() - 0.5) * 90;
+						var cr = clusterRadius[n.project] || 60;
+						n.x = a.x + (Math.random() - 0.5) * cr;
+						n.y = a.y + (Math.random() - 0.5) * cr;
 					});
 
 					// ── Force simulation tuned to pull projects into SEPARATE islands,
@@ -462,8 +475,8 @@ templ graphPage(view GraphView) {
 							.strength(function (d) { return -(22 + Math.min(d.degree, 16) * 3); })
 							.distanceMax(240))
 						.force('collide', d3.forceCollide(function (d) { return radius(d) + 3; }).strength(0.9).iterations(2))
-						.force('x', d3.forceX(function (d) { return (anchors[d.project] || {}).x || W / 2; }).strength(0.6))
-						.force('y', d3.forceY(function (d) { return (anchors[d.project] || {}).y || H / 2; }).strength(0.6))
+						.force('x', d3.forceX(function (d) { return (anchors[d.project] || {}).x || W / 2; }).strength(0.5))
+						.force('y', d3.forceY(function (d) { return (anchors[d.project] || {}).y || H / 2; }).strength(0.5))
 						.velocityDecay(0.42)
 						.alphaDecay(0.021);
 
@@ -510,8 +523,8 @@ templ graphPage(view GraphView) {
 							});
 							ctx.stroke();
 						}
-						drawBase(false, 'rgba(120,150,180,0.035)'); // cross-project: barely there
-						drawBase(true, 'rgba(120,150,180,0.13)');   // intra-project: cluster fabric
+						drawBase(true, 'rgba(120,150,180,0.11)');  // intra-project: cluster fabric (grey)
+						drawBase(false, 'rgba(34,211,238,0.16)');  // cross-project: bridges (cyan, on top)
 
 						if (hi) {
 							ctx.lineWidth = 1.4 / transform.k;
