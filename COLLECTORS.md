@@ -1,160 +1,168 @@
-# Omnia — External Source Collectors
+# Omnia — Colectores de fuentes externas
 
-Status and next steps for pulling external activity into Omnia/Engram.
+Estado y próximos pasos para traer actividad externa hacia Omnia/Engram.
 
-Omnia already has a pluggable collection pipeline (`internal/core` Source/Sink/StateStore,
-`internal/source/*`, `internal/sink/engram`). The nightly `sync` cron (02:00, launchd
-`com.velion.omnia`) fetches from each enabled source and upserts the results into Engram
-as observations (idempotent by `topic_key`). This doc tracks each source's state and what
-you need to decide/do to turn the rest on.
+Omnia ya tiene un pipeline de colección reutilizable (`internal/core` con Source/Sink/StateStore,
+`internal/source/*`, `internal/sink/engram`). El cron nocturno `sync` (02:00, launchd
+`com.velion.omnia`) trae datos de cada fuente habilitada y los guarda en Engram como
+observaciones (idempotente por `topic_key`). Este documento lleva el registro del estado de
+cada fuente y de lo que tenés que decidir o hacer para encender las que faltan.
 
 ---
 
-## GitHub — commits (NEW, off by default)
+## GitHub — commits (NUEVO, apagado por defecto)
 
-**What changed:** the GitHub source already pulled issues and PRs (via `/issues`). It now
-also pulls **commits** with their authors — `sha`, message, the GitHub login *and* the git
-name/email, date, and URL — as `github-commit` observations. This is exactly the "commits,
-who made them" you asked for.
+**Qué cambió:** el source de GitHub ya traía issues y PRs (por el endpoint `/issues`). Ahora
+además trae los **commits** con sus autores — `sha`, mensaje, el usuario de GitHub *y* el
+nombre/email de git, fecha y URL — como observaciones `github-commit`. Esto es exactamente lo
+que pediste: "commits, quiénes los hicieron".
 
-- Code: `internal/source/github/github.go` (`commitResp`, `fetchCommitItems`, `fetchCommits`,
+- Código: `internal/source/github/github.go` (`commitResp`, `fetchCommitItems`, `fetchCommits`,
   `formatCommit`). Config: `internal/config/config.go` (`GitHubConfig.IncludeCommits`,
   `MaxCommitsPerRepo`). Wiring: `cmd/omnia/main.go` `runSync`.
-- Idempotent: `topic_key = github/<owner>-<repo>/commit-<sha>`, so re-runs never duplicate.
-- Separate per-repo cursor (`<repo>#commits`) so it doesn't interfere with the issues/PRs cursor.
-- Verified end-to-end (dry-run, real API) against `saluvita`; unit-tested.
+- Idempotente: `topic_key = github/<owner>-<repo>/commit-<sha>`, así que volver a correrlo
+  nunca duplica.
+- Cursor propio por repo (`<repo>#commits`) para no interferir con el cursor de issues/PRs.
+- Verificado de punta a punta (dry-run, API real) contra `saluvita`; con tests unitarios.
 
-**Why it's OFF by default:** the first run backfills up to `max_commits_per_repo` (default
-**300**) per repo over `backfill_days`. Across all your repos that can be a *lot* of new
-observations in Engram at once. I didn't want to flood Engram while you slept. You decide
-when to flip it.
+**Por qué está APAGADO por defecto:** la primera corrida trae hasta `max_commits_per_repo`
+(default **300**) por repo dentro de la ventana de `backfill_days`. Entre todos tus repos eso
+pueden ser *muchísimas* observaciones nuevas en Engram de golpe. No quise inundar Engram
+mientras dormías. Vos decidís cuándo prenderlo.
 
-**To turn it on:**
+**Para activarlo:**
 
-First, deploy the new binary (the prod binary at `~/.local/bin/omnia` predates this code).
-With `include_commits` still false this is a no-op behaviourally — the cron keeps doing exactly
-what it does today (issues/PRs only) until you flip the flag:
+Primero, desplegá el binario nuevo (el binario de producción en `~/.local/bin/omnia` es anterior
+a este código). Con `include_commits` todavía en false esto no cambia el comportamiento — el
+cron sigue haciendo exactamente lo de hoy (solo issues/PRs) hasta que prendas la opción:
 
 ```bash
 cp ~/.local/bin/omnia ~/.local/bin/omnia.bak-$(date +%Y%m%d-%H%M%S)   # backup
-go build -o ~/.local/bin/omnia ./cmd/omnia                            # from the repo root
+go build -o ~/.local/bin/omnia ./cmd/omnia                            # desde la raíz del repo
 ```
 
-Then edit `~/.config/omnia/config.yaml`:
+Después editá `~/.config/omnia/config.yaml`:
 
 ```yaml
 sources:
   github:
-    enabled: true              # already true
-    include_commits: true      # <-- add this
-    max_commits_per_repo: 100  # optional; default 300. Lower = gentler first backfill
+    enabled: true              # ya está en true
+    include_commits: true      # <-- agregá esto
+    max_commits_per_repo: 100  # opcional; default 300. Más bajo = primer backfill más suave
 ```
 
-Then either wait for the 02:00 cron or run it now. **Preview first (no writes):**
+Después esperá al cron de las 02:00 o corrélo a mano. **Probá primero sin escribir nada:**
 
 ```bash
-omnia --dry-run --source github sync   # prints what it WOULD ingest
-omnia --source github sync             # actually ingests
+omnia --dry-run --source github sync   # muestra lo que TRAERÍA, sin guardar
+omnia --source github sync             # trae de verdad
 ```
 
-Tip: to keep the first backfill small, set a short window once: `omnia --since 2026-06-10T00:00:00Z --source github sync`.
+Tip: para que el primer backfill sea chico, fijá una ventana corta una vez:
+`omnia --since 2026-06-10T00:00:00Z --source github sync`.
 
 ---
 
-## GitHub — issues / PRs (already live)
+## GitHub — issues / PRs (ya activo)
 
-`enabled: true` and running on the 02:00 cron. No action needed. Commits ride the same cron.
+`enabled: true` y corriendo en el cron de las 02:00. No hay que hacer nada. Los commits viajan
+por el mismo cron.
 
 ---
 
-## Discord (implemented, disabled — needs a bot)
+## Discord (implementado, deshabilitado — necesita un bot)
 
-`internal/source/discord/discord.go` is **already complete**: it reads channel message
-history over the Discord REST API and stores one `message_digest` observation per channel
-per day, with rate-limit handling, pagination, snowflake cursors, and project routing. It
-is **read-only** — it never posts. Nothing to build; it just needs credentials.
+`internal/source/discord/discord.go` **ya está completo**: lee el historial de mensajes de los
+canales por la API REST de Discord y guarda una observación `message_digest` por canal por día,
+con manejo de rate-limit, paginación, cursores (snowflake) y ruteo a proyecto. Es **solo
+lectura** — nunca publica nada. No hay que construir nada; solo le faltan credenciales.
 
-**To turn it on:**
+**Para activarlo:**
 
-1. Create a bot app at <https://discord.com/developers/applications> → New Application → Bot.
-2. Copy the **bot token**.
-3. Invite the bot to your server with the minimum scopes: **View Channel** + **Read Message
-   History** only (OAuth2 URL generator → scope `bot`, those two permissions).
-4. Enable the **Message Content Intent** in the bot settings (required to read message bodies).
-5. Get the channel IDs (Discord → Settings → Advanced → Developer Mode → right-click channel → Copy ID).
-6. Configure:
+1. Creá una app de bot en <https://discord.com/developers/applications> → New Application → Bot.
+2. Copiá el **token del bot**.
+3. Invitá el bot a tu servidor con los permisos mínimos: **View Channel** + **Read Message
+   History** solamente (OAuth2 URL generator → scope `bot`, esos dos permisos).
+4. Activá el **Message Content Intent** en la config del bot (necesario para leer el cuerpo de
+   los mensajes).
+5. Conseguí los IDs de los canales (Discord → Ajustes → Avanzado → Modo desarrollador →
+   clic derecho en el canal → Copiar ID).
+6. Configurá:
 
 ```yaml
 sources:
   discord:
     enabled: true
-    token: ""                       # better: export DISCORD_BOT_TOKEN in the launchd plist
+    token: ""                       # mejor: exportá DISCORD_BOT_TOKEN en el plist de launchd
     channels:
-      - { id: "123...", name: "general", guild: "my-server" }
-    project: omnia                   # or route per-channel via the `routes:` map
+      - { id: "123...", name: "general", guild: "mi-servidor" }
+    project: omnia                   # o ruteá por canal con el mapa `routes:`
 ```
 
-**Care notes (your "con cuidado"):** keep the bot scoped to only the channels you want, with
-read-only permissions. Don't commit the token to git — prefer the `DISCORD_BOT_TOKEN` env var
-in the plist's `EnvironmentVariables`. The collector only reads; it can't send or moderate.
+**Notas de cuidado (tu "con cuidado"):** mantené el bot limitado solo a los canales que querés,
+con permisos de solo lectura. No subas el token a git — mejor usá la variable `DISCORD_BOT_TOKEN`
+en `EnvironmentVariables` del plist. El colector solo lee; no puede enviar ni moderar.
 
-> Note: you said "bot **helper** de discord". This source *ingests* messages (read-only). If
-> what you want is a bot that *replies/assists* in Discord, that's a separate build — tell me
-> and I'll spec it.
+> Nota: dijiste "bot **helper** de discord". Este source *ingiere* mensajes (solo lectura). Si
+> lo que querés es un bot que *responda/ayude* en Discord, eso es otra construcción aparte —
+> decime y lo planifico.
 
 ---
 
-## WhatsApp (NOT implemented — decision needed) ⚠️
+## WhatsApp (NO implementado — necesito que decidas) ⚠️
 
-You asked for your self-chat ("notes to self"). I deliberately did **not** build this yet,
-because the only ways to read a personal WhatsApp account are risky. Here are the real options:
+Pediste tu chat contigo mismo ("notas para mí"). A propósito **no** construí esto todavía,
+porque las únicas formas de leer una cuenta personal de WhatsApp son riesgosas. Estas son las
+opciones reales:
 
-| Option | How | Risk |
+| Opción | Cómo | Riesgo |
 |---|---|---|
-| **A. Manual export → import** (recommended) | In WhatsApp: open the self-chat → ⋯ → Export chat → share the `.txt`/`.zip`. Then `omnia import whatsapp <file>`. | **None to your account.** Manual, you control when. |
-| B. Unofficial lib (Baileys / whatsapp-web.js) | Scrapes WhatsApp Web via a linked session (scan a QR, keep it alive). | **Can get your personal number BANNED.** Violates WhatsApp ToS. Fragile (breaks on WA updates). |
-| C. WhatsApp Cloud / Business API (official) | Meta's official API. | Only for **business** numbers, not your personal account/self-chat. Doesn't fit. |
+| **A. Exportar a mano → importar** (recomendada) | En WhatsApp: abrí el chat contigo mismo → ⋯ → Exportar chat → compartí el `.txt`/`.zip`. Después `omnia import whatsapp <archivo>`. | **Ninguno para tu cuenta.** Manual, vos controlás cuándo. |
+| B. Librería no oficial (Baileys / whatsapp-web.js) | Scrapea WhatsApp Web con una sesión vinculada (escanear un QR, mantenerla viva). | **Te pueden BANEAR el número personal.** Viola los términos de WhatsApp. Frágil (se rompe con cada update de WA). |
+| C. WhatsApp Cloud / Business API (oficial) | La API oficial de Meta. | Solo para números de **empresa**, no tu cuenta personal / chat contigo mismo. No sirve. |
 
-**My recommendation: Option A.** It's safe, and the self-chat export is exactly the "stuff I
-send myself" you described. I can implement `omnia import whatsapp <export>` quickly — but the
-export's text format varies by locale (es-CL) and iOS vs Android, so **I need one sample
-export from you to calibrate the parser**. Drop a small exported chat in the repo (or paste a
-few lines) and I'll wire it up.
+**Mi recomendación: Opción A.** Es segura, y el export del chat contigo mismo es justo "las
+cosas que me mando a mí mismo" que describiste. Puedo implementar `omnia import whatsapp <export>`
+rápido — pero el formato de texto del export varía según el idioma (es-CL) y según iOS vs
+Android, así que **necesito un export de muestra tuyo para calibrar el parser**. Dejá un chat
+exportado chico en el repo (o pegame unas líneas) y lo dejo andando.
 
-If you want Option B despite the ban risk, say so explicitly and I'll build it isolated behind
-a disabled flag — but I won't point it at your real number without your clear go-ahead.
-
----
-
-## Cron — no new job needed
-
-The existing `com.velion.omnia` launchd job (02:00, `omnia --source github sync`) already
-runs the GitHub source; commits flow through it once `include_commits: true`. The embed job
-(02:15) re-embeds afterward. I did **not** touch either cron. When Discord is configured,
-the same `sync` job (run without `--source github`, i.e. `omnia sync`) will run both sources;
-we can update the plist's `ProgramArguments` to drop the `--source github` filter then.
+Si querés la Opción B a pesar del riesgo de ban, decímelo de forma explícita y la construyo
+aislada detrás de un flag deshabilitado — pero no la voy a apuntar a tu número real sin tu visto
+bueno claro.
 
 ---
 
-## Ideas for more sources (not built — tell me if you use these)
+## Cron — no hace falta un job nuevo
 
-- **Linear / Jira** — `meta.go` already reserves a `jira` source kind. Easy to add if you use one.
-- **Google Calendar** — events as observations (needs OAuth setup).
-- **Local notes / Obsidian vault** — ingest markdown files on a path.
-- **Per-commit diffs/stats** — current commit ingestion stores message + author; we could add
-  files-changed/+−lines (one extra API call per commit; heavier).
+El job de launchd que ya existe (`com.velion.omnia`, 02:00, `omnia --source github sync`) ya
+corre el source de GitHub; los commits pasan por ahí en cuanto `include_commits: true`. El job
+de embeddings (02:15) re-embebe después. **No toqué ninguno de los dos crons.** Cuando Discord
+esté configurado, el mismo job `sync` (corrido sin `--source github`, es decir `omnia sync`)
+corre las dos fuentes; ahí actualizamos el `ProgramArguments` del plist para sacar el filtro
+`--source github`.
 
 ---
 
-## Decisions I need from you
+## Ideas para más fuentes (no construidas — decime si usás alguna)
 
-1. **GitHub commits:** OK to flip `include_commits: true`? Any repos to *exclude*? Good
-   `max_commits_per_repo` for the first backfill?
-2. **Discord:** do you want message ingestion (built, needs bot token + channels), a reply
-   bot (separate build), or both?
-3. **WhatsApp:** Option A (safe export-import — send me a sample) or Option B (unofficial,
-   ban risk — explicit go-ahead required)?
-4. **Any other source** from the ideas list?
+- **Linear / Jira** — `meta.go` ya reserva un kind de source `jira`. Fácil de agregar si usás alguno.
+- **Google Calendar** — eventos como observaciones (necesita configurar OAuth).
+- **Notas locales / vault de Obsidian** — ingerir archivos markdown de una carpeta.
+- **Diffs/stats por commit** — la ingesta actual guarda mensaje + autor; podríamos sumar
+  archivos cambiados / líneas +− (una llamada extra a la API por commit; más pesado).
 
-Nothing here is live yet except what was already running (GitHub issues/PRs). The new commit
-code is committed but gated off until you decide.
+---
+
+## Decisiones que necesito de vos
+
+1. **Commits de GitHub:** ¿prendo `include_commits: true`? ¿Algún repo a *excluir*? ¿Qué
+   `max_commits_per_repo` te parece bien para el primer backfill?
+2. **Discord:** ¿querés ingesta de mensajes (ya construida, necesita token del bot + canales),
+   un bot que responda (construcción aparte), o las dos cosas?
+3. **WhatsApp:** ¿Opción A (export-import segura — mandame una muestra) u Opción B (no oficial,
+   riesgo de ban — necesito tu visto bueno explícito)?
+4. **¿Alguna otra fuente** de la lista de ideas?
+
+Por ahora no hay nada activo salvo lo que ya venía corriendo (issues/PRs de GitHub). El código
+nuevo de commits está commiteado pero apagado hasta que decidas.
