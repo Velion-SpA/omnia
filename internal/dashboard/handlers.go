@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/velion/omnia/internal/audit"
+	"github.com/velion/omnia/internal/embed"
 	"github.com/velion/omnia/internal/engramdb"
 )
 
@@ -46,15 +47,26 @@ type Config struct {
 	ProjectAliases map[string]string
 	// ProjectGroups is the project_groups map from config.yaml.
 	ProjectGroups map[string][]string
+	// Embeddings* configure the optional local semantic-search layer. When
+	// EmbeddingsEnabled is false (default), the dashboard serves keyword (FTS)
+	// search only. When true, NewServer opens Omnia's own embeddings store and an
+	// Ollama client; a failure to open either degrades gracefully back to FTS.
+	EmbeddingsEnabled bool
+	EmbeddingsBaseURL string
+	EmbeddingsModel   string
+	EmbeddingsDim     int
+	EmbeddingsDBPath  string
 }
 
 // Server is the Omnia dashboard HTTP server.
 type Server struct {
-	cfg    Config
-	client *engramClient
-	db     *engramdb.DB // nil when unavailable; dashboard falls back to HTTP/FTS
-	logger *slog.Logger
-	groups *GroupIndex
+	cfg       Config
+	client    *engramClient
+	db        *engramdb.DB // nil when unavailable; dashboard falls back to HTTP/FTS
+	emb       *embed.Store // nil when embeddings disabled/unavailable; browse falls back to FTS
+	embClient embed.Embedder
+	logger    *slog.Logger
+	groups    *GroupIndex
 }
 
 // NewServer creates a new dashboard Server.
@@ -72,6 +84,19 @@ func NewServer(cfg Config, logger *slog.Logger) *Server {
 		logger.Warn("engramdb unavailable; structural queries fall back to HTTP/FTS", "err", err)
 	} else {
 		s.db = db
+	}
+
+	// Optional semantic-search layer. A failure to open the store leaves emb nil,
+	// and browse transparently falls back to keyword (FTS) search.
+	if cfg.EmbeddingsEnabled {
+		store, err := embed.OpenStore(cfg.EmbeddingsDBPath)
+		if err != nil {
+			logger.Warn("embeddings store unavailable; semantic search disabled, using FTS", "err", err)
+		} else {
+			s.emb = store
+			s.embClient = embed.New(cfg.EmbeddingsBaseURL, cfg.EmbeddingsModel, cfg.EmbeddingsDim)
+			logger.Info("semantic search enabled", "model", cfg.EmbeddingsModel, "db", cfg.EmbeddingsDBPath)
+		}
 	}
 	return s
 }
@@ -104,7 +129,15 @@ func (s *Server) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return srv.Shutdown(shutCtx)
+		err := srv.Shutdown(shutCtx)
+		// Close the SQLite handles so their WAL is checkpointed on clean shutdown.
+		if s.emb != nil {
+			_ = s.emb.Close()
+		}
+		if s.db != nil {
+			_ = s.db.Close()
+		}
+		return err
 	case err := <-errCh:
 		return err
 	}
@@ -450,13 +483,17 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	var allViews []ObsView
 	switch {
 	case params.Query != "":
-		// Free-text search within the (optional) project.
-		raw, err := s.client.Search(ctx, params.Query, params.Project, 300)
-		if err != nil {
-			s.logger.Warn("browse search failed", "err", err)
-		}
-		for _, o := range raw {
-			allViews = append(allViews, enrichObs(o))
+		// Semantic search when the embeddings layer is available; FTS otherwise.
+		if sem, ok := s.semanticSearch(ctx, params); ok {
+			allViews = sem
+		} else {
+			raw, err := s.client.Search(ctx, params.Query, params.Project, 300)
+			if err != nil {
+				s.logger.Warn("browse search failed", "err", err)
+			}
+			for _, o := range raw {
+				allViews = append(allViews, enrichObs(o))
+			}
 		}
 	case params.Project != "":
 		// No query, project selected.
@@ -531,6 +568,82 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	if err := browsePage(params, views, projectNames, types, groupNav).Render(ctx, w); err != nil {
 		s.logger.Error("render browse", "err", err)
 	}
+}
+
+// semanticSearch runs vector search for params.Query when the embeddings layer
+// is available. It embeds the query, finds nearest neighbors in Omnia's own
+// store, re-fetches the full rows from engram.db (for rich rendering), and
+// preserves similarity ranking. When a project is selected it scopes results to
+// that project (including a group parent's children). Returns (views, true) on
+// success, or (nil, false) to fall back to FTS — on any nil dependency or error.
+func (s *Server) semanticSearch(ctx context.Context, params BrowseParams) ([]ObsView, bool) {
+	if s.emb == nil || s.embClient == nil || s.db == nil {
+		return nil, false
+	}
+
+	// Bound the interactive query embedding so a slow/down Ollama can't hang the
+	// browse request for the client's full 60s timeout before FTS takes over.
+	embCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	vec, err := s.embClient.Embed(embCtx, params.Query, embed.TaskQuery)
+	if err != nil {
+		s.logger.Warn("semantic embed query failed; falling back to FTS", "err", err)
+		return nil, false
+	}
+	hits, err := s.emb.Search(ctx, vec, 200)
+	if err != nil {
+		s.logger.Warn("semantic search failed; falling back to FTS", "err", err)
+		return nil, false
+	}
+	if len(hits) == 0 {
+		// Empty store (not yet backfilled) — FTS is the better answer.
+		return nil, false
+	}
+
+	ids := make([]int, 0, len(hits))
+	for _, h := range hits {
+		ids = append(ids, h.ObsID)
+	}
+	rows, err := s.db.ListByIDs(ctx, ids)
+	if err != nil {
+		s.logger.Warn("semantic ListByIDs failed; falling back to FTS", "err", err)
+		return nil, false
+	}
+	byID := make(map[int]ObsView, len(rows))
+	for _, o := range rows {
+		byID[o.ID] = enrichObs(obsFromDB(o))
+	}
+
+	// Optional project scoping (canonical match; group parents include children).
+	var keep func(project string) bool
+	if params.Project != "" {
+		canon := canonicalizerFunc(s.cfg.ProjectAliases)
+		allowed := map[string]struct{}{canon(params.Project): {}}
+		if s.groups.IsParent(params.Project) {
+			for _, child := range s.groups.Children(params.Project) {
+				allowed[canon(child)] = struct{}{}
+			}
+		}
+		keep = func(p string) bool { _, ok := allowed[canon(p)]; return ok }
+	}
+
+	views := make([]ObsView, 0, len(hits))
+	for _, h := range hits {
+		v, ok := byID[h.ObsID]
+		if !ok {
+			continue
+		}
+		if keep != nil && !keep(v.Obs.Project) {
+			continue
+		}
+		views = append(views, v)
+	}
+	if len(views) == 0 {
+		// Project scope eliminated every hit — fall back to FTS instead of
+		// rendering an empty page when keyword search might still match.
+		return nil, false
+	}
+	return views, true
 }
 
 // effectiveProjectNames returns the sorted, deduplicated union of DB-derived

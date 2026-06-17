@@ -22,9 +22,12 @@ import (
 // Observation mirrors the columns from Engram's observations table that the
 // dashboard needs. Timestamps are stored as plain text in SQLite
 // (format: "2006-01-02 15:04:05" in UTC). Fields not needed by the dashboard
-// (sync_id, session_id, tool_name, revision_count) are omitted.
+// (session_id, tool_name, revision_count) are omitted. SyncID is populated only
+// by queries that select it (ListForEmbedding, ListByIDs); the hot-path List
+// leaves it empty.
 type Observation struct {
 	ID        int
+	SyncID    string
 	Type      string
 	Title     string
 	Content   string
@@ -272,6 +275,94 @@ func (d *DB) Count(ctx context.Context, f Filter) (int, error) {
 		return 0, fmt.Errorf("engramdb: Count: %w", err)
 	}
 	return n, nil
+}
+
+// ListForEmbedding returns every live (non-deleted) observation with the columns
+// the embeddings reconciler needs: ID, SyncID, Type, Title, Content, Project,
+// TopicKey, UpdatedAt. SyncID is the stable cross-instance key; ID is the local
+// (autoincrement) row id used for the dashboard detail link. The existing List
+// SELECT is intentionally left untouched so the dashboard hot path is unaffected.
+func (d *DB) ListForEmbedding(ctx context.Context) ([]Observation, error) {
+	const q = `
+		SELECT id,
+		       COALESCE(sync_id,''),
+		       COALESCE(type,''),
+		       COALESCE(title,''),
+		       COALESCE(content,''),
+		       COALESCE(project,''),
+		       COALESCE(topic_key,''),
+		       COALESCE(updated_at,'')
+		FROM observations
+		WHERE deleted_at IS NULL
+		ORDER BY updated_at DESC`
+
+	rows, err := d.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("engramdb: ListForEmbedding: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Observation
+	for rows.Next() {
+		var o Observation
+		if err := rows.Scan(
+			&o.ID, &o.SyncID, &o.Type, &o.Title, &o.Content,
+			&o.Project, &o.TopicKey, &o.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("engramdb: ListForEmbedding scan: %w", err)
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// ListByIDs returns live observations whose id is in ids, with full columns
+// (including SyncID). Used by semantic search to re-fetch ranked rows for
+// rendering. The returned order is unspecified; callers that need ranking order
+// should reorder by id. Returns an empty slice when ids is empty.
+func (d *DB) ListByIDs(ctx context.Context, ids []int) ([]Observation, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	q := `SELECT id,
+		         COALESCE(sync_id,''),
+		         COALESCE(type,''),
+		         COALESCE(title,''),
+		         COALESCE(content,''),
+		         COALESCE(project,''),
+		         COALESCE(scope,''),
+		         COALESCE(topic_key,''),
+		         COALESCE(created_at,''),
+		         COALESCE(updated_at,'')
+		  FROM observations
+		  WHERE deleted_at IS NULL
+		    AND id IN (` + strings.Join(placeholders, ", ") + `)`
+
+	rows, err := d.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("engramdb: ListByIDs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Observation
+	for rows.Next() {
+		var o Observation
+		if err := rows.Scan(
+			&o.ID, &o.SyncID, &o.Type, &o.Title, &o.Content,
+			&o.Project, &o.Scope, &o.TopicKey,
+			&o.CreatedAt, &o.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("engramdb: ListByIDs scan: %w", err)
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
 }
 
 // buildWhere constructs a parameterized WHERE clause from a Filter.

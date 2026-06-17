@@ -30,11 +30,25 @@ type Config struct {
 	// Children are hidden from the top-level overview and aggregated into the parent.
 	// A child must not also be a parent; self-referential entries are ignored.
 	ProjectGroups map[string][]string `yaml:"project_groups"`
+	// Embeddings configures Omnia's own local semantic-search index ("capa propia").
+	// Disabled by default so the production sync job is unaffected until opted in.
+	Embeddings EmbeddingsConfig `yaml:"embeddings"`
 }
 
 type EngramConfig struct {
 	BaseURL        string `yaml:"base_url"`
 	DefaultProject string `yaml:"default_project"`
+}
+
+// EmbeddingsConfig configures the local embeddings layer. When Enabled is false,
+// `omnia embed` is a no-op and the dashboard serves keyword (FTS) search only.
+// Omnia keeps its OWN writable vector store at DBPath; engram.db stays read-only.
+type EmbeddingsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	BaseURL string `yaml:"base_url"` // Ollama base URL, e.g. http://localhost:11434
+	Model   string `yaml:"model"`    // e.g. nomic-embed-text
+	Dim     int    `yaml:"dim"`      // embedding dimension, e.g. 768 for nomic-embed-text
+	DBPath  string `yaml:"db_path"`  // path to Omnia's own embeddings SQLite file
 }
 
 type SourcesConfig struct {
@@ -148,5 +162,18 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Sources.GitHub.Project == "" {
 		cfg.Sources.GitHub.Project = cfg.Engram.DefaultProject
+	}
+	if cfg.Embeddings.BaseURL == "" {
+		cfg.Embeddings.BaseURL = "http://localhost:11434"
+	}
+	if cfg.Embeddings.Model == "" {
+		cfg.Embeddings.Model = "nomic-embed-text"
+	}
+	if cfg.Embeddings.Dim == 0 {
+		cfg.Embeddings.Dim = 768
+	}
+	if cfg.Embeddings.DBPath == "" {
+		home, _ := os.UserHomeDir()
+		cfg.Embeddings.DBPath = filepath.Join(home, ".local", "share", "omnia", "embeddings.db")
 	}
 }

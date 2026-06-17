@@ -92,6 +92,31 @@ func Render(m Meta) string {
 	return sb.String()
 }
 
+// Strip returns content with the trailing omnia-meta block removed. It only
+// strips when a VALID block is present (same mandatory-field contract as Parse),
+// so a curated human note that merely quotes the fence is returned untouched.
+// Used to build clean embedding input: the identical boilerplate block would
+// otherwise cluster all ingested memories spuriously in vector space.
+func Strip(content string) string {
+	if _, ok := Parse(content); !ok {
+		return content
+	}
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	// The block is always appended last; find the LAST opening fence and drop
+	// everything from there to the end (the close fence and nothing follows it).
+	startIdx := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == blockFence {
+			startIdx = i
+		}
+	}
+	if startIdx < 0 {
+		return content
+	}
+	return strings.TrimRight(strings.Join(lines[:startIdx], "\n"), " \t\n")
+}
+
 // Parse extracts the omnia-meta block from observation content.
 // Returns (Meta, true) if a valid, complete block is found; (Meta{}, false) otherwise.
 //
@@ -203,7 +228,7 @@ func Parse(content string) (Meta, bool) {
 					m.ChunkTotal = tot
 				}
 			}
-		// Unknown keys are silently ignored (forward compatibility).
+			// Unknown keys are silently ignored (forward compatibility).
 		}
 	}
 

@@ -14,6 +14,8 @@ import (
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/core"
 	"github.com/velion/omnia/internal/dashboard"
+	"github.com/velion/omnia/internal/embed"
+	"github.com/velion/omnia/internal/engramdb"
 	engram "github.com/velion/omnia/internal/sink/engram"
 	discord "github.com/velion/omnia/internal/source/discord"
 	github "github.com/velion/omnia/internal/source/github"
@@ -60,8 +62,10 @@ func run(args []string) error {
 		return runStatus(*configPath)
 	case "dashboard":
 		return runDashboard(args[1:], *configPath)
+	case "embed":
+		return runEmbed(args[1:], *configPath)
 	default:
-		return fmt.Errorf("unknown subcommand %q (use: sync, status, dashboard)", subcommand)
+		return fmt.Errorf("unknown subcommand %q (use: sync, status, dashboard, embed)", subcommand)
 	}
 }
 
@@ -194,6 +198,7 @@ func runDashboard(args []string, configPath string) error {
 		configHidden   []string
 		configAliases  map[string]string
 		configGroups   map[string][]string
+		embCfg         config.EmbeddingsConfig
 	)
 	if cfg, err := config.Load(configPath); err == nil {
 		if resolvedEngram == "" {
@@ -204,6 +209,7 @@ func runDashboard(args []string, configPath string) error {
 		configHidden = cfg.ProjectHidden
 		configAliases = cfg.ProjectAliases
 		configGroups = cfg.ProjectGroups
+		embCfg = cfg.Embeddings
 	}
 	if resolvedEngram == "" {
 		resolvedEngram = "http://127.0.0.1:7437"
@@ -222,19 +228,73 @@ func runDashboard(args []string, configPath string) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	srv := dashboard.NewServer(dashboard.Config{
-		Port:           *port,
-		EngramURL:      resolvedEngram,
-		EngramDataDir:  *engramDB,
-		Actor:          *actor,
-		Projects:       configProjects,
-		Routes:         configRoutes,
-		ProjectHidden:  configHidden,
-		ProjectAliases: configAliases,
-		ProjectGroups:  configGroups,
+		Port:              *port,
+		EngramURL:         resolvedEngram,
+		EngramDataDir:     *engramDB,
+		Actor:             *actor,
+		Projects:          configProjects,
+		Routes:            configRoutes,
+		ProjectHidden:     configHidden,
+		ProjectAliases:    configAliases,
+		ProjectGroups:     configGroups,
+		EmbeddingsEnabled: embCfg.Enabled,
+		EmbeddingsBaseURL: embCfg.BaseURL,
+		EmbeddingsModel:   embCfg.Model,
+		EmbeddingsDim:     embCfg.Dim,
+		EmbeddingsDBPath:  embCfg.DBPath,
 	}, logger)
 
 	ctx := context.Background()
 	return srv.Start(ctx)
+}
+
+// runEmbed reconciles Omnia's own embeddings store with the live observations in
+// engram.db. It reads engram.db READ-ONLY and writes only Omnia's own database.
+// No-op (and prod-safe) unless embeddings.enabled is true in the config.
+func runEmbed(args []string, configPath string) error {
+	fs := flag.NewFlagSet("embed", flag.ContinueOnError)
+	force := fs.Bool("force", false, "re-embed every row, ignoring content/model hashes")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if !cfg.Embeddings.Enabled {
+		logger.Info("embeddings disabled; nothing to do (set embeddings.enabled: true to opt in)")
+		return nil
+	}
+
+	// Read engram.db read-only ($ENGRAM_DATA_DIR or ~/.engram).
+	reader, err := engramdb.Open("")
+	if err != nil {
+		return fmt.Errorf("open engram.db (read-only): %w", err)
+	}
+	defer reader.Close()
+
+	store, err := embed.OpenStore(cfg.Embeddings.DBPath)
+	if err != nil {
+		return fmt.Errorf("open embeddings store: %w", err)
+	}
+	defer store.Close()
+
+	client := embed.New(cfg.Embeddings.BaseURL, cfg.Embeddings.Model, cfg.Embeddings.Dim)
+	ctx := context.Background()
+
+	start := time.Now()
+	stats, err := embed.Reconcile(ctx, reader, store, client, cfg.Embeddings.Model, cfg.Embeddings.Dim, *force, logger)
+	if err != nil {
+		return fmt.Errorf("reconcile embeddings: %w", err)
+	}
+	total, _ := store.Count(ctx)
+	fmt.Printf("embed: embedded %d / reused %d / pruned %d / skipped %d / errors %d (store now %d rows) in %s\n",
+		stats.Embedded, stats.Reused, stats.Pruned, stats.Skipped, stats.Errors, total,
+		time.Since(start).Round(time.Millisecond))
+	return nil
 }
 
 func runStatus(configPath string) error {

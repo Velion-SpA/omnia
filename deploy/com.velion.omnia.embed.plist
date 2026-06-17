@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.velion.omnia.embed</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Reconciles Omnia's own embeddings store (engram.db is read-only). -->
+        <!-- No-op unless embeddings.enabled: true is set in ~/.config/omnia/config.yaml -->
+        <!-- Requires a local Ollama at http://localhost:11434 (brew services start ollama) -->
+        <!-- launchd does not expand ~ — replace /Users/benja with your actual home directory -->
+        <string>/Users/benja/.local/bin/omnia</string>
+        <string>embed</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <!-- 02:15, AFTER the 02:00 sync job so new memories are present to embed. -->
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>15</integer>
+    </dict>
+    <!-- Separate log from the sync job so an embed failure is isolated and visible. -->
+    <key>StandardOutPath</key>
+    <string>/Users/benja/Library/Logs/omnia/omnia-embed.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/benja/Library/Logs/omnia/omnia-embed.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
