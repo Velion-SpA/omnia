@@ -570,12 +570,26 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Semantic search tuning. Measured against the real store with nomic-embed-text:
+// scores are compressed and every query — including pure gibberish — produces a
+// long tail of weakly-related rows plateauing around 0.47–0.55. A 0.55 cosine
+// floor cuts that tail (drops a 200-row result set to tens) without starving
+// specific queries the way a stricter 0.60 floor would. maxResults caps the
+// rendered feed so broad queries don't dump hundreds of cards.
+const (
+	semanticSearchK    = 150  // neighbors to pull from the store before filtering
+	semanticMinScore   = 0.55 // cosine floor; below this is nomic's noise plateau
+	semanticMaxResults = 50   // hard cap on rendered cards, ranked by similarity
+)
+
 // semanticSearch runs vector search for params.Query when the embeddings layer
 // is available. It embeds the query, finds nearest neighbors in Omnia's own
-// store, re-fetches the full rows from engram.db (for rich rendering), and
-// preserves similarity ranking. When a project is selected it scopes results to
-// that project (including a group parent's children). Returns (views, true) on
-// success, or (nil, false) to fall back to FTS — on any nil dependency or error.
+// store, drops the weak-similarity tail below semanticMinScore, re-fetches the
+// full rows from engram.db (for rich rendering), and preserves similarity
+// ranking. When a project is selected it scopes results to that project
+// (including a group parent's children) and caps the feed at semanticMaxResults.
+// Returns (views, true) on success, or (nil, false) to fall back to FTS — on any
+// nil dependency or error.
 func (s *Server) semanticSearch(ctx context.Context, params BrowseParams) ([]ObsView, bool) {
 	if s.emb == nil || s.embClient == nil || s.db == nil {
 		return nil, false
@@ -590,13 +604,28 @@ func (s *Server) semanticSearch(ctx context.Context, params BrowseParams) ([]Obs
 		s.logger.Warn("semantic embed query failed; falling back to FTS", "err", err)
 		return nil, false
 	}
-	hits, err := s.emb.Search(ctx, vec, 200)
+	hits, err := s.emb.Search(ctx, vec, semanticSearchK)
 	if err != nil {
 		s.logger.Warn("semantic search failed; falling back to FTS", "err", err)
 		return nil, false
 	}
 	if len(hits) == 0 {
 		// Empty store (not yet backfilled) — FTS is the better answer.
+		return nil, false
+	}
+
+	// Drop the weak-similarity tail. Hits are score-descending, so truncate at
+	// the first row below the floor. If nothing clears it, FTS is the better
+	// answer than a page of barely-related rows.
+	cut := len(hits)
+	for i, h := range hits {
+		if h.Score < semanticMinScore {
+			cut = i
+			break
+		}
+	}
+	hits = hits[:cut]
+	if len(hits) == 0 {
 		return nil, false
 	}
 
@@ -627,7 +656,7 @@ func (s *Server) semanticSearch(ctx context.Context, params BrowseParams) ([]Obs
 		keep = func(p string) bool { _, ok := allowed[canon(p)]; return ok }
 	}
 
-	views := make([]ObsView, 0, len(hits))
+	views := make([]ObsView, 0, semanticMaxResults)
 	for _, h := range hits {
 		v, ok := byID[h.ObsID]
 		if !ok {
@@ -637,6 +666,9 @@ func (s *Server) semanticSearch(ctx context.Context, params BrowseParams) ([]Obs
 			continue
 		}
 		views = append(views, v)
+		if len(views) >= semanticMaxResults {
+			break
+		}
 	}
 	if len(views) == 0 {
 		// Project scope eliminated every hit — fall back to FTS instead of
