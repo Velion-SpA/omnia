@@ -188,7 +188,7 @@ templ graphPage(view GraphView) {
 				border: 1px solid var(--border-strong);
 				border-radius: 4px;
 				padding: 9px 12px;
-				max-width: 240px;
+				max-width: 290px;
 				pointer-events: none;
 				z-index: 100;
 				opacity: 0;
@@ -205,6 +205,9 @@ templ graphPage(view GraphView) {
 			}
 			.tt-title { font-size: 10px; color: var(--text); line-height: 1.45; margin-bottom: 5px; }
 			.tt-meta { font-size: 8px; color: var(--text-2); letter-spacing: 0.06em; }
+			.tt-conn { font-size: 8.5px; color: var(--text); letter-spacing: 0.03em; line-height: 1.85; margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--border); }
+			.tt-conn-label { display: block; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.16em; font-size: 7px; margin-bottom: 3px; }
+			.tt-conn b { font-weight: 700; }
 
 			/* ── Empty / loading ── */
 			.graph-empty {
@@ -439,9 +442,10 @@ templ graphPage(view GraphView) {
 
 					function radius(d) { return Math.min(20, 3.5 + Math.sqrt(d.degree) * 2.3); }
 
-					// Adjacency for hover highlighting.
+					// Adjacency + id lookup for hover highlighting and the tooltip.
 					var adj = {};
-					nodes.forEach(function (n) { adj[n.id] = new Set(); });
+					var nodeById = {};
+					nodes.forEach(function (n) { adj[n.id] = new Set(); nodeById[n.id] = n; });
 					links.forEach(function (l) {
 						var s = l.source, t = l.target;
 						if (adj[s]) adj[s].add(t);
@@ -523,12 +527,14 @@ templ graphPage(view GraphView) {
 							});
 							ctx.stroke();
 						}
-						drawBase(true, 'rgba(120,150,180,0.11)');  // intra-project: cluster fabric (grey)
-						drawBase(false, 'rgba(34,211,238,0.16)');  // cross-project: bridges (cyan, on top)
+						// While focusing a node, fade the whole fabric so its own links pop.
+						var fab = hi ? 0.25 : 1;
+						drawBase(true, 'rgba(120,150,180,' + (0.11 * fab) + ')');  // intra-project fabric (grey)
+						drawBase(false, 'rgba(34,211,238,' + (0.16 * fab) + ')');  // cross-project bridges (cyan)
 
 						if (hi) {
-							ctx.lineWidth = 1.4 / transform.k;
-							ctx.strokeStyle = 'rgba(34,211,238,0.7)';
+							ctx.lineWidth = 2.2 / transform.k;
+							ctx.strokeStyle = 'rgba(34,211,238,0.92)';
 							ctx.beginPath();
 							links.forEach(function (l) {
 								var s = l.source.id, t = l.target.id;
@@ -539,25 +545,45 @@ templ graphPage(view GraphView) {
 							ctx.stroke();
 						}
 
-						// Nodes
+						// Nodes — when focusing a node, everything unrelated fades to faint
+						// grey so the hovered node and its connections stand out clearly.
 						nodes.forEach(function (d) {
 							var r = radius(d);
 							var lit = isLit(d.id);
-							ctx.globalAlpha = lit ? 1 : 0.12;
+							if (hi && !lit) {
+								ctx.globalAlpha = 0.06;
+								ctx.beginPath();
+								ctx.arc(d.x, d.y, r, 0, Math.PI * 2);
+								ctx.fillStyle = '#5a6b80';
+								ctx.fill();
+								return;
+							}
+							var col = projColor(d.project);
+							var isHi = hi && d.id === hi.id;
+							// Glow halo behind the focused node.
+							if (isHi) {
+								ctx.globalAlpha = 0.2;
+								ctx.beginPath();
+								ctx.arc(d.x, d.y, r + 7 / transform.k, 0, Math.PI * 2);
+								ctx.fillStyle = col;
+								ctx.fill();
+							}
+							// Soft fill + ring + bright core.
+							ctx.globalAlpha = 0.22;
 							ctx.beginPath();
 							ctx.arc(d.x, d.y, r, 0, Math.PI * 2);
-							ctx.fillStyle = projColor(d.project);
-							ctx.globalAlpha = lit ? 0.22 : 0.05;
+							ctx.fillStyle = col;
 							ctx.fill();
-							ctx.globalAlpha = lit ? 1 : 0.12;
-							ctx.lineWidth = (d.degree >= 4 ? 1.5 : 1) / transform.k;
-							ctx.strokeStyle = projColor(d.project);
-							ctx.stroke();
-							// bright core
+							ctx.globalAlpha = 1;
+							ctx.lineWidth = (isHi ? 2 : (d.degree >= 4 ? 1.5 : 1)) / transform.k;
+							ctx.strokeStyle = isHi ? '#ffffff' : col;
 							ctx.beginPath();
-							ctx.arc(d.x, d.y, Math.max(1.4, r * 0.32), 0, Math.PI * 2);
-							ctx.globalAlpha = lit ? 0.92 : 0.1;
-							ctx.fillStyle = projColor(d.project);
+							ctx.arc(d.x, d.y, r, 0, Math.PI * 2);
+							ctx.stroke();
+							ctx.beginPath();
+							ctx.arc(d.x, d.y, Math.max(1.4, r * (isHi ? 0.5 : 0.32)), 0, Math.PI * 2);
+							ctx.globalAlpha = isHi ? 1 : 0.92;
+							ctx.fillStyle = isHi ? '#ffffff' : col;
 							ctx.fill();
 						});
 						ctx.globalAlpha = 1;
@@ -629,16 +655,17 @@ templ graphPage(view GraphView) {
 					var ttProject = document.getElementById('tt-project');
 					var ttTitle = document.getElementById('tt-title');
 					var ttMeta = document.getElementById('tt-meta');
+					var ttConn = document.getElementById('tt-conn');
 					var downX = null, downY = null, moved = false;
 
 					function pick(ev) {
 						if (!qt) return null;
 						var rect = canvas.getBoundingClientRect();
 						var p = transform.invert([ev.clientX - rect.left, ev.clientY - rect.top]);
-						var found = qt.find(p[0], p[1], 44 / transform.k);
+						var found = qt.find(p[0], p[1], 60 / transform.k);
 						if (!found) return null;
 						var dx = found.x - p[0], dy = found.y - p[1];
-						return Math.sqrt(dx * dx + dy * dy) <= radius(found) + 6 / transform.k ? found : null;
+						return Math.sqrt(dx * dx + dy * dy) <= radius(found) + 14 / transform.k ? found : null;
 					}
 
 					canvas.addEventListener('mousedown', function (ev) { downX = ev.clientX; downY = ev.clientY; moved = false; canvas.classList.add('dragging'); });
@@ -651,7 +678,19 @@ templ graphPage(view GraphView) {
 							ttProject.textContent = hit.project + ' · ' + hit.type;
 							ttProject.style.color = projColor(hit.project);
 							ttTitle.textContent = hit.title;
-							ttMeta.textContent = hit.degree + (hit.degree === 1 ? ' link' : ' links') + ' · mem #' + hit.id;
+							ttMeta.textContent = hit.degree + (hit.degree === 1 ? ' connection' : ' connections') + ' · mem #' + hit.id;
+							// "Connects to" — group this node's neighbours by project so you
+							// can see at a glance which projects the memory bridges into.
+							var pc = {};
+							(adj[hit.id] ? Array.from(adj[hit.id]) : []).forEach(function (nid) {
+								var n = nodeById[nid]; if (n) pc[n.project] = (pc[n.project] || 0) + 1;
+							});
+							var pl = Object.keys(pc).sort(function (a, b) { return pc[b] - pc[a]; });
+							ttConn.innerHTML = pl.length
+								? '<span class="tt-conn-label">Connects to</span> ' + pl.slice(0, 6).map(function (p) {
+										return '<b style="color:' + projColor(p) + '">' + p + '</b>&#8202;' + pc[p];
+									}).join('   ')
+								: '<span class="tt-conn-label">No links at this threshold</span>';
 							tooltip.classList.add('visible');
 							var tw = tooltip.offsetWidth, tx = ev.clientX + 15, ty = ev.clientY - 10;
 							if (tx + tw > window.innerWidth - 10) tx = ev.clientX - tw - 15;
@@ -733,6 +772,7 @@ templ graphPage(view GraphView) {
 				<div class="tt-project" id="tt-project"></div>
 				<div class="tt-title" id="tt-title"></div>
 				<div class="tt-meta" id="tt-meta"></div>
+					<div class="tt-conn" id="tt-conn"></div>
 			</div>
 		}
 	}
