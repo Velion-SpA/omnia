@@ -364,7 +364,7 @@ templ graphPage(view GraphView) {
 				function whenReady(cb) {
 					var area = document.getElementById('graph-area');
 					if (!area || area.dataset.omniaInit === '1') return;
-					if (!window.d3) { setTimeout(function () { whenReady(cb); }, 30); return; }
+					var tip = document.getElementById('graph-tooltip'); if (!window.d3 || !tip) { setTimeout(function () { whenReady(cb); }, 30); return; }
 					area.dataset.omniaInit = '1';
 					cb();
 				}
