@@ -8,8 +8,14 @@ package dashboard
 import "github.com/a-h/templ"
 import templruntime "github.com/a-h/templ/runtime"
 
-// graphPage renders the knowledge graph placeholder.
-func graphPage() templ.Component {
+import "fmt"
+
+// graphPage renders the semantic knowledge graph. Edges are REAL cosine
+// similarities between memories from Omnia's own embeddings store — never
+// synthesized. Rendering is canvas-based D3 force layout for smoothness at
+// ~1k nodes. When the embeddings layer is unavailable it renders a clear
+// disabled state instead of faking data.
+func graphPage(view GraphView) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -42,9 +48,201 @@ func graphPage() templ.Component {
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div style=\"display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 60vh; text-align: center; gap: 16px;\"><svg width=\"64\" height=\"64\" viewBox=\"0 0 36 36\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\" style=\"opacity: 0.35;\"><circle cx=\"18\" cy=\"18\" r=\"16.5\" stroke=\"rgba(34,211,238,0.4)\" stroke-width=\"1\"></circle> <circle cx=\"18\" cy=\"18\" r=\"11.5\" stroke=\"rgba(34,211,238,0.25)\" stroke-width=\"0.75\" stroke-dasharray=\"3 2.5\"></circle> <circle cx=\"18\" cy=\"18\" r=\"5\" fill=\"rgba(34,211,238,0.4)\"></circle></svg><div style=\"font-family: var(--display); font-weight: 800; font-size: 28px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text);\">Knowledge Graph</div><div style=\"font-size: 11px; color: var(--text-2); letter-spacing: 0.08em; max-width: 320px; line-height: 1.6;\">Interactive memory graph coming soon — visualize connections across your knowledge base.</div><a href=\"/\" class=\"nav-link\" style=\"margin-top: 8px;\">← Back to Overview</a></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<style>\n\t\t\t.graph-shell { display: flex; flex-direction: column; gap: 14px; }\n\n\t\t\t/* ── Controls bar ── */\n\t\t\t.graph-controls {\n\t\t\t\tdisplay: flex;\n\t\t\t\talign-items: flex-end;\n\t\t\t\tgap: 18px;\n\t\t\t\tflex-wrap: wrap;\n\t\t\t\tbackground: var(--surface);\n\t\t\t\tborder: 1px solid var(--border);\n\t\t\t\tborder-radius: var(--radius);\n\t\t\t\tpadding: 14px 18px;\n\t\t\t}\n\t\t\t.gc-group { display: flex; flex-direction: column; gap: 6px; }\n\t\t\t.gc-label {\n\t\t\t\tfont-family: var(--mono);\n\t\t\t\tfont-size: 8.5px;\n\t\t\t\tfont-weight: 600;\n\t\t\t\tletter-spacing: 0.2em;\n\t\t\t\ttext-transform: uppercase;\n\t\t\t\tcolor: var(--text-2);\n\t\t\t}\n\t\t\t.gc-select { min-width: 190px; }\n\t\t\t.gc-num { width: 92px; font-variant-numeric: tabular-nums; }\n\t\t\t.gc-apply {\n\t\t\t\tfont-family: var(--mono);\n\t\t\t\tfont-size: 10px;\n\t\t\t\tfont-weight: 600;\n\t\t\t\tletter-spacing: 0.14em;\n\t\t\t\ttext-transform: uppercase;\n\t\t\t\tcolor: var(--accent);\n\t\t\t\tbackground: var(--accent-dim);\n\t\t\t\tborder: 1px solid var(--border-accent);\n\t\t\t\tborder-radius: 4px;\n\t\t\t\tpadding: 7px 16px;\n\t\t\t\tcursor: pointer;\n\t\t\t\ttransition: background 0.15s, border-color 0.15s;\n\t\t\t}\n\t\t\t.gc-apply:hover { background: rgba(34,211,238,0.15); border-color: rgba(34,211,238,0.4); }\n\t\t\t.gc-hint {\n\t\t\t\tfont-size: 8.5px;\n\t\t\t\tcolor: var(--text-3);\n\t\t\t\tletter-spacing: 0.06em;\n\t\t\t\tmargin-left: auto;\n\t\t\t\tmax-width: 280px;\n\t\t\t\tline-height: 1.5;\n\t\t\t\talign-self: center;\n\t\t\t}\n\n\t\t\t/* ── Graph area ── */\n\t\t\t.graph-area {\n\t\t\t\tposition: relative;\n\t\t\t\theight: calc(100vh - 268px);\n\t\t\t\tmin-height: 520px;\n\t\t\t\tborder: 1px solid var(--border);\n\t\t\t\tborder-radius: var(--radius);\n\t\t\t\tbackground:\n\t\t\t\t\tradial-gradient(ellipse 60% 50% at 50% 42%, rgba(34,211,238,0.035) 0%, transparent 70%),\n\t\t\t\t\tvar(--surface);\n\t\t\t\toverflow: hidden;\n\t\t\t}\n\t\t\t#graph-canvas { display: block; width: 100%; height: 100%; cursor: grab; }\n\t\t\t#graph-canvas.dragging { cursor: grabbing; }\n\n\t\t\t/* ── Stats / legend overlay ── */\n\t\t\t.graph-overlay {\n\t\t\t\tposition: absolute;\n\t\t\t\tbottom: 16px;\n\t\t\t\tleft: 16px;\n\t\t\t\twidth: 224px;\n\t\t\t\tbackground: rgba(13,16,23,0.86);\n\t\t\t\tbackdrop-filter: blur(16px) saturate(160%);\n\t\t\t\t-webkit-backdrop-filter: blur(16px) saturate(160%);\n\t\t\t\tborder: 1px solid var(--border);\n\t\t\t\tborder-radius: 5px;\n\t\t\t\tpadding: 15px 17px;\n\t\t\t\tz-index: 10;\n\t\t\t\tpointer-events: none;\n\t\t\t}\n\t\t\t.graph-overlay::before {\n\t\t\t\tcontent: '';\n\t\t\t\tposition: absolute;\n\t\t\t\ttop: 0; left: 0; right: 0;\n\t\t\t\theight: 1px;\n\t\t\t\tbackground: linear-gradient(90deg, var(--accent) 0%, rgba(34,211,238,0.2) 40%, transparent 70%);\n\t\t\t\topacity: 0.5;\n\t\t\t}\n\t\t\t.ov-eyebrow {\n\t\t\t\tfont-size: 8px;\n\t\t\t\tfont-weight: 600;\n\t\t\t\tletter-spacing: 0.26em;\n\t\t\t\tcolor: var(--text-2);\n\t\t\t\ttext-transform: uppercase;\n\t\t\t\tmargin-bottom: 11px;\n\t\t\t}\n\t\t\t.ov-counts { display: flex; gap: 14px; margin-bottom: 13px; }\n\t\t\t.ov-c { display: flex; flex-direction: column; gap: 2px; }\n\t\t\t.ov-c-v {\n\t\t\t\tfont-family: var(--display);\n\t\t\t\tfont-weight: 900;\n\t\t\t\tfont-size: 22px;\n\t\t\t\tcolor: var(--text);\n\t\t\t\tline-height: 1;\n\t\t\t\tfont-variant-numeric: tabular-nums;\n\t\t\t}\n\t\t\t.ov-c-l {\n\t\t\t\tfont-size: 7.5px;\n\t\t\t\tcolor: var(--text-2);\n\t\t\t\tletter-spacing: 0.12em;\n\t\t\t\ttext-transform: uppercase;\n\t\t\t}\n\t\t\t.ov-divider { height: 1px; background: var(--border); margin: 11px 0; }\n\t\t\t#graph-legend { display: flex; flex-direction: column; gap: 6px; }\n\t\t\t.lg-item { display: flex; align-items: center; gap: 8px; }\n\t\t\t.lg-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }\n\t\t\t.lg-name {\n\t\t\t\tfont-size: 9px;\n\t\t\t\tfont-weight: 500;\n\t\t\t\tletter-spacing: 0.08em;\n\t\t\t\tcolor: var(--silver);\n\t\t\t\tflex: 1;\n\t\t\t\twhite-space: nowrap;\n\t\t\t\toverflow: hidden;\n\t\t\t\ttext-overflow: ellipsis;\n\t\t\t}\n\t\t\t.lg-count {\n\t\t\t\tfont-size: 9px;\n\t\t\t\tfont-weight: 600;\n\t\t\t\tcolor: var(--text-2);\n\t\t\t\tfont-variant-numeric: tabular-nums;\n\t\t\t}\n\t\t\t.lg-more { font-size: 8px; color: var(--text-3); letter-spacing: 0.06em; padding-top: 2px; }\n\t\t\t.ov-note {\n\t\t\t\tfont-size: 7.5px;\n\t\t\t\tcolor: var(--text-3);\n\t\t\t\tletter-spacing: 0.05em;\n\t\t\t\tline-height: 1.55;\n\t\t\t\tmargin-top: 11px;\n\t\t\t}\n\t\t\t.ov-note strong { color: var(--text-2); font-weight: 600; }\n\n\t\t\t/* ── Toolbar ── */\n\t\t\t.graph-toolbar {\n\t\t\t\tposition: absolute;\n\t\t\t\ttop: 14px;\n\t\t\t\tright: 14px;\n\t\t\t\tdisplay: flex;\n\t\t\t\tflex-direction: column;\n\t\t\t\tgap: 5px;\n\t\t\t\tz-index: 15;\n\t\t\t}\n\t\t\t.tb-btn {\n\t\t\t\twidth: 30px;\n\t\t\t\theight: 30px;\n\t\t\t\tbackground: rgba(13,16,23,0.86);\n\t\t\t\tbackdrop-filter: blur(12px);\n\t\t\t\t-webkit-backdrop-filter: blur(12px);\n\t\t\t\tborder: 1px solid var(--border);\n\t\t\t\tborder-radius: 4px;\n\t\t\t\tcolor: var(--text-2);\n\t\t\t\tcursor: pointer;\n\t\t\t\tdisplay: flex;\n\t\t\t\talign-items: center;\n\t\t\t\tjustify-content: center;\n\t\t\t\ttransition: all 0.15s;\n\t\t\t}\n\t\t\t.tb-btn:hover { background: var(--surface-2); color: var(--text); border-color: var(--border-strong); }\n\t\t\t.tb-btn.active { color: var(--accent); border-color: var(--border-accent); background: var(--accent-dim); }\n\n\t\t\t/* ── Tooltip ── */\n\t\t\t#graph-tooltip {\n\t\t\t\tposition: fixed;\n\t\t\t\tbackground: rgba(10,13,20,0.96);\n\t\t\t\tbackdrop-filter: blur(12px);\n\t\t\t\t-webkit-backdrop-filter: blur(12px);\n\t\t\t\tborder: 1px solid var(--border-strong);\n\t\t\t\tborder-radius: 4px;\n\t\t\t\tpadding: 9px 12px;\n\t\t\t\tmax-width: 240px;\n\t\t\t\tpointer-events: none;\n\t\t\t\tz-index: 100;\n\t\t\t\topacity: 0;\n\t\t\t\ttransform: translateY(4px);\n\t\t\t\ttransition: opacity 0.12s, transform 0.12s;\n\t\t\t}\n\t\t\t#graph-tooltip.visible { opacity: 1; transform: translateY(0); }\n\t\t\t.tt-project {\n\t\t\t\tfont-size: 7.5px;\n\t\t\t\tfont-weight: 600;\n\t\t\t\tletter-spacing: 0.2em;\n\t\t\t\ttext-transform: uppercase;\n\t\t\t\tmargin-bottom: 4px;\n\t\t\t}\n\t\t\t.tt-title { font-size: 10px; color: var(--text); line-height: 1.45; margin-bottom: 5px; }\n\t\t\t.tt-meta { font-size: 8px; color: var(--text-2); letter-spacing: 0.06em; }\n\n\t\t\t/* ── Empty / loading ── */\n\t\t\t.graph-empty {\n\t\t\t\tposition: absolute;\n\t\t\t\tinset: 0;\n\t\t\t\tdisplay: flex;\n\t\t\t\tflex-direction: column;\n\t\t\t\talign-items: center;\n\t\t\t\tjustify-content: center;\n\t\t\t\tgap: 10px;\n\t\t\t\ttext-align: center;\n\t\t\t\tcolor: var(--text-2);\n\t\t\t\tz-index: 5;\n\t\t\t}\n\t\t\t/* `hidden` must win over the display:flex above. The [hidden] UA\n\t\t\t   rule (display:none) loses to any author display rule, so the\n\t\t\t   empty state would otherwise show even when nodes exist. */\n\t\t\t.graph-empty[hidden] { display: none; }\n\t\t\t.graph-empty .ge-title {\n\t\t\t\tfont-family: var(--display);\n\t\t\t\tfont-weight: 800;\n\t\t\t\tfont-size: 20px;\n\t\t\t\tletter-spacing: 0.06em;\n\t\t\t\ttext-transform: uppercase;\n\t\t\t\tcolor: var(--text);\n\t\t\t}\n\t\t\t.graph-empty .ge-sub { font-size: 10px; max-width: 360px; line-height: 1.6; letter-spacing: 0.04em; }\n\n\t\t\t/* ── Unavailable state ── */\n\t\t\t.graph-unavailable {\n\t\t\t\tdisplay: flex;\n\t\t\t\tflex-direction: column;\n\t\t\t\talign-items: center;\n\t\t\t\tjustify-content: center;\n\t\t\t\tgap: 16px;\n\t\t\t\ttext-align: center;\n\t\t\t\tmin-height: 58vh;\n\t\t\t}\n\t\t\t.graph-unavailable .gu-title {\n\t\t\t\tfont-family: var(--display);\n\t\t\t\tfont-weight: 800;\n\t\t\t\tfont-size: 26px;\n\t\t\t\tletter-spacing: 0.08em;\n\t\t\t\ttext-transform: uppercase;\n\t\t\t\tcolor: var(--text);\n\t\t\t}\n\t\t\t.graph-unavailable .gu-sub { font-size: 11px; color: var(--text-2); max-width: 400px; line-height: 1.7; letter-spacing: 0.04em; }\n\t\t\t.graph-unavailable code {\n\t\t\t\tfont-family: var(--mono);\n\t\t\t\tbackground: var(--surface-2);\n\t\t\t\tcolor: var(--calypso);\n\t\t\t\tpadding: 0.15em 0.45em;\n\t\t\t\tborder-radius: 0.3em;\n\t\t\t\tborder: 1px solid var(--border);\n\t\t\t\tfont-size: 0.92em;\n\t\t\t}\n\t\t</style> ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
+			}
+			if !view.Available {
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "<div class=\"graph-unavailable\"><svg width=\"60\" height=\"60\" viewBox=\"0 0 36 36\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\" style=\"opacity: 0.3;\"><circle cx=\"18\" cy=\"18\" r=\"16.5\" stroke=\"rgba(34,211,238,0.4)\" stroke-width=\"1\"></circle> <circle cx=\"18\" cy=\"18\" r=\"11.5\" stroke=\"rgba(34,211,238,0.25)\" stroke-width=\"0.75\" stroke-dasharray=\"3 2.5\"></circle> <circle cx=\"18\" cy=\"18\" r=\"5\" fill=\"rgba(34,211,238,0.4)\"></circle></svg><div class=\"gu-title\">Semantic Graph Unavailable</div><div class=\"gu-sub\">This view is built from REAL semantic similarity between memories, which requires Omnia's local embeddings layer. Enable <code>embeddings</code> in your config and run <code>omnia embed</code> to populate the vector store, then reload this page.</div><a href=\"/\" class=\"nav-link\" style=\"margin-top: 8px;\">← Back to Overview</a></div>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+			} else {
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<div class=\"graph-shell\"><!-- Controls: project scope + kNN tuning. Submits GET /graph. --><form method=\"GET\" action=\"/graph\" class=\"graph-controls\"><div class=\"gc-group\"><label class=\"gc-label\" for=\"g-project\">Project</label> <select id=\"g-project\" name=\"project\" class=\"gc-select\" onchange=\"this.form.submit()\" aria-label=\"Scope graph to project\"><option value=\"\">All projects</option> ")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				for _, p := range view.Projects {
+					if p == view.Project {
+						templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<option value=\"")
+						if templ_7745c5c3_Err != nil {
+							return templ_7745c5c3_Err
+						}
+						var templ_7745c5c3_Var3 string
+						templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.ResolveAttributeValue(p)
+						if templ_7745c5c3_Err != nil {
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/graph.templ`, Line: 291, Col: 26}
+						}
+						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var3)
+						if templ_7745c5c3_Err != nil {
+							return templ_7745c5c3_Err
+						}
+						templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "\" selected>")
+						if templ_7745c5c3_Err != nil {
+							return templ_7745c5c3_Err
+						}
+						var templ_7745c5c3_Var4 string
+						templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(p)
+						if templ_7745c5c3_Err != nil {
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/graph.templ`, Line: 291, Col: 41}
+						}
+						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
+						if templ_7745c5c3_Err != nil {
+							return templ_7745c5c3_Err
+						}
+						templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "</option>")
+						if templ_7745c5c3_Err != nil {
+							return templ_7745c5c3_Err
+						}
+					} else {
+						templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "<option value=\"")
+						if templ_7745c5c3_Err != nil {
+							return templ_7745c5c3_Err
+						}
+						var templ_7745c5c3_Var5 string
+						templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.ResolveAttributeValue(p)
+						if templ_7745c5c3_Err != nil {
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/graph.templ`, Line: 293, Col: 26}
+						}
+						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var5)
+						if templ_7745c5c3_Err != nil {
+							return templ_7745c5c3_Err
+						}
+						templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "\">")
+						if templ_7745c5c3_Err != nil {
+							return templ_7745c5c3_Err
+						}
+						var templ_7745c5c3_Var6 string
+						templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(p)
+						if templ_7745c5c3_Err != nil {
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/graph.templ`, Line: 293, Col: 32}
+						}
+						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
+						if templ_7745c5c3_Err != nil {
+							return templ_7745c5c3_Err
+						}
+						templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</option>")
+						if templ_7745c5c3_Err != nil {
+							return templ_7745c5c3_Err
+						}
+					}
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "</select></div><div class=\"gc-group\"><label class=\"gc-label\" for=\"g-k\">Neighbors (k)</label> <input id=\"g-k\" name=\"k\" type=\"number\" min=\"1\" max=\"24\" value=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var7 string
+				templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.ResolveAttributeValue(fmt.Sprintf("%d", view.K))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/graph.templ`, Line: 300, Col: 95}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var7)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "\" class=\"gc-num\"></div><div class=\"gc-group\"><label class=\"gc-label\" for=\"g-min\">Min similarity</label> <input id=\"g-min\" name=\"min\" type=\"number\" min=\"0\" max=\"0.99\" step=\"0.01\" value=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var8 string
+				templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.ResolveAttributeValue(fmt.Sprintf("%.2f", view.Min))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/graph.templ`, Line: 304, Col: 117}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var8)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "\" class=\"gc-num\"></div><button type=\"submit\" class=\"gc-apply\">Apply</button> <span class=\"gc-hint\">Lower the threshold or raise k for a denser graph; raise the threshold for tighter, higher-confidence clusters.</span></form><!-- Canvas + overlays --><div class=\"graph-area\" id=\"graph-area\"><canvas id=\"graph-canvas\"></canvas><div class=\"graph-overlay\"><div class=\"ov-eyebrow\">Knowledge Graph</div><div class=\"ov-counts\"><div class=\"ov-c\"><div class=\"ov-c-v\">")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var9 string
+				templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d", view.Connected))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/graph.templ`, Line: 316, Col: 63}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "</div><div class=\"ov-c-l\">connected</div></div><div class=\"ov-c\"><div class=\"ov-c-v\">")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var10 string
+				templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d", view.EdgeCount))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/graph.templ`, Line: 320, Col: 63}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var10))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "</div><div class=\"ov-c-l\">links</div></div><div class=\"ov-c\"><div class=\"ov-c-v\">")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var11 string
+				templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d", view.Total))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/graph.templ`, Line: 324, Col: 59}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "</div><div class=\"ov-c-l\">memories</div></div></div><div class=\"ov-divider\"></div><div id=\"graph-legend\"></div><div class=\"ov-note\">Edges = cosine similarity ≥ <strong>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var12 string
+				templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%.2f", view.Min))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/graph.templ`, Line: 331, Col: 76}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "</strong> from local embeddings · top-")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var13 string
+				templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d", view.K))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/graph.templ`, Line: 331, Col: 144}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, " neighbors. <strong>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var14 string
+				templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d", view.Total-view.Connected))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/graph.templ`, Line: 331, Col: 212}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var14))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "</strong> memories have no link at this threshold.</div></div><div class=\"graph-toolbar\"><button class=\"tb-btn\" id=\"g-fit\" title=\"Reset / fit view\" type=\"button\" aria-label=\"Fit view\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 13 13\" fill=\"none\"><rect x=\"1\" y=\"1\" width=\"4\" height=\"4\" rx=\"0.5\" stroke=\"currentColor\" stroke-width=\"1.2\"></rect> <rect x=\"8\" y=\"1\" width=\"4\" height=\"4\" rx=\"0.5\" stroke=\"currentColor\" stroke-width=\"1.2\"></rect> <rect x=\"1\" y=\"8\" width=\"4\" height=\"4\" rx=\"0.5\" stroke=\"currentColor\" stroke-width=\"1.2\"></rect> <rect x=\"8\" y=\"8\" width=\"4\" height=\"4\" rx=\"0.5\" stroke=\"currentColor\" stroke-width=\"1.2\"></rect></svg></button> <button class=\"tb-btn active\" id=\"g-labels\" title=\"Toggle hub labels\" type=\"button\" aria-label=\"Toggle labels\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 13 13\" fill=\"none\"><path d=\"M2 4h9M2 6.5h6M2 9h7.5\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linecap=\"round\"></path></svg></button></div><div class=\"graph-empty\" id=\"graph-empty\" hidden><div class=\"ge-title\">No semantic links</div><div class=\"ge-sub\">No pair of memories meets the current similarity threshold in this scope. Lower the <em>Min similarity</em> or widen the project filter, then Apply.</div></div></div></div>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templ.JSONScript("graph-data", view.Payload).Render(ctx, templ_7745c5c3_Buffer)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 19, " <script src=\"https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js\"></script> <script>\n\t\t\t(function () {\n\t\t\t\t// Resilient init: works on full page load AND on htmx hx-boost swaps,\n\t\t\t\t// where D3 (injected in body) may still be loading when this runs.\n\t\t\t\tfunction whenReady(cb) {\n\t\t\t\t\tvar area = document.getElementById('graph-area');\n\t\t\t\t\tif (!area || area.dataset.omniaInit === '1') return;\n\t\t\t\t\tif (!window.d3) { setTimeout(function () { whenReady(cb); }, 30); return; }\n\t\t\t\t\tarea.dataset.omniaInit = '1';\n\t\t\t\t\tcb();\n\t\t\t\t}\n\t\t\t\twhenReady(initGraph);\n\n\t\t\t\tfunction initGraph() {\n\t\t\t\t\tvar dataEl = document.getElementById('graph-data');\n\t\t\t\t\tvar data = { nodes: [], edges: [] };\n\t\t\t\t\ttry { data = JSON.parse(dataEl.textContent); } catch (e) {}\n\t\t\t\t\tvar nodes = (data.nodes || []).map(function (d) { return Object.assign({}, d); });\n\t\t\t\t\tvar links = (data.edges || []).map(function (d) { return { source: d.source, target: d.target, weight: d.weight }; });\n\n\t\t\t\t\tvar area = document.getElementById('graph-area');\n\t\t\t\t\tvar canvas = document.getElementById('graph-canvas');\n\t\t\t\t\tvar emptyEl = document.getElementById('graph-empty');\n\n\t\t\t\t\tif (!nodes.length) { if (emptyEl) emptyEl.hidden = false; return; }\n\n\t\t\t\t\tvar ctx = canvas.getContext('2d');\n\t\t\t\t\tvar W = area.clientWidth, H = area.clientHeight, DPR = window.devicePixelRatio || 1;\n\n\t\t\t\t\tfunction sizeCanvas() {\n\t\t\t\t\t\tW = area.clientWidth; H = area.clientHeight; DPR = window.devicePixelRatio || 1;\n\t\t\t\t\t\tcanvas.width = Math.round(W * DPR);\n\t\t\t\t\t\tcanvas.height = Math.round(H * DPR);\n\t\t\t\t\t\tcanvas.style.width = W + 'px';\n\t\t\t\t\t\tcanvas.style.height = H + 'px';\n\t\t\t\t\t\tctx.setTransform(DPR, 0, 0, DPR, 0, 0);\n\t\t\t\t\t}\n\t\t\t\t\tsizeCanvas();\n\n\t\t\t\t\t// ── Palette (cohesive command-center hues, calypso family + accents) ──\n\t\t\t\t\tvar PALETTE = ['#22d3ee', '#818cf8', '#34d399', '#f472b6', '#fbbf24',\n\t\t\t\t\t\t'#38bdf8', '#a78bfa', '#fb7185', '#2dd4bf', '#60a5fa', '#c084fc', '#94a3b8'];\n\t\t\t\t\tvar DEFAULT_COLOR = '#8a9ab5';\n\n\t\t\t\t\t// Project node counts → deterministic color assignment (biggest first).\n\t\t\t\t\tvar counts = {};\n\t\t\t\t\tnodes.forEach(function (n) { counts[n.project] = (counts[n.project] || 0) + 1; });\n\t\t\t\t\tvar projects = Object.keys(counts).sort(function (a, b) {\n\t\t\t\t\t\tif (counts[b] !== counts[a]) return counts[b] - counts[a];\n\t\t\t\t\t\treturn a < b ? -1 : 1;\n\t\t\t\t\t});\n\t\t\t\t\tvar colorOf = {};\n\t\t\t\t\tprojects.forEach(function (p, i) { colorOf[p] = i < PALETTE.length ? PALETTE[i] : DEFAULT_COLOR; });\n\t\t\t\t\tfunction projColor(p) { return colorOf[p] || DEFAULT_COLOR; }\n\n\t\t\t\t\t// ── Cluster anchors: one per present project, on a ring around centre.\n\t\t\t\t\t// Pulling each node toward its project anchor yields readable, Obsidian-\n\t\t\t\t\t// style communities while keeping the whole graph compact and centred.\n\t\t\t\t\tvar anchors = {};\n\t\t\t\t\tfunction computeAnchors() {\n\t\t\t\t\t\tvar cx = W / 2, cy = H / 2;\n\t\t\t\t\t\tvar R = Math.min(W, H) * 0.30;\n\t\t\t\t\t\tvar P = projects.length;\n\t\t\t\t\t\tprojects.forEach(function (p, i) {\n\t\t\t\t\t\t\tif (P === 1) { anchors[p] = { x: cx, y: cy }; return; }\n\t\t\t\t\t\t\tvar a = (i / P) * Math.PI * 2 - Math.PI / 2;\n\t\t\t\t\t\t\tanchors[p] = { x: cx + Math.cos(a) * R, y: cy + Math.sin(a) * R };\n\t\t\t\t\t\t});\n\t\t\t\t\t}\n\t\t\t\t\tcomputeAnchors();\n\n\t\t\t\t\tfunction radius(d) { return Math.min(20, 3.5 + Math.sqrt(d.degree) * 2.3); }\n\n\t\t\t\t\t// Adjacency for hover highlighting.\n\t\t\t\t\tvar adj = {};\n\t\t\t\t\tnodes.forEach(function (n) { adj[n.id] = new Set(); });\n\t\t\t\t\tlinks.forEach(function (l) {\n\t\t\t\t\t\tvar s = l.source, t = l.target;\n\t\t\t\t\t\tif (adj[s]) adj[s].add(t);\n\t\t\t\t\t\tif (adj[t]) adj[t].add(s);\n\t\t\t\t\t});\n\n\t\t\t\t\t// Hub labels: top-degree nodes get a persistent label.\n\t\t\t\t\tvar byDeg = nodes.slice().sort(function (a, b) { return b.degree - a.degree; });\n\t\t\t\t\tvar labelCut = byDeg.length ? Math.max(3, byDeg[Math.min(byDeg.length - 1, 25)].degree) : 3;\n\t\t\t\t\tvar labelIds = new Set(byDeg.filter(function (d) { return d.degree >= labelCut; }).slice(0, 30).map(function (d) { return d.id; }));\n\n\t\t\t\t\t// Seed near anchors for fast convergence.\n\t\t\t\t\tnodes.forEach(function (n) {\n\t\t\t\t\t\tvar a = anchors[n.project] || { x: W / 2, y: H / 2 };\n\t\t\t\t\t\tn.x = a.x + (Math.random() - 0.5) * 90;\n\t\t\t\t\t\tn.y = a.y + (Math.random() - 0.5) * 90;\n\t\t\t\t\t});\n\n\t\t\t\t\t// ── Force simulation: strong links, moderate+capped charge, collision,\n\t\t\t\t\t// and per-project anchoring. Tuned for a readable cluster, not a hairball.\n\t\t\t\t\tvar sim = d3.forceSimulation(nodes)\n\t\t\t\t\t\t.force('link', d3.forceLink(links).id(function (d) { return d.id; })\n\t\t\t\t\t\t\t.distance(function (l) { return 18 + (1 - l.weight) * 64; })\n\t\t\t\t\t\t\t.strength(function (l) { return 0.15 + l.weight * 0.45; }))\n\t\t\t\t\t\t.force('charge', d3.forceManyBody()\n\t\t\t\t\t\t\t.strength(function (d) { return -(16 + Math.min(d.degree, 14) * 2.4); })\n\t\t\t\t\t\t\t.distanceMax(320))\n\t\t\t\t\t\t.force('collide', d3.forceCollide(function (d) { return radius(d) + 2.5; }).strength(0.9).iterations(2))\n\t\t\t\t\t\t.force('x', d3.forceX(function (d) { return (anchors[d.project] || {}).x || W / 2; }).strength(0.07))\n\t\t\t\t\t\t.force('y', d3.forceY(function (d) { return (anchors[d.project] || {}).y || H / 2; }).strength(0.07))\n\t\t\t\t\t\t.velocityDecay(0.4)\n\t\t\t\t\t\t.alphaDecay(0.0228);\n\n\t\t\t\t\t// ── View transform + interaction state ──\n\t\t\t\t\tvar transform = d3.zoomIdentity;\n\t\t\t\t\tvar hovered = null;\n\t\t\t\t\tvar labelsOn = true;\n\t\t\t\t\tvar qt = null;\n\n\t\t\t\t\tvar zoom = d3.zoom().scaleExtent([0.1, 8]).on('zoom', function (ev) { transform = ev.transform; draw(); });\n\t\t\t\t\td3.select(canvas).call(zoom).on('dblclick.zoom', null);\n\n\t\t\t\t\tsim.on('tick', draw);\n\t\t\t\t\t// Auto-fit once the layout has cooled.\n\t\t\t\t\tvar fitted = false;\n\t\t\t\t\tsim.on('tick.fit', function () { if (!fitted && sim.alpha() < 0.06) { fitted = true; fitView(false); sim.on('tick.fit', null); } });\n\n\t\t\t\t\tfunction draw() {\n\t\t\t\t\t\tif (!canvas.isConnected) { sim.stop(); return; }\n\t\t\t\t\t\tctx.save();\n\t\t\t\t\t\tctx.clearRect(0, 0, W, H);\n\t\t\t\t\t\tctx.translate(transform.x, transform.y);\n\t\t\t\t\t\tctx.scale(transform.k, transform.k);\n\n\t\t\t\t\t\tvar hi = hovered;\n\t\t\t\t\t\tvar nbset = hi ? adj[hi.id] : null;\n\t\t\t\t\t\tfunction isLit(id) { return !hi || id === hi.id || (nbset && nbset.has(id)); }\n\n\t\t\t\t\t\t// Edges — batch the dim base layer in one path, then lit edges on top.\n\t\t\t\t\t\tctx.lineWidth = 0.8 / transform.k;\n\t\t\t\t\t\tctx.strokeStyle = 'rgba(120,150,180,0.10)';\n\t\t\t\t\t\tctx.beginPath();\n\t\t\t\t\t\tlinks.forEach(function (l) {\n\t\t\t\t\t\t\tif (hi) {\n\t\t\t\t\t\t\t\tvar s = l.source.id, t = l.target.id;\n\t\t\t\t\t\t\t\tif (s === hi.id || t === hi.id) return; // drawn lit below\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\tctx.moveTo(l.source.x, l.source.y);\n\t\t\t\t\t\t\tctx.lineTo(l.target.x, l.target.y);\n\t\t\t\t\t\t});\n\t\t\t\t\t\tctx.stroke();\n\n\t\t\t\t\t\tif (hi) {\n\t\t\t\t\t\t\tctx.lineWidth = 1.4 / transform.k;\n\t\t\t\t\t\t\tctx.strokeStyle = 'rgba(34,211,238,0.7)';\n\t\t\t\t\t\t\tctx.beginPath();\n\t\t\t\t\t\t\tlinks.forEach(function (l) {\n\t\t\t\t\t\t\t\tvar s = l.source.id, t = l.target.id;\n\t\t\t\t\t\t\t\tif (s !== hi.id && t !== hi.id) return;\n\t\t\t\t\t\t\t\tctx.moveTo(l.source.x, l.source.y);\n\t\t\t\t\t\t\t\tctx.lineTo(l.target.x, l.target.y);\n\t\t\t\t\t\t\t});\n\t\t\t\t\t\t\tctx.stroke();\n\t\t\t\t\t\t}\n\n\t\t\t\t\t\t// Nodes\n\t\t\t\t\t\tnodes.forEach(function (d) {\n\t\t\t\t\t\t\tvar r = radius(d);\n\t\t\t\t\t\t\tvar lit = isLit(d.id);\n\t\t\t\t\t\t\tctx.globalAlpha = lit ? 1 : 0.12;\n\t\t\t\t\t\t\tctx.beginPath();\n\t\t\t\t\t\t\tctx.arc(d.x, d.y, r, 0, Math.PI * 2);\n\t\t\t\t\t\t\tctx.fillStyle = projColor(d.project);\n\t\t\t\t\t\t\tctx.globalAlpha = lit ? 0.22 : 0.05;\n\t\t\t\t\t\t\tctx.fill();\n\t\t\t\t\t\t\tctx.globalAlpha = lit ? 1 : 0.12;\n\t\t\t\t\t\t\tctx.lineWidth = (d.degree >= 4 ? 1.5 : 1) / transform.k;\n\t\t\t\t\t\t\tctx.strokeStyle = projColor(d.project);\n\t\t\t\t\t\t\tctx.stroke();\n\t\t\t\t\t\t\t// bright core\n\t\t\t\t\t\t\tctx.beginPath();\n\t\t\t\t\t\t\tctx.arc(d.x, d.y, Math.max(1.4, r * 0.32), 0, Math.PI * 2);\n\t\t\t\t\t\t\tctx.globalAlpha = lit ? 0.92 : 0.1;\n\t\t\t\t\t\t\tctx.fillStyle = projColor(d.project);\n\t\t\t\t\t\t\tctx.fill();\n\t\t\t\t\t\t});\n\t\t\t\t\t\tctx.globalAlpha = 1;\n\n\t\t\t\t\t\t// Labels: persistent hubs + hovered neighbourhood.\n\t\t\t\t\t\tif (transform.k > 0.18) {\n\t\t\t\t\t\t\tctx.textAlign = 'center';\n\t\t\t\t\t\t\tctx.textBaseline = 'bottom';\n\t\t\t\t\t\t\tnodes.forEach(function (d) {\n\t\t\t\t\t\t\t\tvar show = (labelsOn && labelIds.has(d.id)) || (hi && isLit(d.id));\n\t\t\t\t\t\t\t\tif (!show) return;\n\t\t\t\t\t\t\t\tvar r = radius(d);\n\t\t\t\t\t\t\t\tvar fs = (d.degree >= 8 ? 11 : d.degree >= 4 ? 9.5 : 8.5) / transform.k;\n\t\t\t\t\t\t\t\tctx.font = '600 ' + fs + 'px \"JetBrains Mono\", monospace';\n\t\t\t\t\t\t\t\tvar label = shortLabel(d.title, d.degree >= 5 ? 26 : 20);\n\t\t\t\t\t\t\t\tvar ly = d.y - r - 4 / transform.k;\n\t\t\t\t\t\t\t\tctx.lineWidth = 3 / transform.k;\n\t\t\t\t\t\t\t\tctx.strokeStyle = '#080a10';\n\t\t\t\t\t\t\t\tctx.lineJoin = 'round';\n\t\t\t\t\t\t\t\tctx.strokeText(label, d.x, ly);\n\t\t\t\t\t\t\t\tctx.fillStyle = (hi && d.id === hi.id) ? '#dce6f0' : projColor(d.project);\n\t\t\t\t\t\t\t\tctx.fillText(label, d.x, ly);\n\t\t\t\t\t\t\t});\n\t\t\t\t\t\t}\n\n\t\t\t\t\t\tctx.restore();\n\n\t\t\t\t\t\t// Rebuild spatial index for hit-testing against current positions.\n\t\t\t\t\t\tqt = d3.quadtree().x(function (d) { return d.x; }).y(function (d) { return d.y; }).addAll(nodes);\n\t\t\t\t\t}\n\n\t\t\t\t\tfunction shortLabel(t, max) {\n\t\t\t\t\t\tif (!t) return '';\n\t\t\t\t\t\tif (t.length <= max) return t;\n\t\t\t\t\t\tvar sub = t.slice(0, max), sp = sub.lastIndexOf(' ');\n\t\t\t\t\t\treturn (sp > max * 0.5 ? sub.slice(0, sp) : sub) + '…';\n\t\t\t\t\t}\n\n\t\t\t\t\t// ── Pointer interaction ──\n\t\t\t\t\tvar tooltip = document.getElementById('graph-tooltip');\n\t\t\t\t\tvar ttProject = document.getElementById('tt-project');\n\t\t\t\t\tvar ttTitle = document.getElementById('tt-title');\n\t\t\t\t\tvar ttMeta = document.getElementById('tt-meta');\n\t\t\t\t\tvar downX = null, downY = null, moved = false;\n\n\t\t\t\t\tfunction pick(ev) {\n\t\t\t\t\t\tif (!qt) return null;\n\t\t\t\t\t\tvar rect = canvas.getBoundingClientRect();\n\t\t\t\t\t\tvar p = transform.invert([ev.clientX - rect.left, ev.clientY - rect.top]);\n\t\t\t\t\t\tvar found = qt.find(p[0], p[1], 44 / transform.k);\n\t\t\t\t\t\tif (!found) return null;\n\t\t\t\t\t\tvar dx = found.x - p[0], dy = found.y - p[1];\n\t\t\t\t\t\treturn Math.sqrt(dx * dx + dy * dy) <= radius(found) + 6 / transform.k ? found : null;\n\t\t\t\t\t}\n\n\t\t\t\t\tcanvas.addEventListener('mousedown', function (ev) { downX = ev.clientX; downY = ev.clientY; moved = false; canvas.classList.add('dragging'); });\n\t\t\t\t\twindow.addEventListener('mouseup', function () { downX = null; canvas.classList.remove('dragging'); });\n\n\t\t\t\t\tcanvas.addEventListener('mousemove', function (ev) {\n\t\t\t\t\t\tif (downX !== null && (Math.abs(ev.clientX - downX) > 4 || Math.abs(ev.clientY - downY) > 4)) moved = true;\n\t\t\t\t\t\tvar hit = pick(ev);\n\t\t\t\t\t\tif (hit) {\n\t\t\t\t\t\t\tttProject.textContent = hit.project + ' · ' + hit.type;\n\t\t\t\t\t\t\tttProject.style.color = projColor(hit.project);\n\t\t\t\t\t\t\tttTitle.textContent = hit.title;\n\t\t\t\t\t\t\tttMeta.textContent = hit.degree + (hit.degree === 1 ? ' link' : ' links') + ' · mem #' + hit.id;\n\t\t\t\t\t\t\ttooltip.classList.add('visible');\n\t\t\t\t\t\t\tvar tw = tooltip.offsetWidth, tx = ev.clientX + 15, ty = ev.clientY - 10;\n\t\t\t\t\t\t\tif (tx + tw > window.innerWidth - 10) tx = ev.clientX - tw - 15;\n\t\t\t\t\t\t\ttooltip.style.left = tx + 'px';\n\t\t\t\t\t\t\ttooltip.style.top = ty + 'px';\n\t\t\t\t\t\t\tcanvas.style.cursor = 'pointer';\n\t\t\t\t\t\t} else {\n\t\t\t\t\t\t\ttooltip.classList.remove('visible');\n\t\t\t\t\t\t\tcanvas.style.cursor = downX !== null ? 'grabbing' : 'grab';\n\t\t\t\t\t\t}\n\t\t\t\t\t\tif ((hit && hit.id) !== (hovered && hovered.id)) { hovered = hit; draw(); }\n\t\t\t\t\t});\n\n\t\t\t\t\tcanvas.addEventListener('mouseleave', function () {\n\t\t\t\t\t\ttooltip.classList.remove('visible');\n\t\t\t\t\t\tif (hovered) { hovered = null; draw(); }\n\t\t\t\t\t});\n\n\t\t\t\t\tcanvas.addEventListener('click', function (ev) {\n\t\t\t\t\t\tif (moved) return;\n\t\t\t\t\t\tvar hit = pick(ev);\n\t\t\t\t\t\tif (hit) window.location.href = '/detail/' + hit.id;\n\t\t\t\t\t});\n\n\t\t\t\t\t// ── Fit view to node bounds ──\n\t\t\t\t\tfunction fitView(animate) {\n\t\t\t\t\t\tvar minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;\n\t\t\t\t\t\tnodes.forEach(function (d) {\n\t\t\t\t\t\t\tminX = Math.min(minX, d.x); maxX = Math.max(maxX, d.x);\n\t\t\t\t\t\t\tminY = Math.min(minY, d.y); maxY = Math.max(maxY, d.y);\n\t\t\t\t\t\t});\n\t\t\t\t\t\tif (!isFinite(minX)) return;\n\t\t\t\t\t\tvar pad = 60;\n\t\t\t\t\t\tvar bw = (maxX - minX) || 1, bh = (maxY - minY) || 1;\n\t\t\t\t\t\tvar k = Math.min(8, Math.max(0.1, Math.min((W - pad * 2) / bw, (H - pad * 2) / bh)));\n\t\t\t\t\t\tvar tx = W / 2 - k * (minX + maxX) / 2;\n\t\t\t\t\t\tvar ty = H / 2 - k * (minY + maxY) / 2;\n\t\t\t\t\t\tvar t = d3.zoomIdentity.translate(tx, ty).scale(k);\n\t\t\t\t\t\tvar sel = d3.select(canvas);\n\t\t\t\t\t\tif (animate) sel.transition().duration(600).ease(d3.easeCubicInOut).call(zoom.transform, t);\n\t\t\t\t\t\telse sel.call(zoom.transform, t);\n\t\t\t\t\t}\n\n\t\t\t\t\tdocument.getElementById('g-fit').addEventListener('click', function () { fitView(true); });\n\t\t\t\t\tdocument.getElementById('g-labels').addEventListener('click', function () {\n\t\t\t\t\t\tlabelsOn = !labelsOn;\n\t\t\t\t\t\tthis.classList.toggle('active', labelsOn);\n\t\t\t\t\t\tdraw();\n\t\t\t\t\t});\n\n\t\t\t\t\t// ── Legend (top projects by node count) ──\n\t\t\t\t\tvar legend = document.getElementById('graph-legend');\n\t\t\t\t\tvar shown = projects.slice(0, 9);\n\t\t\t\t\tshown.forEach(function (p) {\n\t\t\t\t\t\tvar row = document.createElement('div'); row.className = 'lg-item';\n\t\t\t\t\t\trow.innerHTML = '<span class=\"lg-dot\" style=\"background:' + projColor(p) + '\"></span>' +\n\t\t\t\t\t\t\t'<span class=\"lg-name\">' + p + '</span>' +\n\t\t\t\t\t\t\t'<span class=\"lg-count\">' + counts[p] + '</span>';\n\t\t\t\t\t\tlegend.appendChild(row);\n\t\t\t\t\t});\n\t\t\t\t\tif (projects.length > shown.length) {\n\t\t\t\t\t\tvar more = document.createElement('div'); more.className = 'lg-more';\n\t\t\t\t\t\tmore.textContent = '+ ' + (projects.length - shown.length) + ' more projects';\n\t\t\t\t\t\tlegend.appendChild(more);\n\t\t\t\t\t}\n\n\t\t\t\t\t// ── Resize ──\n\t\t\t\t\tvar ro = new ResizeObserver(function () {\n\t\t\t\t\t\tif (!canvas.isConnected) { ro.disconnect(); return; }\n\t\t\t\t\t\tsizeCanvas();\n\t\t\t\t\t\tcomputeAnchors();\n\t\t\t\t\t\tsim.alpha(0.15).restart();\n\t\t\t\t\t});\n\t\t\t\t\tro.observe(area);\n\t\t\t\t}\n\t\t\t})();\n\t\t\t</script> <div id=\"graph-tooltip\"><div class=\"tt-project\" id=\"tt-project\"></div><div class=\"tt-title\" id=\"tt-title\"></div><div class=\"tt-meta\" id=\"tt-meta\"></div></div>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
 			}
 			return nil
 		})

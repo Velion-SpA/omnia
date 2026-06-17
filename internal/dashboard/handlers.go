@@ -1029,9 +1029,44 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleGraph renders the semantic knowledge graph. Edges are REAL cosine
+// similarities from Omnia's own embeddings store — never synthesized. When the
+// embeddings layer is unavailable the page renders a clear disabled state with
+// instructions instead of faking data.
+//
+// Query params: ?project= scopes to a canonical project (and a group parent's
+// children); ?k= and ?min= tune the kNN neighbor cap and similarity threshold.
 func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if err := graphPage().Render(ctx, w); err != nil {
+	syncStatus := loadSyncStatus()
+	projects := s.effectiveProjectNames(ctx, syncStatus)
+
+	q := r.URL.Query()
+	project := q.Get("project")
+	k := clampInt(parseIntDefault(q.Get("k"), defaultGraphK), 1, 24)
+	minScore := clampFloat(parseFloatDefault(q.Get("min"), defaultGraphMin), 0, 0.99)
+
+	// No embeddings store → honest unavailable state (do NOT fabricate edges).
+	if s.emb == nil {
+		view := GraphView{Available: false, Projects: projects, Project: project, K: k, Min: minScore}
+		if err := graphPage(view).Render(ctx, w); err != nil {
+			s.logger.Error("render graph", "err", err)
+		}
+		return
+	}
+
+	nodes, edges, err := s.emb.Graph(k, float32(minScore))
+	if err != nil {
+		s.logger.Error("build semantic graph", "err", err)
+		view := GraphView{Available: false, Projects: projects, Project: project, K: k, Min: minScore}
+		if rErr := graphPage(view).Render(ctx, w); rErr != nil {
+			s.logger.Error("render graph", "err", rErr)
+		}
+		return
+	}
+
+	view := s.buildGraphView(nodes, edges, project, projects, k, minScore, len(nodes))
+	if err := graphPage(view).Render(ctx, w); err != nil {
 		s.logger.Error("render graph", "err", err)
 	}
 }

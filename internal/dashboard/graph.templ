@@ -1,19 +1,687 @@
 package dashboard
 
-// graphPage renders the knowledge graph placeholder.
-templ graphPage() {
+import "fmt"
+
+// graphPage renders the semantic knowledge graph. Edges are REAL cosine
+// similarities between memories from Omnia's own embeddings store — never
+// synthesized. Rendering is canvas-based D3 force layout for smoothness at
+// ~1k nodes. When the embeddings layer is unavailable it renders a clear
+// disabled state instead of faking data.
+templ graphPage(view GraphView) {
 	@layout("Graph") {
-		<div style="display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 60vh; text-align: center; gap: 16px;">
-			<svg width="64" height="64" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" style="opacity: 0.35;">
-				<circle cx="18" cy="18" r="16.5" stroke="rgba(34,211,238,0.4)" stroke-width="1"/>
-				<circle cx="18" cy="18" r="11.5" stroke="rgba(34,211,238,0.25)" stroke-width="0.75" stroke-dasharray="3 2.5"/>
-				<circle cx="18" cy="18" r="5" fill="rgba(34,211,238,0.4)"/>
-			</svg>
-			<div style="font-family: var(--display); font-weight: 800; font-size: 28px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text);">Knowledge Graph</div>
-			<div style="font-size: 11px; color: var(--text-2); letter-spacing: 0.08em; max-width: 320px; line-height: 1.6;">
-				Interactive memory graph coming soon — visualize connections across your knowledge base.
+		<style>
+			.graph-shell { display: flex; flex-direction: column; gap: 14px; }
+
+			/* ── Controls bar ── */
+			.graph-controls {
+				display: flex;
+				align-items: flex-end;
+				gap: 18px;
+				flex-wrap: wrap;
+				background: var(--surface);
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				padding: 14px 18px;
+			}
+			.gc-group { display: flex; flex-direction: column; gap: 6px; }
+			.gc-label {
+				font-family: var(--mono);
+				font-size: 8.5px;
+				font-weight: 600;
+				letter-spacing: 0.2em;
+				text-transform: uppercase;
+				color: var(--text-2);
+			}
+			.gc-select { min-width: 190px; }
+			.gc-num { width: 92px; font-variant-numeric: tabular-nums; }
+			.gc-apply {
+				font-family: var(--mono);
+				font-size: 10px;
+				font-weight: 600;
+				letter-spacing: 0.14em;
+				text-transform: uppercase;
+				color: var(--accent);
+				background: var(--accent-dim);
+				border: 1px solid var(--border-accent);
+				border-radius: 4px;
+				padding: 7px 16px;
+				cursor: pointer;
+				transition: background 0.15s, border-color 0.15s;
+			}
+			.gc-apply:hover { background: rgba(34,211,238,0.15); border-color: rgba(34,211,238,0.4); }
+			.gc-hint {
+				font-size: 8.5px;
+				color: var(--text-3);
+				letter-spacing: 0.06em;
+				margin-left: auto;
+				max-width: 280px;
+				line-height: 1.5;
+				align-self: center;
+			}
+
+			/* ── Graph area ── */
+			.graph-area {
+				position: relative;
+				height: calc(100vh - 268px);
+				min-height: 520px;
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				background:
+					radial-gradient(ellipse 60% 50% at 50% 42%, rgba(34,211,238,0.035) 0%, transparent 70%),
+					var(--surface);
+				overflow: hidden;
+			}
+			#graph-canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+			#graph-canvas.dragging { cursor: grabbing; }
+
+			/* ── Stats / legend overlay ── */
+			.graph-overlay {
+				position: absolute;
+				bottom: 16px;
+				left: 16px;
+				width: 224px;
+				background: rgba(13,16,23,0.86);
+				backdrop-filter: blur(16px) saturate(160%);
+				-webkit-backdrop-filter: blur(16px) saturate(160%);
+				border: 1px solid var(--border);
+				border-radius: 5px;
+				padding: 15px 17px;
+				z-index: 10;
+				pointer-events: none;
+			}
+			.graph-overlay::before {
+				content: '';
+				position: absolute;
+				top: 0; left: 0; right: 0;
+				height: 1px;
+				background: linear-gradient(90deg, var(--accent) 0%, rgba(34,211,238,0.2) 40%, transparent 70%);
+				opacity: 0.5;
+			}
+			.ov-eyebrow {
+				font-size: 8px;
+				font-weight: 600;
+				letter-spacing: 0.26em;
+				color: var(--text-2);
+				text-transform: uppercase;
+				margin-bottom: 11px;
+			}
+			.ov-counts { display: flex; gap: 14px; margin-bottom: 13px; }
+			.ov-c { display: flex; flex-direction: column; gap: 2px; }
+			.ov-c-v {
+				font-family: var(--display);
+				font-weight: 900;
+				font-size: 22px;
+				color: var(--text);
+				line-height: 1;
+				font-variant-numeric: tabular-nums;
+			}
+			.ov-c-l {
+				font-size: 7.5px;
+				color: var(--text-2);
+				letter-spacing: 0.12em;
+				text-transform: uppercase;
+			}
+			.ov-divider { height: 1px; background: var(--border); margin: 11px 0; }
+			#graph-legend { display: flex; flex-direction: column; gap: 6px; }
+			.lg-item { display: flex; align-items: center; gap: 8px; }
+			.lg-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+			.lg-name {
+				font-size: 9px;
+				font-weight: 500;
+				letter-spacing: 0.08em;
+				color: var(--silver);
+				flex: 1;
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+			.lg-count {
+				font-size: 9px;
+				font-weight: 600;
+				color: var(--text-2);
+				font-variant-numeric: tabular-nums;
+			}
+			.lg-more { font-size: 8px; color: var(--text-3); letter-spacing: 0.06em; padding-top: 2px; }
+			.ov-note {
+				font-size: 7.5px;
+				color: var(--text-3);
+				letter-spacing: 0.05em;
+				line-height: 1.55;
+				margin-top: 11px;
+			}
+			.ov-note strong { color: var(--text-2); font-weight: 600; }
+
+			/* ── Toolbar ── */
+			.graph-toolbar {
+				position: absolute;
+				top: 14px;
+				right: 14px;
+				display: flex;
+				flex-direction: column;
+				gap: 5px;
+				z-index: 15;
+			}
+			.tb-btn {
+				width: 30px;
+				height: 30px;
+				background: rgba(13,16,23,0.86);
+				backdrop-filter: blur(12px);
+				-webkit-backdrop-filter: blur(12px);
+				border: 1px solid var(--border);
+				border-radius: 4px;
+				color: var(--text-2);
+				cursor: pointer;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				transition: all 0.15s;
+			}
+			.tb-btn:hover { background: var(--surface-2); color: var(--text); border-color: var(--border-strong); }
+			.tb-btn.active { color: var(--accent); border-color: var(--border-accent); background: var(--accent-dim); }
+
+			/* ── Tooltip ── */
+			#graph-tooltip {
+				position: fixed;
+				background: rgba(10,13,20,0.96);
+				backdrop-filter: blur(12px);
+				-webkit-backdrop-filter: blur(12px);
+				border: 1px solid var(--border-strong);
+				border-radius: 4px;
+				padding: 9px 12px;
+				max-width: 240px;
+				pointer-events: none;
+				z-index: 100;
+				opacity: 0;
+				transform: translateY(4px);
+				transition: opacity 0.12s, transform 0.12s;
+			}
+			#graph-tooltip.visible { opacity: 1; transform: translateY(0); }
+			.tt-project {
+				font-size: 7.5px;
+				font-weight: 600;
+				letter-spacing: 0.2em;
+				text-transform: uppercase;
+				margin-bottom: 4px;
+			}
+			.tt-title { font-size: 10px; color: var(--text); line-height: 1.45; margin-bottom: 5px; }
+			.tt-meta { font-size: 8px; color: var(--text-2); letter-spacing: 0.06em; }
+
+			/* ── Empty / loading ── */
+			.graph-empty {
+				position: absolute;
+				inset: 0;
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				gap: 10px;
+				text-align: center;
+				color: var(--text-2);
+				z-index: 5;
+			}
+			/* `hidden` must win over the display:flex above. The [hidden] UA
+			   rule (display:none) loses to any author display rule, so the
+			   empty state would otherwise show even when nodes exist. */
+			.graph-empty[hidden] { display: none; }
+			.graph-empty .ge-title {
+				font-family: var(--display);
+				font-weight: 800;
+				font-size: 20px;
+				letter-spacing: 0.06em;
+				text-transform: uppercase;
+				color: var(--text);
+			}
+			.graph-empty .ge-sub { font-size: 10px; max-width: 360px; line-height: 1.6; letter-spacing: 0.04em; }
+
+			/* ── Unavailable state ── */
+			.graph-unavailable {
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				gap: 16px;
+				text-align: center;
+				min-height: 58vh;
+			}
+			.graph-unavailable .gu-title {
+				font-family: var(--display);
+				font-weight: 800;
+				font-size: 26px;
+				letter-spacing: 0.08em;
+				text-transform: uppercase;
+				color: var(--text);
+			}
+			.graph-unavailable .gu-sub { font-size: 11px; color: var(--text-2); max-width: 400px; line-height: 1.7; letter-spacing: 0.04em; }
+			.graph-unavailable code {
+				font-family: var(--mono);
+				background: var(--surface-2);
+				color: var(--calypso);
+				padding: 0.15em 0.45em;
+				border-radius: 0.3em;
+				border: 1px solid var(--border);
+				font-size: 0.92em;
+			}
+		</style>
+		if !view.Available {
+			<div class="graph-unavailable">
+				<svg width="60" height="60" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" style="opacity: 0.3;">
+					<circle cx="18" cy="18" r="16.5" stroke="rgba(34,211,238,0.4)" stroke-width="1"></circle>
+					<circle cx="18" cy="18" r="11.5" stroke="rgba(34,211,238,0.25)" stroke-width="0.75" stroke-dasharray="3 2.5"></circle>
+					<circle cx="18" cy="18" r="5" fill="rgba(34,211,238,0.4)"></circle>
+				</svg>
+				<div class="gu-title">Semantic Graph Unavailable</div>
+				<div class="gu-sub">
+					This view is built from REAL semantic similarity between memories, which
+					requires Omnia's local embeddings layer. Enable <code>embeddings</code> in
+					your config and run <code>omnia embed</code> to populate the vector store,
+					then reload this page.
+				</div>
+				<a href="/" class="nav-link" style="margin-top: 8px;">← Back to Overview</a>
 			</div>
-			<a href="/" class="nav-link" style="margin-top: 8px;">← Back to Overview</a>
-		</div>
+		} else {
+			<div class="graph-shell">
+				<!-- Controls: project scope + kNN tuning. Submits GET /graph. -->
+				<form method="GET" action="/graph" class="graph-controls">
+					<div class="gc-group">
+						<label class="gc-label" for="g-project">Project</label>
+						<select id="g-project" name="project" class="gc-select" onchange="this.form.submit()" aria-label="Scope graph to project">
+							<option value="">All projects</option>
+							for _, p := range view.Projects {
+								if p == view.Project {
+									<option value={ p } selected>{ p }</option>
+								} else {
+									<option value={ p }>{ p }</option>
+								}
+							}
+						</select>
+					</div>
+					<div class="gc-group">
+						<label class="gc-label" for="g-k">Neighbors (k)</label>
+						<input id="g-k" name="k" type="number" min="1" max="24" value={ fmt.Sprintf("%d", view.K) } class="gc-num"/>
+					</div>
+					<div class="gc-group">
+						<label class="gc-label" for="g-min">Min similarity</label>
+						<input id="g-min" name="min" type="number" min="0" max="0.99" step="0.01" value={ fmt.Sprintf("%.2f", view.Min) } class="gc-num"/>
+					</div>
+					<button type="submit" class="gc-apply">Apply</button>
+					<span class="gc-hint">Lower the threshold or raise k for a denser graph; raise the threshold for tighter, higher-confidence clusters.</span>
+				</form>
+				<!-- Canvas + overlays -->
+				<div class="graph-area" id="graph-area">
+					<canvas id="graph-canvas"></canvas>
+					<div class="graph-overlay">
+						<div class="ov-eyebrow">Knowledge Graph</div>
+						<div class="ov-counts">
+							<div class="ov-c">
+								<div class="ov-c-v">{ fmt.Sprintf("%d", view.Connected) }</div>
+								<div class="ov-c-l">connected</div>
+							</div>
+							<div class="ov-c">
+								<div class="ov-c-v">{ fmt.Sprintf("%d", view.EdgeCount) }</div>
+								<div class="ov-c-l">links</div>
+							</div>
+							<div class="ov-c">
+								<div class="ov-c-v">{ fmt.Sprintf("%d", view.Total) }</div>
+								<div class="ov-c-l">memories</div>
+							</div>
+						</div>
+						<div class="ov-divider"></div>
+						<div id="graph-legend"></div>
+						<div class="ov-note">
+							Edges = cosine similarity ≥ <strong>{ fmt.Sprintf("%.2f", view.Min) }</strong> from local embeddings · top-{ fmt.Sprintf("%d", view.K) } neighbors. <strong>{ fmt.Sprintf("%d", view.Total-view.Connected) }</strong> memories have no link at this threshold.
+						</div>
+					</div>
+					<div class="graph-toolbar">
+						<button class="tb-btn" id="g-fit" title="Reset / fit view" type="button" aria-label="Fit view">
+							<svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+								<rect x="1" y="1" width="4" height="4" rx="0.5" stroke="currentColor" stroke-width="1.2"></rect>
+								<rect x="8" y="1" width="4" height="4" rx="0.5" stroke="currentColor" stroke-width="1.2"></rect>
+								<rect x="1" y="8" width="4" height="4" rx="0.5" stroke="currentColor" stroke-width="1.2"></rect>
+								<rect x="8" y="8" width="4" height="4" rx="0.5" stroke="currentColor" stroke-width="1.2"></rect>
+							</svg>
+						</button>
+						<button class="tb-btn active" id="g-labels" title="Toggle hub labels" type="button" aria-label="Toggle labels">
+							<svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+								<path d="M2 4h9M2 6.5h6M2 9h7.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"></path>
+							</svg>
+						</button>
+					</div>
+					<div class="graph-empty" id="graph-empty" hidden>
+						<div class="ge-title">No semantic links</div>
+						<div class="ge-sub">No pair of memories meets the current similarity threshold in this scope. Lower the <em>Min similarity</em> or widen the project filter, then Apply.</div>
+					</div>
+				</div>
+			</div>
+			@templ.JSONScript("graph-data", view.Payload)
+			<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+			<script>
+			(function () {
+				// Resilient init: works on full page load AND on htmx hx-boost swaps,
+				// where D3 (injected in body) may still be loading when this runs.
+				function whenReady(cb) {
+					var area = document.getElementById('graph-area');
+					if (!area || area.dataset.omniaInit === '1') return;
+					if (!window.d3) { setTimeout(function () { whenReady(cb); }, 30); return; }
+					area.dataset.omniaInit = '1';
+					cb();
+				}
+				whenReady(initGraph);
+
+				function initGraph() {
+					var dataEl = document.getElementById('graph-data');
+					var data = { nodes: [], edges: [] };
+					try { data = JSON.parse(dataEl.textContent); } catch (e) {}
+					var nodes = (data.nodes || []).map(function (d) { return Object.assign({}, d); });
+					var links = (data.edges || []).map(function (d) { return { source: d.source, target: d.target, weight: d.weight }; });
+
+					var area = document.getElementById('graph-area');
+					var canvas = document.getElementById('graph-canvas');
+					var emptyEl = document.getElementById('graph-empty');
+
+					if (!nodes.length) { if (emptyEl) emptyEl.hidden = false; return; }
+
+					var ctx = canvas.getContext('2d');
+					var W = area.clientWidth, H = area.clientHeight, DPR = window.devicePixelRatio || 1;
+
+					function sizeCanvas() {
+						W = area.clientWidth; H = area.clientHeight; DPR = window.devicePixelRatio || 1;
+						canvas.width = Math.round(W * DPR);
+						canvas.height = Math.round(H * DPR);
+						canvas.style.width = W + 'px';
+						canvas.style.height = H + 'px';
+						ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+					}
+					sizeCanvas();
+
+					// ── Palette (cohesive command-center hues, calypso family + accents) ──
+					var PALETTE = ['#22d3ee', '#818cf8', '#34d399', '#f472b6', '#fbbf24',
+						'#38bdf8', '#a78bfa', '#fb7185', '#2dd4bf', '#60a5fa', '#c084fc', '#94a3b8'];
+					var DEFAULT_COLOR = '#8a9ab5';
+
+					// Project node counts → deterministic color assignment (biggest first).
+					var counts = {};
+					nodes.forEach(function (n) { counts[n.project] = (counts[n.project] || 0) + 1; });
+					var projects = Object.keys(counts).sort(function (a, b) {
+						if (counts[b] !== counts[a]) return counts[b] - counts[a];
+						return a < b ? -1 : 1;
+					});
+					var colorOf = {};
+					projects.forEach(function (p, i) { colorOf[p] = i < PALETTE.length ? PALETTE[i] : DEFAULT_COLOR; });
+					function projColor(p) { return colorOf[p] || DEFAULT_COLOR; }
+
+					// ── Cluster anchors: one per present project, on a ring around centre.
+					// Pulling each node toward its project anchor yields readable, Obsidian-
+					// style communities while keeping the whole graph compact and centred.
+					var anchors = {};
+					function computeAnchors() {
+						var cx = W / 2, cy = H / 2;
+						var R = Math.min(W, H) * 0.30;
+						var P = projects.length;
+						projects.forEach(function (p, i) {
+							if (P === 1) { anchors[p] = { x: cx, y: cy }; return; }
+							var a = (i / P) * Math.PI * 2 - Math.PI / 2;
+							anchors[p] = { x: cx + Math.cos(a) * R, y: cy + Math.sin(a) * R };
+						});
+					}
+					computeAnchors();
+
+					function radius(d) { return Math.min(20, 3.5 + Math.sqrt(d.degree) * 2.3); }
+
+					// Adjacency for hover highlighting.
+					var adj = {};
+					nodes.forEach(function (n) { adj[n.id] = new Set(); });
+					links.forEach(function (l) {
+						var s = l.source, t = l.target;
+						if (adj[s]) adj[s].add(t);
+						if (adj[t]) adj[t].add(s);
+					});
+
+					// Hub labels: top-degree nodes get a persistent label.
+					var byDeg = nodes.slice().sort(function (a, b) { return b.degree - a.degree; });
+					var labelCut = byDeg.length ? Math.max(3, byDeg[Math.min(byDeg.length - 1, 25)].degree) : 3;
+					var labelIds = new Set(byDeg.filter(function (d) { return d.degree >= labelCut; }).slice(0, 30).map(function (d) { return d.id; }));
+
+					// Seed near anchors for fast convergence.
+					nodes.forEach(function (n) {
+						var a = anchors[n.project] || { x: W / 2, y: H / 2 };
+						n.x = a.x + (Math.random() - 0.5) * 90;
+						n.y = a.y + (Math.random() - 0.5) * 90;
+					});
+
+					// ── Force simulation: strong links, moderate+capped charge, collision,
+					// and per-project anchoring. Tuned for a readable cluster, not a hairball.
+					var sim = d3.forceSimulation(nodes)
+						.force('link', d3.forceLink(links).id(function (d) { return d.id; })
+							.distance(function (l) { return 18 + (1 - l.weight) * 64; })
+							.strength(function (l) { return 0.15 + l.weight * 0.45; }))
+						.force('charge', d3.forceManyBody()
+							.strength(function (d) { return -(16 + Math.min(d.degree, 14) * 2.4); })
+							.distanceMax(320))
+						.force('collide', d3.forceCollide(function (d) { return radius(d) + 2.5; }).strength(0.9).iterations(2))
+						.force('x', d3.forceX(function (d) { return (anchors[d.project] || {}).x || W / 2; }).strength(0.07))
+						.force('y', d3.forceY(function (d) { return (anchors[d.project] || {}).y || H / 2; }).strength(0.07))
+						.velocityDecay(0.4)
+						.alphaDecay(0.0228);
+
+					// ── View transform + interaction state ──
+					var transform = d3.zoomIdentity;
+					var hovered = null;
+					var labelsOn = true;
+					var qt = null;
+
+					var zoom = d3.zoom().scaleExtent([0.1, 8]).on('zoom', function (ev) { transform = ev.transform; draw(); });
+					d3.select(canvas).call(zoom).on('dblclick.zoom', null);
+
+					sim.on('tick', draw);
+					// Auto-fit once the layout has cooled.
+					var fitted = false;
+					sim.on('tick.fit', function () { if (!fitted && sim.alpha() < 0.06) { fitted = true; fitView(false); sim.on('tick.fit', null); } });
+
+					function draw() {
+						if (!canvas.isConnected) { sim.stop(); return; }
+						ctx.save();
+						ctx.clearRect(0, 0, W, H);
+						ctx.translate(transform.x, transform.y);
+						ctx.scale(transform.k, transform.k);
+
+						var hi = hovered;
+						var nbset = hi ? adj[hi.id] : null;
+						function isLit(id) { return !hi || id === hi.id || (nbset && nbset.has(id)); }
+
+						// Edges — batch the dim base layer in one path, then lit edges on top.
+						ctx.lineWidth = 0.8 / transform.k;
+						ctx.strokeStyle = 'rgba(120,150,180,0.10)';
+						ctx.beginPath();
+						links.forEach(function (l) {
+							if (hi) {
+								var s = l.source.id, t = l.target.id;
+								if (s === hi.id || t === hi.id) return; // drawn lit below
+							}
+							ctx.moveTo(l.source.x, l.source.y);
+							ctx.lineTo(l.target.x, l.target.y);
+						});
+						ctx.stroke();
+
+						if (hi) {
+							ctx.lineWidth = 1.4 / transform.k;
+							ctx.strokeStyle = 'rgba(34,211,238,0.7)';
+							ctx.beginPath();
+							links.forEach(function (l) {
+								var s = l.source.id, t = l.target.id;
+								if (s !== hi.id && t !== hi.id) return;
+								ctx.moveTo(l.source.x, l.source.y);
+								ctx.lineTo(l.target.x, l.target.y);
+							});
+							ctx.stroke();
+						}
+
+						// Nodes
+						nodes.forEach(function (d) {
+							var r = radius(d);
+							var lit = isLit(d.id);
+							ctx.globalAlpha = lit ? 1 : 0.12;
+							ctx.beginPath();
+							ctx.arc(d.x, d.y, r, 0, Math.PI * 2);
+							ctx.fillStyle = projColor(d.project);
+							ctx.globalAlpha = lit ? 0.22 : 0.05;
+							ctx.fill();
+							ctx.globalAlpha = lit ? 1 : 0.12;
+							ctx.lineWidth = (d.degree >= 4 ? 1.5 : 1) / transform.k;
+							ctx.strokeStyle = projColor(d.project);
+							ctx.stroke();
+							// bright core
+							ctx.beginPath();
+							ctx.arc(d.x, d.y, Math.max(1.4, r * 0.32), 0, Math.PI * 2);
+							ctx.globalAlpha = lit ? 0.92 : 0.1;
+							ctx.fillStyle = projColor(d.project);
+							ctx.fill();
+						});
+						ctx.globalAlpha = 1;
+
+						// Labels: persistent hubs + hovered neighbourhood.
+						if (transform.k > 0.18) {
+							ctx.textAlign = 'center';
+							ctx.textBaseline = 'bottom';
+							nodes.forEach(function (d) {
+								var show = (labelsOn && labelIds.has(d.id)) || (hi && isLit(d.id));
+								if (!show) return;
+								var r = radius(d);
+								var fs = (d.degree >= 8 ? 11 : d.degree >= 4 ? 9.5 : 8.5) / transform.k;
+								ctx.font = '600 ' + fs + 'px "JetBrains Mono", monospace';
+								var label = shortLabel(d.title, d.degree >= 5 ? 26 : 20);
+								var ly = d.y - r - 4 / transform.k;
+								ctx.lineWidth = 3 / transform.k;
+								ctx.strokeStyle = '#080a10';
+								ctx.lineJoin = 'round';
+								ctx.strokeText(label, d.x, ly);
+								ctx.fillStyle = (hi && d.id === hi.id) ? '#dce6f0' : projColor(d.project);
+								ctx.fillText(label, d.x, ly);
+							});
+						}
+
+						ctx.restore();
+
+						// Rebuild spatial index for hit-testing against current positions.
+						qt = d3.quadtree().x(function (d) { return d.x; }).y(function (d) { return d.y; }).addAll(nodes);
+					}
+
+					function shortLabel(t, max) {
+						if (!t) return '';
+						if (t.length <= max) return t;
+						var sub = t.slice(0, max), sp = sub.lastIndexOf(' ');
+						return (sp > max * 0.5 ? sub.slice(0, sp) : sub) + '…';
+					}
+
+					// ── Pointer interaction ──
+					var tooltip = document.getElementById('graph-tooltip');
+					var ttProject = document.getElementById('tt-project');
+					var ttTitle = document.getElementById('tt-title');
+					var ttMeta = document.getElementById('tt-meta');
+					var downX = null, downY = null, moved = false;
+
+					function pick(ev) {
+						if (!qt) return null;
+						var rect = canvas.getBoundingClientRect();
+						var p = transform.invert([ev.clientX - rect.left, ev.clientY - rect.top]);
+						var found = qt.find(p[0], p[1], 44 / transform.k);
+						if (!found) return null;
+						var dx = found.x - p[0], dy = found.y - p[1];
+						return Math.sqrt(dx * dx + dy * dy) <= radius(found) + 6 / transform.k ? found : null;
+					}
+
+					canvas.addEventListener('mousedown', function (ev) { downX = ev.clientX; downY = ev.clientY; moved = false; canvas.classList.add('dragging'); });
+					window.addEventListener('mouseup', function () { downX = null; canvas.classList.remove('dragging'); });
+
+					canvas.addEventListener('mousemove', function (ev) {
+						if (downX !== null && (Math.abs(ev.clientX - downX) > 4 || Math.abs(ev.clientY - downY) > 4)) moved = true;
+						var hit = pick(ev);
+						if (hit) {
+							ttProject.textContent = hit.project + ' · ' + hit.type;
+							ttProject.style.color = projColor(hit.project);
+							ttTitle.textContent = hit.title;
+							ttMeta.textContent = hit.degree + (hit.degree === 1 ? ' link' : ' links') + ' · mem #' + hit.id;
+							tooltip.classList.add('visible');
+							var tw = tooltip.offsetWidth, tx = ev.clientX + 15, ty = ev.clientY - 10;
+							if (tx + tw > window.innerWidth - 10) tx = ev.clientX - tw - 15;
+							tooltip.style.left = tx + 'px';
+							tooltip.style.top = ty + 'px';
+							canvas.style.cursor = 'pointer';
+						} else {
+							tooltip.classList.remove('visible');
+							canvas.style.cursor = downX !== null ? 'grabbing' : 'grab';
+						}
+						if ((hit && hit.id) !== (hovered && hovered.id)) { hovered = hit; draw(); }
+					});
+
+					canvas.addEventListener('mouseleave', function () {
+						tooltip.classList.remove('visible');
+						if (hovered) { hovered = null; draw(); }
+					});
+
+					canvas.addEventListener('click', function (ev) {
+						if (moved) return;
+						var hit = pick(ev);
+						if (hit) window.location.href = '/detail/' + hit.id;
+					});
+
+					// ── Fit view to node bounds ──
+					function fitView(animate) {
+						var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+						nodes.forEach(function (d) {
+							minX = Math.min(minX, d.x); maxX = Math.max(maxX, d.x);
+							minY = Math.min(minY, d.y); maxY = Math.max(maxY, d.y);
+						});
+						if (!isFinite(minX)) return;
+						var pad = 60;
+						var bw = (maxX - minX) || 1, bh = (maxY - minY) || 1;
+						var k = Math.min(8, Math.max(0.1, Math.min((W - pad * 2) / bw, (H - pad * 2) / bh)));
+						var tx = W / 2 - k * (minX + maxX) / 2;
+						var ty = H / 2 - k * (minY + maxY) / 2;
+						var t = d3.zoomIdentity.translate(tx, ty).scale(k);
+						var sel = d3.select(canvas);
+						if (animate) sel.transition().duration(600).ease(d3.easeCubicInOut).call(zoom.transform, t);
+						else sel.call(zoom.transform, t);
+					}
+
+					document.getElementById('g-fit').addEventListener('click', function () { fitView(true); });
+					document.getElementById('g-labels').addEventListener('click', function () {
+						labelsOn = !labelsOn;
+						this.classList.toggle('active', labelsOn);
+						draw();
+					});
+
+					// ── Legend (top projects by node count) ──
+					var legend = document.getElementById('graph-legend');
+					var shown = projects.slice(0, 9);
+					shown.forEach(function (p) {
+						var row = document.createElement('div'); row.className = 'lg-item';
+						row.innerHTML = '<span class="lg-dot" style="background:' + projColor(p) + '"></span>' +
+							'<span class="lg-name">' + p + '</span>' +
+							'<span class="lg-count">' + counts[p] + '</span>';
+						legend.appendChild(row);
+					});
+					if (projects.length > shown.length) {
+						var more = document.createElement('div'); more.className = 'lg-more';
+						more.textContent = '+ ' + (projects.length - shown.length) + ' more projects';
+						legend.appendChild(more);
+					}
+
+					// ── Resize ──
+					var ro = new ResizeObserver(function () {
+						if (!canvas.isConnected) { ro.disconnect(); return; }
+						sizeCanvas();
+						computeAnchors();
+						sim.alpha(0.15).restart();
+					});
+					ro.observe(area);
+				}
+			})();
+			</script>
+			<div id="graph-tooltip">
+				<div class="tt-project" id="tt-project"></div>
+				<div class="tt-title" id="tt-title"></div>
+				<div class="tt-meta" id="tt-meta"></div>
+			</div>
+		}
 	}
 }
