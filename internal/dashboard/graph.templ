@@ -415,7 +415,7 @@ templ graphPage(view GraphView) {
 					var anchors = {};
 					function computeAnchors() {
 						var cx = W / 2, cy = H / 2;
-						var R = Math.min(W, H) * 0.30;
+						var R = Math.min(W, H) * 0.44;
 						var P = projects.length;
 						projects.forEach(function (p, i) {
 							if (P === 1) { anchors[p] = { x: cx, y: cy }; return; }
@@ -448,20 +448,24 @@ templ graphPage(view GraphView) {
 						n.y = a.y + (Math.random() - 0.5) * 90;
 					});
 
-					// ── Force simulation: strong links, moderate+capped charge, collision,
-					// and per-project anchoring. Tuned for a readable cluster, not a hairball.
+					// ── Force simulation tuned to pull projects into SEPARATE islands,
+					// not one hairball. Intra-project links are short + strong (cohesive
+					// communities); cross-project links are long + nearly free so they
+					// don't drag every project into the centre. Strong per-project
+					// anchoring (forceX/Y) keeps each community in its own region.
+					function sameProj(l) { return l.source.project === l.target.project; }
 					var sim = d3.forceSimulation(nodes)
 						.force('link', d3.forceLink(links).id(function (d) { return d.id; })
-							.distance(function (l) { return 18 + (1 - l.weight) * 64; })
-							.strength(function (l) { return 0.15 + l.weight * 0.45; }))
+							.distance(function (l) { return sameProj(l) ? (14 + (1 - l.weight) * 40) : (180 + (1 - l.weight) * 120); })
+							.strength(function (l) { return sameProj(l) ? (0.45 + l.weight * 0.5) : 0.015; }))
 						.force('charge', d3.forceManyBody()
-							.strength(function (d) { return -(16 + Math.min(d.degree, 14) * 2.4); })
-							.distanceMax(320))
-						.force('collide', d3.forceCollide(function (d) { return radius(d) + 2.5; }).strength(0.9).iterations(2))
-						.force('x', d3.forceX(function (d) { return (anchors[d.project] || {}).x || W / 2; }).strength(0.07))
-						.force('y', d3.forceY(function (d) { return (anchors[d.project] || {}).y || H / 2; }).strength(0.07))
-						.velocityDecay(0.4)
-						.alphaDecay(0.0228);
+							.strength(function (d) { return -(22 + Math.min(d.degree, 16) * 3); })
+							.distanceMax(240))
+						.force('collide', d3.forceCollide(function (d) { return radius(d) + 3; }).strength(0.9).iterations(2))
+						.force('x', d3.forceX(function (d) { return (anchors[d.project] || {}).x || W / 2; }).strength(0.6))
+						.force('y', d3.forceY(function (d) { return (anchors[d.project] || {}).y || H / 2; }).strength(0.6))
+						.velocityDecay(0.42)
+						.alphaDecay(0.021);
 
 					// ── View transform + interaction state ──
 					var transform = d3.zoomIdentity;
@@ -488,19 +492,26 @@ templ graphPage(view GraphView) {
 						var nbset = hi ? adj[hi.id] : null;
 						function isLit(id) { return !hi || id === hi.id || (nbset && nbset.has(id)); }
 
-						// Edges — batch the dim base layer in one path, then lit edges on top.
-						ctx.lineWidth = 0.8 / transform.k;
-						ctx.strokeStyle = 'rgba(120,150,180,0.10)';
-						ctx.beginPath();
-						links.forEach(function (l) {
-							if (hi) {
-								var s = l.source.id, t = l.target.id;
-								if (s === hi.id || t === hi.id) return; // drawn lit below
-							}
-							ctx.moveTo(l.source.x, l.source.y);
-							ctx.lineTo(l.target.x, l.target.y);
-						});
-						ctx.stroke();
+						// Edges — dim base layer in two passes: cross-project links are drawn
+						// very faint so the centre doesn't fog into a hairball, while
+						// intra-project links stay visible enough to define each cluster.
+						function drawBase(wantSame, style) {
+							ctx.lineWidth = 0.8 / transform.k;
+							ctx.strokeStyle = style;
+							ctx.beginPath();
+							links.forEach(function (l) {
+								if (hi) {
+									var s = l.source.id, t = l.target.id;
+									if (s === hi.id || t === hi.id) return; // drawn lit below
+								}
+								if ((l.source.project === l.target.project) !== wantSame) return;
+								ctx.moveTo(l.source.x, l.source.y);
+								ctx.lineTo(l.target.x, l.target.y);
+							});
+							ctx.stroke();
+						}
+						drawBase(false, 'rgba(120,150,180,0.035)'); // cross-project: barely there
+						drawBase(true, 'rgba(120,150,180,0.13)');   // intra-project: cluster fabric
 
 						if (hi) {
 							ctx.lineWidth = 1.4 / transform.k;
@@ -557,6 +568,34 @@ templ graphPage(view GraphView) {
 								ctx.fillStyle = (hi && d.id === hi.id) ? '#dce6f0' : projColor(d.project);
 								ctx.fillText(label, d.x, ly);
 							});
+						}
+
+						// ── Project region labels: name each cluster at its centroid so you
+						// can read at a glance WHICH project a region of memories belongs to.
+						// Dimmed while hovering a node so the focused neighbourhood stands out.
+						if (labelsOn) {
+							var cen = {};
+							nodes.forEach(function (d) {
+								var c = cen[d.project] || (cen[d.project] = { x: 0, y: 0, n: 0 });
+								c.x += d.x; c.y += d.y; c.n++;
+							});
+							ctx.textAlign = 'center';
+							ctx.textBaseline = 'middle';
+							Object.keys(cen).forEach(function (p) {
+								var c = cen[p];
+								if (c.n < 4) return; // skip tiny clusters — too noisy to label
+								var mx = c.x / c.n, my = c.y / c.n;
+								var fs = Math.min(46, 15 + Math.sqrt(c.n) * 2.6) / transform.k;
+								ctx.font = '800 ' + fs + 'px "Barlow Condensed", sans-serif';
+								ctx.globalAlpha = hi ? 0.09 : 0.6;
+								ctx.lineWidth = 4 / transform.k;
+								ctx.strokeStyle = 'rgba(8,10,16,0.9)';
+								ctx.lineJoin = 'round';
+								ctx.strokeText(p.toUpperCase(), mx, my);
+								ctx.fillStyle = projColor(p);
+								ctx.fillText(p.toUpperCase(), mx, my);
+							});
+							ctx.globalAlpha = 1;
 						}
 
 						ctx.restore();
