@@ -95,6 +95,86 @@ func TestFetchRepoFromFixture(t *testing.T) {
 	}
 }
 
+func TestCommitCollection(t *testing.T) {
+	commits := []map[string]any{
+		{
+			"sha":      "abc123def456789",
+			"html_url": "https://github.com/velion/api/commit/abc123def456789",
+			"commit": map[string]any{
+				"message": "feat: add thing\n\nlonger body here",
+				"author":  map[string]any{"name": "Benja", "email": "b@x.com", "date": "2026-06-10T12:00:00Z"},
+			},
+			"author": map[string]any{"login": "arratiabenjamin"},
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/commits"):
+			json.NewEncoder(w).Encode(commits)
+		case strings.Contains(r.URL.Path, "/issues"):
+			w.Write([]byte("[]"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	src := github.NewWithBaseURL([]string{"velion/api"}, &stubRouter{"omnia"}, "", newStubState(nil), srv.URL)
+	src.SetIncludeCommits(true)
+	items, err := src.FetchAll(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch failed: %v", err)
+	}
+	found := false
+	for _, it := range items {
+		if it.Type != "github-commit" {
+			continue
+		}
+		found = true
+		if !strings.Contains(it.Title, "abc123de") {
+			t.Errorf("title %q should contain short sha", it.Title)
+		}
+		if !strings.Contains(it.TopicKey, "commit-abc123def456789") {
+			t.Errorf("topic_key %q should contain commit sha", it.TopicKey)
+		}
+		if !strings.Contains(it.Content, "arratiabenjamin") {
+			t.Errorf("content should mention author login")
+		}
+		if !strings.Contains(it.Content, "author: arratiabenjamin") {
+			t.Errorf("meta block should carry author login")
+		}
+	}
+	if !found {
+		t.Fatal("expected a github-commit item")
+	}
+}
+
+// TestCommitsDisabledByDefault verifies the commits endpoint is never hit unless
+// IncludeCommits is enabled — protects the existing issues/PRs-only behaviour.
+func TestCommitsDisabledByDefault(t *testing.T) {
+	commitHit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/commits"):
+			commitHit = true
+			w.Write([]byte("[]"))
+		case strings.Contains(r.URL.Path, "/issues"):
+			w.Write([]byte("[]"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	src := github.NewWithBaseURL([]string{"velion/api"}, &stubRouter{"omnia"}, "", newStubState(nil), srv.URL)
+	if _, err := src.FetchAll(context.Background()); err != nil {
+		t.Fatalf("Fetch failed: %v", err)
+	}
+	if commitHit {
+		t.Error("commits endpoint must not be hit when IncludeCommits is false")
+	}
+}
+
 func TestPRDetection(t *testing.T) {
 	prData, err := os.ReadFile("../../../testdata/github_pr.json")
 	if err != nil {

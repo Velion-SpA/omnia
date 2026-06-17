@@ -117,6 +117,8 @@ func runSync(configPath string, dryRun bool, sourceFilter, sinceStr string) erro
 		// W4: pass token from config; New() applies env → config → gh fallback precedence.
 		src := github.New(cfg.Sources.GitHub.Repos, router, cfg.Sources.GitHub.Token, st)
 		src.SetBackfillDays(cfg.BackfillDays)
+		src.SetIncludeCommits(cfg.Sources.GitHub.IncludeCommits)
+		src.SetMaxCommitsPerRepo(cfg.Sources.GitHub.MaxCommitsPerRepo)
 
 		// S6: startup validation — ensure a token resolved.
 		if os.Getenv("GITHUB_TOKEN") == "" && cfg.Sources.GitHub.Token == "" {

@@ -74,6 +74,13 @@ type GitHubConfig struct {
 	Token   string   `yaml:"token"`
 	Repos   []string `yaml:"repos"`
 	Project string   `yaml:"project"`
+	// IncludeCommits also ingests commit history (sha, message, author login +
+	// git name/email, date, url) as `github-commit` observations, in addition to
+	// issues/PRs. Off by default: the first run backfills up to MaxCommitsPerRepo
+	// per repo over the backfill window, which can be a lot of observations.
+	IncludeCommits bool `yaml:"include_commits"`
+	// MaxCommitsPerRepo caps commits fetched per repo per run (0 → default 300).
+	MaxCommitsPerRepo int `yaml:"max_commits_per_repo"`
 }
 
 // Router resolves the Engram project for a given ingestion origin.

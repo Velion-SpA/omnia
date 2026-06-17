@@ -76,16 +76,20 @@ type comment struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// Source fetches GitHub issues and PRs.
+// Source fetches GitHub issues and PRs (and optionally commits).
 type Source struct {
-	repos        []string
-	router       projectRouter
-	token        string
-	backfillDays int
-	client       *http.Client
-	state        core.StateStore
-	baseURL      string
+	repos             []string
+	router            projectRouter
+	token             string
+	backfillDays      int
+	client            *http.Client
+	state             core.StateStore
+	baseURL           string
+	includeCommits    bool
+	maxCommitsPerRepo int
 }
+
+const defaultMaxCommitsPerRepo = 300
 
 // New creates a GitHub Source. Token resolution: GITHUB_TOKEN env → configToken → `gh auth token`.
 func New(repos []string, router projectRouter, configToken string, state core.StateStore) *Source {
@@ -99,13 +103,14 @@ func New(repos []string, router projectRouter, configToken string, state core.St
 		}
 	}
 	return &Source{
-		repos:        repos,
-		router:       router,
-		token:        token,
-		backfillDays: 30,
-		client:       &http.Client{Timeout: 30 * time.Second},
-		state:        state,
-		baseURL:      defaultBaseURL,
+		repos:             repos,
+		router:            router,
+		token:             token,
+		backfillDays:      30,
+		client:            &http.Client{Timeout: 30 * time.Second},
+		state:             state,
+		baseURL:           defaultBaseURL,
+		maxCommitsPerRepo: defaultMaxCommitsPerRepo,
 	}
 }
 
@@ -120,6 +125,16 @@ func NewWithBaseURL(repos []string, router projectRouter, configToken string, st
 func (s *Source) SetBackfillDays(days int) {
 	if days > 0 {
 		s.backfillDays = days
+	}
+}
+
+// SetIncludeCommits enables ingestion of commit history alongside issues/PRs.
+func (s *Source) SetIncludeCommits(v bool) { s.includeCommits = v }
+
+// SetMaxCommitsPerRepo caps commits fetched per repo per run. Non-positive keeps the default.
+func (s *Source) SetMaxCommitsPerRepo(n int) {
+	if n > 0 {
+		s.maxCommitsPerRepo = n
 	}
 }
 
@@ -204,6 +219,16 @@ func (s *Source) fetchRepo(ctx context.Context, repo string, since time.Time) ([
 			}
 		}
 	}
+
+	// Optionally collect commit history for this repo (sha, message, author).
+	if s.includeCommits {
+		commitItems, err := s.fetchCommitItems(ctx, owner, repoName, repo, project, since)
+		if err != nil {
+			return nil, fmt.Errorf("fetch commits %s: %w", repo, err)
+		}
+		items = append(items, commitItems...)
+	}
+
 	return items, nil
 }
 
@@ -480,6 +505,200 @@ func formatIssue(iss issue, comments []comment, owner, repo, project string) []c
 		})
 	}
 	return items
+}
+
+// commitResp is the subset of the GitHub commits API we use.
+type commitResp struct {
+	SHA     string `json:"sha"`
+	HTMLURL string `json:"html_url"`
+	Commit  struct {
+		Message string `json:"message"`
+		Author  struct {
+			Name  string    `json:"name"`
+			Email string    `json:"email"`
+			Date  time.Time `json:"date"`
+		} `json:"author"`
+	} `json:"commit"`
+	Author *struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}
+
+// fetchCommitItems resolves the per-repo commit cursor (key "<repo>#commits",
+// kept separate from the issues/PRs cursor), fetches new commits, formats them,
+// and advances the cursor to the latest commit date seen.
+func (s *Source) fetchCommitItems(ctx context.Context, owner, repoName, repo, project string, fallbackSince time.Time) ([]core.Item, error) {
+	commitSince := fallbackSince
+	if s.state != nil {
+		if cursor, ok := s.state.GetCursor("github", repo+"#commits"); ok {
+			if t, err := time.Parse(time.RFC3339, cursor); err == nil {
+				commitSince = t.Add(-cursorOverlap)
+			}
+		}
+	}
+	if commitSince.IsZero() {
+		commitSince = time.Now().AddDate(0, 0, -s.backfillDays)
+	}
+
+	commits, err := s.fetchCommits(ctx, owner, repoName, commitSince)
+	if err != nil {
+		return nil, err
+	}
+
+	var items []core.Item
+	var latest time.Time
+	for _, c := range commits {
+		items = append(items, formatCommit(c, owner, repoName, project))
+		if c.Commit.Author.Date.After(latest) {
+			latest = c.Commit.Author.Date
+		}
+	}
+	if s.state != nil && !latest.IsZero() {
+		key := repo + "#commits"
+		nv := latest.UTC().Format(time.RFC3339)
+		if v, ok := s.state.GetCursor("github", key); !ok || nv > v {
+			s.state.SetCursor("github", key, nv)
+		}
+	}
+	return items, nil
+}
+
+// fetchCommits pages the commits API since the given time, capped at maxCommitsPerRepo.
+func (s *Source) fetchCommits(ctx context.Context, owner, repoName string, since time.Time) ([]commitResp, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/commits?since=%s&per_page=100",
+		s.baseURL, owner, repoName, since.UTC().Format(time.RFC3339))
+	var all []commitResp
+	for url != "" && len(all) < s.maxCommitsPerRepo {
+		var page []commitResp
+		next, err := s.getJSON(ctx, url, &page)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) == 0 {
+			break
+		}
+		url = next
+	}
+	if len(all) > s.maxCommitsPerRepo {
+		all = all[:s.maxCommitsPerRepo]
+	}
+	return all, nil
+}
+
+// getJSON performs an authenticated GET with the same rate-limit handling as
+// fetchPage and decodes the JSON body into out, returning the Link "next" URL.
+func (s *Source) getJSON(ctx context.Context, url string, out any) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if s.token != "" {
+		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("GET %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
+		if resp.Header.Get("X-RateLimit-Remaining") == "0" {
+			sleep := retryAfterDuration(resp, 60*time.Second)
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(sleep):
+			}
+			return s.getJSON(ctx, url, out)
+		}
+		return "", fmt.Errorf("forbidden: check token scope/repo access (status %d)", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GET %s returned %d", url, resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return "", fmt.Errorf("decode: %w", err)
+	}
+	return parseLinkNext(resp.Header.Get("Link")), nil
+}
+
+// formatCommit builds a single Item for a commit (idempotent topic_key by sha).
+func formatCommit(c commitResp, owner, repo, project string) core.Item {
+	sha := c.SHA
+	shortSHA := sha
+	if len(shortSHA) > 8 {
+		shortSHA = shortSHA[:8]
+	}
+	firstLine := strings.SplitN(strings.TrimSpace(c.Commit.Message), "\n", 2)[0]
+
+	login := ""
+	if c.Author != nil {
+		login = c.Author.Login
+	}
+	authorDisplay := login
+	if authorDisplay == "" {
+		authorDisplay = c.Commit.Author.Name
+	}
+
+	rawTopicKey := fmt.Sprintf("github/%s-%s/commit-%s", owner, repo, sha)
+	title := fmt.Sprintf("[%s@%s] %s", repo, shortSHA, firstLine)
+
+	var sb strings.Builder
+	sb.WriteString("## Source\n\n")
+	sb.WriteString(fmt.Sprintf("- Repository: %s/%s\n", owner, repo))
+	sb.WriteString(fmt.Sprintf("- Commit: %s\n", sha))
+	sb.WriteString(fmt.Sprintf("- URL: %s\n", c.HTMLURL))
+	if login != "" {
+		sb.WriteString(fmt.Sprintf("- Author: %s (%s <%s>)\n", login, c.Commit.Author.Name, c.Commit.Author.Email))
+	} else {
+		sb.WriteString(fmt.Sprintf("- Author: %s <%s>\n", c.Commit.Author.Name, c.Commit.Author.Email))
+	}
+	sb.WriteString(fmt.Sprintf("- Date: %s\n", c.Commit.Author.Date.Format(time.RFC3339)))
+	sb.WriteString("\n## Message\n\n")
+	sb.WriteString(enrich.TruncateContent(c.Commit.Message, 5000))
+	sb.WriteString("\n")
+	content := sb.String()
+
+	var participants []string
+	if login != "" {
+		participants = append(participants, login)
+	}
+
+	m := meta.Meta{
+		SchemaVersion: meta.SchemaVersion,
+		Source:        "github",
+		Kind:          "commit",
+		Layer:         "ingested",
+		Project:       project,
+		Repo:          owner + "/" + repo,
+		SourceID:      sha,
+		Status:        "committed",
+		Author:        authorDisplay,
+		Participants:  participants,
+		URL:           c.HTMLURL,
+		CreatedAt:     c.Commit.Author.Date,
+		UpdatedAt:     c.Commit.Author.Date,
+		IngestedAt:    time.Now().UTC(),
+	}
+
+	topicKey := enrich.NormalizeTopicKey(rawTopicKey)
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += meta.Render(m)
+
+	return core.Item{
+		Type:      "github-commit",
+		Title:     title,
+		Content:   content,
+		Project:   project,
+		TopicKey:  topicKey,
+		Source:    "github",
+		FetchedAt: time.Now(),
+	}
 }
 
 // parseLinkNext extracts the "next" URL from a GitHub Link header.
