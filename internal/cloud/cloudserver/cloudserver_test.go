@@ -542,7 +542,7 @@ func TestHandlerDashboardRouteOwnershipParity(t *testing.T) {
 	}
 
 	asset := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/dashboard/static/styles.css", nil))
+	srv.Handler().ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/dashboard/static/omnia.css", nil))
 	if asset.Code != http.StatusOK {
 		t.Fatalf("expected dashboard static route to be mounted, got %d", asset.Code)
 	}

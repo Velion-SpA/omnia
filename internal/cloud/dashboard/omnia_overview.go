@@ -8,60 +8,8 @@ import (
 	"time"
 
 	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/ui"
 )
-
-// OverviewData bundles everything the command-center home renders. It mirrors the
-// local Omnia dashboard's OverviewData so the cloud home is visually identical.
-type OverviewData struct {
-	Projects       []ProjectStats
-	TotalMemories  int
-	TotalProjects  int
-	LastSync       string
-	LastSyncSource string
-	ByType         []TypeCount
-	LiveFeed       []FeedItem
-	Sources        []SourceStat
-}
-
-// ProjectStats is one row of the Projects panel.
-type ProjectStats struct {
-	Name           string
-	Total          int
-	LatestUpdateAt string
-	HasUpdate      bool
-	IsFresh        bool
-}
-
-// TypeCount is one bar of the Memory Types panel.
-type TypeCount struct {
-	Name  string
-	Count int
-}
-
-// FeedItem is one entry of the Live Feed panel.
-type FeedItem struct {
-	DetailURL string
-	Title     string
-	Type      string
-	Project   string
-	Age       string
-}
-
-// SourceStat is one row of the Sources panel.
-type SourceStat struct {
-	Name    string
-	Sub     string
-	IconKey string // "github" | "discord" | "claude"
-	Count   int
-}
-
-// typePct returns the bar fill percentage for a type count relative to the max.
-func typePct(count int, all []TypeCount) string {
-	if len(all) == 0 || all[0].Count == 0 {
-		return "0"
-	}
-	return fmt.Sprintf("%d", (count*100)/all[0].Count)
-}
 
 func parseCloudTime(s string) (time.Time, bool) {
 	s = strings.TrimSpace(s)
@@ -76,16 +24,14 @@ func parseCloudTime(s string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// buildCloudOverview assembles OverviewData from cloud store rows, mirroring the
-// local dashboard's buildOverviewData. `observations` should be the most-recent
-// rows already scoped to the principal.
-func buildCloudOverview(stats []cloudstore.DashboardProjectRow, observations []cloudstore.DashboardObservationRow) OverviewData {
+// buildCloudOverview assembles the shared ui.OverviewData from cloud store rows.
+// `observations` should be the most-recent rows already scoped to the principal.
+func buildCloudOverview(stats []cloudstore.DashboardProjectRow, observations []cloudstore.DashboardObservationRow) ui.OverviewData {
 	total := 0
 	for _, s := range stats {
 		total += s.Observations
 	}
 
-	// Latest update per project + overall last sync, from the observation sample.
 	latestByProject := map[string]time.Time{}
 	var lastSync time.Time
 	for _, o := range observations {
@@ -99,10 +45,13 @@ func buildCloudOverview(stats []cloudstore.DashboardProjectRow, observations []c
 		}
 	}
 
-	// Projects sorted by count desc, then name.
-	projects := make([]ProjectStats, 0, len(stats))
+	projects := make([]ui.ProjectStats, 0, len(stats))
 	for _, s := range stats {
-		ps := ProjectStats{Name: s.Project, Total: s.Observations}
+		ps := ui.ProjectStats{
+			Name:  s.Project,
+			Total: s.Observations,
+			Href:  "/dashboard/browser?project=" + url.QueryEscape(s.Project),
+		}
 		if t, ok := latestByProject[s.Project]; ok {
 			ps.LatestUpdateAt = relativeTime(t)
 			ps.HasUpdate = true
@@ -117,7 +66,6 @@ func buildCloudOverview(stats []cloudstore.DashboardProjectRow, observations []c
 		return projects[i].Name < projects[j].Name
 	})
 
-	// Type breakdown from the observation sample (cap 8 bars).
 	typeCounts := map[string]int{}
 	for _, o := range observations {
 		t := strings.TrimSpace(o.Type)
@@ -126,9 +74,9 @@ func buildCloudOverview(stats []cloudstore.DashboardProjectRow, observations []c
 		}
 		typeCounts[t]++
 	}
-	byType := make([]TypeCount, 0, len(typeCounts))
+	byType := make([]ui.TypeCount, 0, len(typeCounts))
 	for name, cnt := range typeCounts {
-		byType = append(byType, TypeCount{Name: name, Count: cnt})
+		byType = append(byType, ui.TypeCount{Name: name, Count: cnt})
 	}
 	sort.SliceStable(byType, func(i, j int) bool {
 		if byType[i].Count != byType[j].Count {
@@ -141,8 +89,7 @@ func buildCloudOverview(stats []cloudstore.DashboardProjectRow, observations []c
 		byType = byType[:maxTypeBars]
 	}
 
-	// Live feed: most-recent observations (cap 8).
-	var feed []FeedItem
+	var feed []ui.FeedItem
 	for i, o := range observations {
 		if i >= 8 {
 			break
@@ -160,12 +107,9 @@ func buildCloudOverview(stats []cloudstore.DashboardProjectRow, observations []c
 		}
 		detail := fmt.Sprintf("/dashboard/observations/%s/%s/%s",
 			url.PathEscape(o.Project), url.PathEscape(o.SessionID), url.PathEscape(o.SyncID))
-		feed = append(feed, FeedItem{DetailURL: detail, Title: title, Type: o.Type, Project: o.Project, Age: age})
+		feed = append(feed, ui.FeedItem{DetailURL: detail, Title: title, Type: o.Type, Project: o.Project, Age: age})
 	}
 
-	// Sources: the same three rows as the local dashboard, counts derived from the
-	// observation sample's tool signal (cloud memories are mostly agent sessions,
-	// so Claude Code carries the curated count).
 	var github, discord, claude int
 	for _, o := range observations {
 		switch strings.ToLower(strings.TrimSpace(o.ToolName)) {
@@ -177,7 +121,7 @@ func buildCloudOverview(stats []cloudstore.DashboardProjectRow, observations []c
 			claude++
 		}
 	}
-	sources := []SourceStat{
+	sources := []ui.SourceStat{
 		{Name: "GitHub", Sub: "PRs · commits · reviews", IconKey: "github", Count: github},
 		{Name: "Discord", Sub: "digests · threads · mentions", IconKey: "discord", Count: discord},
 		{Name: "Claude Code", Sub: "sessions · fixes · decisions", IconKey: "claude", Count: claude},
@@ -188,7 +132,7 @@ func buildCloudOverview(stats []cloudstore.DashboardProjectRow, observations []c
 		lastSyncAge = relativeTime(lastSync)
 	}
 
-	return OverviewData{
+	return ui.OverviewData{
 		Projects:       projects,
 		TotalMemories:  total,
 		TotalProjects:  len(stats),

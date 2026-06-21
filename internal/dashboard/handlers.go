@@ -15,6 +15,7 @@ import (
 	"github.com/velion/omnia/internal/audit"
 	"github.com/velion/omnia/internal/embed"
 	"github.com/velion/omnia/internal/engramdb"
+	"github.com/velion/omnia/internal/ui"
 )
 
 // Config holds the runtime configuration for the dashboard server.
@@ -145,6 +146,10 @@ func (s *Server) Start(ctx context.Context) error {
 
 // registerRoutes sets up all HTTP routes.
 func (s *Server) registerRoutes(mux *http.ServeMux) {
+	// Shared Omnia design-system assets (internal/ui) — the exact same CSS the cloud
+	// dashboard serves, so both surfaces stay visually identical.
+	mux.Handle("GET /static/", ui.StaticHandler("/static/"))
+
 	// Pages
 	mux.HandleFunc("GET /", s.handleOverview)
 	mux.HandleFunc("GET /browse", s.handleBrowse)

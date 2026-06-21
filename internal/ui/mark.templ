@@ -1,9 +1,9 @@
-package dashboard
+package ui
 
 import "strconv"
 
-// OmniaMark renders the Omnia logomark — the cyan "core" concentric mark used
-// across the Omnia surfaces. size is the rendered width/height in px.
+// OmniaMark renders the Omnia logomark — the concentric cyan "core" used across
+// every Omnia surface. size is the rendered width/height in px.
 templ OmniaMark(size int) {
 	<svg
 		width={ strconv.Itoa(size) }

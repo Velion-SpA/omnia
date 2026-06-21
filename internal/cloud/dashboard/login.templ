@@ -1,5 +1,7 @@
 package dashboard
 
+import "github.com/velion/omnia/internal/ui"
+
 // LoginPage renders the standalone login page (no layout wrapper).
 // Accepts account credentials (username + password) for member/admin accounts,
 // with an operator-token fallback for the server administrator. The account path
@@ -12,14 +14,14 @@ templ LoginPage(errorMsg string, next string) {
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>Login — Omnia Cloud</title>
 			<link rel="stylesheet" href="/dashboard/static/pico.min.css"/>
-			<link rel="stylesheet" href="/dashboard/static/styles.css"/>
+			<link rel="stylesheet" href="/dashboard/static/omnia.css"/>
 		</head>
 		<body class="shell-body">
 			<div class="shell-backdrop">
 				<main class="login-shell">
 					<section class="login-sidepanel">
 						<div style="margin-bottom:18px;">
-							@OmniaMark(48)
+							@ui.OmniaMark(48)
 						</div>
 						<p class="section-kicker">CLOUD ACTIVE</p>
 						<h1>Omnia Cloud</h1>

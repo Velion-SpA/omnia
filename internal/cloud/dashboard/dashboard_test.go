@@ -931,7 +931,7 @@ func TestDashboardLayoutHTMLStructure(t *testing.T) {
 		class string
 	}{
 		{"nav", "cmd-nav"},
-		{"a", "wordmark"},
+		{"a", "nav-brand"},
 		{"div", "nav-links"},
 		{"div", "nav-meta"},
 		{"main", "page-main"},
@@ -953,8 +953,8 @@ func TestStatusRibbonAndFooterPresent(t *testing.T) {
 	for _, marker := range []string{
 		"cmd-nav",
 		"micro-label",
-		"OMNIA CLOUD — SHARED MEMORY LAYER",
-		"Omnia Cloud",
+		"Cloud Memory",
+		"Omnia",
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("expected %q in body", marker)
@@ -1122,7 +1122,7 @@ func TestMountRouteParityAndHTTPFallbacks(t *testing.T) {
 		if !strings.Contains(body, "/dashboard/static/pico.min.css") {
 			t.Fatalf("expected pico css reference, body=%q", body)
 		}
-		if !strings.Contains(body, "/dashboard/static/styles.css") {
+		if !strings.Contains(body, "/dashboard/static/omnia.css") {
 			t.Fatalf("expected styles css reference, body=%q", body)
 		}
 		if !strings.Contains(body, "name=\"token\"") {
@@ -1132,7 +1132,7 @@ func TestMountRouteParityAndHTTPFallbacks(t *testing.T) {
 
 	t.Run("static assets are served", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/static/styles.css", nil))
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/static/omnia.css", nil))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected static asset 200, got %d", rec.Code)
 		}
@@ -1250,7 +1250,7 @@ func TestMountRouteParityAndHTTPFallbacks(t *testing.T) {
 		for _, token := range []string{
 			"cmd-nav",
 			"page-main",
-			"Omnia Cloud",
+			"Cloud Memory",
 		} {
 			if !strings.Contains(body, token) {
 				t.Fatalf("expected mounted /dashboard route to include %q, body=%q", token, body)
@@ -2515,8 +2515,8 @@ func TestDashboardStatsFullPageShowsStatusRibbon(t *testing.T) {
 	body := rec.Body.String()
 	for _, marker := range []string{
 		"cmd-nav",
-		"Omnia Cloud",
-		"OMNIA CLOUD — SHARED MEMORY LAYER",
+		"Cloud Memory",
+		"micro-label",
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("R5-1: expected %q in /dashboard/stats full-page body, got body=%q", marker, body[:min(len(body), 500)])
@@ -2535,8 +2535,8 @@ func TestDashboardActivityFullPageShowsStatusRibbon(t *testing.T) {
 	body := rec.Body.String()
 	for _, marker := range []string{
 		"cmd-nav",
-		"Omnia Cloud",
-		"OMNIA CLOUD — SHARED MEMORY LAYER",
+		"Cloud Memory",
+		"micro-label",
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("R5-1: expected %q in /dashboard/activity full-page body, got body=%q", marker, body[:min(len(body), 500)])

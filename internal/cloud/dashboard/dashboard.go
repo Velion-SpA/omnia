@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"html"
-	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/velion/omnia/internal/cloud/cloudstore"
 	"github.com/velion/omnia/internal/cloud/constants"
+	"github.com/velion/omnia/internal/ui"
 	"github.com/a-h/templ"
 )
 
@@ -109,11 +109,9 @@ type handlers struct {
 func Mount(mux *http.ServeMux, cfg MountConfig) {
 	h := &handlers{cfg: cfg}
 
-	staticSub, err := fs.Sub(StaticFS, "static")
-	if err != nil {
-		log.Fatalf("dashboard: failed to create static sub FS: %v", err)
-	}
-	mux.Handle("GET /dashboard/static/", http.StripPrefix("/dashboard/static/", http.FileServer(http.FS(staticSub))))
+	// Serve the SHARED Omnia design system assets (internal/ui) so the cloud and
+	// local dashboards load the exact same CSS.
+	mux.Handle("GET /dashboard/static/", ui.StaticHandler("/dashboard/static/"))
 
 	mux.HandleFunc("GET /dashboard/health", h.handleHealth)
 	mux.HandleFunc("GET /dashboard/login", h.handleLoginPage)
@@ -322,7 +320,7 @@ func (h *handlers) handleDashboardHome(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	// Build the Omnia command-center overview from store rows scoped to the
 	// principal (operator → all, account → its memberships).
-	data := OverviewData{}
+	data := ui.OverviewData{}
 	if h.cfg.Store != nil {
 		if projects, err := h.cfg.Store.ListProjects(""); err == nil {
 			projects = filterRowsByScope(p, projects, projectOfRow)
@@ -334,10 +332,10 @@ func (h *handlers) handleDashboardHome(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if isHTMXRequest(r) {
-		renderComponent(w, r, overviewContent(data))
+		renderComponent(w, r, ui.OverviewContent(data))
 		return
 	}
-	renderComponent(w, r, Layout("Dashboard", p.DisplayName(), "dashboard", p.IsAdmin(), overviewContent(data)))
+	renderComponent(w, r, Layout("Dashboard", p.DisplayName(), "dashboard", p.IsAdmin(), ui.OverviewContent(data)))
 }
 
 func (h *handlers) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
