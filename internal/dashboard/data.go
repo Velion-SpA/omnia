@@ -108,7 +108,7 @@ const ingestedTerm = "schema_version: 1"
 
 // loadProjectObs fetches all available observations for a project.
 // It uses two searches (ingested term + project name) and deduplicates.
-func loadProjectObs(ctx context.Context, client *engramClient, project string, limit int) ([]ObsView, error) {
+func loadProjectObs(ctx context.Context, client RecordReader, project string, limit int) ([]ObsView, error) {
 	// Search 1: ingested observations (have omnia-meta block).
 	ingested, err := client.Search(ctx, ingestedTerm, project, limit)
 	if err != nil {

@@ -45,21 +45,6 @@ type stubCloudRuntimeServer struct {
 	err     error
 }
 
-type stubManifestReader struct {
-	manifest *engramsync.Manifest
-	err      error
-}
-
-func (s stubManifestReader) ReadManifest(context.Context, string) (*engramsync.Manifest, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	if s.manifest != nil {
-		return s.manifest, nil
-	}
-	return &engramsync.Manifest{}, nil
-}
-
 func (s *stubCloudRuntimeServer) Start() error {
 	s.started = true
 	return s.err
@@ -2277,27 +2262,6 @@ func TestStoreSyncStatusProviderDoesNotUsePersistedStateWhenProjectNotEnrolled(t
 	}
 	if !strings.Contains(status.ReasonMessage, "not enrolled") {
 		t.Fatalf("expected not enrolled message, got %q", status.ReasonMessage)
-	}
-}
-
-func TestCloudDashboardStatusProviderSanitizesManifestErrors(t *testing.T) {
-	provider := cloudDashboardStatusProvider{
-		store:    stubManifestReader{err: errors.New("dial tcp 10.0.0.10:443: connection refused")},
-		projects: []string{"proj-a"},
-	}
-
-	status := provider.Status()
-	if status.Phase != "degraded" {
-		t.Fatalf("expected degraded phase, got %q", status.Phase)
-	}
-	if status.ReasonCode != constants.ReasonTransportFailed {
-		t.Fatalf("expected reason code %q, got %q", constants.ReasonTransportFailed, status.ReasonCode)
-	}
-	if status.ReasonMessage != "cloud sync status is temporarily unavailable" {
-		t.Fatalf("expected sanitized user-facing message, got %q", status.ReasonMessage)
-	}
-	if strings.Contains(status.ReasonMessage, "10.0.0.10") || strings.Contains(status.ReasonMessage, "connection refused") {
-		t.Fatalf("expected backend details to be hidden from reason_message, got %q", status.ReasonMessage)
 	}
 }
 

@@ -210,7 +210,14 @@ func TestAuthRoutesNotRegisteredWithoutAccountService(t *testing.T) {
 	req := httptest.NewRequest("POST", "/auth/login", strings.NewReader(`{"username":"a","password":"b"}`))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 when AccountService absent, got %d", rec.Code)
+	// The /auth/login POST endpoint is NOT registered without an account service.
+	// Since the unified dashboard now owns the root namespace ("GET /"), the path is
+	// recognised for GET only, so an unhandled POST resolves to 405 Method Not Allowed
+	// rather than 404 — either way, no login is processed.
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 when AccountService absent, got %d", rec.Code)
+	}
+	if rec.Code == http.StatusOK {
+		t.Fatalf("auth login must not succeed without an account service")
 	}
 }

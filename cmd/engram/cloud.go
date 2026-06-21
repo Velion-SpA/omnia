@@ -6,65 +6,21 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/velion/omnia/internal/cloud"
 	"github.com/velion/omnia/internal/cloud/auth"
 	"github.com/velion/omnia/internal/cloud/cloudserver"
 	"github.com/velion/omnia/internal/cloud/cloudstore"
 	"github.com/velion/omnia/internal/cloud/constants"
-	"github.com/velion/omnia/internal/cloud/dashboard"
 	"github.com/velion/omnia/internal/cloud/remote"
 	"github.com/velion/omnia/internal/store"
 	engramsync "github.com/velion/omnia/internal/sync"
 )
-
-type cloudManifestReader interface {
-	ReadManifest(ctx context.Context, project string) (*engramsync.Manifest, error)
-}
-
-type cloudDashboardStatusProvider struct {
-	store    cloudManifestReader
-	projects []string
-}
-
-func (p cloudDashboardStatusProvider) Status() dashboard.SyncStatus {
-	if len(p.projects) == 0 {
-		return dashboard.SyncStatus{
-			Phase:         "degraded",
-			ReasonCode:    constants.ReasonBlockedUnenrolled,
-			ReasonMessage: "cloud project allowlist is empty",
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	totalChunks := 0
-	for _, project := range p.projects {
-		manifest, err := p.store.ReadManifest(ctx, project)
-		if err != nil {
-			log.Printf("[engram] cloud dashboard status manifest read failed for project %q: %v", project, err)
-			return dashboard.SyncStatus{
-				Phase:         "degraded",
-				ReasonCode:    constants.ReasonTransportFailed,
-				ReasonMessage: "cloud sync status is temporarily unavailable",
-			}
-		}
-		totalChunks += len(manifest.Chunks)
-	}
-
-	return dashboard.SyncStatus{
-		Phase:         "healthy",
-		ReasonMessage: fmt.Sprintf("cloud chunks available across %d project(s): %d", len(p.projects), totalChunks),
-	}
-}
 
 type cloudServerRuntime interface {
 	Start() error
@@ -115,7 +71,6 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			cloudserver.WithProjectAuthorizer(projectAuth),
 			cloudserver.WithDashboardAdminToken(cfg.AdminToken),
 			cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
-			cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
 		),
 		store: cs,
 	}, nil

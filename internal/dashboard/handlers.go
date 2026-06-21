@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/velion/omnia/internal/audit"
-	"github.com/velion/omnia/internal/embed"
 	"github.com/velion/omnia/internal/engramdb"
 	"github.com/velion/omnia/internal/ui"
 )
@@ -59,47 +58,63 @@ type Config struct {
 	EmbeddingsDBPath  string
 }
 
-// Server is the Omnia dashboard HTTP server.
+// Server is the Omnia dashboard HTTP server. It depends only on a DataSource, so
+// the same server (and the same templ pages) runs over the local Engram stack or
+// the cloud's replicated store — they differ ONLY in which DataSource is wired in.
+//
+// db, sem and mut are the optional capabilities resolved from the DataSource at
+// construction time. They are nil when the backend does not provide them, and the
+// handlers keep their original nil-checks (e.g. `if s.db != nil`) so behaviour is
+// identical to when these were concrete *engramdb.DB / *embed.Store / client fields.
 type Server struct {
-	cfg       Config
-	client    *engramClient
-	db        *engramdb.DB // nil when unavailable; dashboard falls back to HTTP/FTS
-	emb       *embed.Store // nil when embeddings disabled/unavailable; browse falls back to FTS
-	embClient embed.Embedder
-	logger    *slog.Logger
-	groups    *GroupIndex
+	cfg     Config
+	src     DataSource
+	records RecordReader     // always present (single observation + keyword search)
+	db      StructuralReader // nil → structural queries fall back to HTTP/FTS
+	sem     SemanticIndex    // nil → semantic search/graph unavailable
+	mut     MutationWriter   // nil → dashboard is read-only
+	logger  *slog.Logger
+	groups  *GroupIndex
 }
 
-// NewServer creates a new dashboard Server.
-// It attempts to open the Engram SQLite DB for structural queries; if that
-// fails it logs a warning and the dashboard continues using HTTP/FTS.
+// NewServer creates a new dashboard Server backed by the LOCAL Engram stack.
+// It attempts to open the Engram SQLite DB for structural queries and the
+// optional embeddings store; failures are logged and the dashboard continues with
+// reduced capabilities (HTTP/FTS, no graph). cmd/omnia uses this unchanged.
 func NewServer(cfg Config, logger *slog.Logger) *Server {
+	return NewServerWithDataSource(cfg, newLocalDataSource(cfg, logger), logger)
+}
+
+// NewServerWithDataSource builds a Server over an arbitrary DataSource. The cloud
+// wires its replicated-store DataSource here; everything else (routing, handlers,
+// templ pages) is identical to the local dashboard.
+func NewServerWithDataSource(cfg Config, src DataSource, logger *slog.Logger) *Server {
 	s := &Server{
 		cfg:    cfg,
-		client: newEngramClient(cfg.EngramURL),
+		src:    src,
 		logger: logger,
 	}
 	s.groups = newGroupIndex(cfg.ProjectGroups, logger)
-	db, err := engramdb.Open(cfg.EngramDataDir)
-	if err != nil {
-		logger.Warn("engramdb unavailable; structural queries fall back to HTTP/FTS", "err", err)
-	} else {
-		s.db = db
+	s.records = src.Records()
+	if sr, ok := src.Structural(); ok {
+		s.db = sr
 	}
-
-	// Optional semantic-search layer. A failure to open the store leaves emb nil,
-	// and browse transparently falls back to keyword (FTS) search.
-	if cfg.EmbeddingsEnabled {
-		store, err := embed.OpenStore(cfg.EmbeddingsDBPath)
-		if err != nil {
-			logger.Warn("embeddings store unavailable; semantic search disabled, using FTS", "err", err)
-		} else {
-			s.emb = store
-			s.embClient = embed.New(cfg.EmbeddingsBaseURL, cfg.EmbeddingsModel, cfg.EmbeddingsDim)
-			logger.Info("semantic search enabled", "model", cfg.EmbeddingsModel, "db", cfg.EmbeddingsDBPath)
-		}
+	if si, ok := src.Semantic(); ok {
+		s.sem = si
+	}
+	if mw, ok := src.Mutations(); ok {
+		s.mut = mw
 	}
 	return s
+}
+
+// Handler returns the dashboard's HTTP handler with all routes registered. The
+// cloud server mounts this directly (fronted by its own auth/session middleware),
+// so both surfaces share identical routing.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	s.registerRoutes(mux)
+	return mux
 }
 
 // Start binds to localhost and serves until ctx is cancelled.
@@ -131,13 +146,8 @@ func (s *Server) Start(ctx context.Context) error {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		err := srv.Shutdown(shutCtx)
-		// Close the SQLite handles so their WAL is checkpointed on clean shutdown.
-		if s.emb != nil {
-			_ = s.emb.Close()
-		}
-		if s.db != nil {
-			_ = s.db.Close()
-		}
+		// Release backend resources (e.g. checkpoint SQLite WAL) on clean shutdown.
+		_ = s.src.Close()
 		return err
 	case err := <-errCh:
 		return err
@@ -172,7 +182,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	engUp := s.client.Health(ctx) == nil
+	engUp := s.src.Health(ctx) == nil
 	syncStatus := loadSyncStatus()
 
 	// Load project stats (existing logic preserved).
@@ -189,10 +199,10 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			var views []ObsView
 			var err error
 			if s.groups.IsParent(proj) {
-				views, err = loadProjectObs(ctx, s.client, proj, 200)
+				views, err = loadProjectObs(ctx, s.records, proj, 200)
 				if err == nil {
 					for _, child := range s.groups.Children(proj) {
-						childViews, childErr := loadProjectObs(ctx, s.client, child, 200)
+						childViews, childErr := loadProjectObs(ctx, s.records, child, 200)
 						if childErr == nil {
 							views = append(views, childViews...)
 						}
@@ -200,7 +210,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 					views = dedupeViews(views)
 				}
 			} else {
-				views, err = loadProjectObs(ctx, s.client, proj, 200)
+				views, err = loadProjectObs(ctx, s.records, proj, 200)
 			}
 			if err != nil {
 				s.logger.Warn("failed to load project obs", "project", proj, "err", err)
@@ -492,7 +502,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		if sem, ok := s.semanticSearch(ctx, params); ok {
 			allViews = sem
 		} else {
-			raw, err := s.client.Search(ctx, params.Query, params.Project, 300)
+			raw, err := s.records.Search(ctx, params.Query, params.Project, 300)
 			if err != nil {
 				s.logger.Warn("browse search failed", "err", err)
 			}
@@ -506,20 +516,20 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 			switch params.Sub {
 			case "core":
 				// Parent's own observations only.
-				v, err := loadProjectObs(ctx, s.client, params.Project, 300)
+				v, err := loadProjectObs(ctx, s.records, params.Project, 300)
 				if err != nil {
 					s.logger.Warn("browse project load failed", "project", params.Project, "err", err)
 				}
 				allViews = v
 			case "":
 				// All: parent + all children, deduplicated.
-				v, err := loadProjectObs(ctx, s.client, params.Project, 300)
+				v, err := loadProjectObs(ctx, s.records, params.Project, 300)
 				if err != nil {
 					s.logger.Warn("browse project load failed", "project", params.Project, "err", err)
 				}
 				allViews = v
 				for _, child := range s.groups.Children(params.Project) {
-					childViews, childErr := loadProjectObs(ctx, s.client, child, 300)
+					childViews, childErr := loadProjectObs(ctx, s.records, child, 300)
 					if childErr == nil {
 						allViews = append(allViews, childViews...)
 					}
@@ -527,7 +537,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 				allViews = dedupeViews(allViews)
 			default:
 				// A specific child canonical.
-				v, err := loadProjectObs(ctx, s.client, params.Sub, 300)
+				v, err := loadProjectObs(ctx, s.records, params.Sub, 300)
 				if err != nil {
 					s.logger.Warn("browse project load failed", "project", params.Sub, "err", err)
 				}
@@ -535,7 +545,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			// Non-group project: load normally.
-			v, err := loadProjectObs(ctx, s.client, params.Project, 300)
+			v, err := loadProjectObs(ctx, s.records, params.Project, 300)
 			if err != nil {
 				s.logger.Warn("browse project load failed", "err", err)
 			}
@@ -543,7 +553,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		// No query, no project: ingested observations across all projects.
-		raw, err := s.client.Search(ctx, ingestedTerm, "", 300)
+		raw, err := s.records.Search(ctx, ingestedTerm, "", 300)
 		if err != nil {
 			s.logger.Warn("browse search failed", "err", err)
 		}
@@ -596,7 +606,7 @@ const (
 // Returns (views, true) on success, or (nil, false) to fall back to FTS — on any
 // nil dependency or error.
 func (s *Server) semanticSearch(ctx context.Context, params BrowseParams) ([]ObsView, bool) {
-	if s.emb == nil || s.embClient == nil || s.db == nil {
+	if s.sem == nil || s.db == nil {
 		return nil, false
 	}
 
@@ -604,12 +614,12 @@ func (s *Server) semanticSearch(ctx context.Context, params BrowseParams) ([]Obs
 	// browse request for the client's full 60s timeout before FTS takes over.
 	embCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	vec, err := s.embClient.Embed(embCtx, params.Query, embed.TaskQuery)
+	vec, err := s.sem.EmbedQuery(embCtx, params.Query)
 	if err != nil {
 		s.logger.Warn("semantic embed query failed; falling back to FTS", "err", err)
 		return nil, false
 	}
-	hits, err := s.emb.Search(ctx, vec, semanticSearchK)
+	hits, err := s.sem.Search(ctx, vec, semanticSearchK)
 	if err != nil {
 		s.logger.Warn("semantic search failed; falling back to FTS", "err", err)
 		return nil, false
@@ -840,7 +850,7 @@ func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obs, err := s.client.GetObservation(ctx, id)
+	obs, err := s.records.GetObservation(ctx, id)
 	if err != nil {
 		http.Error(w, "observation not found", http.StatusNotFound)
 		return
@@ -879,7 +889,10 @@ func (s *Server) handleEditForm(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	obs, err := s.client.GetObservation(ctx, id)
+	if s.readOnly(ctx, w) {
+		return
+	}
+	obs, err := s.records.GetObservation(ctx, id)
 	if err != nil {
 		http.Error(w, "observation not found", http.StatusNotFound)
 		return
@@ -888,6 +901,20 @@ func (s *Server) handleEditForm(w http.ResponseWriter, r *http.Request) {
 	if err := editForm(v).Render(ctx, w); err != nil {
 		s.logger.Error("render edit form", "err", err)
 	}
+}
+
+// readOnly reports whether the backend has no mutation capability and, when so,
+// renders a clear banner. The cloud dashboard is read-only (it serves replicated
+// data), so edits and deletes are reported as unsupported rather than silently
+// failing. Returns true when the caller should stop.
+func (s *Server) readOnly(ctx context.Context, w http.ResponseWriter) bool {
+	if s.mut != nil {
+		return false
+	}
+	if err := errorBanner("Editing is not available on this dashboard (read-only).").Render(ctx, w); err != nil {
+		s.logger.Error("render read-only banner", "err", err)
+	}
+	return true
 }
 
 func (s *Server) handleEditCancel(w http.ResponseWriter, r *http.Request) {
@@ -909,9 +936,12 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
+	if s.readOnly(ctx, w) {
+		return
+	}
 
 	// Read old observation to capture project and old title for audit.
-	oldObs, err := s.client.GetObservation(ctx, id)
+	oldObs, err := s.records.GetObservation(ctx, id)
 	if err != nil {
 		http.Error(w, "observation not found", http.StatusNotFound)
 		return
@@ -930,7 +960,7 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 
 	actor := s.resolveActor(r)
 
-	if err := s.client.PatchObservation(ctx, id, title, content, obsType); err != nil {
+	if err := s.mut.PatchObservation(ctx, id, title, content, obsType); err != nil {
 		s.logger.Error("patch observation", "id", id, "err", err)
 		audit.Append(audit.Entry{
 			Ts:            audit.Now(),
@@ -970,7 +1000,10 @@ func (s *Server) handleDeleteConfirm(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	obs, err := s.client.GetObservation(ctx, id)
+	if s.readOnly(ctx, w) {
+		return
+	}
+	obs, err := s.records.GetObservation(ctx, id)
 	if err != nil {
 		http.Error(w, "observation not found", http.StatusNotFound)
 		return
@@ -987,7 +1020,7 @@ func (s *Server) handleDeleteCancel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	obs, err := s.client.GetObservation(ctx, id)
+	obs, err := s.records.GetObservation(ctx, id)
 	if err != nil {
 		http.Error(w, "observation not found", http.StatusNotFound)
 		return
@@ -1004,11 +1037,14 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
+	if s.readOnly(ctx, w) {
+		return
+	}
 
 	hard := strings.ToLower(r.URL.Query().Get("hard")) == "true"
 
 	// Read old observation to capture project and title for audit.
-	oldObs, err := s.client.GetObservation(ctx, id)
+	oldObs, err := s.records.GetObservation(ctx, id)
 	if err != nil {
 		http.Error(w, "observation not found", http.StatusNotFound)
 		return
@@ -1022,7 +1058,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		action = audit.ActionHardDelete
 	}
 
-	if err := s.client.DeleteObservation(ctx, id, hard); err != nil {
+	if err := s.mut.DeleteObservation(ctx, id, hard); err != nil {
 		s.logger.Error("delete observation", "id", id, "err", err)
 		audit.Append(audit.Entry{
 			Ts:            audit.Now(),
@@ -1083,8 +1119,8 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 	k := clampInt(parseIntDefault(q.Get("k"), defaultGraphK), 1, 24)
 	minScore := clampFloat(parseFloatDefault(q.Get("min"), defaultGraphMin), 0, 0.99)
 
-	// No embeddings store → honest unavailable state (do NOT fabricate edges).
-	if s.emb == nil {
+	// No embeddings layer → honest unavailable state (do NOT fabricate edges).
+	if s.sem == nil {
 		view := GraphView{Available: false, Projects: projects, Project: project, K: k, Min: minScore}
 		if err := graphPage(view).Render(ctx, w); err != nil {
 			s.logger.Error("render graph", "err", err)
@@ -1092,7 +1128,7 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nodes, edges, err := s.emb.Graph(k, float32(minScore))
+	nodes, edges, err := s.sem.Graph(k, float32(minScore))
 	if err != nil {
 		s.logger.Error("build semantic graph", "err", err)
 		view := GraphView{Available: false, Projects: projects, Project: project, K: k, Min: minScore}

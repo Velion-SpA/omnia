@@ -13,7 +13,6 @@ import (
 
 	cloudauth "github.com/velion/omnia/internal/cloud/auth"
 	"github.com/velion/omnia/internal/cloud/cloudstore"
-	"github.com/velion/omnia/internal/cloud/dashboard"
 	"github.com/velion/omnia/internal/store"
 	engramsync "github.com/velion/omnia/internal/sync"
 )
@@ -117,10 +116,6 @@ func (a strictBearerAuth) Authorize(r *http.Request) error {
 	return nil
 }
 
-type staticStatus struct{ status dashboard.SyncStatus }
-
-func (s staticStatus) Status() dashboard.SyncStatus { return s.status }
-
 type actionableErrorBody struct {
 	ErrorClass string `json:"error_class"`
 	ErrorCode  string `json:"error_code"`
@@ -141,11 +136,7 @@ func TestHandlerMountsDashboardAndHealth(t *testing.T) {
 	// requests redirect to login instead of rendering status directly. Status fields
 	// (upgrade_stage, etc.) are no longer rendered inline — the new dashboard home
 	// uses HTMX-driven stats loading. The test now asserts auth-redirect behavior.
-	srv := New(&fakeStore{}, fakeAuth{}, 0, WithSyncStatusProvider(staticStatus{status: dashboard.SyncStatus{
-		Phase:         "degraded",
-		ReasonCode:    "auth_required",
-		ReasonMessage: "token missing",
-	}}))
+	srv := New(&fakeStore{}, fakeAuth{}, 0)
 
 	health := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))
@@ -155,12 +146,12 @@ func TestHandlerMountsDashboardAndHealth(t *testing.T) {
 
 	// Unauthenticated request redirects to login.
 	dashboardRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(dashboardRec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	srv.Handler().ServeHTTP(dashboardRec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if dashboardRec.Code != http.StatusSeeOther {
-		t.Fatalf("expected /dashboard redirect to login for unauthenticated request, got %d body=%q", dashboardRec.Code, dashboardRec.Body.String())
+		t.Fatalf("expected dashboard redirect to login for unauthenticated request, got %d body=%q", dashboardRec.Code, dashboardRec.Body.String())
 	}
-	if loc := dashboardRec.Header().Get("Location"); !strings.Contains(loc, "/dashboard/login") {
-		t.Fatalf("expected redirect to /dashboard/login, got %q", loc)
+	if loc := dashboardRec.Header().Get("Location"); !strings.Contains(loc, "/login") {
+		t.Fatalf("expected redirect to /login, got %q", loc)
 	}
 }
 
@@ -217,11 +208,11 @@ func TestHandlerReturnsUnauthorizedWhenAuthFails(t *testing.T) {
 	}
 
 	dashboardRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(dashboardRec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	srv.Handler().ServeHTTP(dashboardRec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if dashboardRec.Code != http.StatusSeeOther {
 		t.Fatalf("expected /dashboard redirect to login, got %d", dashboardRec.Code)
 	}
-	if location := dashboardRec.Header().Get("Location"); location != "/dashboard/login?next=%2Fdashboard" {
+	if location := dashboardRec.Header().Get("Location"); location != "/login?next=%2F" {
 		t.Fatalf("expected redirect location with preserved next target, got %q", location)
 	}
 }
@@ -235,15 +226,15 @@ func TestHandlerDashboardLoginFlowSetsCookieForBrowserUse(t *testing.T) {
 	srv := New(&fakeStore{}, authSvc, 0)
 
 	unauth := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(unauth, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	srv.Handler().ServeHTTP(unauth, httptest.NewRequest(http.MethodGet, "/", nil))
 	if unauth.Code != http.StatusSeeOther {
 		t.Fatalf("expected unauthenticated dashboard request to redirect, got %d", unauth.Code)
 	}
 
 	loginPage := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(loginPage, httptest.NewRequest(http.MethodGet, "/dashboard/login", nil))
+	srv.Handler().ServeHTTP(loginPage, httptest.NewRequest(http.MethodGet, "/login", nil))
 	if loginPage.Code != http.StatusOK {
-		t.Fatalf("expected /dashboard/login=200, got %d", loginPage.Code)
+		t.Fatalf("expected /login=200, got %d", loginPage.Code)
 	}
 	// UPDATED: new templ login page renders "Sign In" heading + "Omnia Cloud" brand.
 	if !strings.Contains(loginPage.Body.String(), "Omnia Cloud") || !strings.Contains(loginPage.Body.String(), "name=\"token\"") {
@@ -251,7 +242,7 @@ func TestHandlerDashboardLoginFlowSetsCookieForBrowserUse(t *testing.T) {
 	}
 
 	badLogin := httptest.NewRecorder()
-	badReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=wrong"))
+	badReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=wrong"))
 	badReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Handler().ServeHTTP(badLogin, badReq)
 	if badLogin.Code != http.StatusOK {
@@ -262,13 +253,13 @@ func TestHandlerDashboardLoginFlowSetsCookieForBrowserUse(t *testing.T) {
 	}
 
 	login := httptest.NewRecorder()
-	loginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=secret-token"))
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=secret-token"))
 	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Handler().ServeHTTP(login, loginReq)
 	if login.Code != http.StatusSeeOther {
 		t.Fatalf("expected successful login redirect, got %d", login.Code)
 	}
-	if location := login.Header().Get("Location"); location != "/dashboard/" {
+	if location := login.Header().Get("Location"); location != "/" {
 		t.Fatalf("expected redirect to /dashboard/, got %q", location)
 	}
 	cookies := login.Result().Cookies()
@@ -277,7 +268,7 @@ func TestHandlerDashboardLoginFlowSetsCookieForBrowserUse(t *testing.T) {
 	}
 
 	dashboard := httptest.NewRecorder()
-	dashboardReq := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	dashboardReq := httptest.NewRequest(http.MethodGet, "/", nil)
 	for _, cookie := range cookies {
 		dashboardReq.AddCookie(cookie)
 	}
@@ -296,7 +287,7 @@ func TestHandlerDashboardLoginRejectsTokenFromQueryString(t *testing.T) {
 	srv := New(&fakeStore{}, authSvc, 0)
 
 	login := httptest.NewRecorder()
-	loginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login?token=secret-token", strings.NewReader(""))
+	loginReq := httptest.NewRequest(http.MethodPost, "/login?token=secret-token", strings.NewReader(""))
 	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Handler().ServeHTTP(login, loginReq)
 
@@ -323,7 +314,7 @@ func TestHandlerDashboardLoginRejectsOversizedFormPayload(t *testing.T) {
 
 	oversizedToken := strings.Repeat("x", int(maxDashboardLoginBodyBytes)+1)
 	login := httptest.NewRecorder()
-	loginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token="+oversizedToken))
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token="+oversizedToken))
 	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Handler().ServeHTTP(login, loginReq)
 
@@ -356,7 +347,7 @@ func TestHandlerDashboardLoginCookieSecureRespectsForwardedProto(t *testing.T) {
 			srv := New(&fakeStore{}, authSvc, 0)
 
 			login := httptest.NewRecorder()
-			loginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=secret-token"))
+			loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=secret-token"))
 			loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			if tt.forwardedProto != "" {
 				loginReq.Header.Set("X-Forwarded-Proto", tt.forwardedProto)
@@ -387,7 +378,7 @@ func TestHandlerDashboardLoginFailsClosedWithoutSessionCodec(t *testing.T) {
 	srv := New(&fakeStore{}, strictBearerAuth{token: "secret-token"}, 0)
 
 	login := httptest.NewRecorder()
-	loginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=secret-token"))
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=secret-token"))
 	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Handler().ServeHTTP(login, loginReq)
 	if login.Code != http.StatusInternalServerError {
@@ -400,14 +391,14 @@ func TestHandlerDashboardLoginFailsClosedWithoutSessionCodec(t *testing.T) {
 	}
 
 	dashboard := httptest.NewRecorder()
-	dashboardReq := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	dashboardReq := httptest.NewRequest(http.MethodGet, "/", nil)
 	dashboardReq.AddCookie(&http.Cookie{Name: dashboardSessionCookieName, Value: "secret-token"})
 	srv.Handler().ServeHTTP(dashboard, dashboardReq)
 	if dashboard.Code != http.StatusSeeOther {
 		t.Fatalf("expected dashboard to reject raw bearer cookie fallback, got %d", dashboard.Code)
 	}
-	if location := dashboard.Header().Get("Location"); location != "/dashboard/login?next=%2Fdashboard" {
-		t.Fatalf("expected redirect to /dashboard/login with preserved next target, got %q", location)
+	if location := dashboard.Header().Get("Location"); location != "/login?next=%2F" {
+		t.Fatalf("expected redirect to /login with preserved next target, got %q", location)
 	}
 }
 
@@ -415,41 +406,29 @@ func TestHandlerDashboardLoginBypassesInsecureModeWithoutSessionCodec(t *testing
 	srv := New(&fakeStore{}, nil, 0)
 
 	loginPage := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(loginPage, httptest.NewRequest(http.MethodGet, "/dashboard/login", nil))
+	srv.Handler().ServeHTTP(loginPage, httptest.NewRequest(http.MethodGet, "/login", nil))
 	if loginPage.Code != http.StatusSeeOther {
 		t.Fatalf("expected insecure login page to redirect to dashboard, got %d", loginPage.Code)
 	}
-	if location := loginPage.Header().Get("Location"); location != "/dashboard/" {
+	if location := loginPage.Header().Get("Location"); location != "/" {
 		t.Fatalf("expected redirect to /dashboard/, got %q", location)
 	}
 
 	login := httptest.NewRecorder()
-	loginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader(""))
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(""))
 	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Handler().ServeHTTP(login, loginReq)
 	if login.Code != http.StatusSeeOther {
 		t.Fatalf("expected insecure login submit to redirect, got %d body=%q", login.Code, login.Body.String())
 	}
-	if location := login.Header().Get("Location"); location != "/dashboard/" {
+	if location := login.Header().Get("Location"); location != "/" {
 		t.Fatalf("expected redirect to /dashboard/, got %q", location)
 	}
 
 	dashboardRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(dashboardRec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	srv.Handler().ServeHTTP(dashboardRec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if dashboardRec.Code != http.StatusOK {
 		t.Fatalf("expected insecure dashboard access to succeed, got %d body=%q", dashboardRec.Code, dashboardRec.Body.String())
-	}
-}
-
-func TestHandlerDashboardAdminTokenIsDisabledWhenAuthIsBypassed(t *testing.T) {
-	srv := New(&fakeStore{}, nil, 0, WithDashboardAdminToken("admin-token"))
-
-	admin := httptest.NewRecorder()
-	adminReq := httptest.NewRequest(http.MethodGet, "/dashboard/admin", nil)
-	srv.Handler().ServeHTTP(admin, adminReq)
-
-	if admin.Code != http.StatusForbidden {
-		t.Fatalf("expected admin dashboard to be forbidden in insecure no-auth mode, got %d body=%q", admin.Code, admin.Body.String())
 	}
 }
 
@@ -464,25 +443,22 @@ func TestHandlerDashboardAdminTokenFlowEstablishesAdminSession(t *testing.T) {
 	srv := New(&fakeStore{}, authSvc, 0, WithDashboardAdminToken("admin-token"))
 
 	login := httptest.NewRecorder()
-	loginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=admin-token"))
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=admin-token"))
 	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Handler().ServeHTTP(login, loginReq)
 	if login.Code != http.StatusSeeOther {
 		t.Fatalf("expected successful login redirect, got %d body=%q", login.Code, login.Body.String())
 	}
 
-	admin := httptest.NewRecorder()
-	adminReq := httptest.NewRequest(http.MethodGet, "/dashboard/admin", nil)
+	// The admin (operator) session grants scope-all access to the unified dashboard.
+	home := httptest.NewRecorder()
+	homeReq := httptest.NewRequest(http.MethodGet, "/", nil)
 	for _, cookie := range login.Result().Cookies() {
-		adminReq.AddCookie(cookie)
+		homeReq.AddCookie(cookie)
 	}
-	srv.Handler().ServeHTTP(admin, adminReq)
-	if admin.Code != http.StatusOK {
-		t.Fatalf("expected admin dashboard request to succeed with admin credential session, got %d body=%q", admin.Code, admin.Body.String())
-	}
-	// UPDATED: new admin page uses AdminPage templ component which renders "Admin Overview".
-	if !strings.Contains(admin.Body.String(), "ADMIN SURFACE") {
-		t.Fatalf("expected admin page content, body=%q", admin.Body.String())
+	srv.Handler().ServeHTTP(home, homeReq)
+	if home.Code != http.StatusOK {
+		t.Fatalf("expected dashboard request to succeed with operator session, got %d body=%q", home.Code, home.Body.String())
 	}
 }
 
@@ -495,7 +471,7 @@ func TestHandlerDashboardLoginUsesSignedSessionCookieWithAuthService(t *testing.
 	srv := New(&fakeStore{}, authSvc, 0)
 
 	login := httptest.NewRecorder()
-	loginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=secret-token"))
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=secret-token"))
 	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Handler().ServeHTTP(login, loginReq)
 	if login.Code != http.StatusSeeOther {
@@ -517,7 +493,7 @@ func TestHandlerDashboardLoginUsesSignedSessionCookieWithAuthService(t *testing.
 	}
 
 	dashboard := httptest.NewRecorder()
-	dashboardReq := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	dashboardReq := httptest.NewRequest(http.MethodGet, "/", nil)
 	dashboardReq.AddCookie(sessionCookie)
 	srv.Handler().ServeHTTP(dashboard, dashboardReq)
 	if dashboard.Code != http.StatusOK {
@@ -534,7 +510,7 @@ func TestHandlerDashboardRouteOwnershipParity(t *testing.T) {
 	srv := New(&fakeStore{}, authSvc, 0)
 
 	login := httptest.NewRecorder()
-	loginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=secret-token"))
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=secret-token"))
 	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Handler().ServeHTTP(login, loginReq)
 	if login.Code != http.StatusSeeOther {
@@ -542,7 +518,7 @@ func TestHandlerDashboardRouteOwnershipParity(t *testing.T) {
 	}
 
 	asset := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/dashboard/static/omnia.css", nil))
+	srv.Handler().ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/static/omnia.css", nil))
 	if asset.Code != http.StatusOK {
 		t.Fatalf("expected dashboard static route to be mounted, got %d", asset.Code)
 	}
@@ -550,19 +526,15 @@ func TestHandlerDashboardRouteOwnershipParity(t *testing.T) {
 		t.Fatalf("expected stylesheet body markers, body=%q", asset.Body.String())
 	}
 
-	shareable := httptest.NewRecorder()
-	shareableReq := httptest.NewRequest(http.MethodGet, "/dashboard/projects/proj-a?project=proj-a", nil)
+	// The unified dashboard browse route resolves for an authenticated session.
+	browse := httptest.NewRecorder()
+	browseReq := httptest.NewRequest(http.MethodGet, "/browse?project=proj-a", nil)
 	for _, cookie := range login.Result().Cookies() {
-		shareableReq.AddCookie(cookie)
+		browseReq.AddCookie(cookie)
 	}
-	srv.Handler().ServeHTTP(shareable, shareableReq)
-	if shareable.Code != http.StatusOK {
-		t.Fatalf("expected shareable dashboard detail route to resolve, got %d body=%q", shareable.Code, shareable.Body.String())
-	}
-	// MIGRATED: handleProjectDetail now uses ProjectDetailPage templ (renders "PROJECT DETAIL"
-	// kicker + "proj-a" in breadcrumb, not "Project: proj-a" from old raw-HTML builder).
-	if !strings.Contains(shareable.Body.String(), "PROJECT DETAIL") || !strings.Contains(shareable.Body.String(), "proj-a") {
-		t.Fatalf("expected shareable project detail page content, body=%q", shareable.Body.String())
+	srv.Handler().ServeHTTP(browse, browseReq)
+	if browse.Code != http.StatusOK {
+		t.Fatalf("expected browse route to resolve for authenticated session, got %d body=%q", browse.Code, browse.Body.String())
 	}
 
 	syncSrv := New(&fakeStore{}, fakeAuth{}, 0)
@@ -584,15 +556,15 @@ func TestHandlerDashboardLoginDoesNotAcceptBearerHeaderAsSession(t *testing.T) {
 	srv := New(&fakeStore{}, authSvc, 0)
 
 	loginPage := httptest.NewRecorder()
-	loginPageReq := httptest.NewRequest(http.MethodGet, "/dashboard/login", nil)
+	loginPageReq := httptest.NewRequest(http.MethodGet, "/login", nil)
 	loginPageReq.Header.Set("Authorization", "Bearer secret-token")
 	srv.Handler().ServeHTTP(loginPage, loginPageReq)
 	if loginPage.Code != http.StatusOK {
-		t.Fatalf("expected /dashboard/login to render form when only bearer header is present, got %d", loginPage.Code)
+		t.Fatalf("expected /login to render form when only bearer header is present, got %d", loginPage.Code)
 	}
 
 	dashboard := httptest.NewRecorder()
-	dashboardReq := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	dashboardReq := httptest.NewRequest(http.MethodGet, "/", nil)
 	dashboardReq.Header.Set("Authorization", "Bearer secret-token")
 	srv.Handler().ServeHTTP(dashboard, dashboardReq)
 	if dashboard.Code != http.StatusSeeOther {
@@ -600,11 +572,11 @@ func TestHandlerDashboardLoginDoesNotAcceptBearerHeaderAsSession(t *testing.T) {
 	}
 
 	admin := httptest.NewRecorder()
-	adminReq := httptest.NewRequest(http.MethodGet, "/dashboard/admin", nil)
+	adminReq := httptest.NewRequest(http.MethodGet, "/", nil)
 	adminReq.Header.Set("Authorization", "Bearer admin-token")
 	srv.Handler().ServeHTTP(admin, adminReq)
 	if admin.Code != http.StatusSeeOther {
-		t.Fatalf("expected /dashboard/admin to require cookie-backed admin session, got %d", admin.Code)
+		t.Fatalf("expected dashboard to require cookie-backed session even with admin bearer header, got %d", admin.Code)
 	}
 }
 
@@ -1512,7 +1484,7 @@ func TestValidateLoginTokenAdminComparisonGuard(t *testing.T) {
 
 	// Correct admin token must authenticate and redirect to dashboard.
 	goodLogin := httptest.NewRecorder()
-	goodReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=admin-token"))
+	goodReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=admin-token"))
 	goodReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Handler().ServeHTTP(goodLogin, goodReq)
 	if goodLogin.Code != http.StatusSeeOther {
@@ -1521,7 +1493,7 @@ func TestValidateLoginTokenAdminComparisonGuard(t *testing.T) {
 
 	// Wrong token must be rejected (re-render login form).
 	badLogin := httptest.NewRecorder()
-	badReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=wrong-token"))
+	badReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=wrong-token"))
 	badReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Handler().ServeHTTP(badLogin, badReq)
 	if badLogin.Code == http.StatusSeeOther {
@@ -1549,7 +1521,7 @@ func TestIsDashboardAdminComparisonGuard(t *testing.T) {
 
 	// Establish a valid admin session cookie via login.
 	loginRec := httptest.NewRecorder()
-	loginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=admin-token"))
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=admin-token"))
 	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Handler().ServeHTTP(loginRec, loginReq)
 	if loginRec.Code != http.StatusSeeOther {
@@ -1557,18 +1529,16 @@ func TestIsDashboardAdminComparisonGuard(t *testing.T) {
 	}
 	adminCookies := loginRec.Result().Cookies()
 
-	// Admin session must grant access to /dashboard/admin.
-	adminRec := httptest.NewRecorder()
-	adminReq := httptest.NewRequest(http.MethodGet, "/dashboard/admin", nil)
+	// The admin session cookie must be recognised as the server operator.
+	adminReq := httptest.NewRequest(http.MethodGet, "/", nil)
 	for _, c := range adminCookies {
 		adminReq.AddCookie(c)
 	}
-	srv.Handler().ServeHTTP(adminRec, adminReq)
-	if adminRec.Code != http.StatusOK {
-		t.Fatalf("valid admin session must access /dashboard/admin, got %d body=%q", adminRec.Code, adminRec.Body.String())
+	if !srv.isDashboardAdmin(adminReq) {
+		t.Fatal("valid admin session must be recognised as operator by isDashboardAdmin")
 	}
 
-	// Non-admin session (sync-token login) must not access /dashboard/admin.
+	// A non-admin session (sync-token login) must NOT be recognised as operator.
 	authSvc2, err := cloudauth.NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
 	if err != nil {
 		t.Fatalf("new auth service 2: %v", err)
@@ -1578,25 +1548,23 @@ func TestIsDashboardAdminComparisonGuard(t *testing.T) {
 	srv2 := New(&fakeStore{}, authSvc2, 0, WithDashboardAdminToken("admin-token"))
 
 	syncLoginRec := httptest.NewRecorder()
-	syncLoginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=sync-token"))
+	syncLoginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=sync-token"))
 	syncLoginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv2.Handler().ServeHTTP(syncLoginRec, syncLoginReq)
 	if syncLoginRec.Code != http.StatusSeeOther {
 		t.Fatalf("setup: sync-token login must succeed, got %d body=%q", syncLoginRec.Code, syncLoginRec.Body.String())
 	}
 
-	nonAdminRec := httptest.NewRecorder()
-	nonAdminReq := httptest.NewRequest(http.MethodGet, "/dashboard/admin", nil)
+	nonAdminReq := httptest.NewRequest(http.MethodGet, "/", nil)
 	for _, c := range syncLoginRec.Result().Cookies() {
 		nonAdminReq.AddCookie(c)
 	}
-	srv2.Handler().ServeHTTP(nonAdminRec, nonAdminReq)
-	if nonAdminRec.Code == http.StatusOK {
-		t.Fatalf("non-admin session must not access /dashboard/admin, got %d", nonAdminRec.Code)
+	if srv2.isDashboardAdmin(nonAdminReq) {
+		t.Fatal("non-admin session must not be recognised as operator by isDashboardAdmin")
 	}
 }
 
-// TestInsecureModeLoginRedirects asserts that GET /dashboard/login with auth==nil
+// TestInsecureModeLoginRedirects asserts that GET /login with auth==nil
 // returns 303 to /dashboard/ (login is a no-op in insecure mode). Satisfies REQ-110.
 func TestInsecureModeLoginRedirects(t *testing.T) {
 	// Create server with nil auth (insecure no-auth mode).
@@ -1610,13 +1578,13 @@ func TestInsecureModeLoginRedirects(t *testing.T) {
 	srv.routes()
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/dashboard/login", nil)
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
 	srv.Handler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("expected 303 redirect in insecure mode, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if loc := rec.Header().Get("Location"); loc != "/dashboard/" {
+	if loc := rec.Header().Get("Location"); loc != "/" {
 		t.Fatalf("expected redirect to /dashboard/, got %q", loc)
 	}
 }

@@ -15,7 +15,6 @@ import (
 	"github.com/velion/omnia/internal/cloud/chunkcodec"
 	"github.com/velion/omnia/internal/cloud/cloudstore"
 	"github.com/velion/omnia/internal/cloud/constants"
-	"github.com/velion/omnia/internal/cloud/dashboard"
 	engramproject "github.com/velion/omnia/internal/project"
 	"github.com/velion/omnia/internal/store"
 	engramsync "github.com/velion/omnia/internal/sync"
@@ -54,10 +53,6 @@ type dashboardSessionCodec interface {
 	ParseDashboardSession(sessionToken string) (string, error)
 }
 
-type staticStatusProvider struct{ status dashboard.SyncStatus }
-
-func (s staticStatusProvider) Status() dashboard.SyncStatus { return s.status }
-
 type CloudServer struct {
 	store              ChunkStore
 	auth               Authenticator
@@ -70,7 +65,6 @@ type CloudServer struct {
 	host               string
 	maxPushBodyBytes   int64
 	mux                *http.ServeMux
-	syncStatus         dashboard.SyncStatusProvider
 	listenAndServe     func(addr string, handler http.Handler) error
 }
 
@@ -80,12 +74,6 @@ const maxDashboardLoginBodyBytes int64 = 16 * 1024
 const dashboardSessionCookieName = "engram_dashboard_token"
 
 var ErrDashboardSessionCodecRequired = errors.New("dashboard session codec is required for dashboard auth")
-
-func WithSyncStatusProvider(provider dashboard.SyncStatusProvider) Option {
-	return func(s *CloudServer) {
-		s.syncStatus = provider
-	}
-}
 
 func WithHost(host string) Option {
 	return func(s *CloudServer) {
@@ -120,12 +108,7 @@ func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *Clo
 		port:             port,
 		host:             defaultHost,
 		maxPushBodyBytes: defaultMaxPushBodyBytes,
-		syncStatus: staticStatusProvider{status: dashboard.SyncStatus{
-			Phase:         "degraded",
-			ReasonCode:    constants.ReasonTransportFailed,
-			ReasonMessage: "sync status provider is unavailable",
-		}},
-		listenAndServe: http.ListenAndServe,
+		listenAndServe:   http.ListenAndServe,
 	}
 	if projectAuthorizer, ok := authSvc.(ProjectAuthorizer); ok {
 		s.projectAuth = projectAuthorizer
@@ -184,74 +167,6 @@ func (s *CloudServer) pushBodyLimit() int64 {
 func (s *CloudServer) routes() {
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("GET /health", s.handleHealth)
-	var dashboardStore dashboard.DashboardStore
-	if store, ok := s.store.(dashboard.DashboardStore); ok {
-		dashboardStore = store
-	}
-	validateLoginToken := func(token string) error {
-		token = strings.TrimSpace(token)
-		if token == "" {
-			return fmt.Errorf("bearer token is required")
-		}
-		if adminToken := strings.TrimSpace(s.dashboardAdmin); adminToken != "" && hmac.Equal([]byte(token), []byte(adminToken)) {
-			return nil
-		}
-		if s.auth == nil {
-			return nil
-		}
-		req, _ := http.NewRequest(http.MethodGet, "/dashboard/login", nil)
-		req.Header.Set("Authorization", "Bearer "+token)
-		return s.auth.Authorize(req)
-	}
-	createSessionCookie := func(w http.ResponseWriter, r *http.Request, token string) error {
-		sessionToken, err := s.dashboardSessionToken(token)
-		if err != nil {
-			return err
-		}
-		http.SetCookie(w, &http.Cookie{
-			Name:     dashboardSessionCookieName,
-			Value:    sessionToken,
-			Path:     "/dashboard",
-			HttpOnly: true,
-			Secure:   dashboardCookieSecure(r),
-			SameSite: http.SameSiteLaxMode,
-			MaxAge:   int((8 * time.Hour).Seconds()),
-		})
-		return nil
-	}
-	if s.auth == nil {
-		validateLoginToken = nil
-		createSessionCookie = nil
-	}
-	dashboard.Mount(s.mux, dashboard.MountConfig{
-		RequireSession:      s.authorizeDashboardRequest,
-		ValidateLoginToken:  validateLoginToken,
-		CreateSessionCookie: createSessionCookie,
-		ClearSessionCookie: func(w http.ResponseWriter, r *http.Request) {
-			http.SetCookie(w, &http.Cookie{
-				Name:     dashboardSessionCookieName,
-				Value:    "",
-				Path:     "/dashboard",
-				HttpOnly: true,
-				Secure:   dashboardCookieSecure(r),
-				SameSite: http.SameSiteLaxMode,
-				MaxAge:   -1,
-			})
-		},
-		IsAdmin: func(r *http.Request) bool {
-			return s.isDashboardAdmin(r)
-		},
-		// GetDisplayName surfaces the account username (or "OPERATOR" for the admin
-		// token). VisibleProjects scopes every project listing to the logged-in
-		// account's memberships; the operator sees all. LoginWithCredentials lets the
-		// login form accept account username/password in addition to the operator token.
-		GetDisplayName:       s.dashboardDisplayName,
-		VisibleProjects:      s.dashboardVisibleProjects,
-		LoginWithCredentials: s.dashboardLoginWithCredentials,
-		Store:                dashboardStore,
-		MaxLoginBodyBytes:    maxDashboardLoginBodyBytes,
-		StatusProvider:       s.syncStatus,
-	})
 	s.mux.HandleFunc("GET /sync/pull", s.withAuth(s.handlePullManifest))
 	s.mux.HandleFunc("GET /sync/pull/{chunkID}", s.withAuth(s.handlePullChunk))
 	s.mux.HandleFunc("POST /sync/push", s.withAuth(s.handlePushChunk))
@@ -281,6 +196,11 @@ func (s *CloudServer) routes() {
 			s.mux.HandleFunc("DELETE /devices/{id}", s.withAuth(s.handleDeleteDevice))
 		}
 	}
+
+	// Mount the unified dashboard at the root catch-all, behind the cloud's
+	// login/session/RBAC. Specific API patterns above take precedence; every other
+	// path falls through to the dashboard gate.
+	s.mountDashboard(s.mux)
 }
 
 func (s *CloudServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -378,6 +298,9 @@ func (s *CloudServer) dashboardBearerToken(sessionToken string) (string, error) 
 	}
 	return "", ErrDashboardSessionCodecRequired
 }
+
+// hmacEqual is a constant-time string comparison for token equality checks.
+func hmacEqual(a, b string) bool { return hmac.Equal([]byte(a), []byte(b)) }
 
 func dashboardCookieSecure(r *http.Request) bool {
 	if r.TLS != nil {
@@ -497,20 +420,8 @@ func (s *CloudServer) dashboardVisibleProjects(r *http.Request) ([]string, bool)
 	return projects, false
 }
 
-// dashboardDisplayName implements dashboard.MountConfig.GetDisplayName.
-func (s *CloudServer) dashboardDisplayName(r *http.Request) string {
-	claims, operator := s.dashboardSessionClaims(r)
-	if operator {
-		return "OPERATOR"
-	}
-	if claims != nil && strings.TrimSpace(claims.Username) != "" {
-		return claims.Username
-	}
-	return "OPERATOR"
-}
-
-// dashboardLoginWithCredentials implements dashboard.MountConfig.LoginWithCredentials,
-// exchanging an account username/password for an account bearer token.
+// dashboardLoginWithCredentials exchanges an account username/password for an
+// account bearer token used as the dashboard session.
 func (s *CloudServer) dashboardLoginWithCredentials(username, password string) (string, error) {
 	if s.account == nil {
 		return "", fmt.Errorf("account login not available")
