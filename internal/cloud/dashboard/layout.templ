@@ -1,0 +1,93 @@
+package dashboard
+
+// Layout wraps page content in the Omnia command-center shell.
+// activeTab should be one of: "dashboard", "browser", "projects", "contributors", "admin".
+// ADAPTED: username comes from Principal.DisplayName() at the call site (no context reads).
+templ Layout(title string, username string, activeTab string, isAdmin bool, content templ.Component) {
+	<!DOCTYPE html>
+	<html lang="en" data-theme="dark">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ title } — Omnia Cloud</title>
+			<link rel="preconnect" href="https://fonts.googleapis.com"/>
+			<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+			<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+			<link rel="stylesheet" href="/dashboard/static/pico.min.css"/>
+			<link rel="stylesheet" href="/dashboard/static/styles.css"/>
+			<script src="/dashboard/static/htmx.min.js"></script>
+		</head>
+		<body>
+			<div class="app">
+				<nav class="cmd-nav">
+					<a href="/dashboard/" class="wordmark" aria-label="Omnia Cloud home">
+						@OmniaMark(34)
+						<span>Omnia Cloud</span>
+					</a>
+					<div class="nav-divider"></div>
+					<div class="nav-links">
+						@navLink("/dashboard/", "Dashboard", "dashboard", activeTab)
+						@navLink("/dashboard/browser", "Browser", "browser", activeTab)
+						@navLink("/dashboard/projects", "Projects", "projects", activeTab)
+						if isAdmin {
+							@navLink("/dashboard/contributors", "Contributors", "contributors", activeTab)
+							@navLink("/dashboard/admin", "Admin", "admin", activeTab)
+						}
+					</div>
+					<div class="nav-spacer"></div>
+					<div class="nav-meta">
+						<span id="cmd-clock" class="nav-clock">--:--:--</span>
+						<span class="status-chip">
+							<span class="pulse"><span class="pulse-core"></span><span class="pulse-ring"></span></span>
+							LIVE
+						</span>
+						<span class="nav-user">{ username }</span>
+						<form method="post" action="/dashboard/logout" style="margin:0">
+							<button type="submit" class="nav-logout">Logout</button>
+						</form>
+					</div>
+				</nav>
+				<main class="page-main">
+					@content
+				</main>
+				<footer class="page-footer">
+					<span class="micro-label">OMNIA CLOUD — SHARED MEMORY LAYER</span>
+				</footer>
+			</div>
+			<script>
+				(function() {
+					function tick() {
+						var el = document.getElementById('cmd-clock');
+						if (el) {
+							var d = new Date();
+							var hh = String(d.getHours()).padStart(2,'0');
+							var mm = String(d.getMinutes()).padStart(2,'0');
+							var ss = String(d.getSeconds()).padStart(2,'0');
+							el.textContent = hh + ':' + mm + ':' + ss;
+						}
+					}
+					tick();
+					setInterval(tick, 1000);
+				})();
+				(function() {
+					var links = document.querySelectorAll('.nav-link[data-nav]');
+					var path = window.location.pathname;
+					links.forEach(function(a) {
+						if (a.getAttribute('data-nav') === path || path.startsWith(a.getAttribute('data-nav') + '/')) {
+							a.classList.add('active');
+						}
+					});
+				})();
+			</script>
+		</body>
+	</html>
+}
+
+// navLink renders a single cmd-nav link with active state.
+templ navLink(href string, label string, tabID string, activeTab string) {
+	if tabID == activeTab {
+		<a href={ templ.SafeURL(href) } class="nav-link active" data-nav={ href } aria-current="page">{ label }</a>
+	} else {
+		<a href={ templ.SafeURL(href) } class="nav-link" data-nav={ href }>{ label }</a>
+	}
+}
