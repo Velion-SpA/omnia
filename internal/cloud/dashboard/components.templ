@@ -5,6 +5,7 @@ import (
 	"net/url"
 
 	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/ui"
 )
 
 // ─── Shared Components ──────────────────────────────────────────────────────
@@ -329,33 +330,31 @@ templ ObservationsPartial(observations []cloudstore.DashboardObservationRow, pg 
 	if len(observations) == 0 {
 		@EmptyState("No Observations", "No observations match the current project, search text, or type filter.")
 	} else {
-		<div class="panel panel-results bracketed">
-			<div class="memory-feed comfortable" id="memory-feed">
-				for _, o := range observations {
-					<a href={ templ.SafeURL(fmt.Sprintf("/dashboard/observations/%s/%s/%s", url.PathEscape(o.Project), url.PathEscape(o.SessionID), url.PathEscape(o.SyncID))) } class="memory-card">
-						<div class={ "card-accent-bar", templ.KV("ingested", o.Type != ""), templ.KV("curated", o.Type == "") }></div>
-						<div class="card-body">
-							<div class="card-title-row">
-								<span class="card-title">{ o.Title }</span>
-							</div>
-							if snip := renderInlineStructuredPreview(o.Content, 140); snip != "" {
-								<p class="card-snippet">{ snip }</p>
-							}
-							<div class="card-meta">
-								if o.Type != "" {
-									<span class="meta-type" style={ "color:" + typeColor(o.Type) + ";background:" + typeColorBg(o.Type) + ";padding:2px 7px;border-radius:3px;font-size:9px;font-family:var(--mono);letter-spacing:0.1em;" }>{ o.Type }</span>
-									<span class="meta-dot"></span>
-								}
-								@StatusBadge(o.Project, "muted")
-								<span class="meta-time">{ formatTimestamp(o.CreatedAt) }</span>
-							</div>
-						</div>
-					</a>
-				}
-			</div>
-		</div>
+		@ui.MemoryFeed(toUICardsCloud(observations))
 		@HtmxPaginationBar(pg, "/dashboard/browser/observations", "#browser-content", "#browser-project, #browser-search, #browser-type")
 	}
+}
+
+// toUICardsCloud maps cloud observation rows to the shared ui.Card model, so the
+// cloud browse feed renders the exact same memory cards as the local dashboard.
+func toUICardsCloud(observations []cloudstore.DashboardObservationRow) []ui.Card {
+	cards := make([]ui.Card, len(observations))
+	for i, o := range observations {
+		age := ""
+		if t, ok := parseCloudTime(o.CreatedAt); ok {
+			age = relativeTime(t)
+		}
+		cards[i] = ui.Card{
+			Href:     fmt.Sprintf("/dashboard/observations/%s/%s/%s", url.PathEscape(o.Project), url.PathEscape(o.SessionID), url.PathEscape(o.SyncID)),
+			Title:    o.Title,
+			Snippet:  renderInlineStructuredPreview(o.Content, 140),
+			Type:     o.Type,
+			Tag:      o.Project,
+			Age:      age,
+			Ingested: o.Type != "",
+		}
+	}
+	return cards
 }
 
 // SessionsPartial renders the sessions list, loaded as an htmx partial.

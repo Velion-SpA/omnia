@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/velion/omnia/internal/ui"
 )
 
 // BrowseParams holds the filter state for the browse page.
@@ -400,36 +402,30 @@ templ groupNavBar(nav GroupNav) {
 	</div>
 }
 
-// obsCardFeed renders the observation list as a rich card feed.
-// Replaces the old obsTable; called from browsePage and HTMX partial updates.
+// obsCardFeed renders the observation list using the SHARED ui.MemoryFeed, so the
+// browse cards are identical to the cloud dashboard's.
 templ obsCardFeed(views []ObsView) {
-	if len(views) == 0 {
-		@emptyState("No observations found. Try a different filter or search term.")
-	} else {
-		<div class="panel panel-results bracketed">
-			<div class="feed-header">
-				<span class="density-label">View</span>
-				<div class="density-toggle">
-					<button class="density-btn density-btn-active" data-density="comfortable" onclick="omniaSetDensity('comfortable')">comfortable</button>
-					<button class="density-btn" data-density="compact" onclick="omniaSetDensity('compact')">compact</button>
-				</div>
-			</div>
-			<div class="memory-feed comfortable" id="memory-feed">
-				for _, v := range views {
-					@obsCard(v)
-				}
-			</div>
-		</div>
-		<script>
-			function omniaSetDensity(d) {
-				document.querySelectorAll('.density-btn').forEach(function(b) {
-					b.classList.toggle('density-btn-active', b.dataset.density === d);
-				});
-				var feed = document.getElementById('memory-feed');
-				if (feed) { feed.className = 'memory-feed ' + d; }
-			}
-		</script>
+	@ui.MemoryFeed(toUICards(views))
+}
+
+// toUICards maps local ObsView rows to the shared ui.Card model.
+func toUICards(views []ObsView) []ui.Card {
+	cards := make([]ui.Card, len(views))
+	for i, v := range views {
+		card := ui.Card{
+			Href:     fmt.Sprintf("/detail/%d", v.Obs.ID),
+			Title:    v.Obs.Title,
+			Snippet:  snippet(v.Obs.Content),
+			Type:     v.Obs.Type,
+			Age:      v.Age,
+			Ingested: v.HasMeta,
+		}
+		if v.HasMeta {
+			card.SourceKey = v.Meta.Source
+		}
+		cards[i] = card
 	}
+	return cards
 }
 
 // obsCard renders a single memory card in the browse feed.
