@@ -65,6 +65,16 @@ func (s *CloudServer) mountDashboard(mux *http.ServeMux) {
 func (s *CloudServer) dashboardGate(dashHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/dashboard" || strings.HasPrefix(r.URL.Path, "/dashboard/"):
+			// Back-compat: the cloud dashboard used to live under /dashboard. Redirect
+			// to the unified root routes so old links/bookmarks (and any next=/dashboard
+			// after login) land correctly instead of 404'ing.
+			target := strings.TrimPrefix(r.URL.Path, "/dashboard")
+			if target == "" {
+				target = "/"
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
 		case r.URL.Path == dashboardLoginPath:
 			s.handleDashboardLogin(w, r)
 			return
@@ -327,12 +337,24 @@ func renderDashboardLoginPage(w http.ResponseWriter, status int, errorMsg, next 
 <link rel="stylesheet" href="/static/pico.min.css">
 <link rel="stylesheet" href="/static/omnia.css">
 </head>
-<body>
-<div class="app">
-<main class="page-main">
-<section class="frame-section login-shell">
-<p class="section-kicker">OMNIA CLOUD</p>
+<body class="shell-body">
+<div class="shell-backdrop">
+<main class="login-shell">
+<section class="login-sidepanel">
+<div style="margin-bottom:18px;"><svg width="48" height="48" viewBox="0 0 36 36" fill="none" aria-label="Omnia" style="flex-shrink:0;"><defs><radialGradient id="omnia-core" cx="50%%" cy="50%%" r="50%%"><stop offset="0%%" stop-color="#22d3ee"></stop><stop offset="100%%" stop-color="#0e9ab5"></stop></radialGradient></defs><circle cx="18" cy="18" r="16.5" stroke="rgba(34,211,238,0.22)" stroke-width="0.75"></circle><circle cx="18" cy="18" r="11.5" stroke="rgba(34,211,238,0.40)" stroke-width="0.75" stroke-dasharray="3 2.5"></circle><circle cx="18" cy="18" r="5" fill="url(#omnia-core)"></circle><circle cx="18" cy="18" r="2.2" fill="#080a10" opacity="0.5"></circle><line x1="18" y1="1.5" x2="18" y2="6.5" stroke="#22d3ee" stroke-width="1.4" stroke-linecap="round"></line><line x1="34.5" y1="18" x2="29.5" y2="18" stroke="#22d3ee" stroke-width="1.4" stroke-linecap="round"></line><line x1="18" y1="34.5" x2="18" y2="29.5" stroke="#22d3ee" stroke-width="1.4" stroke-linecap="round"></line><line x1="1.5" y1="18" x2="6.5" y2="18" stroke="#22d3ee" stroke-width="1.4" stroke-linecap="round"></line></svg></div>
+<p class="section-kicker">CLOUD ACTIVE</p>
+<h1>Omnia Cloud</h1>
+<p class="login-lead">Your shared memory, scoped to your account. Sign in to see the projects you belong to — and nothing else.</p>
+<div class="hero-console login-console">
+<p><span class="console-key">identity</span> per-account access</p>
+<p><span class="console-key">scope</span> projects by membership</p>
+<p><span class="console-key">model</span> local-first / cloud policy aware</p>
+</div>
+</section>
+<section class="login-container">
+<p class="section-kicker">SIGN IN</p>
 <h2>Sign In</h2>
+<p class="login-copy">Use your account credentials to open a signed dashboard session.</p>
 %s
 <form method="post" action="%s" class="login-form">
 %s
