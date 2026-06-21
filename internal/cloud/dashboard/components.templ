@@ -261,63 +261,61 @@ templ DashboardActivityPartial(stats []cloudstore.DashboardProjectRow, pg Pagina
 
 // BrowserPage renders the knowledge browser with subtabs and filter controls.
 templ BrowserPage(projects []string, types []string, activeProject string, search string, activeType string) {
-	<div style="display:flex;align-items:baseline;gap:0.75rem;margin-bottom:1.5rem;">
-		<h1 style="font-size:20px;font-weight:700;color:var(--text);letter-spacing:-0.02em;margin:0;">Knowledge Browser</h1>
-		<span class="micro-label" style="color:var(--text-faint);">KNOWLEDGE BROWSER</span>
+	<!-- Page header — same structure as the local /browse -->
+	<div style="display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 1.5rem;">
+		<h1 style="font-size: 20px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; margin: 0;">Browse</h1>
+		<span class="micro-label" style="color: var(--text-faint);">knowledge base</span>
 	</div>
-	<div class="browser-controls">
-		<select id="browser-project" name="project" hx-get="/dashboard/browser/observations" hx-target="#browser-content" hx-swap="innerHTML" hx-include="#browser-search, #browser-type">
-			<option value="">All Projects</option>
-			for _, p := range projects {
-				if p == activeProject {
-					<option value={ p } selected>{ p }</option>
-				} else {
-					<option value={ p }>{ p }</option>
-				}
-			}
-		</select>
-		<input
-			id="browser-search"
-			type="search"
-			name="q"
-			placeholder="Search..."
-			value={ search }
-			hx-get="/dashboard/browser/observations"
-			hx-target="#browser-content"
-			hx-swap="innerHTML"
-			hx-trigger="keyup changed delay:300ms"
-			hx-include="#browser-project, #browser-type"
-		/>
-	</div>
-	<input type="hidden" id="browser-type" name="type" value={ activeType }/>
-	if len(types) > 0 {
-		<div class="filter-strip">
-			<a href={ templ.SafeURL(browserURL(activeProject, search, "")) } class={ typePillClass(activeType, "") }>All Types</a>
-			for _, obsType := range types {
-				<a href={ templ.SafeURL(browserURL(activeProject, search, obsType)) } class={ typePillClass(activeType, obsType) }>{ obsType }</a>
+	<!-- Filter panel — same card + browse-filter-grid + chips as the local browse -->
+	<div class="card" style="margin-bottom: 1.25rem; padding: 1.25rem;">
+		<span class="micro-label" style="display: block; margin-bottom: 1rem;">Filters</span>
+		<div class="browse-filter-grid">
+			<div class="filter-section">
+				<label class="micro-label filter-label" for="browser-project">Project</label>
+				<select id="browser-project" name="project" class="filter-select" hx-get="/dashboard/browser/observations" hx-target="#browser-content" hx-swap="innerHTML" hx-include="#browser-search, #browser-type" aria-label="Filter by project">
+					<option value="">All projects</option>
+					for _, p := range projects {
+						if p == activeProject {
+							<option value={ p } selected>{ p }</option>
+						} else {
+							<option value={ p }>{ p }</option>
+						}
+					}
+				</select>
+			</div>
+			if len(types) > 0 {
+				<div class="filter-section" style="flex: 1; min-width: 0;">
+					<span class="micro-label filter-label">Category</span>
+					<div class="chip-row" style="flex-wrap: wrap;" role="group" aria-label="Filter by category">
+						<a href={ templ.SafeURL(browserURL(activeProject, search, "")) } class={ "filter-chip", templ.KV("filter-chip-active", activeType == "") }>All</a>
+						for _, obsType := range types {
+							<a href={ templ.SafeURL(browserURL(activeProject, search, obsType)) } class={ "filter-chip", templ.KV("filter-chip-active", activeType == obsType) }>{ obsType }</a>
+						}
+					</div>
+				</div>
 			}
 		</div>
-	}
-	<div class="browser-subtabs" role="tablist" id="browser-tabs">
-		<a role="tab" aria-selected="true" class="active"
-			hx-get="/dashboard/browser/observations"
-			hx-target="#browser-content"
-			hx-swap="innerHTML"
-			hx-include="#browser-project, #browser-search, #browser-type"
-			hx-on::after-request="document.querySelectorAll('#browser-tabs [role=tab]').forEach(t=>t.classList.remove('active'));this.classList.add('active')">Observations</a>
-		<a role="tab" aria-selected="false"
-			hx-get="/dashboard/browser/sessions"
-			hx-target="#browser-content"
-			hx-swap="innerHTML"
-			hx-include="#browser-project, #browser-search, #browser-type"
-			hx-on::after-request="document.querySelectorAll('#browser-tabs [role=tab]').forEach(t=>t.classList.remove('active'));this.classList.add('active')">Sessions</a>
-		<a role="tab" aria-selected="false"
-			hx-get="/dashboard/browser/prompts"
-			hx-target="#browser-content"
-			hx-swap="innerHTML"
-			hx-include="#browser-project, #browser-search, #browser-type"
-			hx-on::after-request="document.querySelectorAll('#browser-tabs [role=tab]').forEach(t=>t.classList.remove('active'));this.classList.add('active')">Prompts</a>
+		<div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); display: flex; gap: 2rem; align-items: flex-end; flex-wrap: wrap;">
+			<div class="filter-section" style="flex-shrink: 0;">
+				<label class="micro-label filter-label" for="browser-search">Search</label>
+				<input
+					id="browser-search"
+					type="search"
+					name="q"
+					value={ search }
+					placeholder="Search observations..."
+					style="width: 260px;"
+					hx-get="/dashboard/browser/observations"
+					hx-target="#browser-content"
+					hx-swap="innerHTML"
+					hx-trigger="keyup changed delay:300ms"
+					hx-include="#browser-project, #browser-type"
+				/>
+			</div>
+		</div>
+		<input type="hidden" id="browser-type" name="type" value={ activeType }/>
 	</div>
+	<!-- Results — HTMX-loaded shared ui.MemoryFeed -->
 	<div class="browser-content-frame" id="browser-content" hx-get="/dashboard/browser/observations" hx-trigger="load" hx-swap="innerHTML" hx-include="#browser-project, #browser-search, #browser-type">
 		<p class="htmx-indicator">Loading...</p>
 	</div>

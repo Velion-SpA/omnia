@@ -463,7 +463,7 @@ func TestMountHTMXAndProjectDetailParity(t *testing.T) {
 		if !strings.Contains(body, "<!doctype html>") && !strings.Contains(body, "<!DOCTYPE html>") {
 			t.Fatalf("expected full page html fallback, body=%q", body)
 		}
-		if !strings.Contains(body, "Knowledge Browser") {
+		if !strings.Contains(body, ">Browse<") {
 			t.Fatalf("expected browser page heading, body=%q", body)
 		}
 	})
@@ -563,8 +563,8 @@ func TestMountAddsHTMXNavigationWiringForBrowserProjectsAndAdmin(t *testing.T) {
 	// The query params are no longer forwarded via URL string manipulation —
 	// HTMX uses hx-include to pass active filter state. Assertions updated accordingly.
 	browserBody := browser.Body.String()
-	if !strings.Contains(browserBody, `hx-get="/dashboard/browser/sessions"`) || !strings.Contains(browserBody, `hx-target="#browser-content"`) {
-		t.Fatalf("expected browser subtab htmx wiring, body=%q", browserBody)
+	if !strings.Contains(browserBody, `hx-get="/dashboard/browser/observations"`) || !strings.Contains(browserBody, `hx-target="#browser-content"`) {
+		t.Fatalf("expected browser htmx wiring, body=%q", browserBody)
 	}
 
 	projects := httptest.NewRecorder()
@@ -1725,7 +1725,7 @@ func TestCopyParityStrings(t *testing.T) {
 		path   string
 		marker string
 	}{
-		{"/dashboard/browser?auth=ok", "KNOWLEDGE BROWSER"},
+		{"/dashboard/browser?auth=ok", "knowledge base"},
 		{"/dashboard/projects?auth=ok", "PROJECT ATLAS"},
 		{"/dashboard/contributors?auth=ok", "CONTRIBUTOR SIGNAL"},
 		{"/dashboard/admin?auth=ok", "ADMIN SURFACE"},
