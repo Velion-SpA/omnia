@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/velion/omnia/internal/datadir"
 	"github.com/velion/omnia/internal/timeutil"
 	sqlite "modernc.org/sqlite"
 )
@@ -451,12 +452,8 @@ type Config struct {
 }
 
 func DefaultConfig() (Config, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return Config{}, fmt.Errorf("engram: determine home directory: %w", err)
-	}
 	return Config{
-		DataDir:              filepath.Join(home, ".engram"),
+		DataDir:              datadir.Resolve(""),
 		MaxObservationLength: 50000,
 		MaxContextResults:    20,
 		MaxSearchResults:     20,
@@ -610,13 +607,13 @@ func (s *Store) commitHook(tx *sql.Tx) error {
 
 func New(cfg Config) (*Store, error) {
 	if !filepath.IsAbs(cfg.DataDir) {
-		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set ENGRAM_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
+		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set OMNIA_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("engram: create data dir: %w", err)
 	}
 
-	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	dbPath := datadir.DBPath(cfg.DataDir)
 	db, err := openDB("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)
@@ -651,13 +648,13 @@ func New(cfg Config) (*Store, error) {
 // It exists solely to support tests that need to seed data and call repair manually.
 func newWithoutRepair(cfg Config) (*Store, error) {
 	if !filepath.IsAbs(cfg.DataDir) {
-		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set ENGRAM_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
+		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set OMNIA_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("engram: create data dir: %w", err)
 	}
 
-	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	dbPath := datadir.DBPath(cfg.DataDir)
 	db, err := openDB("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)

@@ -11,10 +11,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/velion/omnia/internal/datadir"
 
 	_ "modernc.org/sqlite" // register "sqlite" driver
 )
@@ -78,15 +78,16 @@ type DB struct {
 //
 // Resolution order for dataDir:
 //  1. dataDir parameter (if non-empty)
-//  2. $ENGRAM_DATA_DIR environment variable
-//  3. ~/.engram
+//  2. $OMNIA_DATA_DIR (or legacy $ENGRAM_DATA_DIR)
+//  3. ~/.omnia (migrating a legacy ~/.engram once, if present)
 //
-// The DSN uses mode=ro and a 5-second busy-timeout, safe for concurrent reads
-// while Engram writes in WAL mode. Returns an error if the file does not exist
-// or cannot be pinged.
+// The database file is omnia.db, falling back to a legacy engram.db when only
+// the old filename is present. The DSN uses mode=ro and a 5-second busy-timeout,
+// safe for concurrent reads while Omnia writes in WAL mode. Returns an error if
+// the file does not exist or cannot be pinged.
 func Open(dataDir string) (*DB, error) {
 	dir := resolveDataDir(dataDir)
-	path := filepath.Join(dir, "engram.db")
+	path := datadir.DBPath(dir)
 
 	// Read-only SQLite URI. Path values from resolveDataDir are system paths
 	// (no user input), so direct concatenation is safe here.
@@ -107,21 +108,11 @@ func Open(dataDir string) (*DB, error) {
 }
 
 func resolveDataDir(dataDir string) string {
-	if dataDir != "" {
-		return dataDir
-	}
-	if env := os.Getenv("ENGRAM_DATA_DIR"); env != "" {
-		return env
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".engram"
-	}
-	return filepath.Join(home, ".engram")
+	return datadir.Resolve(dataDir)
 }
 
 // ResolveDataDir exposes the same data-directory resolution Open uses, so callers
-// that need sibling files in the Engram data dir (e.g. cloud.json) resolve the
+// that need sibling files in the Omnia data dir (e.g. cloud.json) resolve the
 // exact same directory the database was opened from.
 func ResolveDataDir(dataDir string) string {
 	return resolveDataDir(dataDir)

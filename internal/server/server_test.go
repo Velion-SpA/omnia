@@ -947,7 +947,7 @@ func conflictsTestStore(t *testing.T) (*store.Store, *sql.DB) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	rawDB, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	rawDB, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "omnia.db"))
 	if err != nil {
 		t.Fatalf("open raw db: %v", err)
 	}

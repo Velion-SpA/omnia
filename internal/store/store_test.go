@@ -3551,7 +3551,7 @@ func TestNewErrorBranches(t *testing.T) {
 
 	t.Run("fails when db path is a directory", func(t *testing.T) {
 		dataDir := t.TempDir()
-		dbAsDir := filepath.Join(dataDir, "engram.db")
+		dbAsDir := filepath.Join(dataDir, "omnia.db")
 		if err := os.Mkdir(dbAsDir, 0755); err != nil {
 			t.Fatalf("mkdir db path: %v", err)
 		}
