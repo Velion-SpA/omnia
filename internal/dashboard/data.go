@@ -38,6 +38,10 @@ type ProjectStats struct {
 	SubProjects    []SubProjectStat // per-child counts (only when IsGroup=true)
 	CoreCount      int              // parent's own observations count (only when IsGroup=true)
 	LatestUpdateAt string
+	// Clouds lists the display names of the clouds this project is loaded on
+	// (derived from the local store's sync targets + cloud.json). Empty means the
+	// project is local-only. Only meaningful when OverviewData.ShowClouds is true.
+	Clouds []string
 }
 
 // enrichObs parses the omnia-meta block from an observation and returns an ObsView.
@@ -313,6 +317,11 @@ type OverviewData struct {
 	LiveFeed       []FeedItem
 	Sources        []SourceStat
 	EngUp          bool
+	// ShowClouds is true when the surface can resolve cloud placement (the local
+	// dashboard, with a readable cloud.json). When false the Projects panel renders
+	// no cloud pills at all — e.g. the cloud dashboard, where every project is on
+	// that one cloud by definition and a "local-only" pill would be misleading.
+	ShowClouds bool
 }
 
 // isFresh returns true when the updated_at timestamp is within 30 days.

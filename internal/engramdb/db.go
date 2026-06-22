@@ -120,6 +120,53 @@ func resolveDataDir(dataDir string) string {
 	return filepath.Join(home, ".engram")
 }
 
+// ResolveDataDir exposes the same data-directory resolution Open uses, so callers
+// that need sibling files in the Engram data dir (e.g. cloud.json) resolve the
+// exact same directory the database was opened from.
+func ResolveDataDir(dataDir string) string {
+	return resolveDataDir(dataDir)
+}
+
+// CloudTargetKeys returns the set of cloud sync target keys that show real
+// replication activity in the local store. A target key qualifies when the
+// project has recorded synced chunks (sync_chunks) or has a healthy/advanced
+// sync_state row — pure idle/blocked placeholder rows are excluded so a failed
+// or never-completed attempt does not look like a successful push. The local
+// chunk-tracking key ("local") is excluded.
+//
+// The query is strictly read-only and tolerant: on an older database that
+// predates the sync tables (or any per-source query error) it skips that source
+// and returns whatever it could read, never failing the overview.
+func (d *DB) CloudTargetKeys(ctx context.Context) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+
+	collect := func(query string) {
+		rows, err := d.db.QueryContext(ctx, query)
+		if err != nil {
+			return // table absent or unreadable — degrade silently
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var tk string
+			if err := rows.Scan(&tk); err != nil {
+				return
+			}
+			if tk = strings.TrimSpace(tk); tk != "" && tk != "local" {
+				out[tk] = struct{}{}
+			}
+		}
+	}
+
+	// Strongest signal: a chunk was actually exported/imported for this target.
+	collect(`SELECT DISTINCT target_key FROM sync_chunks WHERE target_key <> 'local'`)
+	// Secondary: a per-target sync_state that reached healthy or advanced a cursor.
+	collect(`SELECT target_key FROM sync_state
+		WHERE target_key <> 'local'
+		  AND (lifecycle = 'healthy' OR last_acked_seq > 0 OR last_pulled_seq > 0)`)
+
+	return out, nil
+}
+
 // Close releases the database connection pool.
 func (d *DB) Close() error {
 	return d.db.Close()

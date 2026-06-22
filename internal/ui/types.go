@@ -34,6 +34,9 @@ type OverviewData struct {
 	ByType         []TypeCount
 	LiveFeed       []FeedItem
 	Sources        []SourceStat
+	// ShowClouds is true when the surface can resolve cloud placement; when false
+	// the Projects panel renders no cloud pills.
+	ShowClouds bool
 }
 
 // ProjectStats is one row of the Projects panel.
@@ -44,6 +47,9 @@ type ProjectStats struct {
 	HasUpdate      bool
 	IsFresh        bool
 	Href           string // where the row links (browse filtered by project)
+	// Clouds lists the display names of the clouds this project is loaded on.
+	// Empty means local-only. Only meaningful when OverviewData.ShowClouds is true.
+	Clouds []string
 }
 
 // TypeCount is one bar of the Memory Types panel.

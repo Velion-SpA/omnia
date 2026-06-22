@@ -521,6 +521,38 @@
 				border: 1px solid rgba(245,158,11,0.14);
 			}
 
+			/* ── Cloud placement pills (which cloud[s] a project is loaded on) ── */
+			.proj-name-cell {
+				display: flex;
+				align-items: center;
+				gap: 7px;
+				min-width: 0;
+			}
+			.cloud-pills {
+				display: inline-flex;
+				align-items: center;
+				gap: 4px;
+				flex-wrap: wrap;
+				flex-shrink: 0;
+			}
+			.cloud-pill {
+				font-size: 7.5px;
+				font-weight: 700;
+				letter-spacing: 0.1em;
+				text-transform: uppercase;
+				padding: 2px 6px;
+				border-radius: 10px;
+				white-space: nowrap;
+				color: var(--accent);
+				background: var(--accent-dim);
+				border: 1px solid var(--accent-glow);
+			}
+			.cloud-pill.local {
+				color: var(--text-2);
+				background: rgba(138,154,181,0.06);
+				border: 1px solid var(--border-2);
+			}
+
 			/* ── Feed / Live Feed ── */
 			.live-badge {
 				display: inline-flex;

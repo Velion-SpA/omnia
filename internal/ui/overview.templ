@@ -39,7 +39,12 @@ templ OverviewContent(data OverviewData) {
 					for i, p := range data.Projects {
 						<a href={ templ.SafeURL(p.Href) } class="proj-row" style="display: grid; grid-template-columns: 18px 1fr auto 44px; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border-2); text-decoration: none;">
 							<span class="proj-rank">{ fmt.Sprintf("%02d", i+1) }</span>
-							<span class="proj-name">{ p.Name }</span>
+							<span class="proj-name-cell">
+								<span class="proj-name">{ p.Name }</span>
+								if data.ShowClouds {
+									@cloudPills(p.Clouds)
+								}
+							</span>
 							if p.HasUpdate {
 								if p.IsFresh {
 									<span class="freshness fresh"><span class="freshness-pip"></span>fresh</span>
@@ -164,6 +169,20 @@ templ OverviewContent(data OverviewData) {
 			if (p) countUp(p, parseInt(p.textContent.replace(/,/g,'')), 800);
 		}, 150);
 	</script>
+}
+
+// cloudPills renders one pill per cloud a project is loaded on, or a single
+// muted "local-only" pill when the project is on no cloud.
+templ cloudPills(clouds []string) {
+	<span class="cloud-pills">
+		if len(clouds) == 0 {
+			<span class="cloud-pill local">local-only</span>
+		} else {
+			for _, c := range clouds {
+				<span class="cloud-pill">{ c }</span>
+			}
+		}
+	</span>
 }
 
 templ sourceIcon(key string) {

@@ -231,7 +231,24 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 	// Build OverviewData.
 	canonicalize := canonicalizerFunc(s.cfg.ProjectAliases)
+
+	// Per-project cloud placement (local surface only; read-only). A group parent
+	// also surfaces any clouds its children are loaded on.
+	cloudMap, showClouds := s.cloudsByProject(ctx, canonicalize)
+	if showClouds {
+		for i := range stats {
+			clouds := cloudMap[canonicalize(stats[i].Name)]
+			if stats[i].IsGroup {
+				for _, child := range s.groups.Children(stats[i].Name) {
+					clouds = mergeCloudNames(clouds, cloudMap[canonicalize(child)])
+				}
+			}
+			stats[i].Clouds = clouds
+		}
+	}
+
 	data := s.buildOverviewData(ctx, stats, syncStatus, engUp, canonicalize)
+	data.ShowClouds = showClouds
 
 	if err := overviewPage(data).Render(ctx, w); err != nil {
 		s.logger.Error("render overview", "err", err)
