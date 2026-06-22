@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/velion/omnia/internal/diagnostic"
+	"github.com/velion/omnia/internal/envx"
 	projectpkg "github.com/velion/omnia/internal/project"
 	"github.com/velion/omnia/internal/store"
 )
@@ -127,7 +128,7 @@ func (s *Server) notifyWrite() {
 // does not need to restart when the variable changes.
 func requireAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := os.Getenv("ENGRAM_HTTP_TOKEN")
+		token := envx.Get("OMNIA_HTTP_TOKEN")
 		if token == "" {
 			// No token configured → open access (zero-config default).
 			h(w, r)
@@ -171,7 +172,7 @@ func (s *Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("engram server: listen %s: %w", addr, err)
 	}
-	log.Printf("[engram] HTTP server listening on %s", addr)
+	log.Printf("[omnia] HTTP server listening on %s", addr)
 	return serveFn(ln, s.mux)
 }
 
@@ -927,7 +928,7 @@ func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.store.MigrateProject(body.OldProject, body.NewProject)
 	if err != nil {
-		log.Printf("[engram] project migration failed: %v", err)
+		log.Printf("[omnia] project migration failed: %v", err)
 		jsonError(w, http.StatusInternalServerError, "migration failed")
 		return
 	}
@@ -937,7 +938,7 @@ func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[engram] migrated project %q → %q (obs: %d, sessions: %d, prompts: %d)",
+	log.Printf("[omnia] migrated project %q → %q (obs: %d, sessions: %d, prompts: %d)",
 		body.OldProject, body.NewProject,
 		result.ObservationsUpdated, result.SessionsUpdated, result.PromptsUpdated)
 
@@ -1152,11 +1153,11 @@ func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 	if body.Semantic {
 		if s.runnerFactory == nil {
 			jsonError(w, http.StatusInternalServerError,
-				"ENGRAM_AGENT_CLI not set: server runnerFactory is not configured")
+				"OMNIA_AGENT_CLI not set: server runnerFactory is not configured")
 			return
 		}
 
-		name := os.Getenv("ENGRAM_AGENT_CLI")
+		name := envx.Get("OMNIA_AGENT_CLI")
 		runner, err := s.runnerFactory(name)
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError,
