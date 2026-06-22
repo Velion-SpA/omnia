@@ -444,35 +444,71 @@ func envBool(key string) bool {
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
+// resolveCloudRuntimeConfig resolves the runtime config for the DEFAULT cloud,
+// honouring the ENGRAM_CLOUD_SERVER / ENGRAM_CLOUD_TOKEN env overrides (legacy
+// behavior). It is the alias-agnostic entry point used by status/upgrade paths.
 func resolveCloudRuntimeConfig(cfg store.Config) (*cloudConfig, error) {
-	cc, err := loadCloudConfig(cfg)
+	return resolveCloudRuntimeConfigForAlias(cfg, "", true)
+}
+
+// resolveCloudRuntimeConfigForAlias resolves the runtime connection config
+// (server URL + bearer token) for a specific cloud alias.
+//
+//   - alias == "" → the default cloud entry (legacy single-cloud behavior).
+//   - alias != "" → the named cloud entry from cloud.json.
+//
+// applyEnvOverrides controls whether ENGRAM_CLOUD_SERVER / ENGRAM_CLOUD_TOKEN
+// override the resolved entry. They are applied for the default/legacy target (so
+// an env-only configuration keeps working — fix for issue #343) but MUST NOT be
+// applied when the caller explicitly targeted a named cloud (`--cloud-name`):
+// otherwise a stray ENGRAM_CLOUD_TOKEN in the shell would silently send the wrong
+// credentials to a named cloud.
+func resolveCloudRuntimeConfigForAlias(cfg store.Config, alias string, applyEnvOverrides bool) (*cloudConfig, error) {
+	v2, err := loadCloudConfigV2(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("read cloud config: %w", err)
 	}
-	if cc == nil {
-		cc = &cloudConfig{}
+	cc := &cloudConfig{}
+	if v2 != nil {
+		var entry *cloudEntry
+		if strings.TrimSpace(alias) != "" {
+			entry, _ = v2.getCloud(alias)
+		} else {
+			entry = v2.defaultCloudEntry()
+		}
+		if entry != nil {
+			cc.ServerURL = entry.ServerURL
+			cc.Token = entry.Token
+		}
 	}
-	// ENGRAM_CLOUD_TOKEN overrides any token stored in cloud.json.
-	// When the env var is absent, the persisted token from cloud.json is used
-	// as a fallback so that `engram sync --cloud` works without requiring the
-	// env var to be set in every shell session (fix for issue #343).
-	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_SERVER")); v != "" {
-		cc.ServerURL = v
-	}
-	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN")); v != "" {
-		cc.Token = v
+	if applyEnvOverrides {
+		if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_SERVER")); v != "" {
+			cc.ServerURL = v
+		}
+		if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN")); v != "" {
+			cc.Token = v
+		}
 	}
 	return cc, nil
 }
 
+// preflightCloudSync validates the DEFAULT cloud for a project sync. Retained for
+// callers/tests that target the default cloud; delegates to the alias-aware form.
 func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutateState bool) (*cloudConfig, error) {
+	return preflightCloudSyncForAlias(s, cfg, project, "", true, mutateState)
+}
+
+// preflightCloudSyncForAlias validates a project sync against a specific cloud
+// alias and computes the alias-prefixed target key (cloudnFor) used for any
+// blocked-state marking, so preflight and the success path always agree on the key.
+func preflightCloudSyncForAlias(s *store.Store, cfg store.Config, project, alias string, applyEnvOverrides, mutateState bool) (*cloudConfig, error) {
 	project = strings.TrimSpace(project)
 	if project != "" {
 		project, _ = store.NormalizeProject(project)
 	}
-	targetKey := cloudTargetKeyForProject(project)
+	targetKey := cloudnFor(alias, project)
 
-	cc, err := resolveCloudRuntimeConfig(cfg)
+	cc, err := resolveCloudRuntimeConfigForAlias(cfg, alias, applyEnvOverrides)
 	if err != nil {
 		return nil, fmt.Errorf("cloud sync config error: %w", err)
 	}
@@ -1444,6 +1480,7 @@ func cmdSync(cfg store.Config) {
 	doStatus := false
 	doAll := false
 	doCloud := false
+	cloudName := ""
 	project := ""
 	projectProvided := false
 	for i := 2; i < len(os.Args); i++ {
@@ -1459,6 +1496,11 @@ func cmdSync(cfg store.Config) {
 			doAll = true
 		case "--cloud":
 			doCloud = true
+		case "--cloud-name":
+			if i+1 < len(os.Args) {
+				cloudName = strings.TrimSpace(os.Args[i+1])
+				i++
+			}
 		case "--project":
 			if i+1 < len(os.Args) {
 				project = os.Args[i+1]
@@ -1492,7 +1534,7 @@ func cmdSync(cfg store.Config) {
 	}
 	defer s.Close()
 
-	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
+	cloudEnabled := doCloud || cloudName != "" || envBool("ENGRAM_CLOUD_SYNC")
 	if cloudEnabled {
 		if doAll {
 			fatal(fmt.Errorf("cloud sync requires a single explicit --project scope; --all is not supported"))
@@ -1500,72 +1542,17 @@ func cmdSync(cfg store.Config) {
 		if !projectProvided || strings.TrimSpace(project) == "" {
 			fatal(fmt.Errorf("cloud sync requires an explicit non-empty --project value"))
 		}
-	}
-	cloudTargetKey := cloudTargetKeyForProject(project)
-	var sy *engramsync.Syncer
-
-	markCloudHealthy := func() {
-		if !cloudEnabled {
-			return
-		}
-		if err := s.MarkSyncHealthy(cloudTargetKey); err != nil {
-			fatal(fmt.Errorf("cloud sync health update: %w", err))
-		}
+		runCloudSync(cfg, s, project, syncDir, cloudName, doStatus, doImport)
+		return
 	}
 
-	markCloudSyncOutcome := func() {
-		if !cloudEnabled {
-			return
-		}
-		hasPending, err := s.HasPendingSyncMutationsForProject(project)
-		if err != nil {
-			fatal(fmt.Errorf("cloud sync state update: %w", err))
-		}
-		pendingImports := 0
-		remoteStatusVerified := false
-		if _, _, pending, statusErr := syncStatus(sy); statusErr == nil {
-			pendingImports = pending
-			remoteStatusVerified = true
-		}
-		if hasPending || (remoteStatusVerified && pendingImports > 0) {
-			if err := s.MarkSyncPending(cloudTargetKey); err != nil {
-				fatal(fmt.Errorf("cloud sync pending-state update: %w", err))
-			}
-			return
-		}
-		if !remoteStatusVerified {
-			return
-		}
-		markCloudHealthy()
-	}
-
-	sy = engramsync.NewLocal(s, syncDir)
-	if cloudEnabled {
-		cc, err := preflightCloudSync(s, cfg, project, !doStatus)
-		if err != nil {
-			fatal(err)
-		}
-		transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project)
-		if err != nil {
-			if !doStatus {
-				markCloudSyncFailure(s, cloudTargetKey, err)
-			}
-			fatal(errors.New(cloudSyncFailureMessage(project, err)))
-		}
-		sy = engramsync.NewCloudWithTransport(s, transport, project)
-	}
+	// Local sync path: export/import project-scoped chunks to .engram/.
+	sy := engramsync.NewLocal(s, syncDir)
 
 	if doStatus {
 		local, remote, pending, err := syncStatus(sy)
 		if err != nil {
 			fatal(err)
-		}
-		if cloudEnabled {
-			fmt.Printf("Cloud sync status (project=%q):\n", project)
-			fmt.Printf("  Local chunks:    %d\n", local)
-			fmt.Printf("  Remote chunks:   %d\n", remote)
-			fmt.Printf("  Pending import:  %d\n", pending)
-			return
 		}
 		fmt.Printf("Sync status:\n")
 		fmt.Printf("  Local chunks:    %d\n", local)
@@ -1577,16 +1564,8 @@ func cmdSync(cfg store.Config) {
 	if doImport {
 		result, err := syncImport(sy)
 		if err != nil {
-			if cloudEnabled {
-				markCloudSyncFailure(s, cloudTargetKey, err)
-			}
-			if cloudEnabled {
-				fatal(errors.New(cloudSyncFailureMessage(project, err)))
-			}
 			fatal(err)
 		}
-		markCloudSyncOutcome()
-
 		if result.ChunksImported == 0 {
 			fmt.Println("No new chunks to import.")
 			if result.ChunksSkipped > 0 {
@@ -1594,12 +1573,7 @@ func cmdSync(cfg store.Config) {
 			}
 			return
 		}
-
-		if cloudEnabled {
-			fmt.Printf("Imported %d new remote chunk(s) for project %q\n", result.ChunksImported, project)
-		} else {
-			fmt.Printf("Imported %d new chunk(s) from .engram/\n", result.ChunksImported)
-		}
+		fmt.Printf("Imported %d new chunk(s) from .engram/\n", result.ChunksImported)
 		fmt.Printf("  Sessions:     %d\n", result.SessionsImported)
 		fmt.Printf("  Observations: %d\n", result.ObservationsImported)
 		fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
@@ -1614,22 +1588,12 @@ func cmdSync(cfg store.Config) {
 	if doAll {
 		fmt.Println("Exporting ALL memories (all projects)...")
 	} else {
-		if cloudEnabled {
-			fmt.Printf("Exporting memories for project %q to cloud...\n", project)
-		} else {
-			fmt.Printf("Exporting memories for project %q...\n", project)
-		}
+		fmt.Printf("Exporting memories for project %q...\n", project)
 	}
 	result, err := syncExport(sy, username, project)
 	if err != nil {
-		if cloudEnabled {
-			markCloudSyncFailure(s, cloudTargetKey, err)
-			fatal(errors.New(cloudSyncFailureMessage(project, err)))
-		}
 		fatal(err)
 	}
-	markCloudSyncOutcome()
-
 	if result.IsEmpty {
 		if doAll {
 			fmt.Println("Nothing new to sync — all memories already exported.")
@@ -1646,19 +1610,232 @@ func cmdSync(cfg store.Config) {
 	if result.MutationsExported > 0 {
 		fmt.Printf("  Mutations:    %d\n", result.MutationsExported)
 	}
-	if cloudEnabled {
-		fmt.Printf("Cloud sync complete for project %q.\n", project)
-		return
-	}
 	fmt.Println()
 	fmt.Println("Add to git:")
 	fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
 }
 
+// runCloudSync pushes/pulls a project to one or more configured clouds, recording
+// per-(cloud,project) sync state under alias-prefixed target keys
+// ("<alias>:<project>", via cloudnFor).
+//
+//   - With explicitAlias (`--cloud-name <alias>`): sync to exactly that named cloud.
+//   - Without it: sync to EVERY cloud configured in cloud.json, each under its own
+//     alias key, so one local can replicate the same project to several clouds and
+//     the dashboard can show where each project lives. When no clouds are configured
+//     (env-only setup), it falls back to the legacy default target ("cloud:<project>").
+//
+// Backward compatibility: the default cloud is named "cloud" (v1 migration and
+// `engram cloud config` with no alias), and cloudnFor("cloud", project) ==
+// cloudTargetKeyForProject(project). So the common single-cloud case keeps writing
+// the exact same key it always did; no migration of old "cloud:<project>" rows is
+// performed (a renamed default keeps its legacy row, which the dashboard still maps
+// to the default cloud, while new syncs converge to the alias key).
+func runCloudSync(cfg store.Config, s *store.Store, project, syncDir, explicitAlias string, doStatus, doImport bool) {
+	aliases, defaultAlias, err := resolveCloudSyncAliases(cfg, explicitAlias)
+	if err != nil {
+		fatal(err)
+		return
+	}
+
+	if len(aliases) == 1 {
+		alias := aliases[0]
+		if err := runCloudSyncTarget(cfg, s, project, syncDir, alias, cloudSyncApplyEnv(explicitAlias, alias, defaultAlias), doStatus, doImport); err != nil {
+			fatal(err)
+		}
+		return
+	}
+
+	var failed []string
+	for _, alias := range aliases {
+		label := cloudAliasLabel(alias)
+		fmt.Printf("== cloud %q ==\n", label)
+		if err := runCloudSyncTarget(cfg, s, project, syncDir, alias, cloudSyncApplyEnv(explicitAlias, alias, defaultAlias), doStatus, doImport); err != nil {
+			fmt.Fprintf(os.Stderr, "cloud %q: %v\n", label, err)
+			failed = append(failed, label)
+		}
+	}
+	if len(failed) > 0 {
+		fatal(fmt.Errorf("cloud sync failed for %d of %d cloud(s): %s", len(failed), len(aliases), strings.Join(failed, ", ")))
+	}
+}
+
+// resolveCloudSyncAliases returns the cloud aliases to sync to and the resolved
+// default alias. With explicitAlias set, the alias must exist in cloud.json (a
+// clear error otherwise, mirroring `engram cloud login`). Without it, every
+// configured cloud is returned (sorted); when none are configured, a single empty
+// alias is returned to drive the legacy/env-only default target.
+func resolveCloudSyncAliases(cfg store.Config, explicitAlias string) (aliases []string, defaultAlias string, err error) {
+	v2, err := loadCloudConfigV2(cfg)
+	if err != nil {
+		return nil, "", fmt.Errorf("cloud sync config error: %w", err)
+	}
+	if v2 != nil {
+		if v2.Default != "" {
+			defaultAlias = v2.Default
+		} else if len(v2.Clouds) == 1 {
+			for a := range v2.Clouds {
+				defaultAlias = a
+			}
+		}
+	}
+	if explicitAlias != "" {
+		if v2 == nil {
+			return nil, "", fmt.Errorf("cloud %q not found; run `engram cloud add %s --server <url>` first", explicitAlias, explicitAlias)
+		}
+		if _, ok := v2.getCloud(explicitAlias); !ok {
+			return nil, "", fmt.Errorf("cloud %q not found; run `engram cloud add %s --server <url>` first", explicitAlias, explicitAlias)
+		}
+		return []string{explicitAlias}, defaultAlias, nil
+	}
+	if v2 != nil {
+		aliases = v2.listClouds()
+	}
+	if len(aliases) == 0 {
+		aliases = []string{""}
+	}
+	return aliases, defaultAlias, nil
+}
+
+// cloudAliasLabel renders an alias for display, mapping the empty (legacy/default)
+// alias to the canonical "cloud" target name.
+func cloudAliasLabel(alias string) string {
+	if strings.TrimSpace(alias) == "" {
+		return constants.TargetKeyCloud
+	}
+	return alias
+}
+
+// cloudSyncApplyEnv reports whether ENGRAM_CLOUD_SERVER / ENGRAM_CLOUD_TOKEN env
+// overrides apply to this target. They apply only to the legacy/default cloud when
+// no explicit --cloud-name was given. An explicitly named cloud is NEVER overridden
+// by these env vars, so a stray ENGRAM_CLOUD_TOKEN exported in the shell cannot
+// silently redirect credentials to the wrong named cloud.
+func cloudSyncApplyEnv(explicitAlias, alias, defaultAlias string) bool {
+	if explicitAlias != "" {
+		return false
+	}
+	return alias == "" || alias == defaultAlias
+}
+
+// runCloudSyncTarget performs a single cloud's push/pull for project, recording
+// sync state under cloudnFor(alias, project). It returns a formatted error instead
+// of exiting, so callers can either fatal (single cloud) or aggregate (multi-cloud).
+func runCloudSyncTarget(cfg store.Config, s *store.Store, project, syncDir, alias string, applyEnvOverrides, doStatus, doImport bool) error {
+	targetKey := cloudnFor(alias, project)
+
+	cc, err := preflightCloudSyncForAlias(s, cfg, project, alias, applyEnvOverrides, !doStatus)
+	if err != nil {
+		return err
+	}
+	transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project)
+	if err != nil {
+		if !doStatus {
+			markCloudSyncFailure(s, targetKey, err)
+		}
+		return errors.New(cloudSyncFailureMessage(project, err))
+	}
+	sy := engramsync.NewCloudWithTransport(s, transport, project)
+
+	markCloudHealthy := func() error {
+		if err := s.MarkSyncHealthy(targetKey); err != nil {
+			return fmt.Errorf("cloud sync health update: %w", err)
+		}
+		return nil
+	}
+	markCloudSyncOutcome := func() error {
+		hasPending, err := s.HasPendingSyncMutationsForProject(project)
+		if err != nil {
+			return fmt.Errorf("cloud sync state update: %w", err)
+		}
+		pendingImports := 0
+		remoteStatusVerified := false
+		if _, _, pending, statusErr := syncStatus(sy); statusErr == nil {
+			pendingImports = pending
+			remoteStatusVerified = true
+		}
+		if hasPending || (remoteStatusVerified && pendingImports > 0) {
+			if err := s.MarkSyncPending(targetKey); err != nil {
+				return fmt.Errorf("cloud sync pending-state update: %w", err)
+			}
+			return nil
+		}
+		if !remoteStatusVerified {
+			return nil
+		}
+		return markCloudHealthy()
+	}
+
+	if doStatus {
+		local, remote, pending, err := syncStatus(sy)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Cloud sync status (project=%q):\n", project)
+		fmt.Printf("  Local chunks:    %d\n", local)
+		fmt.Printf("  Remote chunks:   %d\n", remote)
+		fmt.Printf("  Pending import:  %d\n", pending)
+		return nil
+	}
+
+	if doImport {
+		result, err := syncImport(sy)
+		if err != nil {
+			markCloudSyncFailure(s, targetKey, err)
+			return errors.New(cloudSyncFailureMessage(project, err))
+		}
+		if err := markCloudSyncOutcome(); err != nil {
+			return err
+		}
+		if result.ChunksImported == 0 {
+			fmt.Println("No new chunks to import.")
+			if result.ChunksSkipped > 0 {
+				fmt.Printf("  (%d chunks already imported)\n", result.ChunksSkipped)
+			}
+			return nil
+		}
+		fmt.Printf("Imported %d new remote chunk(s) for project %q\n", result.ChunksImported, project)
+		fmt.Printf("  Sessions:     %d\n", result.SessionsImported)
+		fmt.Printf("  Observations: %d\n", result.ObservationsImported)
+		fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
+		if result.ChunksSkipped > 0 {
+			fmt.Printf("  Skipped:      %d (already imported)\n", result.ChunksSkipped)
+		}
+		return nil
+	}
+
+	// Export: DB → new chunk
+	username := engramsync.GetUsername()
+	fmt.Printf("Exporting memories for project %q to cloud...\n", project)
+	result, err := syncExport(sy, username, project)
+	if err != nil {
+		markCloudSyncFailure(s, targetKey, err)
+		return errors.New(cloudSyncFailureMessage(project, err))
+	}
+	if err := markCloudSyncOutcome(); err != nil {
+		return err
+	}
+	if result.IsEmpty {
+		fmt.Printf("Nothing new to sync for project %q — all memories already exported.\n", project)
+		return nil
+	}
+	fmt.Printf("Created chunk %s\n", result.ChunkID)
+	fmt.Printf("  Sessions:     %d\n", result.SessionsExported)
+	fmt.Printf("  Observations: %d\n", result.ObservationsExported)
+	fmt.Printf("  Prompts:      %d\n", result.PromptsExported)
+	if result.MutationsExported > 0 {
+		fmt.Printf("  Mutations:    %d\n", result.MutationsExported)
+	}
+	fmt.Printf("Cloud sync complete for project %q.\n", project)
+	return nil
+}
+
 func printSyncUsage() {
-	fmt.Println("usage: engram sync [--import | --status] [--all] [--cloud --project PROJECT]")
+	fmt.Println("usage: engram sync [--import | --status] [--all] [--cloud [--cloud-name ALIAS] --project PROJECT]")
 	fmt.Println("Local sync exports project-scoped chunks to .engram/ by default.")
 	fmt.Println("Cloud sync requires an explicit --project and never runs from --help.")
+	fmt.Println("--cloud-name ALIAS targets one named cloud; with --cloud and no --cloud-name the")
+	fmt.Println("project is synced to every configured cloud (see `engram cloud list`).")
 }
 
 // storeAdapter wraps *store.Store to satisfy obsidian.StoreReader.

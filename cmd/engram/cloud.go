@@ -702,18 +702,63 @@ func printCloudStatusSyncDiagnostic(cfg store.Config) {
 	}
 }
 
+// cmdCloudEnroll enrolls a project for cloud sync. Enrollment is project-scoped in
+// the local store (sync_enrolled_projects has no per-cloud dimension), so it gates
+// replication to EVERY configured cloud. The optional --cloud-name <alias> makes
+// the command cloud-aware: it validates that the named cloud exists in cloud.json
+// (failing fast otherwise) and reports which cloud the project is intended for. It
+// does not create per-cloud enrollment state, because none exists.
 func cmdCloudEnroll(cfg store.Config) {
-	if len(os.Args) >= 4 {
-		arg := strings.TrimSpace(os.Args[3])
-		if arg == "--help" || arg == "-h" || arg == "help" {
-			fmt.Println("usage: engram cloud enroll <project>")
+	args := os.Args[3:]
+	for _, arg := range args {
+		switch strings.TrimSpace(arg) {
+		case "--help", "-h", "help":
+			fmt.Println("usage: engram cloud enroll <project> [--cloud-name <alias>]")
 			fmt.Println("Enroll a local-first project for explicit cloud replication.")
+			fmt.Println("Enrollment is project-scoped and gates sync to every configured cloud;")
+			fmt.Println("--cloud-name selects (and validates) the intended cloud for confirmation.")
 			return
 		}
 	}
-	if len(os.Args) < 4 || strings.TrimSpace(os.Args[3]) == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud enroll <project>")
+
+	projectName := ""
+	cloudName := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--cloud-name":
+			if i+1 < len(args) {
+				cloudName = strings.TrimSpace(args[i+1])
+				i++
+			}
+		default:
+			if projectName == "" && !strings.HasPrefix(args[i], "-") {
+				projectName = strings.TrimSpace(args[i])
+			}
+		}
+	}
+
+	if projectName == "" {
+		fmt.Fprintln(os.Stderr, "usage: engram cloud enroll <project> [--cloud-name <alias>]")
 		exitFunc(1)
+		return
+	}
+
+	if cloudName != "" {
+		v2, err := loadCloudConfigV2(cfg)
+		if err != nil {
+			fatal(err)
+			return
+		}
+		if v2 == nil {
+			fmt.Fprintf(os.Stderr, "error: cloud %q not found; run `engram cloud add %s --server <url>` first\n", cloudName, cloudName)
+			exitFunc(1)
+			return
+		}
+		if _, ok := v2.getCloud(cloudName); !ok {
+			fmt.Fprintf(os.Stderr, "error: cloud %q not found; run `engram cloud add %s --server <url>` first\n", cloudName, cloudName)
+			exitFunc(1)
+			return
+		}
 	}
 
 	s, err := storeNew(cfg)
@@ -723,12 +768,15 @@ func cmdCloudEnroll(cfg store.Config) {
 	}
 	defer s.Close()
 
-	projectName := strings.TrimSpace(os.Args[3])
 	if err := s.EnrollProject(projectName); err != nil {
 		fatal(err)
 		return
 	}
 
+	if cloudName != "" {
+		fmt.Printf("✓ Project %q enrolled for cloud sync (cloud %q)\n", projectName, cloudName)
+		return
+	}
 	fmt.Printf("✓ Project %q enrolled for cloud sync\n", projectName)
 }
 
