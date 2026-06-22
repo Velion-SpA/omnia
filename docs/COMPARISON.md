@@ -13,8 +13,8 @@
 | **Compression** | Agent does it inline (it already has the LLM) | Separate Claude API calls via agent-sdk |
 | **Dependencies** | `go install` and done | Node.js 18+, Bun, uv, Python, ChromaDB |
 | **Processes** | One binary (or none — MCP stdio) | Worker service on port 37777 + ChromaDB |
-| **Database** | Single `~/.engram/engram.db` file | SQLite + ChromaDB (two storage systems) |
-| **Web UI** | Terminal TUI (`engram tui`) | Web viewer on localhost:37777 |
+| **Database** | Single `~/.omnia/omnia.db` file | SQLite + ChromaDB (two storage systems) |
+| **Web UI** | Terminal TUI (`omnia tui`) | Web viewer on localhost:37777 |
 | **Privacy** | `<private>` tags stripped at 2 layers | `<private>` tags stripped |
 | **Auto-capture** | No. Agent decides what matters | Yes. Captures all tool calls then compresses |
 | **License** | MIT | AGPL-3.0 |

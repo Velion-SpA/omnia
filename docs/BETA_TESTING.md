@@ -3,7 +3,7 @@
 # Engram Beta — Phases 2 + 3 + 4
 
 Community-testing guide for the new memory-conflict-surfacing features.
-Runs in **complete isolation** from your existing engram setup.
+Runs in **complete isolation** from your existing omnia setup.
 
 ---
 
@@ -12,14 +12,14 @@ Runs in **complete isolation** from your existing engram setup.
 | Phase | What it adds |
 |---|---|
 | **2 — Cloud sync of relations** | `memory_relations` (conflict verdicts) now sync across machines. Multi-actor scenarios persist correctly. Server validates relation payloads. |
-| **3 — Admin observability** | New `engram conflicts list/show/stats/scan/deferred` CLI + 6 HTTP endpoints under `/conflicts/*` for retroactive audit + scan over existing memories using FTS5. |
+| **3 — Admin observability** | New `omnia conflicts list/show/stats/scan/deferred` CLI + 6 HTTP endpoints under `/conflicts/*` for retroactive audit + scan over existing memories using FTS5. |
 | **4 — Semantic LLM-judge** | New `--semantic` scan flag uses your **existing** Claude Code or OpenCode CLI to catch vocabulary-different conflicts (e.g. "Hexagonal" ↔ "Ports and Adapters") that FTS5 alone misses. **$0 if you're on a subscription** (Pro/Max/Plus). |
 
 ---
 
 ## Why this guide is "isolated"
 
-Everything below uses **non-default ports**, a **separate data dir**, a **separate token**, and the binary is built locally as `./engram-beta`. Your production engram cloud, your `~/.engram/engram.db`, and your installed `engram` binary are **NOT touched**.
+Everything below uses **non-default ports**, a **separate data dir**, a **separate token**, and the binary is built locally as `./engram-beta`. Your production omnia cloud, your `~/.omnia/omnia.db`, and your installed `engram` binary are **NOT touched**.
 
 Reset anytime with the cleanup section at the end.
 
@@ -66,7 +66,7 @@ curl -s http://127.0.0.1:28080/health
 ## 3. Build the beta binary
 
 ```bash
-go build -o ./engram-beta ./cmd/engram
+go build -o ./engram-beta ./cmd/omnia
 ```
 
 A standalone `./engram-beta` in your repo dir. **Does NOT replace your installed `engram`**.
@@ -78,7 +78,7 @@ A standalone `./engram-beta` in your repo dir. **Does NOT replace your installed
 Run these in the same shell where you'll execute the beta commands:
 
 ```bash
-# Separate data dir — leaves ~/.engram untouched
+# Separate data dir — leaves ~/.omnia untouched
 export ENGRAM_DATA_DIR=/tmp/engram-beta-data
 mkdir -p "$ENGRAM_DATA_DIR"
 
@@ -99,7 +99,7 @@ Expected: cloud status shows `configured=true`, server matches the beta URL.
 
 ### 5.1 Phase 1 baseline — conflict surfacing on save
 
-The CLI `save` syntax is positional: `engram save <title> <content> [flags]`.
+The CLI `save` syntax is positional: `omnia save <title> <content> [flags]`.
 
 ```bash
 # First memory
@@ -170,7 +170,7 @@ The 2nd "machine" should see the memories synced from the 1st.
 ./engram-beta conflicts show <relation_id>
 ```
 
-The HTTP API works too. The `/conflicts/*` routes live on the **local engram serve** (port 7437) — no auth required, localhost-only. Start it in a separate terminal:
+The HTTP API works too. The `/conflicts/*` routes live on the **local omnia serve** (port 7437) — no auth required, localhost-only. Start it in a separate terminal:
 
 ```bash
 # Terminal 2 (keep the same exported env vars from step 4):
@@ -280,7 +280,7 @@ rm -f ./engram-beta
 cd .. && rm -rf engram-beta-repo
 ```
 
-Your production `engram` setup is **fully untouched**. Your prod cloud, your `~/.engram/engram.db`, your `engram` binary — none of those were modified during this test.
+Your production `engram` setup is **fully untouched**. Your prod cloud, your `~/.omnia/omnia.db`, your `engram` binary — none of those were modified during this test.
 
 ---
 

@@ -11,17 +11,17 @@ Use this guide when local Engram saves work but cloud sync does not advance. The
 Run these commands first:
 
 ```bash
-engram version
-engram cloud status
-engram cloud upgrade doctor --project <project>
-engram sync --cloud --status --project <project>
+omnia version
+omnia cloud status
+omnia cloud upgrade doctor --project <project>
+omnia sync --cloud --status --project <project>
 ```
 
 Check three things:
 
 | Signal | Healthy value | What it means |
 |---|---|---|
-| `engram version` | Latest release on client and server | Client/server version skew can block old chunk sync |
+| `omnia version` | Latest release on client and server | Client/server version skew can block old chunk sync |
 | `cloud status` | configured + auth ready | CLI has a server URL and runtime token |
 | `doctor` | `ready` or actionable repair | Local metadata is safe to upload |
 | `last_acked_seq` | Advances after sync | Cloud accepted the pending journal |
@@ -35,13 +35,13 @@ If the dashboard shows `0` observations but local saves exist, the cloud server 
 Use the supported commands exactly:
 
 ```bash
-engram cloud config --server https://your-cloud-host
-engram cloud status
-engram cloud enroll <project>
-engram sync --cloud --project <project>
+omnia cloud config --server https://your-cloud-host
+omnia cloud status
+omnia cloud enroll <project>
+omnia sync --cloud --project <project>
 ```
 
-`engram cloud config --status` is not the documented status command. Use `engram cloud status`.
+`omnia cloud config --status` is not the documented status command. Use `omnia cloud status`.
 
 Cloud auth token is runtime config:
 
@@ -49,7 +49,7 @@ Cloud auth token is runtime config:
 export ENGRAM_CLOUD_TOKEN="your-token"
 ```
 
-The local `~/.engram/cloud.json` stores the server URL. The token is intentionally read from the environment.
+The local `~/.omnia/cloud.json` stores the server URL. The token is intentionally read from the environment.
 
 ---
 
@@ -64,7 +64,7 @@ Upgrade both sides to `v1.14.8` or newer:
 ```bash
 brew update
 brew upgrade engram
-engram version
+omnia version
 ```
 
 Redeploy or restart the cloud server so the server binary also runs `v1.14.8` or newer.
@@ -72,8 +72,8 @@ Redeploy or restart the cloud server so the server binary also runs `v1.14.8` or
 Then retry:
 
 ```bash
-engram sync --cloud --project <project>
-engram sync --cloud --status --project <project>
+omnia sync --cloud --project <project>
+omnia sync --cloud --status --project <project>
 ```
 
 ### Why this works
@@ -145,7 +145,7 @@ If doctor reveals another legacy blocker after each repair, use loop mode after 
 tools/repair-missing-session-directory.sh --apply --interactive --all <project>
 ```
 
-Loop mode repairs exactly one supported blocker (`entity=session|observation op=upsert`), reruns `engram cloud upgrade doctor --project <project>`, then repeats until doctor no longer reports a supported blocker. If doctor reports ready but local `sessions` rows included in the project export still have empty/null `directory`, loop mode applies that fallback repair and reruns doctor once more. If exported local `observations` rows are missing required fields such as `title`, loop mode applies that fallback repair next and reruns doctor again. It still stops on unsupported blockers, project mismatches, or observation data that cannot be fully inferred. In non-interactive loop mode, rerun with `--interactive` when the script asks for human-provided observation fields.
+Loop mode repairs exactly one supported blocker (`entity=session|observation op=upsert`), reruns `omnia cloud upgrade doctor --project <project>`, then repeats until doctor no longer reports a supported blocker. If doctor reports ready but local `sessions` rows included in the project export still have empty/null `directory`, loop mode applies that fallback repair and reruns doctor once more. If exported local `observations` rows are missing required fields such as `title`, loop mode applies that fallback repair next and reruns doctor again. It still stops on unsupported blockers, project mismatches, or observation data that cannot be fully inferred. In non-interactive loop mode, rerun with `--interactive` when the script asks for human-provided observation fields.
 
 If one-shot mode finds no doctor blocker but reports local sessions with empty/null directory, preview and apply the fallback explicitly:
 
@@ -177,10 +177,10 @@ tools/repair-missing-session-directory.sh --apply --interactive --all --max 5 <p
 Then rerun the normal flow:
 
 ```bash
-engram cloud upgrade doctor --project <project>
-engram cloud upgrade repair --project <project> --dry-run
-engram cloud upgrade repair --project <project> --apply
-engram sync --cloud --project <project>
+omnia cloud upgrade doctor --project <project>
+omnia cloud upgrade repair --project <project> --dry-run
+omnia cloud upgrade repair --project <project> --apply
+omnia sync --cloud --project <project>
 ```
 
 ### What the script changes
@@ -215,7 +215,7 @@ It never changes `last_acked_seq`, never deletes mutations, and creates a timest
 If you do not pass `--seq`, the script runs:
 
 ```bash
-engram cloud upgrade doctor --project <project>
+omnia cloud upgrade doctor --project <project>
 ```
 
 and extracts the first matching blocker:
@@ -271,11 +271,11 @@ tools/repair-missing-session-directory.sh --apply --seq 873 sias-app C:/Users/us
 If you want to inspect before using the helper:
 
 ```bash
-sqlite3 ~/.engram/engram.db "select seq, entity, op, entity_key, payload from sync_mutations where seq = 873;"
-sqlite3 ~/.engram/engram.db "select id, project, directory from sessions where id = 'manual-save-current';"
-sqlite3 ~/.engram/engram.db "select id, project, started_at, directory from sessions where project = '<project>' and (directory is null or directory = '');"
-sqlite3 ~/.engram/engram.db "select s.id, s.project, s.started_at, s.directory from sessions s where (s.directory is null or s.directory = '') and (s.project = '<project>' or s.id in (select session_id from observations where ifnull(project, '') = '<project>' union select session_id from user_prompts where ifnull(project, '') = '<project>'));"
-sqlite3 ~/.engram/engram.db "select o.id, ifnull(o.sync_id, '') as sync_id, ifnull(o.session_id, '') as session_id, ifnull(o.project, '') as project, ifnull(o.type, '') as type, ifnull(o.title, '') as title, ifnull(o.scope, '') as scope from observations o where (ifnull(o.project, '') = '<project>' or (ifnull(o.project, '') = '' and o.session_id in (select id from sessions where ifnull(project, '') = '<project>'))) and (ifnull(o.sync_id, '') = '' or ifnull(o.session_id, '') = '' or ifnull(o.type, '') = '' or ifnull(o.title, '') = '' or ifnull(o.content, '') = '' or ifnull(o.scope, '') = '');"
+sqlite3 ~/.omnia/omnia.db "select seq, entity, op, entity_key, payload from sync_mutations where seq = 873;"
+sqlite3 ~/.omnia/omnia.db "select id, project, directory from sessions where id = 'manual-save-current';"
+sqlite3 ~/.omnia/omnia.db "select id, project, started_at, directory from sessions where project = '<project>' and (directory is null or directory = '');"
+sqlite3 ~/.omnia/omnia.db "select s.id, s.project, s.started_at, s.directory from sessions s where (s.directory is null or s.directory = '') and (s.project = '<project>' or s.id in (select session_id from observations where ifnull(project, '') = '<project>' union select session_id from user_prompts where ifnull(project, '') = '<project>'));"
+sqlite3 ~/.omnia/omnia.db "select o.id, ifnull(o.sync_id, '') as sync_id, ifnull(o.session_id, '') as session_id, ifnull(o.project, '') as project, ifnull(o.type, '') as type, ifnull(o.title, '') as title, ifnull(o.scope, '') as scope from observations o where (ifnull(o.project, '') = '<project>' or (ifnull(o.project, '') = '' and o.session_id in (select id from sessions where ifnull(project, '') = '<project>'))) and (ifnull(o.sync_id, '') = '' or ifnull(o.session_id, '') = '' or ifnull(o.type, '') = '' or ifnull(o.title, '') = '' or ifnull(o.content, '') = '' or ifnull(o.scope, '') = '');"
 ```
 
 Do not manually edit SQLite without a backup.
@@ -304,12 +304,12 @@ Do not manually edit SQLite without a backup.
 After any repair, verify in this order:
 
 ```bash
-engram cloud status
-engram cloud upgrade doctor --project <project>
-engram cloud upgrade repair --project <project> --dry-run
-engram cloud upgrade repair --project <project> --apply
-engram sync --cloud --project <project>
-engram sync --cloud --status --project <project>
+omnia cloud status
+omnia cloud upgrade doctor --project <project>
+omnia cloud upgrade repair --project <project> --dry-run
+omnia cloud upgrade repair --project <project> --apply
+omnia sync --cloud --project <project>
+omnia sync --cloud --status --project <project>
 ```
 
 Expected result:

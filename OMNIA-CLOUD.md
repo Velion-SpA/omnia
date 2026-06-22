@@ -79,8 +79,8 @@ Permisos (bitmask): Read=1, Insert=2, Update=4, Delete=8 (suma para combinar; 15
 En cada máquina con engram/omnia local:
 
 ```bash
-engram cloud config --server https://engram.tu-homelab
-engram cloud login --username benja           # pide la contraseña; guarda el token en cloud.json
+omnia cloud config --server https://engram.tu-homelab
+omnia cloud login --username benja           # pide la contraseña; guarda el token en cloud.json
 ```
 
 A partir de ahí, cada sync se autentica como esa cuenta. Re-logueá cuando el token expire

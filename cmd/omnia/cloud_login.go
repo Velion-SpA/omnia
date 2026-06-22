@@ -25,7 +25,7 @@ func resolveCloudServer(flagServer string, cc *cloudConfig) (string, error) {
 	if cc != nil && cc.ServerURL != "" {
 		return strings.TrimRight(cc.ServerURL, "/"), nil
 	}
-	return "", fmt.Errorf("no cloud server configured (run `engram cloud config --server <url>` or pass --server)")
+	return "", fmt.Errorf("no cloud server configured (run `omnia cloud config --server <url>` or pass --server)")
 }
 
 // resolveCloudServerForAlias returns the server URL for a named cloud alias.
@@ -48,7 +48,7 @@ func resolveCloudServerForAlias(flagServer, alias string, v2 *cloudConfigV2) (st
 			return strings.TrimRight(entry.ServerURL, "/"), nil
 		}
 	}
-	return "", fmt.Errorf("no cloud server configured (run `engram cloud config --server <url>` or pass --server)")
+	return "", fmt.Errorf("no cloud server configured (run `omnia cloud config --server <url>` or pass --server)")
 }
 
 // doCloudRequest sends a POST request with a JSON body and returns the
@@ -82,9 +82,9 @@ func serverError(body []byte) string {
 	return "(no error detail)"
 }
 
-// cmdCloudSignup implements `engram cloud signup`.
+// cmdCloudSignup implements `omnia cloud signup`.
 func cmdCloudSignup(cfg store.Config) {
-	fs := flag.NewFlagSet("engram cloud signup", flag.ContinueOnError)
+	fs := flag.NewFlagSet("omnia cloud signup", flag.ContinueOnError)
 	server := fs.String("server", "", "cloud server URL (overrides cloud.json)")
 	username := fs.String("username", "", "username for the new account")
 	email := fs.String("email", "", "email address for the new account")
@@ -107,7 +107,7 @@ func cmdCloudSignup(cfg store.Config) {
 	}
 
 	if *username == "" || *email == "" || *password == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud signup --username <u> --email <e> --password <p> [--server <url>]")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud signup --username <u> --email <e> --password <p> [--server <url>]")
 		fmt.Fprintln(os.Stderr, "error: --username, --email, and --password are required")
 		exitFunc(1)
 		return
@@ -163,9 +163,9 @@ var readPasswordFn = func(prompt string) (string, error) {
 	return string(pw), nil
 }
 
-// cmdCloudLogin implements `engram cloud login`.
+// cmdCloudLogin implements `omnia cloud login`.
 func cmdCloudLogin(cfg store.Config) {
-	fs := flag.NewFlagSet("engram cloud login", flag.ContinueOnError)
+	fs := flag.NewFlagSet("omnia cloud login", flag.ContinueOnError)
 	server := fs.String("server", "", "cloud server URL (overrides cloud.json)")
 	username := fs.String("username", "", "account username")
 	password := fs.String("password", "", "account password (prompted if empty)")
@@ -184,7 +184,7 @@ func cmdCloudLogin(cfg store.Config) {
 	// Validate the alias exists when explicitly specified.
 	if alias != "" && v2 != nil {
 		if _, ok := v2.getCloud(alias); !ok {
-			fmt.Fprintf(os.Stderr, "error: cloud %q not found; run `engram cloud add %s --server <url>` first\n", alias, alias)
+			fmt.Fprintf(os.Stderr, "error: cloud %q not found; run `omnia cloud add %s --server <url>` first\n", alias, alias)
 			exitFunc(1)
 			return
 		}
@@ -198,7 +198,7 @@ func cmdCloudLogin(cfg store.Config) {
 	}
 
 	if *username == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud login --username <u> [--password <p>] [--server <url>] [--cloud <alias>]")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud login --username <u> [--password <p>] [--server <url>] [--cloud <alias>]")
 		fmt.Fprintln(os.Stderr, "error: --username is required")
 		exitFunc(1)
 		return

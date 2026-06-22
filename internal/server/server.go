@@ -31,7 +31,7 @@ var loadServerStats = func(s *store.Store) (*store.Stats, error) {
 }
 
 // SyncStatusProvider returns the current sync status. This is implemented
-// by autosync.Manager and injected from cmd/engram/main.go.
+// by autosync.Manager and injected from cmd/omnia/main.go.
 type SyncStatusProvider interface {
 	Status(project string) SyncStatus
 }
@@ -55,12 +55,12 @@ type SyncStatus struct {
 }
 
 // SemanticRunnerFactory is a function that resolves a store.SemanticRunner by name.
-// It is injected from cmd/engram/main.go so that internal/server does not depend on
+// It is injected from cmd/omnia/main.go so that internal/server does not depend on
 // internal/llm directly (preserving the import-cycle boundary).
 type SemanticRunnerFactory func(name string) (store.SemanticRunner, error)
 
 // SemanticPromptBuilder constructs the LLM prompt for a given pair of observation
-// snippets. Injected from cmd/engram/main.go alongside SemanticRunnerFactory.
+// snippets. Injected from cmd/omnia/main.go alongside SemanticRunnerFactory.
 type SemanticPromptBuilder func(a, b store.ObservationSnippet) string
 
 type Server struct {
@@ -170,7 +170,7 @@ func (s *Server) Start() error {
 
 	ln, err := listenFn("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("engram server: listen %s: %w", addr, err)
+		return fmt.Errorf("omnia server: listen %s: %w", addr, err)
 	}
 	log.Printf("[omnia] HTTP server listening on %s", addr)
 	return serveFn(ln, s.mux)

@@ -11,7 +11,7 @@ import (
 	"github.com/velion/omnia/internal/store"
 )
 
-// cmdConflicts is the top-level dispatcher for `engram conflicts <subcommand>`.
+// cmdConflicts is the top-level dispatcher for `omnia conflicts <subcommand>`.
 // Mirrors the cloud.go pattern: switch on os.Args[2] → delegate to sub-command function.
 func cmdConflicts(cfg store.Config) {
 	if len(os.Args) < 3 {
@@ -38,7 +38,7 @@ func cmdConflicts(cfg store.Config) {
 }
 
 func printConflictsUsage() {
-	fmt.Fprintln(os.Stderr, "usage: engram conflicts <subcommand> [options]")
+	fmt.Fprintln(os.Stderr, "usage: omnia conflicts <subcommand> [options]")
 	fmt.Fprintln(os.Stderr, "subcommands: list, show, stats, scan, deferred")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "  list       [--project P]  [--status S]  [--since RFC3339]  [--limit N]")
@@ -176,7 +176,7 @@ func cmdConflictsList(cfg store.Config) {
 
 func cmdConflictsShow(cfg store.Config) {
 	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: engram conflicts show <relation_id>")
+		fmt.Fprintln(os.Stderr, "usage: omnia conflicts show <relation_id>")
 		exitFunc(1)
 		return
 	}

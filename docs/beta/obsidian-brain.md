@@ -3,7 +3,7 @@
 > **Status**: Beta — feedback welcome on the [GitHub issues](https://github.com/Gentleman-Programming/engram/issues) tagged `beta:obsidian`.
 > **Available since**: `v1.12.0-beta.1`
 > **Stability**: Behavior is locked but flag names may evolve before stable release.
-> **Side-by-side**: This beta installs as `engram-beta` so it doesn't replace your stable `engram`. Both binaries share the same `~/.engram/engram.db`, so memories captured by your stable agent show up in the beta exports automatically.
+> **Side-by-side**: This beta installs as `engram-beta` so it doesn't replace your stable `engram`. Both binaries share the same `~/.omnia/omnia.db`, so memories captured by your stable agent show up in the beta exports automatically.
 
 Visualize your AI agent's memory as an interactive knowledge graph in [Obsidian](https://obsidian.md/). Every observation becomes a Markdown note. Sessions, projects, and topic clusters become connected hubs. Open Obsidian's Graph View and **see how your agent's brain actually thinks**.
 
@@ -27,7 +27,7 @@ The result: your agent's knowledge becomes a **navigable cognitive map** instead
 
 ## Install Side-by-Side (`engram-beta`)
 
-The beta ships as a separate binary named `engram-beta` so it never touches your stable `engram` install. Both binaries read and write the same `~/.engram/engram.db`, so anything captured by your stable agent is immediately visible to the beta.
+The beta ships as a separate binary named `engram-beta` so it never touches your stable `engram` install. Both binaries read and write the same `~/.omnia/omnia.db`, so anything captured by your stable agent is immediately visible to the beta.
 
 Pick the right archive for your platform from the [release page](https://github.com/Gentleman-Programming/engram/releases/tag/v1.12.0-beta.1), then extract and rename:
 
@@ -64,7 +64,7 @@ engram-beta version
 ### From source (`go install`)
 
 ```bash
-go install github.com/Gentleman-Programming/engram/cmd/engram@v1.12.0-beta.1
+go install github.com/velion/omnia/cmd/omnia@v1.12.0-beta.1
 mv ~/go/bin/engram ~/go/bin/engram-beta
 engram-beta version
 ```
@@ -74,7 +74,7 @@ engram-beta version
 ```bash
 which engram        # /usr/local/bin/engram (stable, untouched)
 which engram-beta   # /usr/local/bin/engram-beta (the beta)
-engram version      # your stable version
+omnia version      # your stable version
 engram-beta version # v1.12.0-beta.1
 ```
 
@@ -84,7 +84,7 @@ engram-beta version # v1.12.0-beta.1
 sudo rm /usr/local/bin/engram-beta
 ```
 
-The stable `engram`, your `~/.engram/engram.db`, and your Obsidian vault are untouched.
+The stable `engram`, your `~/.omnia/omnia.db`, and your Obsidian vault are untouched.
 
 ---
 
@@ -108,7 +108,7 @@ You should now see hundreds (or thousands) of connected nodes, color-coded by ty
 ## How It Works
 
 ```
-SQLite (~/.engram/engram.db)
+SQLite (~/.omnia/omnia.db)
         │
         ▼
  obsidian-export reads via store.Export()
@@ -252,7 +252,7 @@ engram-beta obsidian-export --vault ~/Obsidian/engram --graph-config skip
 
 The `--watch` flag turns the export into a long-running daemon. Use cases:
 - Keep your vault current while you work
-- Run on a server alongside `engram serve` for team-shared brains
+- Run on a server alongside `omnia serve` for team-shared brains
 - Feed a live dashboard
 
 ### Behavior
@@ -280,7 +280,7 @@ To keep the daemon running across reboots, use `nohup`, `launchd` (macOS), `syst
 nohup ~/go/bin/engram-beta obsidian-export \
   --vault ~/Obsidian/engram \
   --watch --interval 10m \
-  > ~/.engram/obsidian-sync.log 2>&1 &
+  > ~/.omnia/obsidian-sync.log 2>&1 &
 ```
 
 **macOS launchd plist** (`~/Library/LaunchAgents/com.engram-beta.obsidian-sync.plist`):
@@ -360,7 +360,7 @@ You can absolutely tweak the graph view in Obsidian's UI — Engram's `preserve`
 
 For an in-Obsidian experience with a ribbon button, settings tab, and status bar indicator, there's a TypeScript community plugin in [`plugin/obsidian/`](https://github.com/Gentleman-Programming/engram/tree/main/plugin/obsidian).
 
-It uses Engram's HTTP API (`engram serve`) instead of reading SQLite directly:
+It uses Engram's HTTP API (`omnia serve`) instead of reading SQLite directly:
 
 ```bash
 cd plugin/obsidian
@@ -371,9 +371,9 @@ mkdir -p ~/Obsidian/engram/.obsidian/plugins/engram-brain
 cp manifest.json main.js ~/Obsidian/engram/.obsidian/plugins/engram-brain/
 ```
 
-Then in Obsidian: Settings → Community plugins → enable "Engram Brain". Configure the URL to your `engram serve` endpoint (default: `http://127.0.0.1:7437`).
+Then in Obsidian: Settings → Community plugins → enable "Engram Brain". Configure the URL to your `omnia serve` endpoint (default: `http://127.0.0.1:7437`).
 
-This is **lower priority than the CLI** — the CLI doesn't require `engram serve` to be running, works fully offline, and is the recommended path for daily use.
+This is **lower priority than the CLI** — the CLI doesn't require `omnia serve` to be running, works fully offline, and is the recommended path for daily use.
 
 ---
 
@@ -458,6 +458,6 @@ Once there's feedback signal:
 - **Bidirectional sync** — let Obsidian edits flow back to Engram (with conflict resolution)
 - **Custom hub templates** — user-defined templates for session/topic hub notes
 - **Graph layout presets** — multiple curated layouts beyond the engram-brain default
-- **`engram serve` integration** — auto-export when the HTTP server is running, no separate daemon needed
+- **`omnia serve` integration** — auto-export when the HTTP server is running, no separate daemon needed
 
 If any of those resonate strongly with you, open an issue and it'll get prioritized.

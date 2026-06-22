@@ -227,7 +227,7 @@ func TestFatal(t *testing.T) {
 	if !ok || int(code) != 1 {
 		t.Fatalf("expected exit code 1 panic, got %v", recovered)
 	}
-	if !strings.Contains(stderr, "engram: boom") {
+	if !strings.Contains(stderr, "omnia: boom") {
 		t.Fatalf("fatal stderr mismatch: %q", stderr)
 	}
 }
@@ -659,7 +659,7 @@ func TestMainCloudHelpDoesNotCreateLocalDatabase(t *testing.T) {
 	if recovered != nil || stderr != "" {
 		t.Fatalf("cloud help should return cleanly, panic=%v stderr=%q stdout=%q", recovered, stderr, stdout)
 	}
-	if !strings.Contains(stdout, "usage: engram cloud") {
+	if !strings.Contains(stdout, "usage: omnia cloud") {
 		t.Fatalf("expected cloud usage output, got %q", stdout)
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "omnia.db")); err == nil {
@@ -801,8 +801,8 @@ func TestCmdCloudStatusEmitsLocalDaemonLine(t *testing.T) {
 		if !strings.Contains(stdout, "Local daemon: not running on port") {
 			t.Fatalf("expected not-running daemon line, got %q", stdout)
 		}
-		if !strings.Contains(stdout, "engram serve") {
-			t.Fatalf("expected recovery hint mentioning `engram serve`, got %q", stdout)
+		if !strings.Contains(stdout, "omnia serve") {
+			t.Fatalf("expected recovery hint mentioning `omnia serve`, got %q", stdout)
 		}
 	})
 
@@ -1032,8 +1032,8 @@ func TestCmdSyncCloudPreflightsLegacyMutationPayloads(t *testing.T) {
 		t.Fatal("cloud sync must block before export/canonicalization")
 	}
 	if !strings.Contains(stderr, "legacy mutation payloads require repair before cloud sync") ||
-		!strings.Contains(stderr, "engram cloud upgrade doctor --project sync-legacy") ||
-		!strings.Contains(stderr, "engram cloud upgrade repair --project sync-legacy --apply") {
+		!strings.Contains(stderr, "omnia cloud upgrade doctor --project sync-legacy") ||
+		!strings.Contains(stderr, "omnia cloud upgrade repair --project sync-legacy --apply") {
 		t.Fatalf("expected actionable legacy mutation guidance, got %q", stderr)
 	}
 
@@ -1159,7 +1159,7 @@ func TestCmdCloudUpgradeRepairStatusAndRollbackBranches(t *testing.T) {
 		if _, ok := recovered.(exitCode); !ok {
 			t.Fatalf("expected fatal exit for missing --project, got %v", recovered)
 		}
-		if !strings.Contains(stderr, "usage: engram cloud upgrade repair") || !strings.Contains(stderr, "--project") {
+		if !strings.Contains(stderr, "usage: omnia cloud upgrade repair") || !strings.Contains(stderr, "--project") {
 			t.Fatalf("expected usage guidance with --project, got %q", stderr)
 		}
 	})
@@ -1360,10 +1360,10 @@ func TestCloudUpgradeDocsMatchHelpAndLocalFirstSemantics(t *testing.T) {
 	plugins := read("..", "..", "docs", "PLUGINS.md")
 
 	commandExamples := []string{
-		"engram cloud upgrade doctor --project",
-		"engram cloud upgrade repair --project",
-		"engram cloud upgrade bootstrap --project",
-		"engram cloud upgrade status --project",
+		"omnia cloud upgrade doctor --project",
+		"omnia cloud upgrade repair --project",
+		"omnia cloud upgrade bootstrap --project",
+		"omnia cloud upgrade status --project",
 	}
 	for _, cmd := range commandExamples {
 		if !strings.Contains(readme, cmd) {
@@ -1387,10 +1387,10 @@ func TestCloudUpgradeDocsMatchHelpAndLocalFirstSemantics(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(strings.ToLower(agentSetup), "deferred") || !strings.Contains(agentSetup, "engram cloud") {
+	if !strings.Contains(strings.ToLower(agentSetup), "deferred") || !strings.Contains(agentSetup, "omnia cloud") {
 		t.Fatalf("AGENT-SETUP must describe deferred automation/manual cloud CLI flow")
 	}
-	if !strings.Contains(strings.ToLower(plugins), "deferred") || !strings.Contains(plugins, "engram cloud") {
+	if !strings.Contains(strings.ToLower(plugins), "deferred") || !strings.Contains(plugins, "omnia cloud") {
 		t.Fatalf("PLUGINS must describe deferred automation/manual cloud CLI flow")
 	}
 }
@@ -1413,8 +1413,8 @@ func TestCloudDashboardDocsEnablementFlowIsExecutable(t *testing.T) {
 	readme := read("..", "..", "README.md")
 	docs := read("..", "..", "DOCS.md")
 	for _, token := range []string{
-		"engram cloud config --server",
-		"engram cloud enroll smoke-project",
+		"omnia cloud config --server",
+		"omnia cloud enroll smoke-project",
 		"/dashboard/login",
 		"/dashboard/contributors",
 		"ENGRAM_CLOUD_TOKEN",
@@ -1529,7 +1529,7 @@ func TestCmdCloudStatusSurfacesPersistedNonEnrolledPendingDiagnostic(t *testing.
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	if err := s.MarkSyncBlocked(store.DefaultSyncTargetKey, constants.ReasonNonEnrolledPendingMutations, "pending cloud sync mutations are blocked because project(s) are not enrolled: alpha=2. Run `engram cloud enroll <project>` for each intended project or review enrollment."); err != nil {
+	if err := s.MarkSyncBlocked(store.DefaultSyncTargetKey, constants.ReasonNonEnrolledPendingMutations, "pending cloud sync mutations are blocked because project(s) are not enrolled: alpha=2. Run `omnia cloud enroll <project>` for each intended project or review enrollment."); err != nil {
 		_ = s.Close()
 		t.Fatalf("mark blocked: %v", err)
 	}
@@ -1540,7 +1540,7 @@ func TestCmdCloudStatusSurfacesPersistedNonEnrolledPendingDiagnostic(t *testing.
 	if recovered != nil || stderr != "" {
 		t.Fatalf("cloud status should succeed, panic=%v stderr=%q", recovered, stderr)
 	}
-	for _, want := range []string{"Sync diagnostic: degraded", "reason_code: non_enrolled_pending_mutations", "engram cloud enroll <project>"} {
+	for _, want := range []string{"Sync diagnostic: degraded", "reason_code: non_enrolled_pending_mutations", "omnia cloud enroll <project>"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("expected cloud status output to contain %q, got %q", want, stdout)
 		}
@@ -1590,7 +1590,7 @@ func TestResolveCloudRuntimeConfigReturnsErrorWhenPersistedConfigUnreadable(t *t
 
 func TestResolveCloudRuntimeConfigUsesPersistedTokenAsFallback(t *testing.T) {
 	// Issue #343: when ENGRAM_CLOUD_TOKEN is not set, the token stored in
-	// cloud.json must be used so that `engram sync --cloud` works without
+	// cloud.json must be used so that `omnia sync --cloud` works without
 	// requiring users to export the env var in every shell session.
 	cfg := testConfig(t)
 	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test", Token: "file-token"}); err != nil {
@@ -1897,7 +1897,7 @@ func TestUnconfiguredCloudKeepsLocalCommandDefaults(t *testing.T) {
 	if code, ok := recovered.(exitCode); !ok || int(code) != 1 {
 		t.Fatalf("search missing query should keep exit code 1, got %v", recovered)
 	}
-	if !strings.Contains(searchErr, "usage: engram search <query>") {
+	if !strings.Contains(searchErr, "usage: omnia search <query>") {
 		t.Fatalf("unexpected search usage: %q", searchErr)
 	}
 
@@ -2408,10 +2408,10 @@ func TestCmdExportDefaultAndCmdImportErrors(t *testing.T) {
 	if recovered != nil || stderr != "" {
 		t.Fatalf("export default should succeed, panic=%v stderr=%q", recovered, stderr)
 	}
-	if !strings.Contains(stdout, "Exported to engram-export.json") {
+	if !strings.Contains(stdout, "Exported to omnia-export.json") {
 		t.Fatalf("unexpected default export output: %q", stdout)
 	}
-	if _, err := os.Stat(filepath.Join(workDir, "engram-export.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(workDir, "omnia-export.json")); err != nil {
 		t.Fatalf("expected default export file: %v", err)
 	}
 
@@ -2424,7 +2424,7 @@ func TestCmdExportDefaultAndCmdImportErrors(t *testing.T) {
 
 	withArgs(t, "engram", "import")
 	_, stderr, recovered = captureOutputAndRecover(t, func() { cmdImport(cfg) })
-	if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "usage: engram import") {
+	if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "usage: omnia import") {
 		t.Fatalf("expected import usage exit, panic=%v stderr=%q", recovered, stderr)
 	}
 
@@ -2532,10 +2532,10 @@ func TestUsageAndValidationExits(t *testing.T) {
 		errSubstr  string
 		stderrOnly bool
 	}{
-		{name: "search usage", args: []string{"engram", "search"}, run: cmdSearch, errSubstr: "usage: engram search"},
+		{name: "search usage", args: []string{"engram", "search"}, run: cmdSearch, errSubstr: "usage: omnia search"},
 		{name: "search missing query", args: []string{"engram", "search", "--limit", "3"}, run: cmdSearch, errSubstr: "search query is required"},
-		{name: "save usage", args: []string{"engram", "save", "title"}, run: cmdSave, errSubstr: "usage: engram save"},
-		{name: "timeline usage", args: []string{"engram", "timeline"}, run: cmdTimeline, errSubstr: "usage: engram timeline"},
+		{name: "save usage", args: []string{"engram", "save", "title"}, run: cmdSave, errSubstr: "usage: omnia save"},
+		{name: "timeline usage", args: []string{"engram", "timeline"}, run: cmdTimeline, errSubstr: "usage: omnia timeline"},
 		{name: "timeline invalid id", args: []string{"engram", "timeline", "abc"}, run: cmdTimeline, errSubstr: "invalid observation id"},
 	}
 
@@ -2989,10 +2989,10 @@ func TestMarkCloudSyncFailureStoresRepairGuidance(t *testing.T) {
 	for _, want := range []string{
 		"legacy mutation payload missing required field",
 		"Known repairable cloud sync failure detected.",
-		"engram cloud upgrade doctor --project proj-a",
-		"engram cloud upgrade repair --project proj-a --dry-run",
-		"engram cloud upgrade repair --project proj-a --apply",
-		"engram sync --cloud --project proj-a",
+		"omnia cloud upgrade doctor --project proj-a",
+		"omnia cloud upgrade repair --project proj-a --dry-run",
+		"omnia cloud upgrade repair --project proj-a --apply",
+		"omnia sync --cloud --project proj-a",
 	} {
 		if !strings.Contains(*state.LastError, want) {
 			t.Fatalf("expected last_error to contain %q, got %q", want, *state.LastError)
@@ -3054,10 +3054,10 @@ func TestCmdSyncCloudFailurePrintsRepairGuidance(t *testing.T) {
 	for _, want := range []string{
 		"invalid upsert payload: sessions[0].directory is required",
 		"Known repairable cloud sync failure detected.",
-		"engram cloud upgrade doctor --project proj-a",
-		"engram cloud upgrade repair --project proj-a --dry-run",
-		"engram cloud upgrade repair --project proj-a --apply",
-		"engram sync --cloud --project proj-a",
+		"omnia cloud upgrade doctor --project proj-a",
+		"omnia cloud upgrade repair --project proj-a --dry-run",
+		"omnia cloud upgrade repair --project proj-a --apply",
+		"omnia sync --cloud --project proj-a",
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("expected stderr to contain %q, got %q", want, stderr)

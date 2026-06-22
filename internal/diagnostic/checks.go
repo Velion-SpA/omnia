@@ -110,7 +110,7 @@ func (c ManualSessionNameProjectMismatchCheck) Run(ctx context.Context, scope Sc
 			Message:              "Manual session name suffix does not match sessions.project.",
 			Why:                  "Manual session naming drift can hide memories from project-scoped context retrieval.",
 			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_name": session.Name, "session_project": session.Project, "name_project": nameProject}),
-			SafeNextStep:         "Use `engram context --project <project>` or MCP `project` overrides explicitly before deciding whether to consolidate projects.",
+			SafeNextStep:         "Use `omnia context --project <project>` or MCP `project` overrides explicitly before deciding whether to consolidate projects.",
 			RequiresConfirmation: true,
 		})
 	}
@@ -144,9 +144,9 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		if validation.ReasonCode == "" {
 			continue
 		}
-		nextStep := "Run `engram cloud upgrade doctor` and inspect the mutation payload before any manual repair."
+		nextStep := "Run `omnia cloud upgrade doctor` and inspect the mutation payload before any manual repair."
 		if strings.TrimSpace(scope.Project) != "" {
-			nextStep = "Run `engram cloud upgrade doctor --project " + scope.Project + "` and inspect the mutation payload before any manual repair."
+			nextStep = "Run `omnia cloud upgrade doctor --project " + scope.Project + "` and inspect the mutation payload before any manual repair."
 		}
 		findings = append(findings, Finding{
 			CheckID:              c.Code(),
@@ -169,7 +169,7 @@ func (c SQLiteLockContentionCheck) Run(ctx context.Context, scope Scope) (CheckR
 	}
 	snapshot, err := readSnapshot(ctx)
 	if err != nil {
-		finding := Finding{CheckID: c.Code(), Severity: SeverityError, ReasonCode: "sqlite_lock_probe_failed", Message: err.Error(), Why: "Doctor could not read SQLite lock state, so contention cannot be ruled out.", Evidence: mustJSON(map[string]any{"error": err.Error()}), SafeNextStep: "Close other Engram processes and rerun `engram doctor --check sqlite_lock_contention`.", RequiresConfirmation: false}
+		finding := Finding{CheckID: c.Code(), Severity: SeverityError, ReasonCode: "sqlite_lock_probe_failed", Message: err.Error(), Why: "Doctor could not read SQLite lock state, so contention cannot be ruled out.", Evidence: mustJSON(map[string]any{"error": err.Error()}), SafeNextStep: "Close other Engram processes and rerun `omnia doctor --check sqlite_lock_contention`.", RequiresConfirmation: false}
 		return resultFromFindings(c.Code(), map[string]any{"probe": "failed"}, []Finding{finding}), nil
 	}
 	findings := make([]Finding, 0)
@@ -181,7 +181,7 @@ func (c SQLiteLockContentionCheck) Run(ctx context.Context, scope Scope) (CheckR
 			Message:              "SQLite lock probe reported contention indicators.",
 			Why:                  "Lock contention can cause writes or sync enrollment to fail; doctor only reports the condition and does not repair it.",
 			Evidence:             mustJSON(snapshot),
-			SafeNextStep:         "Stop other Engram processes, wait for active operations to finish, then rerun `engram doctor --check sqlite_lock_contention`.",
+			SafeNextStep:         "Stop other Engram processes, wait for active operations to finish, then rerun `omnia doctor --check sqlite_lock_contention`.",
 			RequiresConfirmation: false,
 		})
 	}

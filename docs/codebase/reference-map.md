@@ -31,10 +31,10 @@
 
 | File/directory | Why it matters |
 |---|---|
-| `cmd/engram/main.go` | Main binary wiring. |
-| `cmd/engram/cloud.go` | Cloud subcommands and runtime. |
-| `cmd/engram/doctor.go` | CLI doctor. |
-| `cmd/engram/conflicts.go` | Conflicts CLI. |
+| `cmd/omnia/main.go` | Main binary wiring. |
+| `cmd/omnia/cloud.go` | Cloud subcommands and runtime. |
+| `cmd/omnia/doctor.go` | CLI doctor. |
+| `cmd/omnia/conflicts.go` | Conflicts CLI. |
 | `internal/store/store.go` | Local persistence core. |
 | `internal/store/relations.go` | Memory relationships/judgments. |
 | `internal/mcp/mcp.go` | MCP tools and profiles. |

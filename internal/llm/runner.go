@@ -3,7 +3,7 @@
 // (e.g., Claude Code or OpenCode). It ships concrete runner implementations
 // and a factory that selects the runner via the ENGRAM_AGENT_CLI env var.
 //
-// The package is a strict boundary: only cmd/engram/conflicts.go and
+// The package is a strict boundary: only cmd/omnia/conflicts.go and
 // internal/store/relations.go are permitted to import it. No other package
 // in the Engram codebase imports internal/llm.
 package llm

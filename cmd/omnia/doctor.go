@@ -64,7 +64,7 @@ func cmdDoctor(cfg store.Config) {
 		if jsonOut {
 			writeDoctorJSON(report)
 		} else {
-			fmt.Fprintf(os.Stderr, "engram doctor failed: %s\n", err)
+			fmt.Fprintf(os.Stderr, "omnia doctor failed: %s\n", err)
 		}
 		if errors.Is(err, diagnostic.ErrInvalidCheck) {
 			exitFunc(1)
@@ -80,8 +80,8 @@ func cmdDoctor(cfg store.Config) {
 }
 
 func printDoctorUsage() {
-	fmt.Fprintln(os.Stdout, "usage: engram doctor [--json] [--project PROJECT] [--check CODE]")
-	fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
+	fmt.Fprintln(os.Stdout, "usage: omnia doctor [--json] [--project PROJECT] [--check CODE]")
+	fmt.Fprintln(os.Stdout, "       omnia doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
 	fmt.Fprintln(os.Stdout, "checks: "+strings.Join(diagnostic.RegisteredCodes(), ", "))
 }
 
@@ -208,7 +208,7 @@ func isSupportedDoctorRepairCheck(check string) bool {
 }
 
 func failDoctorRepair(message string) {
-	fmt.Fprintln(os.Stderr, "engram doctor repair failed: "+message)
+	fmt.Fprintln(os.Stderr, "omnia doctor repair failed: "+message)
 	printDoctorUsage()
 	exitFunc(1)
 }

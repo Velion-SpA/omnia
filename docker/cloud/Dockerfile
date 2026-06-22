@@ -8,15 +8,15 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /out/engram ./cmd/engram
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /out/omnia ./cmd/omnia
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata
-RUN adduser -D -u 10001 engram
-USER engram
-WORKDIR /home/engram
-COPY --from=builder /out/engram /usr/local/bin/engram
+RUN adduser -D -u 10001 omnia
+USER omnia
+WORKDIR /home/omnia
+COPY --from=builder /out/omnia /usr/local/bin/omnia
 
 EXPOSE 18080
-ENTRYPOINT ["engram"]
+ENTRYPOINT ["omnia"]
 CMD ["cloud", "serve"]

@@ -41,7 +41,7 @@ type dashboardClouds struct {
 //
 // Mapping mechanism (all read-only):
 //   - Each connected cloud alias A in cloud.json owns per-project target keys of
-//     the form "A:<normalized-project>" (see cmd/engram cloudnFor).
+//     the form "A:<normalized-project>" (see cmd/omnia cloudnFor).
 //   - The local store records a sync target key for a project once it has actually
 //     replicated with that cloud (sync_chunks / healthy sync_state).
 //   - We split each recorded target key into (alias, project): a known alias maps

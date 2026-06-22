@@ -13,8 +13,8 @@
 | Recent context | Session summary and context for a new session. | `internal/store`, `internal/mcp` |
 | Prompt capture | Saves user prompts as retrievable context. | `internal/store`, `internal/mcp`, plugins |
 | Topic upserts | Updates evolving decisions with `topic_key`. | `internal/store`, `internal/mcp` |
-| Conflict surfacing | Detects/judges relationships between memories. | `internal/store/relations.go`, `internal/mcp`, `cmd/engram/conflicts.go` |
-| Doctor/repair | Operational diagnostics and guided repair. | `internal/diagnostic`, `cmd/engram/doctor.go`, `docs/DOCTOR.md` |
+| Conflict surfacing | Detects/judges relationships between memories. | `internal/store/relations.go`, `internal/mcp`, `cmd/omnia/conflicts.go` |
+| Doctor/repair | Operational diagnostics and guided repair. | `internal/diagnostic`, `cmd/omnia/doctor.go`, `docs/DOCTOR.md` |
 | Git sync | Chunk export/import in `.engram/`. | `internal/sync` |
 | Cloud sync | Per-project replication against cloud. | `internal/cloud/*`, `internal/sync` |
 | Autosync | Background push/pull with degraded status. | `internal/cloud/autosync` |
@@ -30,7 +30,7 @@
 1. **Product and commands**: `README.md`.
 2. **Full technical reference**: `DOCS.md`.
 3. **Existing architecture**: `docs/ARCHITECTURE.md`.
-4. **Binary entry point**: `cmd/engram/main.go` and `cmd/engram/cloud.go`.
+4. **Binary entry point**: `cmd/omnia/main.go` and `cmd/omnia/cloud.go`.
 5. **Data core**: `internal/store/store.go`.
 6. **Access surfaces**: `internal/mcp/mcp.go`, `internal/server/server.go`, `internal/tui/`.
 7. **Sync and cloud**: `internal/sync/sync.go`, `internal/cloud/*`.
@@ -54,7 +54,7 @@
 
 - Local SQLite is the user's source of truth.
 - Cloud is opt-in and project-scoped.
-- `engram sync --cloud --project <name>` is explicit; avoid implicit “sync everything”.
+- `omnia sync --cloud --project <name>` is explicit; avoid implicit “sync everything”.
 - A local client must be able to keep working without cloud.
 
 ### Technical boundaries
@@ -101,7 +101,7 @@
 
 ### Local API change
 
-- [ ] The route belongs to `engram serve`, not cloud.
+- [ ] The route belongs to `omnia serve`, not cloud.
 - [ ] `internal/server/server.go` only orchestrates request/response and calls store/services.
 - [ ] Status codes and JSON errors are deterministic.
 - [ ] Tests in `internal/server/*_test.go` cover errors and success.
@@ -173,7 +173,7 @@ Does it affect browser experience?        dashboard
 Does it affect background replication?    autosync
 Does it affect remote transport?          remote/cloudserver
 Does it affect a specific agent or host?  plugin/setup
-Does it affect human commands?            cmd/engram + docs
+Does it affect human commands?            cmd/omnia + docs
 ```
 
 ---

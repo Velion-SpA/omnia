@@ -150,11 +150,11 @@ func splitVersion(v string) [3]int {
 func updateInstructions() string {
 	switch runtime.GOOS {
 	case "darwin":
-		return "  brew update && brew upgrade engram"
+		return "  brew update && brew upgrade omnia"
 	case "linux":
-		return "  brew update && brew upgrade engram\n  or: go install github.com/velion/omnia/cmd/engram@latest"
+		return "  brew update && brew upgrade omnia\n  or: go install github.com/velion/omnia/cmd/omnia@latest"
 	default:
-		return "  go install github.com/velion/omnia/cmd/engram@latest\n  or: https://github.com/velion/omnia/releases/latest"
+		return "  go install github.com/velion/omnia/cmd/omnia@latest\n  or: https://github.com/velion/omnia/releases/latest"
 	}
 }
 

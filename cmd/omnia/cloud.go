@@ -18,6 +18,7 @@ import (
 	"github.com/velion/omnia/internal/cloud/cloudstore"
 	"github.com/velion/omnia/internal/cloud/constants"
 	"github.com/velion/omnia/internal/cloud/remote"
+	"github.com/velion/omnia/internal/datadir"
 	"github.com/velion/omnia/internal/envx"
 	"github.com/velion/omnia/internal/store"
 	engramsync "github.com/velion/omnia/internal/sync"
@@ -50,7 +51,7 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 	projectAuth := auth.NewProjectScopeAuthorizer(allowedProjects)
 	token := strings.TrimSpace(envx.Get("OMNIA_CLOUD_TOKEN"))
 	cs.SetDashboardAllowedProjects(allowedProjects)
-	insecureNoAuth := token == "" && envBool("ENGRAM_CLOUD_INSECURE_NO_AUTH")
+	insecureNoAuth := token == "" && envBool("OMNIA_CLOUD_INSECURE_NO_AUTH")
 	var authenticator cloudserver.Authenticator
 	if !insecureNoAuth {
 		authSvc, err := auth.NewService(cs, cfg.JWTSecret)
@@ -85,7 +86,7 @@ func backfillAllowedProjectMutationChunks(ctx context.Context, cs *cloudstore.Cl
 		}
 		if report.CandidateMutations > 0 || report.ChunksInserted > 0 {
 			fmt.Fprintf(os.Stderr,
-				"engram cloud repair materialize-mutations: project=%s candidates=%d already_materialized=%d chunks_planned=%d chunks_inserted=%d\n",
+				"omnia cloud repair materialize-mutations: project=%s candidates=%d already_materialized=%d chunks_planned=%d chunks_inserted=%d\n",
 				report.Project, report.CandidateMutations, report.AlreadyMaterialized, report.ChunksPlanned, report.ChunksInserted,
 			)
 		}
@@ -171,12 +172,12 @@ func (c *cloudConfigV2) listClouds() []string {
 
 func cmdCloud(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud <subcommand> [options]")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud <subcommand> [options]")
 		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, signup, login, refresh, add, list, remove, default")
 		exitFunc(1)
 	}
 	if os.Args[2] == "--help" || os.Args[2] == "-h" || os.Args[2] == "help" {
-		fmt.Println("usage: engram cloud <subcommand> [options]")
+		fmt.Println("usage: omnia cloud <subcommand> [options]")
 		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade, repair, signup, login, refresh, add, list, remove, default")
 		return
 	}
@@ -217,7 +218,7 @@ func cmdCloud(cfg store.Config) {
 
 func cmdCloudRepair() {
 	if len(os.Args) < 4 || os.Args[3] == "--help" || os.Args[3] == "-h" || os.Args[3] == "help" {
-		fmt.Println("usage: engram cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
+		fmt.Println("usage: omnia cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
 		fmt.Println("repairs existing cloud_mutations into compatible cloud_chunks without deleting remote data")
 		return
 	}
@@ -230,7 +231,7 @@ func cmdCloudRepair() {
 	}
 	project := parseCloudUpgradeProjectArg(os.Args[4:])
 	if project == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
 		fmt.Fprintln(os.Stderr, "error: --project is required")
 		exitFunc(1)
 		return
@@ -238,7 +239,7 @@ func cmdCloudRepair() {
 	dryRun := hasCloudUpgradeFlag(os.Args[4:], "--dry-run")
 	apply := hasCloudUpgradeFlag(os.Args[4:], "--apply")
 	if dryRun == apply {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
 		fmt.Fprintln(os.Stderr, "error: exactly one of --dry-run or --apply is required")
 		exitFunc(1)
 		return
@@ -265,16 +266,16 @@ func cmdCloudRepair() {
 
 func cmdCloudUpgrade(cfg store.Config) {
 	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>")
 		exitFunc(1)
 		return
 	}
 	command := strings.TrimSpace(strings.ToLower(os.Args[3]))
 	if command == "--help" || command == "-h" || command == "help" {
-		fmt.Println("engram cloud upgrade")
+		fmt.Println("omnia cloud upgrade")
 		fmt.Println("workflow: doctor -> repair -> bootstrap -> status/rollback")
 		fmt.Println("cloud is opt-in replication/shared access; local SQLite remains source of truth")
-		fmt.Println("usage: engram cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>")
+		fmt.Println("usage: omnia cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>")
 		return
 	}
 	switch command {
@@ -298,7 +299,7 @@ func cmdCloudUpgrade(cfg store.Config) {
 func cmdCloudUpgradeDoctor(cfg store.Config) {
 	project := parseCloudUpgradeProjectArg(os.Args[4:])
 	if project == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud upgrade doctor --project <name>")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud upgrade doctor --project <name>")
 		fmt.Fprintln(os.Stderr, "error: --project is required")
 		exitFunc(1)
 		return
@@ -359,7 +360,7 @@ func cmdCloudUpgradeDoctor(cfg store.Config) {
 			Status:  engramsync.UpgradeStatusBlocked,
 			Class:   engramsync.UpgradeReasonClassRepairable,
 			Code:    store.UpgradeReasonRepairableLegacyMutationPayload,
-			Message: fmt.Sprintf("project %q has %d repairable legacy mutation payload issue(s); run `engram cloud upgrade repair --project %s --apply`", project, legacyReport.RepairableCount, project),
+			Message: fmt.Sprintf("project %q has %d repairable legacy mutation payload issue(s); run `omnia cloud upgrade repair --project %s --apply`", project, legacyReport.RepairableCount, project),
 		}
 	}
 
@@ -419,7 +420,7 @@ func parseCloudUpgradeProjectArg(args []string) string {
 func cmdCloudUpgradeRepair(cfg store.Config) {
 	project := parseCloudUpgradeProjectArg(os.Args[4:])
 	if project == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud upgrade repair --project <name> [--dry-run|--apply]")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud upgrade repair --project <name> [--dry-run|--apply]")
 		fmt.Fprintln(os.Stderr, "error: --project is required")
 		exitFunc(1)
 		return
@@ -446,7 +447,7 @@ func cmdCloudUpgradeRepair(cfg store.Config) {
 func cmdCloudUpgradeBootstrap(cfg store.Config) {
 	project := parseCloudUpgradeProjectArg(os.Args[4:])
 	if project == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud upgrade bootstrap --project <name> [--resume]")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud upgrade bootstrap --project <name> [--resume]")
 		fmt.Fprintln(os.Stderr, "error: --project is required")
 		exitFunc(1)
 		return
@@ -488,7 +489,7 @@ func cmdCloudUpgradeBootstrap(cfg store.Config) {
 		return
 	}
 	if legacyReport.RepairableCount > 0 {
-		fatal(fmt.Errorf("legacy mutation payloads require repair before bootstrap: run `engram cloud upgrade repair --project %s --apply`", project))
+		fatal(fmt.Errorf("legacy mutation payloads require repair before bootstrap: run `omnia cloud upgrade repair --project %s --apply`", project))
 		return
 	}
 
@@ -544,7 +545,7 @@ func captureUpgradeSnapshotBeforeBootstrap(s *store.Store, cfg store.Config, pro
 func cmdCloudUpgradeStatus(cfg store.Config) {
 	project := parseCloudUpgradeProjectArg(os.Args[4:])
 	if project == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud upgrade status --project <name>")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud upgrade status --project <name>")
 		fmt.Fprintln(os.Stderr, "error: --project is required")
 		exitFunc(1)
 		return
@@ -575,7 +576,7 @@ func cmdCloudUpgradeStatus(cfg store.Config) {
 func cmdCloudUpgradeRollback(cfg store.Config) {
 	project := parseCloudUpgradeProjectArg(os.Args[4:])
 	if project == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud upgrade rollback --project <name>")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud upgrade rollback --project <name>")
 		fmt.Fprintln(os.Stderr, "error: --project is required")
 		exitFunc(1)
 		return
@@ -650,7 +651,7 @@ func cmdCloudStatus(cfg store.Config) {
 	}
 	cc.ServerURL = validatedURL
 	token := strings.TrimSpace(cc.Token)
-	insecureNoAuth := envBool("ENGRAM_CLOUD_INSECURE_NO_AUTH")
+	insecureNoAuth := envBool("OMNIA_CLOUD_INSECURE_NO_AUTH")
 	fmt.Printf("Cloud status: configured (target=%s)\n", constants.TargetKeyCloud)
 	fmt.Printf("Server: %s\n", cc.ServerURL)
 	if token == "" {
@@ -676,7 +677,7 @@ func cmdCloudStatus(cfg store.Config) {
 }
 
 func printCloudStatusSyncDiagnostic(cfg store.Config) {
-	if _, err := os.Stat(filepath.Join(cfg.DataDir, "engram.db")); err != nil {
+	if _, err := os.Stat(datadir.DBPath(cfg.DataDir)); err != nil {
 		return
 	}
 	s, err := storeNew(cfg)
@@ -714,7 +715,7 @@ func cmdCloudEnroll(cfg store.Config) {
 	for _, arg := range args {
 		switch strings.TrimSpace(arg) {
 		case "--help", "-h", "help":
-			fmt.Println("usage: engram cloud enroll <project> [--cloud-name <alias>]")
+			fmt.Println("usage: omnia cloud enroll <project> [--cloud-name <alias>]")
 			fmt.Println("Enroll a local-first project for explicit cloud replication.")
 			fmt.Println("Enrollment is project-scoped and gates sync to every configured cloud;")
 			fmt.Println("--cloud-name selects (and validates) the intended cloud for confirmation.")
@@ -739,7 +740,7 @@ func cmdCloudEnroll(cfg store.Config) {
 	}
 
 	if projectName == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud enroll <project> [--cloud-name <alias>]")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud enroll <project> [--cloud-name <alias>]")
 		exitFunc(1)
 		return
 	}
@@ -751,12 +752,12 @@ func cmdCloudEnroll(cfg store.Config) {
 			return
 		}
 		if v2 == nil {
-			fmt.Fprintf(os.Stderr, "error: cloud %q not found; run `engram cloud add %s --server <url>` first\n", cloudName, cloudName)
+			fmt.Fprintf(os.Stderr, "error: cloud %q not found; run `omnia cloud add %s --server <url>` first\n", cloudName, cloudName)
 			exitFunc(1)
 			return
 		}
 		if _, ok := v2.getCloud(cloudName); !ok {
-			fmt.Fprintf(os.Stderr, "error: cloud %q not found; run `engram cloud add %s --server <url>` first\n", cloudName, cloudName)
+			fmt.Fprintf(os.Stderr, "error: cloud %q not found; run `omnia cloud add %s --server <url>` first\n", cloudName, cloudName)
 			exitFunc(1)
 			return
 		}
@@ -782,16 +783,16 @@ func cmdCloudEnroll(cfg store.Config) {
 }
 
 func cmdCloudConfig(cfg store.Config) {
-	fs := flag.NewFlagSet("engram cloud config", flag.ContinueOnError)
+	fs := flag.NewFlagSet("omnia cloud config", flag.ContinueOnError)
 	cloudAlias := fs.String("cloud", "", "cloud alias (default: default cloud)")
 	server := fs.String("server", "", "cloud server URL")
 	if err := fs.Parse(os.Args[3:]); err != nil {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud config --server <url> [--cloud <alias>]")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud config --server <url> [--cloud <alias>]")
 		exitFunc(1)
 		return
 	}
 	if *server == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud config --server <url> [--cloud <alias>]")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud config --server <url> [--cloud <alias>]")
 		exitFunc(1)
 		return
 	}
@@ -815,7 +816,7 @@ func cmdCloudConfig(cfg store.Config) {
 
 func cmdCloudAdd(cfg store.Config) {
 	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud add <alias> --server <url>")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud add <alias> --server <url>")
 		exitFunc(1)
 		return
 	}
@@ -825,7 +826,7 @@ func cmdCloudAdd(cfg store.Config) {
 		exitFunc(1)
 		return
 	}
-	fs := flag.NewFlagSet("engram cloud add", flag.ContinueOnError)
+	fs := flag.NewFlagSet("omnia cloud add", flag.ContinueOnError)
 	server := fs.String("server", "", "cloud server URL")
 	if err := fs.Parse(os.Args[4:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -833,7 +834,7 @@ func cmdCloudAdd(cfg store.Config) {
 		return
 	}
 	if *server == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud add <alias> --server <url>")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud add <alias> --server <url>")
 		fmt.Fprintln(os.Stderr, "error: --server is required")
 		exitFunc(1)
 		return
@@ -880,7 +881,7 @@ func cmdCloudList(cfg store.Config) {
 
 func cmdCloudRemove(cfg store.Config) {
 	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud remove <alias>")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud remove <alias>")
 		exitFunc(1)
 		return
 	}
@@ -918,7 +919,7 @@ func cmdCloudRemove(cfg store.Config) {
 
 func cmdCloudDefault(cfg store.Config) {
 	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud default <alias>")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud default <alias>")
 		exitFunc(1)
 		return
 	}
@@ -995,7 +996,7 @@ func cmdCloudServe() {
 func validateCloudServeAuthConfig() error {
 	token := strings.TrimSpace(envx.Get("OMNIA_CLOUD_TOKEN"))
 	adminToken := strings.TrimSpace(envx.Get("OMNIA_CLOUD_ADMIN"))
-	insecureNoAuth := envBool("ENGRAM_CLOUD_INSECURE_NO_AUTH")
+	insecureNoAuth := envBool("OMNIA_CLOUD_INSECURE_NO_AUTH")
 	allowlist := normalizeAllowedProjects(cloud.ConfigFromEnv().AllowedProjects)
 	jwtSecretEnv := strings.TrimSpace(envx.Get("OMNIA_JWT_SECRET"))
 	if insecureNoAuth && token != "" {

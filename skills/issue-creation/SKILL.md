@@ -58,7 +58,7 @@ Auto-labels: `bug`, `status:needs-review`
 | **Expected Behavior** | What should have happened |
 | **Actual Behavior** | What happened instead (include errors/logs) |
 | **Operating System** | Dropdown: macOS, Linux variants, Windows, WSL |
-| **Engram Version** | Output of `engram version` |
+| **Engram Version** | Output of `omnia version` |
 | **Agent / Client** | Dropdown: Claude Code, OpenCode, Gemini CLI, Cursor, Windsurf, Other |
 
 #### Optional Fields

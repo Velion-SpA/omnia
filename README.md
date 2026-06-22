@@ -9,7 +9,7 @@ The goal: every meaningful piece of company knowledge — discussions, issues, d
 ### Prerequisites
 
 - Go 1.23+
-- [Engram](https://github.com/velion/engram) daemon running (`engram serve`)
+- [Engram](https://github.com/velion/engram) daemon running (`omnia serve`)
 - A GitHub token (or `gh` CLI authenticated)
 
 ### Install
@@ -103,6 +103,26 @@ See [docs/METADATA.md](docs/METADATA.md) for the full field reference and versio
 | `sources.discord.enabled` | `false` | Enable Discord ingestion |
 | `sources.discord.channels` | `[]` | List of `{id, name, guild}` |
 | `backfill_days` | `30` | Days to look back on first run |
+
+## Omnia Cloud (optional)
+
+Omnia is local-first: local SQLite is the source of truth; cloud features are optional replication/shared access.
+
+To set up cloud replication:
+
+```bash
+omnia cloud config --server http://127.0.0.1:18080
+omnia cloud enroll smoke-project
+omnia cloud upgrade doctor --project smoke-project
+omnia cloud upgrade repair --project smoke-project --dry-run
+omnia cloud upgrade repair --project smoke-project --apply
+omnia cloud upgrade bootstrap --project smoke-project
+omnia cloud upgrade status --project smoke-project
+omnia cloud serve
+```
+
+Cloud env vars: `ENGRAM_CLOUD_TOKEN` (bearer token), `ENGRAM_JWT_SECRET` (required in auth mode), `ENGRAM_CLOUD_ADMIN` (optional admin token).
+Dashboard routes: `/dashboard/login`, `/dashboard/contributors`.
 
 ## Architecture
 

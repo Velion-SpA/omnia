@@ -24,20 +24,20 @@ docker compose -f docker-compose.cloud.yml up -d
 ### 2) Configure CLI cloud endpoint
 
 ```bash
-engram cloud config --server http://127.0.0.1:18080
+omnia cloud config --server http://127.0.0.1:18080
 ```
 
 ### 3) Enroll explicit project
 
 ```bash
-engram cloud enroll smoke-project
+omnia cloud enroll smoke-project
 ```
 
 ### 4) Sync explicitly in cloud mode
 
 ```bash
-engram sync --cloud --project smoke-project
-engram sync --cloud --status --project smoke-project
+omnia sync --cloud --project smoke-project
+omnia sync --cloud --status --project smoke-project
 ```
 
 ### 5) Verify browser dashboard
@@ -54,11 +54,11 @@ In compose smoke mode, `/dashboard/login` redirects to `/dashboard/` (no bearer 
 Use this sequence before first bootstrap for established local projects:
 
 ```bash
-engram cloud upgrade doctor --project smoke-project
-engram cloud upgrade repair --project smoke-project --dry-run
-engram cloud upgrade repair --project smoke-project --apply
-engram cloud upgrade bootstrap --project smoke-project --resume
-engram cloud upgrade status --project smoke-project
+omnia cloud upgrade doctor --project smoke-project
+omnia cloud upgrade repair --project smoke-project --dry-run
+omnia cloud upgrade repair --project smoke-project --apply
+omnia cloud upgrade bootstrap --project smoke-project --resume
+omnia cloud upgrade status --project smoke-project
 ```
 
 `rollback` is only available before bootstrap reaches `bootstrap_verified`.
@@ -175,10 +175,10 @@ On the machine that runs the Engram CLI, set the client token in the shell befor
 cloud sync:
 
 ```bash
-engram cloud config --server https://your-host:18080
+omnia cloud config --server https://your-host:18080
 export ENGRAM_CLOUD_TOKEN=replace-with-long-random-bearer-token
-engram cloud enroll my-project
-engram sync --cloud --project my-project
+omnia cloud enroll my-project
+omnia sync --cloud --project my-project
 ```
 
 > `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` is for local/dev smoke only. Never use it in production.
@@ -203,23 +203,23 @@ For concrete recovery steps, see [Engram Cloud Troubleshooting](./troubleshootin
 <details>
 <summary><strong>Advanced: Authenticated Source-Run Mode</strong></summary>
 
-Use this when you are running `engram cloud serve` directly (no insecure compose smoke mode):
+Use this when you are running `omnia cloud serve` directly (no insecure compose smoke mode):
 
 ```bash
 ENGRAM_DATABASE_URL="postgres://engram:engram_dev@127.0.0.1:5433/engram_cloud?sslmode=disable" \
 ENGRAM_JWT_SECRET="replace-with-32+-byte-random-secret" \
 ENGRAM_CLOUD_TOKEN="your-token" \
 ENGRAM_CLOUD_ALLOWED_PROJECTS="my-project" \
-engram cloud serve
+omnia cloud serve
 ```
 
 Then configure client endpoint + token:
 
 ```bash
-engram cloud config --server http://127.0.0.1:8080
+omnia cloud config --server http://127.0.0.1:8080
 export ENGRAM_CLOUD_TOKEN="your-token"
-engram cloud enroll my-project
-engram sync --cloud --project my-project
+omnia cloud enroll my-project
+omnia sync --cloud --project my-project
 ```
 
 Rules that matter:

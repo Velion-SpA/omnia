@@ -64,16 +64,16 @@ For other docs:
 
 Engram exposes two different runtimes. Keep routes split by runtime:
 
-- **Local runtime (`engram serve`, JSON on `127.0.0.1:7437`)**
+- **Local runtime (`omnia serve`, JSON on `127.0.0.1:7437`)**
   - `GET /health` (local service health)
   - includes memory CRUD/search/context endpoints documented below
   - includes `GET /sync/status` (local node sync status)
-- **Cloud runtime (`engram cloud serve`)**
+- **Cloud runtime (`omnia cloud serve`)**
   - `GET /health` (cloud service health)
   - `GET /sync/pull`, `GET /sync/pull/{chunkID}`, `POST /sync/push`, `POST /sync/mutations/push`, `GET /sync/mutations/pull` (cloud sync transport)
   - `GET /dashboard/*` HTML routes (browser dashboard)
 
-Dashboard route tree (`engram cloud serve`):
+Dashboard route tree (`omnia cloud serve`):
 
 - Public
   - `GET /dashboard/health` — dashboard subsystem health
@@ -116,8 +116,8 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Health
 
-- Local runtime (`engram serve`): `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "0.1.0"}`
-- Cloud runtime (`engram cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
+- Local runtime (`omnia serve`): `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "0.1.0"}`
+- Cloud runtime (`omnia cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
 
 ### Sessions
 
@@ -188,7 +188,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 - `GET /stats` — Memory statistics
 - `GET /doctor` — Read-only operational diagnostics. Query: `?project=X&check=CHECK_CODE`
-  - Returns the same diagnostic report envelope as `engram doctor --json` and MCP `mem_doctor`
+  - Returns the same diagnostic report envelope as `omnia doctor --json` and MCP `mem_doctor`
   - `project` and `check` are optional; omitted `project` uses current project detection
   - Unknown explicit projects return `404` with `{error, code:"unknown_project", available_projects:[...]}`
 
@@ -200,7 +200,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Conflict Audit (admin — local runtime only)
 
-These endpoints are served by `engram serve` on the local runtime only. They are not exposed on the cloud runtime. All routes are additive — no existing routes changed.
+These endpoints are served by `omnia serve` on the local runtime only. They are not exposed on the cloud runtime. All routes are additive — no existing routes changed.
 
 #### GET /conflicts
 
@@ -439,8 +439,8 @@ Response:
 
 ### Sync Status (local runtime only)
 
-- `GET /sync/status` — Runtime sync-state status for the local node (`engram serve` only).
-- In `engram serve`, sync status is wired to persisted SQLite sync state (project-scoped for detected/current project).
+- `GET /sync/status` — Runtime sync-state status for the local node (`omnia serve` only).
+- In `omnia serve`, sync status is wired to persisted SQLite sync state (project-scoped for detected/current project).
 - Response fields when provider is injected:
   - `enabled`
   - `phase`
@@ -465,49 +465,49 @@ Response:
 
 | Variable                        | Description                                                                                                                                                                                                                                               | Default              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
+| `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.omnia`          |
 | `ENGRAM_PORT`                   | Override HTTP server port                                                                                                                                                                                                                                 | `7437`               |
-| `ENGRAM_PROJECT`                | Process-level default project override. For `engram serve`: used as the fallback when `GET /sync/status` receives no `project` query param. For `engram mcp`: sets `MCPConfig.DefaultProject`, which takes precedence over cwd detection for all read and write tools for the lifetime of that MCP process. When unset, cwd detection is used as the fallback. | cwd-detected project |
+| `ENGRAM_PROJECT`                | Process-level default project override. For `omnia serve`: used as the fallback when `GET /sync/status` receives no `project` query param. For `omnia mcp`: sets `MCPConfig.DefaultProject`, which takes precedence over cwd detection for all read and write tools for the lifetime of that MCP process. When unset, cwd detection is used as the fallback. | cwd-detected project |
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time. Token is read at request time (no restart needed). When unset, all routes are open (zero-config default). | (unset — open) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
-| `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
+| `ENGRAM_AGENT_CLI`              | LLM runner name used by `omnia conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
 | `ENGRAM_CLOUD_AUTOSYNC`         | Set to `1` to enable background autosync. Requires `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` to also be set.                                                                                                                                         | (unset — disabled)   |
-| `ENGRAM_CLOUD_SERVER`           | Cloud server URL used by the autosync manager and `engram sync --cloud`.                                                                                                                                                                                  | (unset)              |
-| `ENGRAM_DATABASE_URL`           | Postgres DSN for `engram cloud serve`.                                                                                                                                                                                                                    | (unset)              |
-| `ENGRAM_CLOUD_HOST`             | Bind host for `engram cloud serve`.                                                                                                                                                                                                                       | `127.0.0.1`          |
+| `ENGRAM_CLOUD_SERVER`           | Cloud server URL used by the autosync manager and `omnia sync --cloud`.                                                                                                                                                                                  | (unset)              |
+| `ENGRAM_DATABASE_URL`           | Postgres DSN for `omnia cloud serve`.                                                                                                                                                                                                                    | (unset)              |
+| `ENGRAM_CLOUD_HOST`             | Bind host for `omnia cloud serve`.                                                                                                                                                                                                                       | `127.0.0.1`          |
 | `ENGRAM_CLOUD_MAX_PUSH_BYTES`   | Max cloud push payload bytes.                                                                                                                                                                                                                             | `8388608`            |
-| `ENGRAM_CLOUD_TOKEN`            | Bearer token required in authenticated `engram cloud serve` mode.                                                                                                                                                                                         | (unset)              |
+| `ENGRAM_CLOUD_TOKEN`            | Bearer token required in authenticated `omnia cloud serve` mode.                                                                                                                                                                                         | (unset)              |
 | `ENGRAM_CLOUD_INSECURE_NO_AUTH` | Set to `1` for local insecure cloud serve (no auth). Cannot be combined with `ENGRAM_CLOUD_TOKEN`.                                                                                                                                                        | (unset)              |
-| `ENGRAM_CLOUD_ALLOWED_PROJECTS` | Comma-separated project allowlist enforced by `engram cloud serve`. Required in both token-auth and insecure modes. Use `*` to allow all projects (dev/internal deploys) — bypasses per-project name enforcement while still requiring a non-empty project on each request. | (unset) |
+| `ENGRAM_CLOUD_ALLOWED_PROJECTS` | Comma-separated project allowlist enforced by `omnia cloud serve`. Required in both token-auth and insecure modes. Use `*` to allow all projects (dev/internal deploys) — bypasses per-project name enforcement while still requiring a non-empty project on each request. | (unset) |
 | `ENGRAM_JWT_SECRET`             | Required in authenticated cloud serve mode. Must be explicitly set to a non-default value.                                                                                                                                                                | (unset)              |
 | `ENGRAM_CLOUD_ADMIN`            | Optional admin-only dashboard token in authenticated cloud serve mode. Ignored/rejected in insecure mode.                                                                                                                                                 | (unset)              |
 
 ### Conflict Audit CLI (admin)
 
-The `engram conflicts` sub-command provides admin/maintainer access to the conflict layer. It is NOT for end users — end users interact with conflicts via the normal agent conversation flow.
+The `omnia conflicts` sub-command provides admin/maintainer access to the conflict layer. It is NOT for end users — end users interact with conflicts via the normal agent conversation flow.
 
 When `--project` is omitted, the cwd-detected project is used.
 
 ```
-engram conflicts list [--project <name>] [--status <pending|judged|orphaned|ignored>] [--since <RFC3339>] [--limit <N>]
+omnia conflicts list [--project <name>] [--status <pending|judged|orphaned|ignored>] [--since <RFC3339>] [--limit <N>]
 ```
 
 List `memory_relations` rows. Output: label-colon aligned columns (`id`, `sync_id`, `relation`, `judgment_status`, `source`, `target`, `created_at`).
 
 ```
-engram conflicts show <relation_id>
+omnia conflicts show <relation_id>
 ```
 
 Show full detail for one relation: relation_id, sync_id, relation, judgment_status, created_at, updated_at, source_id, source_title, target_id, target_title. Exits non-zero when relation_id does not exist.
 
 ```
-engram conflicts stats [--project <name>]
+omnia conflicts stats [--project <name>]
 ```
 
 Print aggregate grouped `judgment_status` counts (`pending` | `judged` | `orphaned` | `ignored`) plus deferred and dead queue sizes. When relation counts exist, also prints `By relation type` counts.
 
 ```
-engram conflicts scan [--project <name>] [--dry-run] [--apply] [--max-insert <N>]
+omnia conflicts scan [--project <name>] [--dry-run] [--apply] [--max-insert <N>]
                       [--since <RFC3339>]
                       [--semantic] [--concurrency <N>] [--timeout-per-call <N>]
                       [--max-semantic <N>] [--yes]
@@ -526,7 +526,7 @@ Walk observations for the project, run FindCandidates, and report or insert new 
 - `--yes`: skip the cost-estimate confirmation prompt before LLM calls.
 
 ```
-engram conflicts deferred [--status <deferred|dead|applied>] [--limit <N>] [--inspect <sync_id>] [--replay]
+omnia conflicts deferred [--status <deferred|dead|applied>] [--limit <N>] [--inspect <sync_id>] [--replay]
 ```
 
 Inspect or replay the `sync_apply_deferred` queue.
@@ -537,22 +537,22 @@ Inspect or replay the `sync_apply_deferred` queue.
 
 ### Cloud CLI (opt-in)
 
-- `engram cloud status` — show current cloud config state plus auth/sync readiness without mutating local state. When cloud is configured, also probes the local `engram serve` daemon at `127.0.0.1:7437` (respects `ENGRAM_PORT`) and prints a `Local daemon:` line (`running` / `not running` / `unreachable`) so you can detect a silently dead autosync. Exit code is unaffected; the line is informational
-- `engram cloud enroll <project>` — enroll one project for cloud replication
-- `engram cloud config --server <url>` — persist cloud server URL to `~/.engram/cloud.json`
-- `engram cloud serve` — run cloud backend API + dashboard (`/dashboard`) using Postgres config from env
-- `engram cloud upgrade doctor --project <project>` — deterministic read-only readiness diagnosis (`ready|blocked`, class/reason)
-- `engram cloud upgrade repair --project <project> [--dry-run|--apply]` — deterministic local-safe repair planner/apply (no remote mutation)
-- `engram cloud upgrade bootstrap --project <project> [--resume]` — resumable checkpointed enroll/push/verify flow
-- `engram cloud upgrade status --project <project>` — show upgrade stage/class/reason
-- `engram cloud upgrade rollback --project <project>` — restore pre-upgrade local snapshot before `bootstrap_verified`; blocked afterwards
-- `engram cloud repair materialize-mutations --project <project> (--dry-run|--apply)` — explicit server-side Postgres repair that backfills existing `cloud_mutations` into compatible `cloud_chunks` without deleting remote data
+- `omnia cloud status` — show current cloud config state plus auth/sync readiness without mutating local state. When cloud is configured, also probes the local `omnia serve` daemon at `127.0.0.1:7437` (respects `ENGRAM_PORT`) and prints a `Local daemon:` line (`running` / `not running` / `unreachable`) so you can detect a silently dead autosync. Exit code is unaffected; the line is informational
+- `omnia cloud enroll <project>` — enroll one project for cloud replication
+- `omnia cloud config --server <url>` — persist cloud server URL to `~/.omnia/cloud.json`
+- `omnia cloud serve` — run cloud backend API + dashboard (`/dashboard`) using Postgres config from env
+- `omnia cloud upgrade doctor --project <project>` — deterministic read-only readiness diagnosis (`ready|blocked`, class/reason)
+- `omnia cloud upgrade repair --project <project> [--dry-run|--apply]` — deterministic local-safe repair planner/apply (no remote mutation)
+- `omnia cloud upgrade bootstrap --project <project> [--resume]` — resumable checkpointed enroll/push/verify flow
+- `omnia cloud upgrade status --project <project>` — show upgrade stage/class/reason
+- `omnia cloud upgrade rollback --project <project>` — restore pre-upgrade local snapshot before `bootstrap_verified`; blocked afterwards
+- `omnia cloud repair materialize-mutations --project <project> (--dry-run|--apply)` — explicit server-side Postgres repair that backfills existing `cloud_mutations` into compatible `cloud_chunks` without deleting remote data
 
 Cloud auth token is provided at runtime via `ENGRAM_CLOUD_TOKEN` (not by a dedicated CLI subcommand).
 Cloud server startup fails closed when the token is missing unless `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` is explicitly set for local insecure development.
 `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` cannot be combined with `ENGRAM_CLOUD_TOKEN`.
 Cloud server always requires `ENGRAM_CLOUD_ALLOWED_PROJECTS` (comma-separated), including insecure mode, so project scope remains server-enforced.
-`ENGRAM_CLOUD_TOKEN` + `ENGRAM_CLOUD_ALLOWED_PROJECTS` are server-side requirements for authenticated mode and must be configured before `engram cloud serve` (or compose startup).
+`ENGRAM_CLOUD_TOKEN` + `ENGRAM_CLOUD_ALLOWED_PROJECTS` are server-side requirements for authenticated mode and must be configured before `omnia cloud serve` (or compose startup).
 Authenticated mode also requires an explicit non-default `ENGRAM_JWT_SECRET`; implicit development defaults are rejected.
 Dashboard requests support browser login in authenticated mode: use `/dashboard/login` to exchange the bearer token for an HttpOnly dashboard cookie scoped to `/dashboard`. Protected `/dashboard/*` HTML routes require that cookie and do **not** treat raw `Authorization: Bearer ...` headers as an authenticated browser session. Sync API routes (`/sync/pull`, `/sync/pull/{chunkID}`, `/sync/push`, `/sync/mutations/push`, `/sync/mutations/pull`) remain header-auth only. In insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1` + no `ENGRAM_CLOUD_TOKEN`), dashboard auth is bypassed and `/dashboard/login` redirects to `/dashboard/`.
 
@@ -564,7 +564,7 @@ Cloud runtime bind host is controlled by `ENGRAM_CLOUD_HOST`:
 - default: `127.0.0.1` (local-only, safer default)
 - container/compose: set `ENGRAM_CLOUD_HOST=0.0.0.0` so published host ports can reach the cloud server
 
-Cloud runtime envs for `engram cloud serve`:
+Cloud runtime envs for `omnia cloud serve`:
 
 | Variable                        | Required                 | Notes                                                                                 |
 | ------------------------------- | ------------------------ | ------------------------------------------------------------------------------------- |
@@ -582,35 +582,35 @@ Cloud sync is still local-first and explicit:
 
 ```bash
 # Explicit cloud sync call
-engram sync --cloud --project my-project
+omnia sync --cloud --project my-project
 
 # Optional env toggle for cloud mode in sync command
-ENGRAM_CLOUD_SYNC=1 engram sync --status --project my-project
+ENGRAM_CLOUD_SYNC=1 omnia sync --status --project my-project
 ```
 
-When `engram sync --cloud --project <project>` or autosync hits a known repairable cloud sync/upsert/canonicalization failure, Engram preserves the original error and appends guidance to run:
+When `omnia sync --cloud --project <project>` or autosync hits a known repairable cloud sync/upsert/canonicalization failure, Engram preserves the original error and appends guidance to run:
 
 ### Cloud Upgrade Flow
 
 ```bash
-engram cloud upgrade doctor --project <project>
-engram cloud upgrade repair --project <project> --dry-run
-engram cloud upgrade repair --project <project> --apply
-engram sync --cloud --project <project>
+omnia cloud upgrade doctor --project <project>
+omnia cloud upgrade repair --project <project> --dry-run
+omnia cloud upgrade repair --project <project> --apply
+omnia sync --cloud --project <project>
 ```
 
 Sync/autosync never auto-applies repairs; only the explicit `repair --apply` command mutates local repairable upgrade state.
 
-For cloud servers that already accepted mutation pushes before mutation payloads were materialized into chunk history, run the server-side backfill against the Postgres DSN used by `engram cloud serve`:
+For cloud servers that already accepted mutation pushes before mutation payloads were materialized into chunk history, run the server-side backfill against the Postgres DSN used by `omnia cloud serve`:
 
 ```bash
-ENGRAM_DATABASE_URL='postgres://...' engram cloud repair materialize-mutations --project <project> --dry-run
-ENGRAM_DATABASE_URL='postgres://...' engram cloud repair materialize-mutations --project <project> --apply
+ENGRAM_DATABASE_URL='postgres://...' omnia cloud repair materialize-mutations --project <project> --dry-run
+ENGRAM_DATABASE_URL='postgres://...' omnia cloud repair materialize-mutations --project <project> --apply
 ```
 
 The backfill is project-scoped, non-destructive, and idempotent: it inserts missing compatible chunks and leaves existing `cloud_mutations` and chunks in place.
 
-`engram cloud serve` also runs this materialization repair automatically for every configured `ENGRAM_CLOUD_ALLOWED_PROJECTS` entry at startup. The explicit repair command remains available for operator verification, dry-runs, and re-running a project after an upgrade.
+`omnia cloud serve` also runs this materialization repair automatically for every configured `ENGRAM_CLOUD_ALLOWED_PROJECTS` entry at startup. The explicit repair command remains available for operator verification, dry-runs, and re-running a project after an upgrade.
 
 ### Local Cloud Bring-Up (Docker + Postgres)
 
@@ -626,30 +626,30 @@ docker compose -f docker-compose.cloud.yml up -d
 # ENGRAM_JWT_SECRET="replace-with-32+-byte-random-secret" \
 # ENGRAM_CLOUD_TOKEN="your-token" \
 # ENGRAM_CLOUD_ALLOWED_PROJECTS="my-project" \
-# engram cloud serve
+# omnia cloud serve
 
 # 2) CLIENT-SIDE CLI setup
 # compose runtime flow: published :18080
-engram cloud config --server http://127.0.0.1:18080
+omnia cloud config --server http://127.0.0.1:18080
 # compose runtime default is insecure local-dev mode; keep token unset
 # client sync preflight only requires the configured cloud server URL; no
 # client-side ENGRAM_CLOUD_INSECURE_NO_AUTH flag is required for compose flow
 unset ENGRAM_CLOUD_TOKEN
 
 # 3) Enroll project + run explicit cloud sync
-engram cloud enroll smoke-project
-engram cloud upgrade doctor --project smoke-project
-engram cloud upgrade repair --project smoke-project --dry-run
-engram cloud upgrade repair --project smoke-project --apply
-engram cloud upgrade bootstrap --project smoke-project --resume
-engram cloud upgrade status --project smoke-project
-engram sync --cloud --status --project smoke-project
+omnia cloud enroll smoke-project
+omnia cloud upgrade doctor --project smoke-project
+omnia cloud upgrade repair --project smoke-project --dry-run
+omnia cloud upgrade repair --project smoke-project --apply
+omnia cloud upgrade bootstrap --project smoke-project --resume
+omnia cloud upgrade status --project smoke-project
+omnia sync --cloud --status --project smoke-project
 
 # source-run client endpoint (without compose): default :8080
-# engram cloud config --server http://127.0.0.1:8080
+# omnia cloud config --server http://127.0.0.1:8080
 
 # cloud mode enforces a single explicit project scope
-# engram sync --cloud --all  # blocked by design
+# omnia sync --cloud --all  # blocked by design
 ```
 
 Deterministic reason codes shared across store/CLI/server:
@@ -675,7 +675,7 @@ Cloud failure visibility must stay deterministic across supported surfaces:
 | Explicit paused state                                                                                  | `paused`                             | `/sync/status`              |
 | Remote/network failure                                                                                 | `transport_failed`                   | CLI stderr + `/sync/status` |
 
-`engram sync --cloud --status --project <name>` is read-only: it does **not** mutate `/sync/status` lifecycle fields.
+`omnia sync --cloud --status --project <name>` is read-only: it does **not** mutate `/sync/status` lifecycle fields.
 
 Machine-actionable validation/policy failures from cloud sync routes include:
 
@@ -722,7 +722,7 @@ Error responses include `available_projects` when the error is `ambiguous_projec
 Exceptions:
 
 - `mem_current_project` returns detection fields directly (`project`, `project_source`, `project_path`, `cwd`, `available_projects`, optional `warning` / `error_hint`) and does not wrap them in `result`.
-- `mem_doctor` returns the same JSON report shape as `engram doctor --json`; it uses read-project resolution before running diagnostics but does not wrap the report in the common MCP envelope.
+- `mem_doctor` returns the same JSON report shape as `omnia doctor --json`; it uses read-project resolution before running diagnostics but does not wrap the report in the common MCP envelope.
 
 ### Write tools (explicit/session/cwd project resolution)
 
@@ -744,7 +744,7 @@ Guardrails:
 - Exact ambiguous-project choices can still fail with `project_name_collision` when multiple available names collapse to the same stored project bucket after normalization. Rename or disambiguate the colliding projects before retrying.
 - Ordinary explicit `mem_save(project=...)` calls can also fail with `project_name_collision` when the raw explicit name collapses into an existing config-backed, session-backed, or store-backed project bucket, such as `foo--bar` colliding with `foo-bar`.
 
-For monorepos, detection now honors the **nearest** `.engram/config.json` at or below the enclosing git root. That lets `repo/backend/.engram/config.json` and `repo/frontend/.engram/config.json` behave as independent projects without letting `~/.engram/config.json` leak into nested workspaces.
+For monorepos, detection now honors the **nearest** `.engram/config.json` at or below the enclosing git root. That lets `repo/backend/.engram/config.json` and `repo/frontend/.engram/config.json` behave as independent projects without letting `~/.omnia/config.json` leak into nested workspaces.
 
 `mem_save_prompt` keeps the older cwd/default behavior by default and only uses `project` for the narrow ambiguous-project recovery override: after a previous `ambiguous_project` error, the agent may retry with `project=<one of available_projects>` and `project_choice_reason=user_selected_after_ambiguous_project`.
 
@@ -824,7 +824,7 @@ Update an observation by ID. Public schema supports partial updates for `title`,
 
 ### mem_review
 
-Review observation lifecycle state. Available in the `agent` profile (`engram mcp --tools=agent`).
+Review observation lifecycle state. Available in the `agent` profile (`omnia mcp --tools=agent`).
 
 Actions:
 
@@ -899,7 +899,7 @@ Detect the current project from the working directory. Returns `project`, `proje
 
 ### mem_doctor
 
-Run read-only operational diagnostics. Returns the same JSON report shape as `engram doctor --json`, with optional `project` and `check` filters. The optional `project` override is validated with read-project resolution before diagnostics run.
+Run read-only operational diagnostics. Returns the same JSON report shape as `omnia doctor --json`, with optional `project` and `check` filters. The optional `project` override is validated with read-project resolution before diagnostics run.
 
 ### mem_judge
 
@@ -921,7 +921,7 @@ Search results subsequently expose annotation lines like `supersedes: #<id> (<ti
 
 Records a verdict on a semantic comparison between two memories. The agent reads both memories, judges the relationship using its LLM reasoning, and calls `mem_compare` to persist the verdict. Unlike `mem_judge` (which resolves a pre-existing `pending` candidate surfaced by `mem_save`), `mem_compare` creates a new relation row directly — useful for proactive semantic analysis that goes beyond FTS5 lexical matching.
 
-Available in the `agent` profile (`engram mcp --tools=agent`).
+Available in the `agent` profile (`omnia mcp --tools=agent`).
 
 Parameters:
 
@@ -1062,7 +1062,7 @@ MCP tools resolve project names at call time using the shared detection chain:
 5. Multiple git-repo children of cwd returns `ambiguous_project` with `available_projects`
 6. Current working directory basename
 
-`engram mcp` accepts a process-level default project via `--project <name>` / `--project=<name>` or `ENGRAM_PROJECT=<name>`. This override takes precedence over cwd detection for all read and write tools throughout the lifetime of that MCP process. It is a trusted startup-time value — use it when the host cannot supply a reliable cwd (VS Code, WSL, CI, Docker).
+`omnia mcp` accepts a process-level default project via `--project <name>` / `--project=<name>` or `ENGRAM_PROJECT=<name>`. This override takes precedence over cwd detection for all read and write tools throughout the lifetime of that MCP process. It is a trusted startup-time value — use it when the host cannot supply a reliable cwd (VS Code, WSL, CI, Docker).
 
 ### Similar-project warnings
 
@@ -1070,7 +1070,7 @@ When saving to a project that doesn't exist yet, Engram checks for similar exist
 
 ### Retroactive cleanup
 
-Use `engram projects consolidate` to interactively merge variant project names, or `mem_merge_projects` for agent-driven consolidation.
+Use `omnia projects consolidate` to interactively merge variant project names, or `mem_merge_projects` for agent-driven consolidation.
 
 ---
 
@@ -1107,19 +1107,19 @@ Separate table captures what the USER asked (not just tool calls). Gives future 
 
 Share memories across machines, backup, or migrate:
 
-- `engram export` — JSON dump of all sessions, observations, prompts
-- `engram import <file>` — Load from JSON, sessions use INSERT OR IGNORE (skip duplicates), atomic transaction
+- `omnia export` — JSON dump of all sessions, observations, prompts
+- `omnia import <file>` — Load from JSON, sessions use INSERT OR IGNORE (skip duplicates), atomic transaction
 
 ### Git Sync (Chunked)
 
 Share memories through git repositories using compressed chunks with a manifest index.
 
-- `engram sync` — Exports new memories as a gzipped JSONL chunk to `.engram/chunks/`
-- `engram sync --all` — Exports ALL memories from every project
-- `engram sync --import` — Imports chunks listed in the manifest that haven't been imported yet
-- `engram sync --status` — Shows how many chunks exist locally vs remotely (filesystem mode)
-- `engram sync --cloud --status --project <name>` — Shows local, remote, and pending chunk counts for the specified cloud project
-- `engram sync --project NAME` — Filters export to a specific project
+- `omnia sync` — Exports new memories as a gzipped JSONL chunk to `.engram/chunks/`
+- `omnia sync --all` — Exports ALL memories from every project
+- `omnia sync --import` — Imports chunks listed in the manifest that haven't been imported yet
+- `omnia sync --status` — Shows how many chunks exist locally vs remotely (filesystem mode)
+- `omnia sync --cloud --status --project <name>` — Shows local, remote, and pending chunk counts for the specified cloud project
+- `omnia sync --project NAME` — Filters export to a specific project
 
 ```
 .engram/
@@ -1128,12 +1128,12 @@ Share memories through git repositories using compressed chunks with a manifest 
 │   ├── a3f8c1d2.jsonl.gz <- chunk 1 (gzipped JSONL)
 │   ├── b7d2e4f1.jsonl.gz <- chunk 2
 │   └── ...
-└── engram.db              <- local working DB (gitignored)
+└── omnia.db              <- local working DB (gitignored)
 ```
 
 **Why chunks?**
 
-- Each `engram sync` creates a NEW chunk — old chunks are never modified
+- Each `omnia sync` creates a NEW chunk — old chunks are never modified
 - No merge conflicts: each dev creates independent chunks, git just adds files
 - Chunks are content-hashed (SHA-256 prefix) — each chunk is imported only once
 - The manifest is the only file git diffs — it's small and append-only
@@ -1158,7 +1158,7 @@ Since v1.15.3, `mem_save` can also best-effort attach the current user prompt wh
 
 ## Terminal UI (TUI)
 
-Interactive Bubbletea-based terminal UI. Launch with `engram tui`.
+Interactive Bubbletea-based terminal UI. Launch with `omnia tui`.
 
 ### Screens
 
@@ -1194,12 +1194,12 @@ Interactive Bubbletea-based terminal UI. Launch with `engram tui`.
 
 ## Running as a Service
 
-Without a service supervisor, `engram serve` dies whenever the binary is replaced (e.g. on `brew upgrade engram`) or the host reboots, and autosync stops silently. The templates below restart it automatically. Use `engram cloud status` afterwards to confirm — the `Local daemon:` line should report `running on port 7437`.
+Without a service supervisor, `omnia serve` dies whenever the binary is replaced (e.g. on `brew upgrade engram`) or the host reboots, and autosync stops silently. The templates below restart it automatically. Use `omnia cloud status` afterwards to confirm — the `Local daemon:` line should report `running on port 7437`.
 
 ### Using systemd (Linux)
 
 1. Move binary to `~/.local/bin` (ensure it's in your `$PATH`)
-2. Create directories: `mkdir -p ~/.engram ~/.config/systemd/user`
+2. Create directories: `mkdir -p ~/.omnia ~/.config/systemd/user`
 3. Create `~/.config/systemd/user/engram.service` (see below)
 4. `systemctl --user daemon-reload`
 5. `systemctl --user enable engram`
@@ -1213,7 +1213,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=%h
-ExecStart=%h/.local/bin/engram serve
+ExecStart=%h/.local/bin/omnia serve
 Restart=always
 RestartSec=3
 Environment=ENGRAM_DATA_DIR=%h/.engram
@@ -1224,13 +1224,13 @@ WantedBy=default.target
 
 ### Using launchd (macOS)
 
-This is the recommended setup for Homebrew users on macOS. With `KeepAlive=true`, launchd relaunches `engram serve` automatically after `brew upgrade engram` replaces the binary, so autosync survives upgrades.
+This is the recommended setup for Homebrew users on macOS. With `KeepAlive=true`, launchd relaunches `omnia serve` automatically after `brew upgrade engram` replaces the binary, so autosync survives upgrades.
 
 1. Find your binary path: `which engram` (typically `/opt/homebrew/bin/engram` on Apple Silicon or `/usr/local/bin/engram` on Intel)
-2. Create the data dir if missing: `mkdir -p ~/.engram`
+2. Create the data dir if missing: `mkdir -p ~/.omnia`
 3. Create `~/Library/LaunchAgents/com.gentleman-programming.engram.plist` with the contents below — replace `<HOME>` with the absolute path of your home directory (`echo $HOME`) and adjust the binary path if `which engram` returned something different
 4. Load it: `launchctl load ~/Library/LaunchAgents/com.gentleman-programming.engram.plist`
-5. Verify: `launchctl list | grep engram` and `engram cloud status` (the `Local daemon:` line should report `running on port 7437`)
+5. Verify: `launchctl list | grep engram` and `omnia cloud status` (the `Local daemon:` line should report `running on port 7437`)
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1277,14 +1277,14 @@ To unload (stop and disable): `launchctl unload ~/Library/LaunchAgents/com.gentl
 
 ### Using Windows Task Scheduler
 
-Windows Task Scheduler is the native service equivalent on Windows. It restarts `engram serve` on login and after reboots, keeping autosync alive without a third-party service manager.
+Windows Task Scheduler is the native service equivalent on Windows. It restarts `omnia serve` on login and after reboots, keeping autosync alive without a third-party service manager.
 
 **Setup steps:**
 
-1. Confirm `engram.exe` is in your `PATH`: open PowerShell and run `Get-Command engram`.
+1. Confirm `omnia.exe` is in your `PATH`: open PowerShell and run `Get-Command engram`.
 2. Set `ENGRAM_CLOUD_TOKEN` (and any other cloud vars) as a **user or system environment variable** in System Properties → Advanced → Environment Variables. Task Scheduler does not inherit session environment variables, so tokens set in your shell profile or in `$env:...` within a PowerShell session will not be visible to the scheduled task.
 3. Create the scheduled task by running the PowerShell snippet below in an elevated terminal (Run as Administrator), or import it manually through the Task Scheduler GUI.
-4. Verify: after the next login (or trigger manually), run `engram cloud status` — the `Local daemon:` line should report `running on port 7437`.
+4. Verify: after the next login (or trigger manually), run `omnia cloud status` — the `Local daemon:` line should report `running on port 7437`.
 
 ```powershell
 $action  = New-ScheduledTaskAction `
@@ -1305,7 +1305,7 @@ Register-ScheduledTask `
     -Trigger     $trigger `
     -Settings    $settings `
     -RunLevel    Limited `
-    -Description "Engram persistent memory server (engram serve)"
+    -Description "Engram persistent memory server (omnia serve)"
 ```
 
 > **Environment variables:** `ENGRAM_CLOUD_TOKEN`, `ENGRAM_CLOUD_SERVER`, `ENGRAM_CLOUD_AUTOSYNC`, and `ENGRAM_DATA_DIR` must be set as persistent user or system environment variables (Control Panel → System → Advanced → Environment Variables) so Task Scheduler can read them. Variables you `export` or set with `$env:` in a terminal session are not visible to scheduled tasks.
@@ -1380,7 +1380,7 @@ Autosync is a background push/pull replication service that keeps your local Eng
 
 ### Enabling Autosync
 
-Autosync is **opt-in**. Set all three environment variables before starting `engram serve` or `engram mcp`:
+Autosync is **opt-in**. Set all three environment variables before starting `omnia serve` or `omnia mcp`:
 
 | Variable                | Required          | Description                                                             |
 | ----------------------- | ----------------- | ----------------------------------------------------------------------- |
@@ -1394,16 +1394,16 @@ Example:
 ENGRAM_CLOUD_AUTOSYNC=1 \
 ENGRAM_CLOUD_TOKEN=your-token \
 ENGRAM_CLOUD_SERVER=https://cloud.engram.example.com \
-engram serve
+omnia serve
 
 # Or, for stdio MCP agents:
 ENGRAM_CLOUD_AUTOSYNC=1 \
 ENGRAM_CLOUD_TOKEN=your-token \
 ENGRAM_CLOUD_SERVER=https://cloud.engram.example.com \
-engram mcp
+omnia mcp
 ```
 
-Missing `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_SERVER` logs an `ERROR` and disables autosync gracefully — `engram serve` or `engram mcp` still starts.
+Missing `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_SERVER` logs an `ERROR` and disables autosync gracefully — `omnia serve` or `omnia mcp` still starts.
 
 ### Autosync Phase Table
 

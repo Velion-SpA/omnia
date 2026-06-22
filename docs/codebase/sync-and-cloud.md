@@ -9,15 +9,15 @@
 Engram has two related but distinct ideas:
 
 1. **Git sync through chunks**: export/import to `.engram/manifest.json` and `.engram/chunks/*.jsonl.gz`.
-2. **Opt-in cloud sync**: push/pull against `engram cloud serve` for an explicit project.
+2. **Opt-in cloud sync**: push/pull against `omnia cloud serve` for an explicit project.
 
 ```text
 Local SQLite
    │
-   ├── engram sync
+   ├── omnia sync
    │     └── .engram/manifest.json + gzip JSONL chunks
    │
-   └── engram sync --cloud --project <name>
+   └── omnia sync --cloud --project <name>
          └── internal/cloud/remote
                 └── HTTP /sync/*
                        └── internal/cloud/cloudserver

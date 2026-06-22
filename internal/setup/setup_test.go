@@ -1660,7 +1660,7 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 		}
 		engram, ok := mcpServers["engram"].(map[string]any)
 		if !ok {
-			t.Fatalf("expected engram server object")
+			t.Fatalf("expected omnia server object")
 		}
 		// resolveEngramCommand() now returns absolute path on all platforms.
 		cmd, ok := engram["command"].(string)
@@ -2124,7 +2124,7 @@ func TestClaudeCodeMemorySkillDoesNotHardcodePluginScopedToolSearch(t *testing.T
 	if strings.Contains(text, "select:mcp__plugin_engram_engram__") {
 		t.Fatalf("memory skill must not hardcode plugin-scoped ToolSearch names")
 	}
-	if !strings.Contains(text, "engram setup claude-code") {
+	if !strings.Contains(text, "omnia setup claude-code") {
 		t.Fatalf("memory skill fallback should direct users to repair Claude Code setup")
 	}
 }

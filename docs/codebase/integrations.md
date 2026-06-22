@@ -12,7 +12,7 @@ Engram supports agents through MCP and through plugins that add lifecycle/sessio
 Agent
   │
   ├── Bare MCP
-  │     └── engram mcp --tools=agent
+  │     └── omnia mcp --tools=agent
   │
   ├── OpenCode plugin
   │     ├── plugin/opencode/engram.ts
@@ -37,7 +37,7 @@ Agent
 
 Plugins may:
 
-- start or find `engram serve`,
+- start or find `omnia serve`,
 - create sessions,
 - import chunks,
 - inject the Memory Protocol,

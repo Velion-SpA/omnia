@@ -10,10 +10,10 @@
 |---|---|
 | **Persistent memory for agents** | Agents save structured observations with `mem_save`, `mem_session_summary`, `mem_save_prompt`, and related tools in `internal/mcp`. |
 | **Local-first** | `internal/store` persists to SQLite; interfaces read/write there first. |
-| **A Go binary** | `cmd/engram` composes store, server, MCP, TUI, setup, sync, and cloud. |
+| **A Go binary** | `cmd/omnia` composes store, server, MCP, TUI, setup, sync, and cloud. |
 | **SQLite + FTS5** | `internal/store/store.go` defines sessions, observations, prompts, FTS, dedupe, topic upserts, and soft deletes. |
 | **Agent-agnostic** | Integrations go through MCP, manual MCP configuration, or thin plugins in `plugin/`; `internal/setup` covers only the automated flows that are implemented. |
-| **Optional cloud** | `engram cloud serve` exposes sync transport, dashboard, and auth, but does not replace the local store. |
+| **Optional cloud** | `omnia cloud serve` exposes sync transport, dashboard, and auth, but does not replace the local store. |
 | **Documented by current behavior** | `DOCS.md`, `docs/ARCHITECTURE.md`, `docs/AGENT-SETUP.md`, `docs/PLUGINS.md`, and `docs/engram-cloud/*` are living references. |
 
 ## What Engram is not
@@ -34,11 +34,11 @@ Coding agent
         │
         │ MCP stdio, plugin hooks, or local API
         ▼
-cmd/engram
+cmd/omnia
   CLI + local runtime + cloud runtime
         │
         ├── internal/mcp        mem_* tools for agents
-        ├── internal/server     local JSON API: engram serve
+        ├── internal/server     local JSON API: omnia serve
         ├── internal/tui        Bubbletea terminal UI
         ├── internal/setup      automated integration installation
         │
@@ -50,7 +50,7 @@ internal/store
         └── internal/cloud/autosync         optional background push/pull
                 │
                 ▼
-        internal/cloud/remote ── HTTP ── engram cloud serve
+        internal/cloud/remote ── HTTP ── omnia cloud serve
                                       │
                                       ├── internal/cloud/cloudserver
                                       ├── internal/cloud/cloudstore  Postgres
@@ -63,13 +63,13 @@ internal/store
 Engram has two runtimes that should not be mixed.
 
 ```text
-Local runtime: engram serve
+Local runtime: omnia serve
   Listens for the local JSON API on 127.0.0.1:7437 by default
   Uses internal/server
   Reads/writes internal/store SQLite
   Exposes /sync/status for local/autosync state
 
-Cloud runtime: engram cloud serve
+Cloud runtime: omnia cloud serve
   Listens for cloud transport + dashboard
   Uses internal/cloud/cloudserver
   Persists in internal/cloud/cloudstore Postgres
@@ -79,11 +79,11 @@ Cloud runtime: engram cloud serve
 
 | Runtime | Command | Main packages | Data type |
 |---|---|---|---|
-| Local API | `engram serve` | `cmd/engram`, `internal/server`, `internal/store` | Local JSON, SQLite |
-| MCP stdio | `engram mcp` | `cmd/engram`, `internal/mcp`, `internal/store` | MCP tools, SQLite |
-| Direct CLI | `engram search`, `engram save`, `engram sync`, etc. | `cmd/engram`, `internal/store`, `internal/sync` | stdout/stderr + SQLite/chunks |
-| TUI | `engram tui` | `internal/tui`, `internal/store` | Bubbletea terminal |
-| Cloud | `engram cloud serve` | `internal/cloud/*`, `cmd/engram/cloud.go` | Cloud HTTP, Postgres, dashboard |
+| Local API | `omnia serve` | `cmd/omnia`, `internal/server`, `internal/store` | Local JSON, SQLite |
+| MCP stdio | `omnia mcp` | `cmd/omnia`, `internal/mcp`, `internal/store` | MCP tools, SQLite |
+| Direct CLI | `omnia search`, `omnia save`, `omnia sync`, etc. | `cmd/omnia`, `internal/store`, `internal/sync` | stdout/stderr + SQLite/chunks |
+| TUI | `omnia tui` | `internal/tui`, `internal/store` | Bubbletea terminal |
+| Cloud | `omnia cloud serve` | `internal/cloud/*`, `cmd/omnia/cloud.go` | Cloud HTTP, Postgres, dashboard |
 
 For the exact and current endpoint list, use [DOCS.md — HTTP API Endpoints](../../DOCS.md#http-api-endpoints).
 

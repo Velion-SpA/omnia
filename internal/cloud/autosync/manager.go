@@ -672,7 +672,7 @@ func nonEnrolledPendingMessage(counts []store.PendingSyncMutationProjectCount) s
 	for _, count := range counts {
 		parts = append(parts, fmt.Sprintf("%s=%d", count.Project, count.Count))
 	}
-	return fmt.Sprintf("pending cloud sync mutations are blocked because project(s) are not enrolled: %s. Run `engram cloud enroll <project>` for each intended project or review enrollment.", strings.Join(parts, ", "))
+	return fmt.Sprintf("pending cloud sync mutations are blocked because project(s) are not enrolled: %s. Run `omnia cloud enroll <project>` for each intended project or review enrollment.", strings.Join(parts, ", "))
 }
 
 // computeBackoff returns exponential backoff with ±25% jitter.

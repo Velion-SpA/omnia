@@ -1,6 +1,6 @@
 package main
 
-// conflicts_test.go — CLI tests for `engram conflicts` sub-commands.
+// conflicts_test.go — CLI tests for `omnia conflicts` sub-commands.
 // Follows strict TDD RED → GREEN → REFACTOR.
 //
 // Pattern: testConfig → seed → withArgs → captureOutput → assert.
@@ -150,7 +150,7 @@ func seedRelation(t *testing.T, cfg store.Config, project string) (srcSync, tgtS
 
 // ─── D.1 RED tests ────────────────────────────────────────────────────────────
 
-// TestCmdConflicts_NoSubcommand verifies that `engram conflicts` without a
+// TestCmdConflicts_NoSubcommand verifies that `omnia conflicts` without a
 // subcommand prints usage to stderr and exits non-zero.
 func TestCmdConflicts_NoSubcommand(t *testing.T) {
 	cfg := testConfig(t)
@@ -162,7 +162,7 @@ func TestCmdConflicts_NoSubcommand(t *testing.T) {
 	}
 }
 
-// TestCmdConflictsList_HappyPath verifies `engram conflicts list --project alpha`
+// TestCmdConflictsList_HappyPath verifies `omnia conflicts list --project alpha`
 // prints relation rows including the judgment_status labels.
 func TestCmdConflictsList_HappyPath(t *testing.T) {
 	cfg := testConfig(t)
@@ -192,7 +192,7 @@ func TestCmdConflictsList_EmptyProject(t *testing.T) {
 	}
 }
 
-// TestCmdConflictsStats_HappyPath verifies `engram conflicts stats --project alpha`
+// TestCmdConflictsStats_HappyPath verifies `omnia conflicts stats --project alpha`
 // prints aggregated counts including the pending label.
 func TestCmdConflictsStats_HappyPath(t *testing.T) {
 	cfg := testConfig(t)
@@ -208,7 +208,7 @@ func TestCmdConflictsStats_HappyPath(t *testing.T) {
 	}
 }
 
-// TestCmdConflictsScan_DryRun verifies `engram conflicts scan --project X` (dry-run
+// TestCmdConflictsScan_DryRun verifies `omnia conflicts scan --project X` (dry-run
 // default) prints 0 inserted and does not modify the DB.
 func TestCmdConflictsScan_DryRun(t *testing.T) {
 	cfg := testConfig(t)
@@ -230,7 +230,7 @@ func TestCmdConflictsScan_DryRun(t *testing.T) {
 	}
 }
 
-// TestCmdConflictsScan_Apply verifies `engram conflicts scan --apply` inserts rows
+// TestCmdConflictsScan_Apply verifies `omnia conflicts scan --apply` inserts rows
 // and reports an inserted count.
 func TestCmdConflictsScan_Apply(t *testing.T) {
 	cfg := testConfig(t)
@@ -266,7 +266,7 @@ func TestCmdConflictsScan_CapWarning(t *testing.T) {
 	_ = stdout
 }
 
-// TestCmdConflictsDeferred_List verifies `engram conflicts deferred` lists rows
+// TestCmdConflictsDeferred_List verifies `omnia conflicts deferred` lists rows
 // from sync_apply_deferred.
 func TestCmdConflictsDeferred_List(t *testing.T) {
 	cfg := testConfig(t)
@@ -292,7 +292,7 @@ func TestCmdConflictsDeferred_List(t *testing.T) {
 	}
 }
 
-// TestCmdConflictsDeferred_ReplayPrintsRetried verifies `engram conflicts deferred
+// TestCmdConflictsDeferred_ReplayPrintsRetried verifies `omnia conflicts deferred
 // --replay` calls ReplayDeferred and prints the retried count (0 for empty queue).
 func TestCmdConflictsDeferred_ReplayPrintsRetried(t *testing.T) {
 	cfg := testConfig(t)
@@ -347,7 +347,7 @@ func TestCmdConflictsDeferred_InspectHappyPath(t *testing.T) {
 	}
 }
 
-// TestCmdConflictsShow_NotFound verifies `engram conflicts show <id>` with a
+// TestCmdConflictsShow_NotFound verifies `omnia conflicts show <id>` with a
 // non-existent relation_id prints not-found and exits non-zero.
 func TestCmdConflictsShow_NotFound(t *testing.T) {
 	cfg := testConfig(t)
@@ -360,7 +360,7 @@ func TestCmdConflictsShow_NotFound(t *testing.T) {
 	}
 }
 
-// TestCmdConflictsShow_HappyPath verifies `engram conflicts show <id>` prints
+// TestCmdConflictsShow_HappyPath verifies `omnia conflicts show <id>` prints
 // relation detail for an existing relation.
 func TestCmdConflictsShow_HappyPath(t *testing.T) {
 	cfg := testConfig(t)
@@ -394,7 +394,7 @@ func TestCmdConflicts_UnknownSubcommand(t *testing.T) {
 	}
 }
 
-// TestCmdMain_ConflictsWired verifies that `engram conflicts` is wired in the
+// TestCmdMain_ConflictsWired verifies that `omnia conflicts` is wired in the
 // top-level switch (D.3) — the dispatch must NOT produce "unknown command: conflicts".
 func TestCmdMain_ConflictsWired(t *testing.T) {
 	withArgs(t, "engram", "conflicts")

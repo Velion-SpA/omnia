@@ -29,7 +29,7 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 - **fix(plugin):** allow `mem_session_summary` to accept an explicit `project` fallback when automatic project detection is unavailable.
 - **fix(plugin):** fall back to local `.engram/config.json` and surface a clearer version-mismatch diagnostic when the running Engram server lacks `/project/current`.
-- **feat(plugin):** add `gentle-engram` package for Pi marketplace installs, with HTTP event capture, Memory Protocol prompt injection, safe `engram mcp` launcher config, and `pi-engram init` setup helper.
+- **feat(plugin):** add `gentle-engram` package for Pi marketplace installs, with HTTP event capture, Memory Protocol prompt injection, safe `omnia mcp` launcher config, and `pi-engram init` setup helper.
 
 ### Cloud dashboard visual parity (`cloud-dashboard-visual-parity`)
 
@@ -50,7 +50,7 @@ New and updated routes registered in `internal/cloud/dashboard/dashboard.go`:
 
 ### Cloud autosync restoration (`cloud-autosync-restoration`)
 
-Background mutation-based replication for `engram serve` and `engram mcp`:
+Background mutation-based replication for `omnia serve` and `omnia mcp`:
 
 - **feat(autosync):** `internal/cloud/autosync.Manager` — lease-guarded background push/pull goroutine enabled by `ENGRAM_CLOUD_AUTOSYNC=1` + `ENGRAM_CLOUD_TOKEN` + `ENGRAM_CLOUD_SERVER`
 - **feat(cloudserver):** add `POST /sync/mutations/push` (batch up to 100 mutations, configurable body cap defaulting to 8 MiB, per-project auth + pause gate returning HTTP 409 `sync-paused`)
@@ -81,7 +81,7 @@ The `project` argument has been removed from the JSON schemas of 7 MCP write too
 Returns detection result including `project`, `project_source`, `project_path`, `cwd`, `available_projects`, and `warning`. Never errors — returns success even when the cwd is ambiguous. Recommended as the first call when starting a session to confirm which project will receive writes.
 
 - **feat(project):** add project name auto-detection via git remote and normalization (lowercase + trim + collapse) on all read/write paths
-- **feat(cli):** add `engram projects list|consolidate|prune` commands for project hygiene
+- **feat(cli):** add `omnia projects list|consolidate|prune` commands for project hygiene
 - **feat(mcp):** add `mem_merge_projects` tool for agent-driven project consolidation
 - **feat(mcp):** auto-detect project at MCP startup via `--project` flag, `ENGRAM_PROJECT` env, or git remote
 - **feat(mcp):** similar-project warnings when saving to a new project that resembles an existing one

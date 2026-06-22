@@ -17,7 +17,7 @@
 | Change cloud autosync | `internal/cloud/autosync/manager.go` | `internal/cloud/remote/transport.go`, `DOCS.md#cloud-autosync` |
 | Change cloud transport | `internal/cloud/cloudserver/cloudserver.go` | `internal/cloud/cloudstore/cloudstore.go`, `docs/engram-cloud/README.md` |
 | Change the dashboard | `internal/cloud/dashboard/dashboard.go` | `internal/cloud/dashboard/*_templ.go`, `internal/cloud/dashboard/static/styles.css` |
-| Change cloud/dashboard auth | `internal/cloud/auth/auth.go` | `cmd/engram/cloud.go`, `internal/cloud/cloudserver/cloudserver.go` |
+| Change cloud/dashboard auth | `internal/cloud/auth/auth.go` | `cmd/omnia/cloud.go`, `internal/cloud/cloudserver/cloudserver.go` |
 | Change agent setup | `internal/setup/setup.go` | `plugin/`, `docs/AGENT-SETUP.md`, `docs/PLUGINS.md` |
 | Change project detection | `internal/project/detect.go` | `internal/project/similar.go`, `docs/AGENT-SETUP.md` |
 | Change the TUI | `internal/tui/model.go` | `internal/tui/update.go`, `internal/tui/view.go`, `internal/tui/styles.go` |
@@ -28,10 +28,10 @@
 
 | Area | Responsibility | Should not do |
 |---|---|---|
-| `cmd/engram` | CLI parsing, runtime composition, package wiring, flags, user commands. | Put SQL or deep business rules here. |
+| `cmd/omnia` | CLI parsing, runtime composition, package wiring, flags, user commands. | Put SQL or deep business rules here. |
 | `internal/store` | Local source of truth: SQLite, FTS5, sessions, observations, prompts, relations, mutations, dedupe, topic upserts, local diagnostics. | Render HTML, talk directly to cloud HTTP, decide UX. |
 | `internal/mcp` | Expose MCP tools, resolve project by cwd, profile tools (`agent`, `admin`, `all`), translate agent calls into store operations. | Persist outside the store or duplicate store logic. |
-| `internal/server` | Local JSON API (`engram serve`), local endpoints, autosync notification after writes. | Expose cloud/dashboard routes or use Postgres. |
+| `internal/server` | Local JSON API (`omnia serve`), local endpoints, autosync notification after writes. | Expose cloud/dashboard routes or use Postgres. |
 | `internal/sync` | Chunk export/import, manifest, abstract transport, sync bootstrap/upgrade. | Decide cloud auth or render the dashboard. |
 | `internal/cloud/chunkcodec` | Shared canonicalization of chunks, IDs, and mutation payload decoding used by sync/cloud. | Decide transport, persistence, or sync policies. |
 | `internal/cloud/remote` | HTTP client to cloud for chunks/mutations. | Store local state directly except through expected interfaces. |

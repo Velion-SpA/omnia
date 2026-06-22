@@ -28,7 +28,7 @@ These are the non-negotiable product values. Every triage decision is filtered t
 | Principle | What it means in practice |
 |-----------|--------------------------|
 | **Zero-config** | Works out of the box. No required flags, env vars, or setup beyond install. |
-| **Local-first** | Data lives in `~/.engram/engram.db`. No cloud dependency by default. |
+| **Local-first** | Data lives in `~/.omnia/omnia.db`. No cloud dependency by default. |
 | **Single binary** | One `engram` binary. No daemon, no service, no secondary processes needed. |
 | **Terminal-first** | CLI and TUI are the primary UX. No web dashboard, no Electron. |
 | **Thin adapters** | Plugin scripts (Claude, OpenCode, Gemini, Codex) are thin shims — logic lives in Go core. |

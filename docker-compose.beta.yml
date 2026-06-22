@@ -6,7 +6,7 @@
 #
 # Usage:
 #   docker compose -f docker-compose.beta.yml up -d
-#   (build local binary: go build -o ./engram-beta ./cmd/engram)
+#   (build local binary: go build -o ./engram-beta ./cmd/omnia)
 #   (point client at beta: see docs/BETA_TESTING.md)
 #
 # Cleanup:

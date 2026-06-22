@@ -4,12 +4,12 @@
 
 Engram works with **any MCP-compatible agent**. Pick your agent below.
 
-> Cloud bootstrap automation in agent scripts/plugins is intentionally deferred in this rollout. Use `engram cloud ...` manually for now.
+> Cloud bootstrap automation in agent scripts/plugins is intentionally deferred in this rollout. Use `omnia cloud ...` manually for now.
 >
 > Deferred validation scope for this rollout:
 >
 > - Setup/plugin scripts are **not** yet validated as cloud enrollment/login orchestrators.
-> - `engram setup ...` installs MCP/plugin integrations only; it does **not** auto-run `engram cloud config/enroll/upgrade`.
+> - `omnia setup ...` installs MCP/plugin integrations only; it does **not** auto-run `omnia cloud config/enroll/upgrade`.
 > - Cloud onboarding contract remains CLI-first until script-level cloud flows are explicitly implemented.
 
 ## Quick Reference
@@ -17,27 +17,27 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Agent         | One-liner                                                                                    | Manual Config                                      |
 | ------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------- |
 | Claude Code   | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` | [Details](#claude-code)                            |
-| Pi            | `engram setup pi`                                                                            | [Details](#pi)                                     |
-| OpenCode      | `engram setup opencode`                                                                      | [Details](#opencode)                               |
-| Gemini CLI    | `engram setup gemini-cli`                                                                    | [Details](#gemini-cli)                             |
-| Codex         | `engram setup codex`                                                                         | [Details](#codex)                                  |
+| Pi            | `omnia setup pi`                                                                            | [Details](#pi)                                     |
+| OpenCode      | `omnia setup opencode`                                                                      | [Details](#opencode)                               |
+| Gemini CLI    | `omnia setup gemini-cli`                                                                    | [Details](#gemini-cli)                             |
+| Codex         | `omnia setup codex`                                                                         | [Details](#codex)                                  |
 | VS Code       | `code --add-mcp '{"name":"engram","command":"engram","args":["mcp"]}'`                       | [Details](#vs-code-copilot--claude-code-extension) |
 | Antigravity   | Manual JSON config                                                                           | [Details](#antigravity)                            |
 | Cursor        | Manual JSON config                                                                           | [Details](#cursor)                                 |
 | Windsurf      | Manual JSON config                                                                           | [Details](#windsurf)                               |
-| Any MCP agent | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
+| Any MCP agent | `omnia mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
 
 ## Pi
 
 Install Engram's Pi package, the MCP adapter, and Pi MCP config:
 
 ```bash
-engram setup pi
+omnia setup pi
 ```
 
-`engram setup pi` runs `pi install npm:gentle-engram@0.1.8` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved.
+`omnia setup pi` runs `pi install npm:gentle-engram@0.1.8` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved.
 
-When [mise](https://mise.jdx.dev/) is detected in `PATH`, `engram setup pi` also auto-pins `npmCommand` in Pi's `settings.json` to `["mise", "exec", "node@<version>", "--", "npm"]`, preventing Node version drift from silently changing which npm root Pi uses. If `npmCommand` already exists in `settings.json`, the existing value is preserved. This step is a no-op when mise is not installed.
+When [mise](https://mise.jdx.dev/) is detected in `PATH`, `omnia setup pi` also auto-pins `npmCommand` in Pi's `settings.json` to `["mise", "exec", "node@<version>", "--", "npm"]`, preventing Node version drift from silently changing which npm root Pi uses. If `npmCommand` already exists in `settings.json`, the existing value is preserved. This step is a no-op when mise is not installed.
 
 Manual equivalent:
 
@@ -51,8 +51,8 @@ Restart Pi after installation.
 
 The package has two paths:
 
-- **HTTP event capture**: the Pi extension sends prompts, summaries, passive task learnings, and compact Pi-native `mem_*` tool calls to `engram serve`.
-- **MCP gateway**: `pi-mcp-adapter` exposes Engram's MCP surface by launching `engram mcp --tools=agent` and is also used by other Pi MCP integrations such as Notion.
+- **HTTP event capture**: the Pi extension sends prompts, summaries, passive task learnings, and compact Pi-native `mem_*` tool calls to `omnia serve`.
+- **MCP gateway**: `pi-mcp-adapter` exposes Engram's MCP surface by launching `omnia mcp --tools=agent` and is also used by other Pi MCP integrations such as Notion.
 
 Use an existing Engram HTTP server:
 
@@ -196,7 +196,7 @@ Alternatives: `cd` into the target repo before starting the MCP server, or add r
 **Recommended: Full setup with one command** — installs the plugin AND registers the MCP server in `opencode.json` automatically:
 
 ```bash
-engram setup opencode
+omnia setup opencode
 ```
 
 This does three things:
@@ -208,10 +208,10 @@ This does three things:
 The plugin auto-starts the HTTP server if needed for session tracking. If your environment blocks background processes, run it manually:
 
 ```bash
-engram serve &
+omnia serve &
 ```
 
-> **Windows**: OpenCode uses `~/.config/opencode/` on Windows too (it does not read `%APPDATA%\opencode\`). `engram setup opencode` writes to `~/.config/opencode/plugins/` and `~/.config/opencode/opencode.json`. To run the server in the background: `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden` (PowerShell) or just run `engram serve` in a separate terminal.
+> **Windows**: OpenCode uses `~/.config/opencode/` on Windows too (it does not read `%APPDATA%\opencode\`). `omnia setup opencode` writes to `~/.config/opencode/plugins/` and `~/.config/opencode/opencode.json`. To run the server in the background: `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden` (PowerShell) or just run `omnia serve` in a separate terminal.
 
 **Alternative: Manual MCP-only setup** (no plugin, all 20 tools by default):
 
@@ -257,10 +257,10 @@ That's it. The plugin registers the MCP server, hooks, and Memory Protocol skill
 >
 > Then re-run the marketplace command. If you cannot update for some reason, **Option C (Bare MCP)** below works on any Claude Code version because it does not go through the marketplace.
 
-**Option B: Plugin via `engram setup`** — same plugin, installed from the embedded binary:
+**Option B: Plugin via `omnia setup`** — same plugin, installed from the embedded binary:
 
 ```bash
-engram setup claude-code
+omnia setup claude-code
 ```
 
 During setup, you'll be asked whether to add engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. The setup writes entries for both the durable user-level MCP server id (`mcp__engram__...`) and the plugin-scoped server id used by older Claude Code plugin installs, so re-running setup repairs stale or incomplete allowlists without adding startup delay.
@@ -346,16 +346,16 @@ Then reload your shell (`source ~/.bashrc`) and re-run the install.
 Recommended: one command to set up MCP + compaction recovery instructions:
 
 ```bash
-engram setup gemini-cli
+omnia setup gemini-cli
 ```
 
-`engram setup gemini-cli` now does three things:
+`omnia setup gemini-cli` now does three things:
 
 - Registers `mcpServers.engram` in `~/.gemini/settings.json` (Windows: `%APPDATA%\gemini\settings.json`)
 - Writes `~/.gemini/system.md` with the Engram Memory Protocol (includes post-compaction recovery)
 - Ensures `~/.gemini/.env` contains `GEMINI_SYSTEM_MD=1` so Gemini actually loads that system prompt
 
-> `engram setup gemini-cli` automatically writes the full Memory Protocol to `~/.gemini/system.md`, so the agent knows exactly when to save, search, and close sessions. No additional configuration needed.
+> `omnia setup gemini-cli` automatically writes the full Memory Protocol to `~/.gemini/system.md`, so the agent knows exactly when to save, search, and close sessions. No additional configuration needed.
 
 Manual alternative: add to your `~/.gemini/settings.json` (global) or `.gemini/settings.json` (project); on Windows: `%APPDATA%\gemini\settings.json`:
 
@@ -373,7 +373,7 @@ Manual alternative: add to your `~/.gemini/settings.json` (global) or `.gemini/s
 Or via the CLI:
 
 ```bash
-gemini mcp add engram engram mcp
+gemini mcp add engram omnia mcp
 ```
 
 ---
@@ -383,16 +383,16 @@ gemini mcp add engram engram mcp
 Recommended: one command to set up MCP + compaction recovery instructions:
 
 ```bash
-engram setup codex
+omnia setup codex
 ```
 
-`engram setup codex` now does three things:
+`omnia setup codex` now does three things:
 
 - Registers `[mcp_servers.engram]` in `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`)
 - Writes `~/.codex/engram-instructions.md` with the Engram Memory Protocol
 - Writes `~/.codex/engram-compact-prompt.md` and points `experimental_compact_prompt_file` to it, so compaction output includes a required memory-save instruction
 
-> `engram setup codex` automatically writes the full Memory Protocol to `~/.codex/engram-instructions.md` and a compaction recovery prompt to `~/.codex/engram-compact-prompt.md`. No additional configuration needed.
+> `omnia setup codex` automatically writes the full Memory Protocol to `~/.codex/engram-instructions.md` and a compaction recovery prompt to `~/.codex/engram-compact-prompt.md`. No additional configuration needed.
 
 Manual alternative: add to your `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`):
 
@@ -418,16 +418,16 @@ Transport closed
 1. Close the current Codex chat or window entirely.
 2. If any `engram` processes are still running, stop them:
    - macOS/Linux: `pkill -x engram`
-   - Windows: `taskkill /IM engram.exe /F`
-3. Open a new Codex chat. Codex starts a fresh `engram mcp` stdio process on launch, which clears the stale session.
+   - Windows: `taskkill /IM omnia.exe /F`
+3. Open a new Codex chat. Codex starts a fresh `omnia mcp` stdio process on launch, which clears the stale session.
 
 **Prevention**
 
-- After replacing `engram.exe` / the `engram` binary, always start a new Codex chat before using memory tools.
+- After replacing `omnia.exe` / the `engram` binary, always start a new Codex chat before using memory tools.
 - After editing `~/.codex/config.toml`, `engram-instructions.md`, or `engram-compact-prompt.md`, restart Codex to pick up the new config.
 - Avoid force-killing `engram` while a Codex session is active; prefer closing the chat first so Codex can shut down the MCP process cleanly.
 
-> **Windows note:** On Windows the stale process is most commonly left behind after an in-place binary replacement. The `taskkill` command above reliably clears it. If Codex shows the error immediately on a fresh chat, confirm that the new `engram.exe` is in `PATH` and that no older copy is shadowing it.
+> **Windows note:** On Windows the stale process is most commonly left behind after an in-place binary replacement. The `taskkill` command above reliably clears it. If Codex shows the error immediately on a fresh chat, confirm that the new `omnia.exe` is in `PATH` and that no older copy is shadowing it.
 
 ---
 
@@ -467,7 +467,7 @@ code --add-mcp "{\"name\":\"engram\",\"command\":\"engram\",\"args\":[\"mcp\"]}"
 
 > **Using Claude Code extension in VS Code?** The Claude Code extension runs inside VS Code but uses its own MCP config. Follow the [Claude Code](#claude-code) instructions above — the `.claude/settings.json` config works whether you use Claude Code as a CLI or as a VS Code extension.
 
-> **Windows**: Make sure `engram.exe` is in your `PATH`. VS Code resolves MCP commands from the system PATH.
+> **Windows**: Make sure `omnia.exe` is in your `PATH`. VS Code resolves MCP commands from the system PATH.
 
 **Adding the Memory Protocol** (recommended — teaches the agent when to save and search memories):
 
@@ -578,7 +578,7 @@ Add to your `.cursor/mcp.json` (same path on all platforms — it's project-rela
 }
 ```
 
-> **Windows**: Make sure `engram.exe` is in your `PATH`. Cursor resolves MCP commands from the system PATH.
+> **Windows**: Make sure `omnia.exe` is in your `PATH`. Cursor resolves MCP commands from the system PATH.
 
 > **Memory Protocol:** Cursor uses `.mdc` rule files stored in `.cursor/rules/` (Cursor 0.43+). Create an `engram.mdc` file (any name works — the `.mdc` extension is what matters) and place it in one of:
 >
@@ -612,7 +612,7 @@ Add to your `~/.windsurf/mcp.json` (Windows: `%USERPROFILE%\.windsurf\mcp.json`)
 
 ## Any other MCP agent
 
-The pattern is always the same — point your agent's MCP config to `engram mcp` via stdio transport.
+The pattern is always the same — point your agent's MCP config to `omnia mcp` via stdio transport.
 
 ---
 
@@ -768,11 +768,11 @@ See [Plugins → mem_compare reference](PLUGINS.md#mcp-tool-reference--mem_compa
 
 ## Cloud Autosync toggle
 
-`engram serve` and `engram mcp` support continuous background replication to an Engram Cloud server. This is **opt-in** and never fatal on missing config.
+`omnia serve` and `omnia mcp` support continuous background replication to an Engram Cloud server. This is **opt-in** and never fatal on missing config.
 
 ### Prerequisites
 
-1. A running Engram Cloud server (see `docker-compose.cloud.yml` or `engram cloud serve`). The server must be a build that includes the mutation endpoints (`POST /sync/mutations/push`, `GET /sync/mutations/pull`). If the server is older, autosync enters `PhaseBackoff` with `reason_code: transport_failed` and logs `server_unsupported` to stderr.
+1. A running Engram Cloud server (see `docker-compose.cloud.yml` or `omnia cloud serve`). The server must be a build that includes the mutation endpoints (`POST /sync/mutations/push`, `GET /sync/mutations/pull`). If the server is older, autosync enters `PhaseBackoff` with `reason_code: transport_failed` and logs `server_unsupported` to stderr.
 
 2. A valid bearer token configured on the server.
 
@@ -783,13 +783,13 @@ export ENGRAM_CLOUD_AUTOSYNC=1          # exact "1" only
 export ENGRAM_CLOUD_TOKEN=your-token    # bearer token
 export ENGRAM_CLOUD_SERVER=https://cloud.engram.example.com
 
-engram serve
+omnia serve
 # or
-engram mcp
+omnia mcp
 ```
 
 The process logs `[autosync] started (server=...)` on success. Missing token or server URL logs `[autosync] ERROR: ...` and the process starts normally without autosync.
-For `engram mcp`, autosync runs for the lifetime of the stdio MCP process and is stopped when that process exits.
+For `omnia mcp`, autosync runs for the lifetime of the stdio MCP process and is stopped when that process exits.
 
 ---
 

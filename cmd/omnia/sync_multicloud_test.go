@@ -69,7 +69,7 @@ func assertNotSyncedTargetKey(t *testing.T, cfg store.Config, targetKey string) 
 	}
 }
 
-// TestCmdSyncNamedCloudRecordsAliasTargetKey proves that `engram sync --cloud
+// TestCmdSyncNamedCloudRecordsAliasTargetKey proves that `omnia sync --cloud
 // --cloud-name work --project proj-a` records its sync state under the
 // alias-prefixed target key "work:proj-a" and NOT under the legacy "cloud:proj-a".
 func TestCmdSyncNamedCloudRecordsAliasTargetKey(t *testing.T) {
@@ -145,7 +145,7 @@ func TestCmdSyncDefaultCloudStillUsesLegacyTargetKey(t *testing.T) {
 	assertSyncedTargetKey(t, cfg, cloudTargetKeyForProject("proj-a")) // "cloud:proj-a"
 }
 
-// TestCmdSyncMultiCloudSyncsEveryConfiguredCloud proves that `engram sync --cloud`
+// TestCmdSyncMultiCloudSyncsEveryConfiguredCloud proves that `omnia sync --cloud`
 // without --cloud-name replicates the project to every configured cloud, each
 // under its own alias-prefixed key.
 func TestCmdSyncMultiCloudSyncsEveryConfiguredCloud(t *testing.T) {
@@ -232,7 +232,7 @@ func TestResolveCloudRuntimeConfigForAliasEnvTokenFootgun(t *testing.T) {
 	}
 }
 
-// TestCmdCloudEnrollCloudNameValidatesAlias proves `engram cloud enroll <project>
+// TestCmdCloudEnrollCloudNameValidatesAlias proves `omnia cloud enroll <project>
 // --cloud-name <alias>` validates the alias and enrolls the project; an unknown
 // alias fails fast.
 func TestCmdCloudEnrollCloudNameValidatesAlias(t *testing.T) {

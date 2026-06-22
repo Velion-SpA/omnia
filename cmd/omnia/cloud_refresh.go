@@ -13,11 +13,11 @@ import (
 	"github.com/velion/omnia/internal/store"
 )
 
-// cmdCloudRefresh implements `engram cloud refresh`.
+// cmdCloudRefresh implements `omnia cloud refresh`.
 // It reads the stored token for the alias, exchanges it for a fresh token via
 // POST /auth/refresh, and overwrites the stored token on success.
 func cmdCloudRefresh(cfg store.Config) {
-	fs := flag.NewFlagSet("engram cloud refresh", flag.ContinueOnError)
+	fs := flag.NewFlagSet("omnia cloud refresh", flag.ContinueOnError)
 	server := fs.String("server", "", "cloud server URL (overrides cloud.json)")
 	cloudAlias := fs.String("cloud", "", "cloud alias to refresh against (default: default cloud)")
 
@@ -54,7 +54,7 @@ func cmdCloudRefresh(cfg store.Config) {
 		}
 	}
 	if currentToken == "" {
-		fmt.Fprintln(os.Stderr, "error: no token stored for this cloud alias; run `engram cloud login` first")
+		fmt.Fprintln(os.Stderr, "error: no token stored for this cloud alias; run `omnia cloud login` first")
 		exitFunc(1)
 		return
 	}

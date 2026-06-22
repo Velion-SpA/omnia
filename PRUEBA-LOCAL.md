@@ -15,7 +15,7 @@ Ese env var **pisa** el token de `cloud.json` por diseño (sirve para CI/overrid
 Para TODAS las pruebas locales usá `env -u ENGRAM_CLOUD_TOKEN` para que el cliente use el token
 de la cuenta de prueba y no el de producción. Sin esto vas a ver `401: invalid bearer token`.
 
-Y siempre con un `ENGRAM_DATA_DIR` aislado: **nunca toques `~/.engram`** (es tu memoria real).
+Y siempre con un `ENGRAM_DATA_DIR` aislado: **nunca toques `~/.omnia`** (es tu memoria real).
 
 ---
 
@@ -171,7 +171,7 @@ cd ~/code/omnia-core && scripts/dev-multicloud-down.sh     # baja los dos clouds
 rm -rf /tmp/omnia-local-work /tmp/omnia-local-personal     # borra los data dirs de prueba
 ```
 
-Tu memoria real (`~/.engram`) y tu cloud de producción **no se tocan** en ningún paso.
+Tu memoria real (`~/.omnia`) y tu cloud de producción **no se tocan** en ningún paso.
 
 ---
 

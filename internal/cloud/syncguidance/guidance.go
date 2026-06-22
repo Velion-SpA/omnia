@@ -77,10 +77,10 @@ func Guidance(project string) string {
 	project = normalizeProject(project)
 	return fmt.Sprintf(`%s
 Run these commands, then retry sync:
-  engram cloud upgrade doctor --project %s
-  engram cloud upgrade repair --project %s --dry-run
-  engram cloud upgrade repair --project %s --apply
-  engram sync --cloud --project %s`, header, project, project, project, project)
+  omnia cloud upgrade doctor --project %s
+  omnia cloud upgrade repair --project %s --dry-run
+  omnia cloud upgrade repair --project %s --apply
+  omnia sync --cloud --project %s`, header, project, project, project, project)
 }
 
 // ProjectFromTargetKey derives the project suffix from cloud:<project> target keys.

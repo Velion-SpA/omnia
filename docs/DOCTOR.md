@@ -1,17 +1,17 @@
 # Engram Doctor
 
-`engram doctor` runs read-only operational diagnostics against the local SQLite store. It detects, explains, and suggests safe next steps; the base diagnostic command does **not** repair data, apply migrations, delete rows, or mutate sync cursors.
+`omnia doctor` runs read-only operational diagnostics against the local SQLite store. It detects, explains, and suggests safe next steps; the base diagnostic command does **not** repair data, apply migrations, delete rows, or mutate sync cursors.
 
 ## CLI
 
 ```bash
-engram doctor
-engram doctor --json
-engram doctor --project engram
-engram doctor --check sync_mutation_required_fields
-engram doctor repair --project sias-app --check session_project_directory_mismatch --plan
-engram doctor repair --project sias-app --check session_project_directory_mismatch --dry-run
-engram doctor repair --project sias-app --check session_project_directory_mismatch --apply
+omnia doctor
+omnia doctor --json
+omnia doctor --project engram
+omnia doctor --check sync_mutation_required_fields
+omnia doctor repair --project sias-app --check session_project_directory_mismatch --plan
+omnia doctor repair --project sias-app --check session_project_directory_mismatch --dry-run
+omnia doctor repair --project sias-app --check session_project_directory_mismatch --apply
 ```
 
 Flags:
@@ -23,7 +23,7 @@ Flags:
 
 ## MCP
 
-Agents can call `mem_doctor` with the same contract as `engram doctor --json`:
+Agents can call `mem_doctor` with the same contract as `omnia doctor --json`:
 
 ```json
 {
@@ -66,9 +66,9 @@ The CLI `--json` and MCP tool return:
 
 ## Safety
 
-Plain `engram doctor` remains diagnostic-only. Findings that imply data movement set `requires_confirmation=true` so agents know a human must review evidence before repair.
+Plain `omnia doctor` remains diagnostic-only. Findings that imply data movement set `requires_confirmation=true` so agents know a human must review evidence before repair.
 
-`engram doctor repair` is intentionally narrow and local-first: local SQLite remains the source of truth, and cloud/sync repair is out of scope. The repair MVP only supports project reclassification for:
+`omnia doctor repair` is intentionally narrow and local-first: local SQLite remains the source of truth, and cloud/sync repair is out of scope. The repair MVP only supports project reclassification for:
 
 - `session_project_directory_mismatch`, using trusted `git_remote` or `git_root` evidence from doctor findings.
 - `manual_session_name_project_mismatch`, only for exact `manual-save-{known_project}` sessions, and only when trusted directory evidence does not contradict the manual-name target.
@@ -115,15 +115,15 @@ On `--apply`, `backup_path` contains the backup database path and `*_applied` co
 
 ### Clone-safe verification workflow
 
-Never experiment on production `~/.engram/engram.db`. Use a SQLite backup clone or a temporary `ENGRAM_DATA_DIR`:
+Never experiment on production `~/.omnia/omnia.db`. Use a SQLite backup clone or a temporary `ENGRAM_DATA_DIR`:
 
 ```bash
 mkdir -p /tmp/engram-repair-clone
-sqlite3 ~/.engram/engram.db ".backup '/tmp/engram-repair-clone/engram.db'"
-ENGRAM_DATA_DIR=/tmp/engram-repair-clone engram doctor --json --project sias-app --check session_project_directory_mismatch
-ENGRAM_DATA_DIR=/tmp/engram-repair-clone engram doctor repair --project sias-app --check session_project_directory_mismatch --plan
-ENGRAM_DATA_DIR=/tmp/engram-repair-clone engram doctor repair --project sias-app --check session_project_directory_mismatch --dry-run
-ENGRAM_DATA_DIR=/tmp/engram-repair-clone engram doctor repair --project sias-app --check session_project_directory_mismatch --apply
+sqlite3 ~/.omnia/omnia.db ".backup '/tmp/engram-repair-clone/omnia.db'"
+ENGRAM_DATA_DIR=/tmp/engram-repair-clone omnia doctor --json --project sias-app --check session_project_directory_mismatch
+ENGRAM_DATA_DIR=/tmp/engram-repair-clone omnia doctor repair --project sias-app --check session_project_directory_mismatch --plan
+ENGRAM_DATA_DIR=/tmp/engram-repair-clone omnia doctor repair --project sias-app --check session_project_directory_mismatch --dry-run
+ENGRAM_DATA_DIR=/tmp/engram-repair-clone omnia doctor repair --project sias-app --check session_project_directory_mismatch --apply
 ```
 
 After apply, verify that only the three allowed project columns changed for the planned session IDs and that a backup exists. If the repair is wrong, stop Engram processes and restore the `backup_path` database file manually.

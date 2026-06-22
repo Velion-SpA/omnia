@@ -142,7 +142,7 @@ func TestProjectScopeAuthorizerEnrolledProjects(t *testing.T) {
 }
 
 // TestServiceEnrolledProjects mirrors the same contract on *Service, which
-// is the production type used by `engram cloud serve` auth wiring.
+// is the production type used by `omnia cloud serve` auth wiring.
 func TestServiceEnrolledProjects(t *testing.T) {
 	svc, err := NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
 	if err != nil {

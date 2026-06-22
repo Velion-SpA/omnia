@@ -14,11 +14,11 @@ Coding agent
         │
         │ MCP stdio, plugin hooks, or local API
         ▼
-cmd/engram
+cmd/omnia
   CLI + local runtime + cloud runtime
         │
         ├── internal/mcp        mem_* tools for agents
-        ├── internal/server     local JSON API: engram serve
+        ├── internal/server     local JSON API: omnia serve
         ├── internal/tui        Bubbletea terminal UI
         ├── internal/setup      automated integration installation
         │
@@ -30,7 +30,7 @@ internal/store
         └── internal/cloud/autosync         optional background push/pull
                 │
                 ▼
-        internal/cloud/remote ── HTTP ── engram cloud serve
+        internal/cloud/remote ── HTTP ── omnia cloud serve
                                       │
                                       ├── internal/cloud/cloudserver
                                       ├── internal/cloud/cloudstore  Postgres

@@ -4,9 +4,9 @@
 
 **Engram exposes one local memory core through several interfaces: CLI, MCP, local HTTP API, and TUI.** Keep interface code thin: parse input, call the right package, return a clear response.
 
-## CLI: `cmd/engram`
+## CLI: `cmd/omnia`
 
-`cmd/engram/main.go` and neighboring files are the binary entry point. They connect store, HTTP, MCP, TUI, sync, autosync, setup, doctor, conflicts, cloud, and Obsidian.
+`cmd/omnia/main.go` and neighboring files are the binary entry point. They connect store, HTTP, MCP, TUI, sync, autosync, setup, doctor, conflicts, cloud, and Obsidian.
 
 Do not put core behavior in the command if it can live in a testable package. The command should coordinate, parse flags, and adapt errors for humans.
 
@@ -16,7 +16,7 @@ Do not put core behavior in the command if it can live in a testable package. Th
 
 | Profile | Use |
 |---|---|
-| `all` | Default for `engram mcp`; registers all tools. |
+| `all` | Default for `omnia mcp`; registers all tools. |
 | `agent` | Normal agent tools, such as save/search/context/session summary/current project/judge/doctor. |
 | `admin` | Manual curation: stats, delete, timeline, merge. |
 
@@ -61,7 +61,7 @@ The TUI uses Bubbletea and reads from the local store. The separation is classic
 
 ### Local API
 
-- [ ] The route belongs to `engram serve`, not cloud.
+- [ ] The route belongs to `omnia serve`, not cloud.
 - [ ] `internal/server/server.go` only orchestrates request/response and calls store/services.
 - [ ] Status codes and JSON errors are deterministic.
 - [ ] Tests in `internal/server/*_test.go` cover errors and success.

@@ -4814,7 +4814,7 @@ type DeleteProjectResult struct {
 // observations.session_id is a NOT NULL FK to sessions — removing sessions
 // while soft-deleted observation rows still reference them would violate the FK
 // constraint. The session rows remain and can be cleaned up with
-// engram delete session <id> once the observations are purged.
+// omnia delete session <id> once the observations are purged.
 //
 // Returns ErrProjectNotFound when no sessions or observations exist for the
 // given project name.

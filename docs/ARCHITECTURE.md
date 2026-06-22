@@ -207,7 +207,7 @@ This means a `personal` note on the same topic does not overwrite the shared `pr
 
 ```
 engram/
-├── cmd/engram/main.go              # CLI entrypoint
+├── cmd/omnia/main.go              # CLI entrypoint
 ├── internal/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
 │   ├── server/server.go            # HTTP REST API (port 7437)
@@ -248,12 +248,12 @@ engram/
 ## CLI Reference
 
 ```
-engram setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
-engram serve [port]       Start HTTP API server (default: 7437)
-engram mcp                Start MCP server (stdio transport)
-engram tui                Launch interactive terminal UI
-engram search <query>     Search memories
-engram save <title> <msg> Save a memory
+omnia setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
+omnia serve [port]       Start HTTP API server (default: 7437)
+omnia mcp                Start MCP server (stdio transport)
+omnia tui                Launch interactive terminal UI
+omnia search <query>     Search memories
+omnia save <title> <msg> Save a memory
 engram delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
 engram delete session <id>
                           Delete a session by ID (session must have no observations)
@@ -263,48 +263,48 @@ engram delete project <name> [--hard]
                           Cascade-delete a project: soft-deletes observations (or hard-deletes
                           with --hard, which also removes sessions); always removes prompts
 engram timeline <obs_id>  Chronological context around an observation
-engram context [project]  Recent context from previous sessions
+omnia context [project]  Recent context from previous sessions
 engram stats              Memory statistics
-engram export [file]      Export all memories to JSON
-engram import <file>      Import memories from JSON
-engram sync               Export new memories as compressed chunk to .engram/
-engram sync --all         Export ALL projects (ignore directory-based filter)
-engram sync --cloud --project <name>
+omnia export [file]      Export all memories to JSON
+omnia import <file>      Import memories from JSON
+omnia sync               Export new memories as compressed chunk to .engram/
+omnia sync --all         Export ALL projects (ignore directory-based filter)
+omnia sync --cloud --project <name>
                           Sync against configured cloud endpoint (project-scoped)
-engram conflicts <sub>    Inspect and manage memory conflict relations
+omnia conflicts <sub>    Inspect and manage memory conflict relations
                             list, show, stats, scan, deferred
-engram doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
-engram cloud status       Show cloud runtime/config status
-engram cloud config --server <url>
+omnia doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
+omnia cloud status       Show cloud runtime/config status
+omnia cloud config --server <url>
                           Configure cloud server URL
-engram cloud enroll <project>
+omnia cloud enroll <project>
                           Enroll a project for cloud sync
-engram cloud serve        Run cloud backend + dashboard
-engram cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>
+omnia cloud serve        Run cloud backend + dashboard
+omnia cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>
                           Guided upgrade workflow for existing projects
-engram projects list      Show all projects with obs/session/prompt counts
-engram projects consolidate  Interactive merge of similar project names [--all] [--dry-run]
-engram projects prune     Remove projects with 0 observations [--dry-run]
+omnia projects list      Show all projects with obs/session/prompt counts
+omnia projects consolidate  Interactive merge of similar project names [--all] [--dry-run]
+omnia projects prune     Remove projects with 0 observations [--dry-run]
 engram obsidian-export    Export memories to Obsidian vault (beta)
-engram version            Show version
+omnia version            Show version
 ```
 
 Local server auth:
 
-- `ENGRAM_HTTP_TOKEN`: optional Bearer auth for `engram serve`. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time; token is read per-request. When unset, all routes are open (zero-config default).
+- `ENGRAM_HTTP_TOKEN`: optional Bearer auth for `omnia serve`. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time; token is read per-request. When unset, all routes are open (zero-config default).
 - `ENGRAM_TIMEZONE`: IANA zone name for timestamp display in TUI and cloud dashboard (e.g. `America/New_York`). Falls back to system local when unset or invalid.
 
 Cloud constraints (current behavior):
 
 - Cloud is opt-in replication/shared access; local SQLite remains source of truth.
-- `engram cloud serve` requires `ENGRAM_CLOUD_ALLOWED_PROJECTS` in both token-auth and insecure no-auth mode. Use `*` to allow all projects (dev/internal deploys) — bypasses per-project name enforcement while still requiring a non-empty project on each request.
+- `omnia cloud serve` requires `ENGRAM_CLOUD_ALLOWED_PROJECTS` in both token-auth and insecure no-auth mode. Use `*` to allow all projects (dev/internal deploys) — bypasses per-project name enforcement while still requiring a non-empty project on each request.
 - Authenticated cloud serve requires `ENGRAM_CLOUD_TOKEN` + explicit non-default `ENGRAM_JWT_SECRET`.
 - Insecure local-dev mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1`) still requires the project allowlist and must not be used in production.
 
 Cloud route/auth split (current behavior):
 
-- Local runtime (`engram serve`) exposes local JSON APIs and `GET /sync/status` only.
-- Cloud runtime (`engram cloud serve`) exposes `GET /health`, `GET /sync/pull`, `GET /sync/pull/{chunkID}`, `POST /sync/push`, and `/dashboard/*`.
+- Local runtime (`omnia serve`) exposes local JSON APIs and `GET /sync/status` only.
+- Cloud runtime (`omnia cloud serve`) exposes `GET /health`, `GET /sync/pull`, `GET /sync/pull/{chunkID}`, `POST /sync/push`, and `/dashboard/*`.
 - Dashboard public routes: `GET /dashboard/health`, `GET/POST /dashboard/login`, `POST /dashboard/logout`, `GET /dashboard/static/*`.
 - Dashboard protected routes: `GET /dashboard`, `/dashboard/stats`, `/dashboard/activity`, `/dashboard/browser` (`/observations`, `/sessions`, `/sessions/{sessionID}`, `/prompts`), `/dashboard/projects`, `/dashboard/projects/list`, `/dashboard/projects/{project}`, `/dashboard/projects/{name}/observations|sessions|prompts`, `/dashboard/contributors`, `/dashboard/contributors/list`, `/dashboard/contributors/{contributor}`, `/dashboard/admin`, `/dashboard/admin/projects`, `/dashboard/admin/users`, `/dashboard/admin/users/list`, `/dashboard/admin/health`, `POST /dashboard/admin/projects/{name}/sync`, `/dashboard/sessions/{project}/{sessionID}`, `/dashboard/observations/{project}/{sessionID}/{syncID}`, `/dashboard/prompts/{project}/{sessionID}/{syncID}`.
 - Note: `/dashboard/admin/contributors` was removed; user/contributor management lives under `/dashboard/admin/users`.
@@ -363,7 +363,7 @@ Path values are extracted via `r.PathValue(name)` (Go 1.22 `net/http.ServeMux`).
 
 ## Cloud Autosync Manager
 
-`internal/cloud/autosync/Manager` is a lease-guarded background goroutine started by `engram serve` and `engram mcp` when `ENGRAM_CLOUD_AUTOSYNC=1`. It implements the local-first invariant: all network I/O happens in its own goroutine and never holds locks shared with the SQLite write path.
+`internal/cloud/autosync/Manager` is a lease-guarded background goroutine started by `omnia serve` and `omnia mcp` when `ENGRAM_CLOUD_AUTOSYNC=1`. It implements the local-first invariant: all network I/O happens in its own goroutine and never holds locks shared with the SQLite write path.
 
 ### Data flow
 

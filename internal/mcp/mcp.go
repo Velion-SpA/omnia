@@ -1,16 +1,16 @@
-// Package mcp implements the Model Context Protocol server for Engram.
+// Package mcp implements the Model Context Protocol server for Omnia.
 //
 // This exposes memory tools via MCP stdio transport so ANY agent
-// (OpenCode, Claude Code, Cursor, Windsurf, etc.) can use Engram's
+// (OpenCode, Claude Code, Cursor, Windsurf, etc.) can use Omnia's
 // persistent memory just by adding it as an MCP server.
 //
 // Tool profiles allow agents to load only the tools they need:
 //
-//	engram mcp                    → all 19 tools (default)
-//	engram mcp --tools=agent      → 15 tools agents actually use (per skill files)
-//	engram mcp --tools=admin      → 4 tools for TUI/CLI (delete, stats, timeline, merge)
-//	engram mcp --tools=agent,admin → combine profiles
-//	engram mcp --tools=mem_save,mem_search → individual tool names
+//	omnia mcp                    → all 19 tools (default)
+//	omnia mcp --tools=agent      → 15 tools agents actually use (per skill files)
+//	omnia mcp --tools=admin      → 4 tools for TUI/CLI (delete, stats, timeline, merge)
+//	omnia mcp --tools=agent,admin → combine profiles
+//	omnia mcp --tools=mem_save,mem_search → individual tool names
 package mcp
 
 import (
@@ -36,7 +36,7 @@ const sourceProcessOverride = "process_override"
 // MCPConfig holds configuration for the MCP server.
 type MCPConfig struct {
 	// DefaultProject is a trusted process-level project override supplied by
-	// long-lived MCP hosts (for example, `engram mcp --project NAME` or
+	// long-lived MCP hosts (for example, `omnia mcp --project NAME` or
 	// ENGRAM_PROJECT). When set, it is used before cwd detection for MCP
 	// auto-resolution; per-call project arguments remain separately validated.
 	DefaultProject string
@@ -170,10 +170,10 @@ func NewServer(s *store.Store) *server.MCPServer {
 	return NewServerWithConfig(s, MCPConfig{}, nil)
 }
 
-// serverInstructions tells MCP clients when to use Engram's tools.
+// serverInstructions tells MCP clients when to use Omnia's tools.
 // 7 core tools are eager (always in context). The rest are deferred
 // and require ToolSearch to load.
-const serverInstructions = `Engram provides persistent memory that survives across sessions and compactions.
+const serverInstructions = `Omnia provides persistent memory that survives across sessions and compactions.
 
 CORE TOOLS (always available — use without ToolSearch):
   mem_save — save decisions, bugs, discoveries, conventions PROACTIVELY (do not wait to be asked)
@@ -235,7 +235,7 @@ func NewServerWithConfig(s *store.Store, cfg MCPConfig, allowlist map[string]boo
 
 func newServerWithActivity(s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) *server.MCPServer {
 	srv := server.NewMCPServer(
-		"engram",
+		"omnia",
 		"0.1.0",
 		server.WithToolCapabilities(true),
 		server.WithInstructions(serverInstructions),
@@ -795,9 +795,9 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 	if shouldRegister("mem_doctor", allowlist) {
 		srv.AddTool(
 			mcp.NewTool("mem_doctor",
-				mcp.WithDescription("Run read-only operational diagnostics. Returns the same structured envelope as `engram doctor --json`."),
+				mcp.WithDescription("Run read-only operational diagnostics. Returns the same structured envelope as `omnia doctor --json`."),
 				mcp.WithDeferLoading(true),
-				mcp.WithTitleAnnotation("Run Engram Doctor"),
+				mcp.WithTitleAnnotation("Run Omnia Doctor"),
 				mcp.WithReadOnlyHintAnnotation(true),
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
@@ -867,7 +867,7 @@ Re-judging an already-judged ID overwrites the verdict (deliberate revision).`),
 	if shouldRegister("mem_compare", allowlist) {
 		srv.AddTool(
 			mcp.NewTool("mem_compare",
-				mcp.WithDescription(`Persist a semantic verdict you have already judged externally (with your LLM) into Engram.
+				mcp.WithDescription(`Persist a semantic verdict you have already judged externally (with your LLM) into Omnia.
 
 WHEN TO CALL: After you have evaluated two memories and reached a verdict, call mem_compare to PERSIST that verdict into the relation store. You do the judgment; mem_compare records it.
 
@@ -1855,7 +1855,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		}
 
 		// Honour process-level project override (cfg.DefaultProject) set via
-		// ENGRAM_PROJECT or `engram mcp --project` (#403/#413). Falls back to cwd
+		// OMNIA_PROJECT or `omnia mcp --project` (#403/#413). Falls back to cwd
 		// detection when no override is configured.
 		detRes, err := resolveWriteProjectWithProcessOverride(cfg.DefaultProject)
 		if err != nil {
@@ -2082,7 +2082,7 @@ func handleJudge(s *store.Store, activity *SessionActivity) server.ToolHandlerFu
 // observations externally; this handler persists the verdict via JudgeBySemantic.
 //
 // Tool description contract (REQ-011, Design §9):
-// "Persist a semantic verdict you have already judged externally into Engram.
+// "Persist a semantic verdict you have already judged externally into Omnia.
 // Accepts int IDs for both observations, resolves them to sync_ids, then
 // calls JudgeBySemantic. Returns the persisted relation's sync_id."
 func handleCompare(s *store.Store, _ *SessionActivity) server.ToolHandlerFunc {

@@ -182,7 +182,7 @@ func ErrorReport(project string, err error) Report {
 			Message:              err.Error(),
 			Why:                  "Doctor could not run the requested diagnostic safely.",
 			Evidence:             mustJSON(map[string]any{"error": err.Error()}),
-			SafeNextStep:         "Run `engram doctor` without --check to list registered diagnostics.",
+			SafeNextStep:         "Run `omnia doctor` without --check to list registered diagnostics.",
 			RequiresConfirmation: false,
 		}},
 	}

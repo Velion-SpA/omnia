@@ -27,7 +27,7 @@ Scope is a **search and filter signal**, not a privacy boundary. Concretely:
 
 ### What scope does NOT do today
 
-Scope **does not filter sync**. Sync operates by **project/session association**, not by scope: when a project is enrolled for cloud sync (or when you run `engram sync` locally), both `project` and `personal` observations of that project are exported and shared with whoever has access to the sync target.
+Scope **does not filter sync**. Sync operates by **project/session association**, not by scope: when a project is enrolled for cloud sync (or when you run `omnia sync` locally), both `project` and `personal` observations of that project are exported and shared with whoever has access to the sync target.
 
 If you need true isolation for personal notes, two workarounds work today:
 
@@ -106,7 +106,7 @@ The mechanics are already in place; what teams need is a written agreement. Thre
 Two flows move observations off your machine:
 
 - **Engram Cloud autosync.** When a project is enrolled and autosync is enabled, mutations push to the cloud server. See [`docs/AGENT-SETUP.md`](AGENT-SETUP.md#cloud-autosync-toggle) for the toggle.
-- **Local `engram sync`.** Exports project-scoped chunks to `.engram/` for sharing via git or any file-based transport.
+- **Local `omnia sync`.** Exports project-scoped chunks to `.engram/` for sharing via git or any file-based transport.
 
 Both flows export observations of the target project regardless of their scope. `personal` does not stay local automatically. The recommended pattern today:
 

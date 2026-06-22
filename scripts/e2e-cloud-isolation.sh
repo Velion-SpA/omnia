@@ -29,7 +29,7 @@ dropdb --if-exists "${DB}" 2>/dev/null || true
 createdb "${DB}"
 
 echo "==> build cloud binary"
-( cd "${ROOT}" && go build -o "${BIN}" ./cmd/engram )
+( cd "${ROOT}" && go build -o "${BIN}" ./cmd/omnia )
 
 echo "==> launch cloud server (auth mode)"
 ENGRAM_DATABASE_URL="postgres://${PGUSER_E2E}@localhost:5432/${DB}?sslmode=disable" \

@@ -2,7 +2,7 @@
 
 # Plugins
 
-> Deferred scope note: plugin-level automatic cloud enrollment/login/upgrade orchestration is not part of this rollout yet. Current cloud flows are CLI-driven (`engram cloud ...`).
+> Deferred scope note: plugin-level automatic cloud enrollment/login/upgrade orchestration is not part of this rollout yet. Current cloud flows are CLI-driven (`omnia cloud ...`).
 >
 > Validation boundary (current): plugin scripts are validated for memory/session workflows, not as cloud bootstrap orchestrators. Use CLI for cloud config/auth/enrollment/upgrade.
 
@@ -18,26 +18,26 @@ For [OpenCode](https://opencode.ai) users, a thin TypeScript plugin adds enhance
 
 ```bash
 # Install via engram (recommended — works from Homebrew or binary install)
-engram setup opencode
+omnia setup opencode
 
 # Or manually: cp plugin/opencode/engram.ts ~/.config/opencode/plugins/
 ```
 
-The plugin auto-starts the HTTP server if it's not already running — no manual `engram serve` needed.
+The plugin auto-starts the HTTP server if it's not already running — no manual `omnia serve` needed.
 
 > **Local model compatibility:** The plugin works with all models, including local ones served via llama.cpp, Ollama, or similar. The Memory Protocol is concatenated into the existing system prompt (not added as a separate system message), so models with strict Jinja templates (Qwen, Mistral/Ministral) work correctly.
 
 ### What the Plugin Does
 
 The plugin:
-- **Auto-starts** the engram server if not running
+- **Auto-starts** the omnia server if not running
 - **Auto-imports** git-synced memories from `.engram/manifest.json` if present in the project
 - **Creates sessions** on-demand via `ensureSession()` (resilient to restarts/reconnects)
 - **Injects the Memory Protocol** into the agent's system prompt via `chat.system.transform` — strict rules for when to save, when to search, and a mandatory session close protocol. The protocol is concatenated into the existing system message (not pushed as a separate one), ensuring compatibility with models that only accept a single system block (Qwen, Mistral/Ministral via llama.cpp, etc.)
 - **Injects previous session context** into the compaction prompt
 - **Instructs the compressor** to tell the new agent to persist the compacted summary via `mem_session_summary`
 - **Strips `<private>` tags** before sending data
-- **Enables** `opencode-subagent-statusline` in `tui.json` or `tui.jsonc` during `engram setup opencode`, adding a live sub-agent monitor to OpenCode's sidebar/home footer. To disable it later, remove `"opencode-subagent-statusline"` from the `"plugin"` array in your TUI config and restart OpenCode.
+- **Enables** `opencode-subagent-statusline` in `tui.json` or `tui.jsonc` during `omnia setup opencode`, adding a live sub-agent monitor to OpenCode's sidebar/home footer. To disable it later, remove `"opencode-subagent-statusline"` from the `"plugin"` array in your TUI config and restart OpenCode.
 
 **No raw tool call recording** — the agent handles memory through curated saves such as `mem_save` and `mem_session_summary`. `mem_save` may best-effort attach prompt context, but only when that prompt was already fed to the same MCP process lifecycle.
 
@@ -72,7 +72,7 @@ claude plugin marketplace add Gentleman-Programming/engram
 claude plugin install engram
 
 # Or via engram binary (works from Homebrew or binary install)
-engram setup claude-code
+omnia setup claude-code
 
 # Or for local development/testing from the repo
 claude --plugin-dir ./plugin/claude-code
@@ -82,7 +82,7 @@ claude --plugin-dir ./plugin/claude-code
 
 | Feature | Bare MCP | Plugin |
 |---------|----------|--------|
-| MCP tools available | 19 default (`engram mcp`) | 15 agent-profile tools (`engram mcp --tools=agent`) |
+| MCP tools available | 19 default (`omnia mcp`) | 15 agent-profile tools (`omnia mcp --tools=agent`) |
 | Session tracking (auto-start) | ✗ | ✓ |
 | Auto-import git-synced memories | ✗ | ✓ |
 | Compaction recovery | ✗ | ✓ |
@@ -160,7 +160,7 @@ PowerShell local override/testing example for locked-down Windows endpoints:
 
 ## MCP Tool Reference — mem_judge
 
-`mem_judge` is available in the `agent` profile (`engram mcp --tools=agent`). It is NOT exposed in the `admin` profile.
+`mem_judge` is available in the `agent` profile (`omnia mcp --tools=agent`). It is NOT exposed in the `admin` profile.
 
 ### Purpose
 
@@ -268,21 +268,21 @@ If no current prompt is available to the MCP process, or if best-effort prompt c
 
 Phase 3 adds an admin-facing observability layer over the conflict/relation system. This is NOT for end users — end users continue to interact with conflicts via the normal agent conversation flow (Phase 1). The tools below are for operators and maintainers who need to inspect or audit the `memory_relations` and `sync_apply_deferred` tables directly.
 
-### engram conflicts CLI
+### omnia conflicts CLI
 
-The `engram conflicts <sub-command>` command provides read and scan access to the conflict layer from the terminal. It is intended for maintainers, not for agents or end users.
+The `omnia conflicts <sub-command>` command provides read and scan access to the conflict layer from the terminal. It is intended for maintainers, not for agents or end users.
 
 | Sub-command | What it does |
 |-------------|-------------|
-| `engram conflicts list` | List `memory_relations` rows with optional `--project`, `--status`, `--since`, `--limit` filters |
-| `engram conflicts show <id>` | Show full detail for one relation row (source/target observation snippets) |
-| `engram conflicts stats` | Aggregate counts grouped by relation type and judgment status; includes deferred and dead queue sizes |
-| `engram conflicts scan` | Walk observations for a project, find conflict candidates, and (with `--apply`) insert new pending relation rows up to a `--max-insert` cap |
-| `engram conflicts deferred` | Inspect and replay rows in `sync_apply_deferred`; supports `--status`, `--inspect <sync_id>`, and `--replay` |
+| `omnia conflicts list` | List `memory_relations` rows with optional `--project`, `--status`, `--since`, `--limit` filters |
+| `omnia conflicts show <id>` | Show full detail for one relation row (source/target observation snippets) |
+| `omnia conflicts stats` | Aggregate counts grouped by relation type and judgment status; includes deferred and dead queue sizes |
+| `omnia conflicts scan` | Walk observations for a project, find conflict candidates, and (with `--apply`) insert new pending relation rows up to a `--max-insert` cap |
+| `omnia conflicts deferred` | Inspect and replay rows in `sync_apply_deferred`; supports `--status`, `--inspect <sync_id>`, and `--replay` |
 
 When `--project` is omitted, the command falls back to the cwd-detected project (same resolution as all other `engram` commands).
 
-`engram conflicts scan` also supports `--semantic` for LLM-judge semantic detection beyond FTS5 lexical candidates. This catches vocabulary-different concepts that share no keywords (e.g., "Hexagonal Architecture" vs "Ports and Adapters"). Set `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode` before running. Additional flags: `--concurrency N` (default 5), `--timeout-per-call N` seconds (default 60), `--max-semantic N` (default 100), `--yes` (skip confirmation).
+`omnia conflicts scan` also supports `--semantic` for LLM-judge semantic detection beyond FTS5 lexical candidates. This catches vocabulary-different concepts that share no keywords (e.g., "Hexagonal Architecture" vs "Ports and Adapters"). Set `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode` before running. Additional flags: `--concurrency N` (default 5), `--timeout-per-call N` seconds (default 60), `--max-semantic N` (default 100), `--yes` (skip confirmation).
 
 > **Subscription note**: `--semantic` uses your existing agent CLI quota (Claude Pro/Max, OpenCode subscription). Engram itself adds no extra cost — you pay only what your LLM provider charges for the prompts.
 
@@ -290,7 +290,7 @@ For the full HTTP API reference and CLI flag details, see [DOCS.md](../DOCS.md).
 
 ### HTTP endpoints
 
-All six `/conflicts/*` endpoints are served by `engram serve` on the local runtime (`127.0.0.1:7437`). They are not exposed on the cloud runtime. Full request/response documentation is in [DOCS.md](../DOCS.md).
+All six `/conflicts/*` endpoints are served by `omnia serve` on the local runtime (`127.0.0.1:7437`). They are not exposed on the cloud runtime. Full request/response documentation is in [DOCS.md](../DOCS.md).
 
 | Route | Purpose |
 |-------|---------|
@@ -305,7 +305,7 @@ All six `/conflicts/*` endpoints are served by `engram serve` on the local runti
 
 ## MCP Tool Reference — mem_compare
 
-`mem_compare` is available in the `agent` profile (`engram mcp --tools=agent`). It is NOT exposed in the `admin` profile.
+`mem_compare` is available in the `agent` profile (`omnia mcp --tools=agent`). It is NOT exposed in the `admin` profile.
 
 ### Purpose
 

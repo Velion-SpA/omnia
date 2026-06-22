@@ -15,7 +15,7 @@ RUN="/tmp/omnia-mc"
 mkdir -p "$RUN"
 
 echo "==> build engram binary"
-( cd "$ROOT" && go build -o "$BIN" ./cmd/engram )
+( cd "$ROOT" && go build -o "$BIN" ./cmd/omnia )
 
 # cloud_alias  port  db                       account-user      account-pass        project
 CLOUDS=(
