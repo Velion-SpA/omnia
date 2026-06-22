@@ -88,18 +88,40 @@ func TestResolveExplicitWins(t *testing.T) {
 	}
 }
 
-func TestResolveIsPureAndNeverMigrates(t *testing.T) {
+func TestResolvePrefersOmniaWhenBothExist(t *testing.T) {
 	home := t.TempDir()
-	// A legacy dir exists. Pure Resolve must NOT migrate it — it just reports
-	// the canonical ~/.omnia path.
+	// Both dirs exist → the canonical ~/.omnia wins.
+	writeFile(t, filepath.Join(home, ".omnia", "omnia.db"), "NEW")
+	writeFile(t, filepath.Join(home, ".engram", "engram.db"), "OLD")
+	if got := resolveWithHome("", home); got != filepath.Join(home, ".omnia") {
+		t.Errorf("dir = %q, want ~/.omnia", got)
+	}
+}
+
+func TestResolveUsesLegacyInPlaceWhenOnlyLegacy(t *testing.T) {
+	home := t.TempDir()
+	// Only a legacy ~/.engram exists → use it IN PLACE: no copy, no ~/.omnia.
 	writeFile(t, filepath.Join(home, ".engram", "engram.db"), "OLD")
 
 	got := resolveWithHome("", home)
-	if got != filepath.Join(home, ".omnia") {
+	if got != filepath.Join(home, ".engram") {
+		t.Errorf("dir = %q, want ~/.engram (in place)", got)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".omnia")); !os.IsNotExist(err) {
+		t.Errorf("Resolve must not create ~/.omnia")
+	}
+	if _, err := os.Stat(filepath.Join(home, ".engram", "omnia.db")); !os.IsNotExist(err) {
+		t.Errorf("Resolve must not copy or rename inside the legacy dir")
+	}
+}
+
+func TestResolveDefaultsToOmniaWhenNeitherExists(t *testing.T) {
+	home := t.TempDir()
+	if got := resolveWithHome("", home); got != filepath.Join(home, ".omnia") {
 		t.Errorf("dir = %q, want ~/.omnia", got)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".omnia")); !os.IsNotExist(err) {
-		t.Errorf("Resolve must not create or migrate ~/.omnia")
+		t.Errorf("Resolve must not create ~/.omnia")
 	}
 }
 
@@ -116,71 +138,6 @@ func TestResolveLegacyEnvFallback(t *testing.T) {
 	t.Setenv("ENGRAM_DATA_DIR", "/tmp/legacy-pinned")
 	if got := resolveWithHome("", home); got != "/tmp/legacy-pinned" {
 		t.Errorf("legacy env dir = %q, want /tmp/legacy-pinned", got)
-	}
-}
-
-func TestAutoMigrateEnvOverrideSkips(t *testing.T) {
-	home := t.TempDir()
-	writeFile(t, filepath.Join(home, ".engram", "engram.db"), "OLD")
-	t.Setenv("OMNIA_DATA_DIR", "/tmp/pinned")
-
-	migrated, dir, err := autoMigrateWithHome(home)
-	if err != nil {
-		t.Fatalf("autoMigrateWithHome: %v", err)
-	}
-	if migrated || dir != "/tmp/pinned" {
-		t.Errorf("got (migrated=%v dir=%q), want (false, /tmp/pinned)", migrated, dir)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".omnia")); !os.IsNotExist(err) {
-		t.Errorf("env override must not trigger migration")
-	}
-}
-
-func TestAutoMigratePrefersExistingOmnia(t *testing.T) {
-	home := t.TempDir()
-	writeFile(t, filepath.Join(home, ".omnia", "omnia.db"), "NEW")
-	writeFile(t, filepath.Join(home, ".engram", "engram.db"), "OLD")
-
-	migrated, dir, err := autoMigrateWithHome(home)
-	if err != nil {
-		t.Fatalf("autoMigrateWithHome: %v", err)
-	}
-	if migrated || dir != filepath.Join(home, ".omnia") {
-		t.Errorf("got (migrated=%v dir=%q), want (false, ~/.omnia)", migrated, dir)
-	}
-	if got, _ := os.ReadFile(filepath.Join(home, ".omnia", "omnia.db")); string(got) != "NEW" {
-		t.Errorf("existing omnia.db clobbered: %q", got)
-	}
-}
-
-func TestAutoMigrateMigratesWhenOnlyLegacyExists(t *testing.T) {
-	home := t.TempDir()
-	writeFile(t, filepath.Join(home, ".engram", "engram.db"), "OLD")
-
-	migrated, dir, err := autoMigrateWithHome(home)
-	if err != nil {
-		t.Fatalf("autoMigrateWithHome: %v", err)
-	}
-	if !migrated || dir != filepath.Join(home, ".omnia") {
-		t.Errorf("got (migrated=%v dir=%q), want (true, ~/.omnia)", migrated, dir)
-	}
-	if data, _ := os.ReadFile(filepath.Join(home, ".omnia", "omnia.db")); string(data) != "OLD" {
-		t.Errorf("expected migrated omnia.db with legacy content, got %q", data)
-	}
-	// Source untouched.
-	if data, _ := os.ReadFile(filepath.Join(home, ".engram", "engram.db")); string(data) != "OLD" {
-		t.Errorf("legacy dir must be left untouched, got %q", data)
-	}
-}
-
-func TestAutoMigrateNoopWhenNeitherExists(t *testing.T) {
-	home := t.TempDir()
-	migrated, dir, err := autoMigrateWithHome(home)
-	if err != nil {
-		t.Fatalf("autoMigrateWithHome: %v", err)
-	}
-	if migrated || dir != filepath.Join(home, ".omnia") {
-		t.Errorf("got (migrated=%v dir=%q), want (false, ~/.omnia)", migrated, dir)
 	}
 }
 

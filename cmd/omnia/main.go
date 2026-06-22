@@ -659,17 +659,10 @@ func main() {
 		return
 	}
 
-	// One-time, non-destructive migration of a legacy ~/.engram directory to
-	// ~/.omnia, performed once at startup before the store is opened. The explicit
-	// `migrate` subcommand runs this itself, so skip the implicit pass there.
-	if os.Args[1] != "migrate" {
-		if migrated, _, err := datadir.AutoMigrate(); err != nil {
-			fatal(fmt.Errorf("omnia: %w\nyour data is safe in ~/.engram; free disk space and retry, or run `omnia migrate`", err))
-		} else if migrated {
-			fmt.Fprintf(os.Stderr, "omnia: migrated legacy data from ~/.engram to ~/.omnia (original left untouched as backup)\n")
-		}
-	}
-
+	// A legacy ~/.engram directory is used IN PLACE (see datadir.Resolve): the
+	// store opens it directly so a pre-rebrand install keeps working against its
+	// real data with no copy and no divergence. Moving to ~/.omnia is opt-in via
+	// the explicit `omnia migrate` subcommand; startup never migrates implicitly.
 	cfg, cfgErr := store.DefaultConfig()
 	if cfgErr != nil {
 		// Fallback: try to resolve home directory from environment variables

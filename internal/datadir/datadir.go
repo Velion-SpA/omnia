@@ -1,19 +1,21 @@
-// Package datadir owns resolution of the Omnia data directory and the one-time,
+// Package datadir owns resolution of the Omnia data directory and the explicit,
 // non-destructive migration from a legacy ~/.engram directory.
 //
 // Omnia was previously named "Engram" and stored everything under ~/.engram with
 // a database file named engram.db. After the rebrand the home is ~/.omnia and the
-// database is omnia.db. Real user memories still live in ~/.engram, so resolution
-// migrates them safely the first time Omnia runs — by COPYING, never moving, and
-// leaving ~/.engram completely untouched as the user's backup.
+// database is omnia.db. Real user memories still live in ~/.engram, so a
+// pre-rebrand install is used IN PLACE: resolution prefers ~/.omnia but
+// transparently falls back to an existing ~/.engram, reading and writing it
+// directly so the data never diverges. Moving to ~/.omnia is opt-in via the
+// explicit `omnia migrate` command, which COPIES (never moves) and leaves
+// ~/.engram untouched as a backup.
 //
 // Resolution order (see Resolve):
 //
 //  1. explicit argument (e.g. a --data-dir flag), if non-empty
 //  2. OMNIA_DATA_DIR (falls back to legacy ENGRAM_DATA_DIR via envx)
 //  3. ~/.omnia if it already exists
-//  4. ~/.omnia after migrating ~/.engram → ~/.omnia, when ~/.omnia is absent but
-//     ~/.engram exists
+//  4. legacy ~/.engram used in place, when ~/.omnia is absent but ~/.engram exists
 //  5. ~/.omnia (to be created by the caller) otherwise
 package datadir
 
@@ -48,16 +50,19 @@ const (
 // (and therefore without writing to the source).
 var dbFileSuffixes = []string{"", "-wal", "-shm"}
 
-// Resolve returns the Omnia data directory. It is PURE: it performs no
-// filesystem mutation and never migrates. Migration is a separate, explicit step
-// (see AutoMigrate) so that library callers and tests never trigger a copy of the
-// real ~/.engram simply by resolving the default path.
+// Resolve returns the Omnia data directory. It never mutates the filesystem: it
+// only stats candidate directories, never creating, copying, or migrating. A
+// legacy ~/.engram is therefore used IN PLACE — read and written directly — so a
+// pre-rebrand install keeps working against its real data with no copy and no
+// divergence. Moving to ~/.omnia is reserved for the explicit `omnia migrate`.
 //
 // Resolution order:
 //
 //  1. explicit argument, if non-empty
 //  2. OMNIA_DATA_DIR (or legacy ENGRAM_DATA_DIR)
-//  3. ~/.omnia  (the canonical default; AutoMigrate populates it when needed)
+//  3. ~/.omnia if it already exists
+//  4. legacy ~/.engram used in place, when only it exists
+//  5. ~/.omnia (the canonical default, to be created by the caller) otherwise
 func Resolve(explicit string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -77,51 +82,16 @@ func resolveWithHome(explicit, home string) string {
 	if home == "" {
 		return DirName
 	}
-	return filepath.Join(home, DirName)
-}
-
-// AutoMigrate performs the one-time, non-destructive migration of a legacy
-// ~/.engram directory to ~/.omnia, and returns the data directory to use.
-//
-// It is intended to be called ONCE at CLI startup, before the store is opened. It
-// only migrates when the user has not pinned a directory via OMNIA_DATA_DIR /
-// ENGRAM_DATA_DIR, ~/.omnia does not already exist, and ~/.engram does. In every
-// other case it is a no-op that simply reports the directory. The legacy
-// directory is only ever read; it is never modified or removed.
-//
-// The returned bool reports whether a migration was performed (so the caller can
-// print a one-line notice).
-func AutoMigrate() (migrated bool, dir string, err error) {
-	home, herr := os.UserHomeDir()
-	if herr != nil {
-		home = ""
-	}
-	return autoMigrateWithHome(home)
-}
-
-// autoMigrateWithHome is the testable core of AutoMigrate.
-func autoMigrateWithHome(home string) (bool, string, error) {
-	// A pinned directory wins and is never migrated into.
-	if env := strings.TrimSpace(envx.Get(DataDirEnv)); env != "" {
-		return false, env, nil
-	}
-	if home == "" {
-		return false, DirName, nil
-	}
-
 	omniaDir := filepath.Join(home, DirName)
-	legacyDir := filepath.Join(home, LegacyDirName)
-
-	if isDir(omniaDir) {
-		return false, omniaDir, nil
-	}
-	if isDir(legacyDir) {
-		if err := Migrate(legacyDir, omniaDir); err != nil {
-			return false, omniaDir, fmt.Errorf("migrate %s → %s: %w", legacyDir, omniaDir, err)
+	// Prefer the canonical ~/.omnia. When it does not yet exist but a legacy
+	// ~/.engram does, use the legacy dir in place (no copy) so a pre-rebrand
+	// install keeps working against its real data and never diverges.
+	if !isDir(omniaDir) {
+		if legacyDir := filepath.Join(home, LegacyDirName); isDir(legacyDir) {
+			return legacyDir
 		}
-		return true, omniaDir, nil
 	}
-	return false, omniaDir, nil
+	return omniaDir
 }
 
 // DBPath returns the database file to open inside dir. It prefers the canonical
