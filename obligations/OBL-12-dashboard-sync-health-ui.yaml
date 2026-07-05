@@ -1,0 +1,56 @@
+id: OBL-12
+title: Dashboard sync-health UI — render degraded / blocked / reason codes
+status: pending
+priority: P2
+blocks_homelab_test: false
+estimated_effort: S
+recommended_model: sonnet-5
+depends_on: []
+
+context: |
+  The dashboard never renders sync health. The cloud placement "pill" is binary
+  present/absent, and a target that is degraded/blocked with no chunks is SILENTLY
+  ABSENT from the dashboard (looks identical to never-configured). During the earlier
+  test this is exactly what caused confusion: a degraded target with no chunks showed
+  no badge at all. Health/reason codes are only visible via CLI and the HTTP status
+  endpoint. For a homelab where you watch state from the browser, surface it.
+
+current_state:
+  - claim: The dashboard sync page reads no lifecycle/reason data — only a log-file placeholder.
+    evidence: internal/dashboard/syncpage.templ:37; grep "degraded" internal/dashboard internal/cloud/clouddash = 0 hits
+  - claim: The cloud pill is present/absent only; a degraded+no-chunks target is excluded from CloudTargetKeys entirely.
+    evidence: internal/dashboard/cloudpresence.go:50-89 (cloudsByProject); internal/engramdb/db.go:131-159 (CloudTargetKeys requires healthy OR last_acked_seq>0 OR last_pulled_seq>0)
+  - claim: Lifecycle states and reason codes exist and are queryable.
+    evidence: internal/store/store.go:224-228 (idle/pending/running/healthy/degraded); MarkSync* set reason_code/reason_message; GET /sync/status at internal/server/server.go:873
+  - claim: sync_state row is visible via CLI (omnia cloud status, cloud.go:679-705) but not the dashboard.
+    evidence: cmd/omnia/cloud.go:679-705
+
+gap: |
+  Render per-target sync health (healthy/pending/running/degraded + reason_code +
+  last_error + last synced time) on the dashboard sync page, and make a degraded
+  target visible (e.g. a red/amber pill) instead of silently absent.
+
+tasks:
+  - Extend the local data source to expose per-target sync_state (lifecycle, reason_code, reason_message, last_error, last_acked_seq, last_pulled_seq, updated_at) — a read-only query alongside CloudTargetKeys.
+  - Update syncpage.templ to render a table/cards of targets with a health chip (green healthy / amber pending|running / red degraded|blocked) and the reason code + last error + relative last-synced time.
+  - Update the overview cloud pill (cloudsByProject) so a degraded/blocked target shows a distinct amber/red pill rather than disappearing — the operator must see "configured but unhealthy", not nothing.
+  - Regenerate templ (go run github.com/a-h/templ/cmd/templ@v0.3.1020 generate ./internal/dashboard/... ./internal/ui/...).
+  - Tests: a degraded target renders a visible unhealthy indicator; a healthy target renders green; reason codes surface.
+
+acceptance_criteria:
+  - A degraded/blocked sync target is visibly represented on the dashboard (not silently absent).
+  - The sync page shows lifecycle + reason for each configured target.
+
+verification:
+  - go build ./... && go test ./internal/dashboard/...
+  - Manual: force a target degraded (bad server URL), confirm the dashboard shows it as unhealthy with a reason.
+
+do_not_touch:
+  - The cloud-surface data source intentionally does NOT implement CloudTargetKeys (cloud dashboards show no pills by design, cloudpresence.go:20-24) — keep that; this obligation is about the LOCAL dashboard.
+
+references:
+  - internal/dashboard/syncpage.templ:37
+  - internal/dashboard/cloudpresence.go:20-24,50-89
+  - internal/engramdb/db.go:131-159
+  - internal/store/store.go:224-228,4103-4175
+  - cmd/omnia/cloud.go:679-705

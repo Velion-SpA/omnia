@@ -1,0 +1,57 @@
+id: OBL-02
+title: First-admin bootstrap + gate the open signup endpoint
+status: pending
+priority: P0
+blocks_homelab_test: true
+estimated_effort: M
+recommended_model: opus-4.8
+depends_on: [OBL-01]   # soft: user-lifecycle helps, but bootstrap can land first with a follow-up
+
+context: |
+  On a fresh server today the FIRST account is created by whoever first calls
+  POST /auth/signup — which is completely open, unauthenticated, and ungated. For a
+  homelab server reachable by two notebooks (and eventually the LAN), that is unsafe:
+  anyone who reaches the port can self-register. We need a deliberate first-admin
+  bootstrap (CLI) and the open signup must be gated after bootstrap.
+
+current_state:
+  - claim: POST /auth/signup is open to any network caller, no invite, no admin approval, no first-user-only flag.
+    evidence: internal/cloud/cloudserver/cloudserver.go:177-178 (route), internal/cloud/cloudserver/auth_routes.go:43-70 (handler), internal/cloud/auth/accounts.go:146-185 (Signup)
+  - claim: Re-signup with an existing username silently updates the email (ON CONFLICT DO UPDATE).
+    evidence: internal/cloud/cloudstore/cloudstore.go:94-108 (CreateUser, line 101)
+  - claim: Operator identity (OMNIA_CLOUD_ADMIN) is a separate env shared-secret, never a cloud_users row.
+    evidence: cmd/omnia/cloud.go:64,74; internal/cloud/config.go:18,49-51
+  - claim: The CLI signup wrapper just POSTs to the same open endpoint, no first-user semantics.
+    evidence: cmd/omnia/cloud_login.go:86-152 (cmdCloudSignup)
+
+gap: |
+  No CLI to create the first managed admin against local runtime storage, and no
+  gate that closes/limits open signup once at least one user (or the first admin)
+  exists.
+
+tasks:
+  - Add `omnia cloud bootstrap-admin --username U [--password P] [--issue-token]` that runs against the server's OWN storage (not over HTTP) — it must be runnable on the server host by the operator. It creates the first managed admin user and, with --issue-token, prints a managed token ONCE (reuse OBL-01 issuance). Model after upstream's first-admin bootstrap.
+  - Gate signup: after bootstrap (or once any cloud_users row exists), POST /auth/signup must be either (a) disabled by default and re-enabled only via an env flag OMNIA_CLOUD_OPEN_SIGNUP=1, or (b) require an admin-issued invite. Pick (a) for simplicity; document it. Keep it open only in insecure dev mode.
+  - Remove the silent email-overwrite on username conflict for signup (return ErrAccountExists cleanly; do not mutate the existing row).
+  - Make bootstrap idempotent-safe: refuse to create a second "first admin" if one already exists (clear message telling the operator to use the admin API instead).
+  - Tests: bootstrap creates admin; second bootstrap refused; signup rejected when open-signup disabled; signup allowed with the flag; conflict no longer overwrites email.
+
+acceptance_criteria:
+  - A fresh server can be brought up with exactly one admin via CLI, no open HTTP signup required.
+  - With open-signup disabled (default), POST /auth/signup returns a clear 403/409, not a new account.
+  - Re-running bootstrap does not create a duplicate/again-privileged account.
+
+verification:
+  - go build ./... && go test ./internal/cloud/... ./cmd/omnia/...
+  - Manual on a scratch Postgres: bootstrap-admin, confirm login works, confirm anonymous signup is refused.
+
+do_not_touch:
+  - Insecure dev mode behavior (OMNIA_CLOUD_INSECURE_NO_AUTH) — signup routes already don't register there (cloudserver.go:177-198 gate on s.account != nil).
+  - The OMNIA_CLOUD_ADMIN operator-token dashboard path (that's OBL-03's concern).
+
+references:
+  - internal/cloud/cloudserver/cloudserver.go:177-198
+  - internal/cloud/cloudserver/auth_routes.go:43-70
+  - internal/cloud/auth/accounts.go:146-185
+  - internal/cloud/cloudstore/cloudstore.go:94-108
+  - cmd/omnia/cloud_login.go:86-152

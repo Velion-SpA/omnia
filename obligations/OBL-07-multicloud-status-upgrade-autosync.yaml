@@ -1,0 +1,61 @@
+id: OBL-07
+title: Thread --cloud-name through status / upgrade / autosync
+status: pending
+priority: P2
+blocks_homelab_test: false
+estimated_effort: M
+recommended_model: sonnet-5
+depends_on: [OBL-06]
+tags: [cloud, multicloud, client, autosync]
+
+context: |
+  Several client paths are hard-wired to the DEFAULT cloud only because they call
+  resolveCloudRuntimeConfig(cfg), which always passes alias empty (and always applies
+  env overrides). So omnia cloud status, all omnia cloud upgrade subcommands, and the
+  in-process autosync loop cannot target a non-default alias. Autosync can only ever
+  sync the single default cloud — it does not iterate cloud.json. Incomplete for a
+  multi-cloud homelab.
+
+current_state: |
+  - resolveCloudRuntimeConfig always uses alias empty with env override always on.
+    evidence: cmd/omnia/main.go:452-454
+  - cmdCloudStatus and all cmdCloudUpgrade use that default-only resolver.
+    evidence: cmd/omnia/cloud.go (status ~679-705, upgrade subcommands)
+  - Autosync is single-cloud only; TargetKey defaults to "cloud", alias never threaded.
+    evidence: cmd/omnia/main.go:864-913; internal/cloud/autosync/manager.go:134-148
+  - The env-override footgun applies to all these default-only callers.
+    evidence: cmd/omnia/main.go:456-495, 1728-1733
+  - Flag-name inconsistency: config/login/refresh use --cloud; enroll and sync use
+    --cloud-name. evidence: cmd/omnia/cloud.go (config/login), cmd/omnia/main.go (sync)
+
+gap: |
+  status/upgrade/autosync should support choosing an alias (or iterating all), and
+  autosync should optionally fan out to all configured clouds (requires OBL-06's
+  per-alias queue to actually deliver).
+
+tasks: |
+  1. Add --cloud-name to omnia cloud status and the omnia cloud upgrade subcommands.
+     When omitted: iterate-all for status (show every cloud's health); keep default for
+     upgrade unless --all is passed.
+  2. Make autosync alias-aware: allow OMNIA_CLOUD_AUTOSYNC to drive per-alias managers
+     (one per configured cloud) OR a single manager that fans out. REQUIRES OBL-06.
+  3. Resolve the flag-name inconsistency (see OBL-11): standardize on --cloud-name
+     everywhere, keep --cloud as a hidden back-compat alias.
+  4. Tests: status shows per-alias health for two clouds; autosync with two aliases
+     delivers to both (integration, post-OBL-06).
+
+acceptance_criteria: |
+  - omnia cloud status reports health per configured cloud, not just the default.
+  - Autosync can keep more than one cloud in sync when configured (after OBL-06).
+
+verification: |
+  - go build ./... && go test ./cmd/omnia/... ./internal/cloud/autosync/...
+
+do_not_touch: |
+  - The documented env-override footgun semantics for NAMED aliases (named aliases must
+    stay immune to env override — main.go:1728-1733); only extend, never weaken.
+
+references: |
+  - cmd/omnia/main.go:452-495,864-913,1728-1733
+  - internal/cloud/autosync/manager.go:134-148,301-431
+  - cmd/omnia/cloud.go (status/upgrade subcommands)

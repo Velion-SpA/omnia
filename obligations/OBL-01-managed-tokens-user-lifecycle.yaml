@@ -1,0 +1,107 @@
+id: OBL-01
+title: Managed tokens + user lifecycle (hashed+pepper, shown-once, revocation, disable)
+status: pending
+priority: P1
+blocks_homelab_test: false
+estimated_effort: XL
+recommended_model: opus-4.8
+depends_on: []
+tags: [security, cloud, auth, tokens, v1.18.0-parity]
+
+context: |
+  This is the exact gap upstream Engram Cloud v1.18.0 closed. Omnia's cloud auth today
+  has three structural weaknesses:
+    1. The sync bearer is a single static shared secret held only in process memory —
+       never persisted, never hashed, no pepper.
+    2. Account tokens are stateless HMAC blobs with a 24h TTL and NO server-side
+       revocation. The only way to invalidate one is to rotate OMNIA_JWT_SECRET, which
+       also kills every dashboard session.
+    3. A user cannot be disabled: cloud_users has no lifecycle column, there is no
+       endpoint to disable, and the per-request authorization path NEVER touches the
+       database, so even adding a column would not be enforced.
+  Goal: introduce managed per-user tokens stored ONLY as hashes (with a dedicated
+  pepper), shown once at issuance, revocable, and rejected at runtime when the token is
+  revoked or the owning user is disabled. Preserve the legacy shared-token path during
+  migration (exactly as upstream did).
+
+current_state: |
+  - Sync bearer validated by constant-time compare against one in-memory secret;
+    account tokens also accepted on sync routes.
+    evidence: internal/cloud/auth/auth.go:333-367 (Authorize/AuthorizeAccount),
+    set via internal/cloud/auth/auth.go:194-196 (SetBearerToken)
+  - The shared secret is never stored in Postgres and never hashed; no pepper exists
+    anywhere. evidence: internal/cloud/auth/auth.go:28 (expectedToken field);
+    repo-wide grep for pepper / ENGRAM_CLOUD_TOKEN_PEPPER = 0 hits
+  - Account tokens are custom HMAC blobs, 24h fixed TTL, no revocation, no token table.
+    evidence: internal/cloud/auth/accounts.go:70-144, accounts.go:28 (accountTokenTTL);
+    userStore has only Create/GetByUsername/GetByEmail (accounts.go:57-61, cloudstore.go:94-140)
+  - cloud_users has NO disabled/active/deleted_at column; auth path never re-queries DB
+    per request. evidence: internal/cloud/cloudstore/cloudstore.go:533-539 (schema);
+    internal/cloud/auth/auth.go:343-367 never calls the store
+  - Refresh re-signs without any DB check that the user is still allowed.
+    evidence: internal/cloud/auth/accounts.go:252-258 (Refresh)
+
+gap: |
+  Missing: a token table (id, user_id, token_hash, created_at, revoked_at,
+  last_used_at), pepper-based hashing, one-time display at issuance, a per-request
+  runtime check that the presented managed token is present + not revoked and owned by
+  an enabled user, plus a disabled_at column on cloud_users and enforcement of it.
+
+tasks: |
+  1. Add migration cloud_tokens(id BIGSERIAL PK, user_id BIGINT NOT NULL REFERENCES
+     cloud_users(id), token_hash TEXT NOT NULL UNIQUE, label TEXT, created_at, revoked_at,
+     last_used_at). Add to the idempotent migrate() alongside the other
+     CREATE TABLE IF NOT EXISTS blocks (internal/cloud/cloudstore/cloudstore.go:531+).
+  2. Add disabled_at TIMESTAMPTZ NULL to cloud_users via the guarded ALTER pattern
+     already used in migrate() (information_schema.columns existence check).
+  3. Add a token pepper: read OMNIA_CLOUD_TOKEN_PEPPER (legacy ENGRAM_CLOUD_TOKEN_PEPPER
+     via envx.Get). Hash = HMAC-SHA256(pepper, rawToken) hex. Store ONLY the hash. Boot
+     MUST fail if managed tokens are enabled but pepper is empty/default (mirror the
+     JWT-secret gate at cmd/omnia/cloud.go:1001-1010).
+  4. Implement issuance: generate a high-entropy random token (>=32 bytes base64url),
+     return the RAW token to the caller EXACTLY ONCE, persist only its hash. Issuance MUST
+     be atomic with an audit insert (OBL-05) in the same tx — a failed audit write rolls
+     back the token row (the "no live unaudited credential" guarantee).
+  5. Implement runtime validation in the sync auth path: on a Bearer that is not the
+     legacy shared secret and not a self-verifying account token, look up token_hash in
+     cloud_tokens; reject if absent, revoked_at IS NOT NULL, or the owning user has
+     disabled_at IS NOT NULL. Update last_used_at (best-effort). Wire into
+     auth.go AuthorizeAccount so it runs on every sync request.
+  6. Implement revocation: POST /admin/tokens/{id}/revoke (managed-admin only) + store
+     method RevokeToken(id). A disabled user's tokens are rejected even without explicit
+     revoke (check disabled_at at validation time).
+  7. Implement disable/enable user: store methods SetUserDisabled(userID, bool) + admin
+     endpoints. A disabled user cannot receive newly issued tokens (guard at issuance).
+  8. Keep the legacy shared-token path (OMNIA_CLOUD_TOKEN) working unchanged when
+     configured, so existing single-tenant deployments still authenticate during migration.
+  9. Tests: hash round-trip; pepper-missing boot rejection; revoked-token rejection;
+     disabled-user rejection at runtime; disabled-user cannot mint; shown-once (raw token
+     never re-derivable from stored hash).
+
+acceptance_criteria: |
+  - A managed token authenticates a sync push/pull only while its user is enabled and
+    the token is not revoked.
+  - Revoking a token or disabling its user causes the NEXT request with that token to be
+    rejected (proves per-request DB enforcement exists).
+  - Stored token material is a hash; the raw token appears in exactly one response and is
+    never logged.
+  - Boot refuses to enable managed tokens without a non-default OMNIA_CLOUD_TOKEN_PEPPER.
+  - Legacy OMNIA_CLOUD_TOKEN shared-secret auth still works when configured.
+
+verification: |
+  - go build ./... && go vet ./... && go test ./internal/cloud/...
+  - Manual: issue a token, push (200), revoke it, push again (401); disable user, push
+    with a second still-un-revoked token (401).
+
+do_not_touch: |
+  - The account-token (JWT-style) format and the dashboard session codec — additive only.
+  - Cookie name engram_dashboard_token, existing table/column names, cloud.json wire format.
+  - LICENSE / Alan Buscaglia attribution.
+
+references: |
+  - internal/cloud/auth/auth.go:28,181-196,333-367
+  - internal/cloud/auth/accounts.go:57-61,70-144,252-258
+  - internal/cloud/cloudstore/cloudstore.go:94-140,531-539
+  - internal/cloud/cloudserver/cloudserver.go:170-198,206-229
+  - cmd/omnia/cloud.go:52,62,1001-1010
+  - internal/envx/envx.go:30-48

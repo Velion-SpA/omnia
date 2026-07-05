@@ -1,0 +1,57 @@
+id: OBL-03
+title: Dashboard operator privilege separation (sync bearer must not see all accounts)
+status: pending
+priority: P1
+blocks_homelab_test: false
+estimated_effort: M
+recommended_model: opus-4.8
+depends_on: []
+
+context: |
+  Finding from the audit: whoever holds the plain SYNC bearer secret
+  (OMNIA_CLOUD_TOKEN) can sign into the web dashboard's "operator token" field and
+  see EVERY account's projects — identical privilege to OMNIA_CLOUD_ADMIN. This is
+  intentional legacy single-tenant behavior, but on a multi-user homelab it means the
+  sync credential doubles as a god-mode dashboard credential. The designated admin
+  credential (OMNIA_CLOUD_ADMIN) should be the ONLY thing that grants operator
+  visibility. Bonus: there is dead code (isDashboardAdmin) that has the timing-safe
+  comparison guard but is never actually called on the live path.
+
+current_state:
+  - claim: The live visibility decision is dashboardSessionClaims -> dashboardVisibleProjects; operator=true if bearer==OMNIA_CLOUD_ADMIN OR if s.auth.Authorize(probe) succeeds (which the plain sync token also satisfies).
+    evidence: internal/cloud/cloudserver/cloudserver.go:362-390 (dashboardSessionClaims), 396-421 (dashboardVisibleProjects); intentional comment at 374-376
+  - claim: isDashboardAdmin (the constant-time-guarded function, security issue #350) is dead code — referenced only by its own definition and TestIsDashboardAdminComparisonGuard.
+    evidence: internal/cloud/cloudserver/cloudserver.go:322-339 (isDashboardAdmin); internal/cloud/cloudserver/cloudserver_test.go:1509-1565 (guard test)
+  - claim: Sync bearer accepted as operator because Authorize() accepts the shared secret.
+    evidence: internal/cloud/auth/auth.go:333-367
+
+gap: |
+  Operator dashboard visibility must be gated on the ADMIN credential only, not on the
+  sync bearer. Ideally route the live check through the already-guarded
+  isDashboardAdmin so the timing-safety fix is actually exercised.
+
+tasks:
+  - Change dashboardSessionClaims/dashboardVisibleProjects so operator=true requires the ADMIN credential path only (OMNIA_CLOUD_ADMIN), NOT a generic s.auth.Authorize(probe) success on the sync bearer.
+  - Route the operator check through isDashboardAdmin(r) (or fold its constant-time compare into the live path) so the dead-but-tested function becomes live; keep TestIsDashboardAdminComparisonGuard green.
+  - Preserve a compatibility switch for genuine single-tenant legacy setups: if no accounts/RBAC store is configured (pure legacy mode), keep the old behavior so we don't break existing single-token deployments. Only enforce the separation when the account/membership store is active (multi-tenant mode).
+  - Keep TestIsDashboardAdminComparisonGuard AND the existing separation test (the one that pins ENGRAM_CLOUD_TOKEN != ENGRAM_CLOUD_ADMIN) green; add a test asserting the sync bearer can NOT list other accounts' projects in multi-tenant mode.
+
+acceptance_criteria:
+  - In multi-tenant mode, presenting the sync bearer to the dashboard grants at most the projects that bearer's account is a member of — NOT all accounts.
+  - OMNIA_CLOUD_ADMIN still grants full operator visibility.
+  - Legacy single-tenant (no account store) behavior unchanged.
+  - isDashboardAdmin is now on the live path (not dead code).
+
+verification:
+  - go build ./... && go test ./internal/cloud/cloudserver/...
+  - Manual: with the two-cloud dev script, log into the dashboard using the sync token and confirm you do NOT see foreign accounts' projects; log in with the admin token and confirm you do.
+
+do_not_touch:
+  - The separation between OMNIA_CLOUD_TOKEN and OMNIA_CLOUD_ADMIN (never make the sync token the admin) — that regression is guarded by TestIsDashboardAdminComparisonGuard.
+  - Cookie name / session codec.
+
+references:
+  - internal/cloud/cloudserver/cloudserver.go:322-339,362-390,396-421
+  - internal/cloud/cloudserver/cloudserver_test.go:1509-1565
+  - internal/cloud/auth/auth.go:333-367
+  - internal/cloud/cloudserver/dashboard_mount.go:365-371 (operator-token dashboard field)
