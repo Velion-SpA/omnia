@@ -57,7 +57,7 @@ func (a *fakeAccountAuth) Login(username, password string) (string, *cloudstore.
 }
 
 func TestAuthRoutesSignupThenLogin(t *testing.T) {
-	srv := New(&fakeStore{}, &fakeAccountAuth{}, 0)
+	srv := New(&fakeStore{}, &fakeAccountAuth{}, 0, WithOpenSignup(true))
 	handler := srv.Handler()
 
 	signup := httptest.NewRequest("POST", "/auth/signup",
@@ -98,7 +98,7 @@ func TestAuthRoutesSignupThenLogin(t *testing.T) {
 }
 
 func TestAuthRoutesStatusCodes(t *testing.T) {
-	srv := New(&fakeStore{}, &fakeAccountAuth{}, 0)
+	srv := New(&fakeStore{}, &fakeAccountAuth{}, 0, WithOpenSignup(true))
 	handler := srv.Handler()
 
 	tests := []struct {
@@ -123,6 +123,43 @@ func TestAuthRoutesStatusCodes(t *testing.T) {
 				t.Fatalf("%s %s status = %d, want %d (body: %s)", "POST", tt.path, rec.Code, tt.want, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestSignupClosedByDefaultReturns403 verifies the OBL-02 default: without
+// WithOpenSignup, POST /auth/signup is refused with 403 and no account is created,
+// even for an otherwise-valid request.
+func TestSignupClosedByDefaultReturns403(t *testing.T) {
+	fake := &fakeAccountAuth{}
+	srv := New(&fakeStore{}, fake, 0) // no WithOpenSignup → closed by default
+	handler := srv.Handler()
+
+	req := httptest.NewRequest("POST", "/auth/signup",
+		strings.NewReader(`{"username":"mallory","email":"m@e.com","password":"supersecret"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("closed signup status = %d, want %d (body: %s)", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	if _, ok := fake.users["mallory"]; ok {
+		t.Fatal("closed signup must not create an account")
+	}
+}
+
+// TestSignupOpenWithFlagCreatesAccount verifies that WithOpenSignup(true) restores
+// self-registration (used by dev seeding via OMNIA_CLOUD_OPEN_SIGNUP=1).
+func TestSignupOpenWithFlagCreatesAccount(t *testing.T) {
+	srv := New(&fakeStore{}, &fakeAccountAuth{}, 0, WithOpenSignup(true))
+	handler := srv.Handler()
+
+	req := httptest.NewRequest("POST", "/auth/signup",
+		strings.NewReader(`{"username":"trinity","email":"t@e.com","password":"supersecret"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("open signup status = %d, want %d (body: %s)", rec.Code, http.StatusCreated, rec.Body.String())
 	}
 }
 

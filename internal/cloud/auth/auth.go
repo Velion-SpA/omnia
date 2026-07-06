@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -16,6 +17,13 @@ import (
 	"github.com/velion/omnia/internal/store"
 )
 
+// deviceToucher is the store seam for stamping a device's last_seen_at on each
+// authenticated device-bound request (OBL-08). *cloudstore.CloudStore satisfies
+// it; tests inject a fake. It is best-effort — errors never fail a request.
+type deviceToucher interface {
+	TouchDevice(ctx context.Context, id string) error
+}
+
 var ErrSecretTooShort = errors.New("jwt secret must be at least 32 bytes")
 var ErrBearerTokenNotConfigured = errors.New("cloud bearer token is not configured")
 var ErrInvalidDashboardSessionToken = errors.New("invalid dashboard session token")
@@ -25,6 +33,7 @@ type Service struct {
 	store         *cloudstore.CloudStore
 	accountStore  userStore
 	deviceStore   deviceRegistrar
+	deviceToucher deviceToucher
 	tokenStore    managedTokenStore
 	tokenPepper   []byte
 	expectedToken string
@@ -48,6 +57,10 @@ func NewService(store *cloudstore.CloudStore, jwtSecret string) (*Service, error
 	// Wire the device registrar when the backing store supports it.
 	if dr, ok := any(store).(deviceRegistrar); ok {
 		svc.deviceStore = dr
+	}
+	// Wire the device last_seen_at toucher when the backing store supports it.
+	if dt, ok := any(store).(deviceToucher); ok {
+		svc.deviceToucher = dt
 	}
 	// Wire the managed-token store when the backing store supports it. Managed
 	// tokens stay inert until a pepper is configured via SetTokenPepper.
@@ -368,6 +381,13 @@ func (s *Service) AuthorizeAccount(r *http.Request) (*AccountClaims, error) {
 		return nil, nil
 	}
 	if claims, err := s.ParseAccountToken(token); err == nil {
+		// Best-effort device activity stamp (OBL-08): a device-bound token records
+		// last_seen_at so the operator can see when a notebook last synced. Never
+		// fail the request on a stats write, and skip the toucher when the backing
+		// store is absent (e.g. token-only unit tests).
+		if deviceID := strings.TrimSpace(claims.DeviceID); deviceID != "" && s.deviceToucher != nil {
+			_ = s.deviceToucher.TouchDevice(r.Context(), deviceID)
+		}
 		return claims, nil
 	}
 	// Managed per-user token: attempted only when the feature is enabled (a

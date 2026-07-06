@@ -45,6 +45,16 @@ func (s *CloudServer) handleSignup(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]string{"error": "account service unavailable"})
 		return
 	}
+	// Open signup is closed by default (OBL-02): a LAN-reachable server must not let
+	// any caller self-register. Accounts are provisioned via `omnia cloud bootstrap-admin`
+	// (first admin) and the operator admin API thereafter. Set OMNIA_CLOUD_OPEN_SIGNUP=1
+	// to deliberately reopen self-signup.
+	if !s.openSignup {
+		jsonResponse(w, http.StatusForbidden, map[string]string{
+			"error": "open signup is disabled; ask an operator to provision your account (omnia cloud bootstrap-admin / admin API) or set OMNIA_CLOUD_OPEN_SIGNUP=1 to reopen self-signup",
+		})
+		return
+	}
 	var req signupRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAuthBodyBytes)).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})

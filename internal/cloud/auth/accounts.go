@@ -179,6 +179,11 @@ func (s *Service) Signup(username, email, password string) (*cloudstore.User, er
 	}
 	user, err := s.accountStore.CreateUser(username, email, string(hash))
 	if err != nil {
+		// A late unique-violation (race between the pre-check above and the INSERT)
+		// surfaces as a clean "account already exists" rather than an opaque 500.
+		if errors.Is(err, cloudstore.ErrUserExists) {
+			return nil, ErrAccountExists
+		}
 		return nil, fmt.Errorf("auth: create user: %w", err)
 	}
 	return user, nil

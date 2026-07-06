@@ -1,6 +1,6 @@
 id: OBL-02
 title: First-admin bootstrap + gate the open signup endpoint
-status: pending
+status: done
 priority: P0
 blocks_homelab_test: true
 estimated_effort: M

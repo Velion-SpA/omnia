@@ -78,6 +78,8 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			cloudserver.WithProjectAuthorizer(projectAuth),
 			cloudserver.WithDashboardAdminToken(cfg.AdminToken),
 			cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
+			// Open signup is closed by default (OBL-02); reopen only via explicit env.
+			cloudserver.WithOpenSignup(envBool("OMNIA_CLOUD_OPEN_SIGNUP")),
 		),
 		store: cs,
 	}, nil
@@ -178,12 +180,12 @@ func (c *cloudConfigV2) listClouds() []string {
 func cmdCloud(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: omnia cloud <subcommand> [options]")
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, signup, login, refresh, add, list, remove, default")
+		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap-admin, signup, login, refresh, devices, add, list, remove, default")
 		exitFunc(1)
 	}
 	if os.Args[2] == "--help" || os.Args[2] == "-h" || os.Args[2] == "help" {
 		fmt.Println("usage: omnia cloud <subcommand> [options]")
-		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade, repair, signup, login, refresh, add, list, remove, default")
+		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap-admin, signup, login, refresh, devices, add, list, remove, default")
 		return
 	}
 
@@ -200,12 +202,16 @@ func cmdCloud(cfg store.Config) {
 		cmdCloudUpgrade(cfg)
 	case "repair":
 		cmdCloudRepair()
+	case "bootstrap-admin":
+		cmdCloudBootstrapAdmin(cfg)
 	case "signup":
 		cmdCloudSignup(cfg)
 	case "login":
 		cmdCloudLogin(cfg)
 	case "refresh":
 		cmdCloudRefresh(cfg)
+	case "devices":
+		cmdCloudDevices(cfg)
 	case "add":
 		cmdCloudAdd(cfg)
 	case "list":
@@ -216,7 +222,7 @@ func cmdCloud(cfg store.Config) {
 		cmdCloudDefault(cfg)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown cloud command: %s\n", os.Args[2])
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, signup, login, refresh, add, list, remove, default")
+		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap-admin, signup, login, refresh, devices, add, list, remove, default")
 		exitFunc(1)
 	}
 }

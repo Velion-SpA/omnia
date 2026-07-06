@@ -57,6 +57,17 @@ func (f *fakeUserStore) CreateUser(username, email, passwordHash string) (*cloud
 	return u, nil
 }
 
+// TestSignupMapsUserExistsToAccountExists verifies that a late unique-violation
+// surfaced by the store as cloudstore.ErrUserExists (the race path, since the
+// ON CONFLICT upsert was removed) becomes a clean ErrAccountExists (OBL-02).
+func TestSignupMapsUserExistsToAccountExists(t *testing.T) {
+	svc := newAccountService(t)
+	svc.accountStore = &fakeUserStore{createErr: cloudstore.ErrUserExists}
+	if _, err := svc.Signup("neo", "neo@example.com", "supersecret"); !errors.Is(err, ErrAccountExists) {
+		t.Fatalf("expected ErrAccountExists, got %v", err)
+	}
+}
+
 func newAccountService(t *testing.T) *Service {
 	t.Helper()
 	svc, err := NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))

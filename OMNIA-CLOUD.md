@@ -19,8 +19,13 @@ Estado: probado end-to-end localmente (`scripts/e2e-cloud-isolation.sh`, 7/7).
   su `owner`.
 - Compatibilidad hacia atrás con el token único legacy (allowlist) intacta.
 
-Pendiente (no bloquea probar): scope por dispositivo (Fase 4), namespacing por cuenta para
-nombres de proyecto repetidos (Fase 5), refresh token (hoy hay que re-loguear cada 24h).
+- **Scope por dispositivo** (Fase 4) — cada device puede restringirse a ciertos proyectos;
+  se administra con `omnia cloud devices list|scope|revoke` (ver 3.1). `last_seen_at` registra
+  actividad por device.
+- **Bootstrap del primer admin** (`omnia cloud bootstrap-admin`) y signup cerrado por defecto.
+
+Pendiente (no bloquea probar): namespacing por cuenta para nombres de proyecto repetidos
+(Fase 5), refresh token (hoy hay que re-loguear cada 24h).
 
 ## 1. Levantar el cloud server en el homelab (Docker)
 
@@ -49,15 +54,36 @@ El esquema (cuentas, memberships, etc.) se migra solo al arrancar.
 
 ## 2. Crear cuentas y dar acceso
 
+> **Signup cerrado por defecto (OBL-02)**: en un server accesible por LAN, `POST /auth/signup`
+> ya **no** está abierto. Se provisiona el **primer admin** con la CLI (contra el storage del
+> propio server, sin HTTP) y de ahí en más se administran cuentas con el admin API. Si querés
+> re-abrir el self-signup deliberadamente (p. ej. para seeding en dev), poné
+> `ENGRAM_CLOUD_OPEN_SIGNUP=1` en el env del server.
+
+**Primer admin (en el host del server):**
+
+```bash
+# crea el primer admin contra el storage del server (mismo ENGRAM_DATABASE_URL).
+# Es idempotente: si ya existe alguna cuenta, se niega.
+omnia cloud bootstrap-admin --username benja --password '...'
+
+# opcional: además emite un managed token (se muestra UNA sola vez).
+# Requiere ENGRAM_CLOUD_MANAGED_TOKENS=1 y un ENGRAM_CLOUD_TOKEN_PEPPER no-default.
+omnia cloud bootstrap-admin --username benja --password '...' --issue-token
+```
+
+**Cuentas adicionales**: con signup cerrado, usá el admin API (operador, `ENGRAM_CLOUD_ADMIN`)
+o re-abrí signup temporalmente con `ENGRAM_CLOUD_OPEN_SIGNUP=1`. Con signup abierto:
+
 ```bash
 S=https://engram.tu-homelab        # o http://IP:18080 en LAN
 
-# crear las dos cuentas
-curl -X POST $S/auth/signup -H 'Content-Type: application/json' \
-  -d '{"username":"benja","email":"benja@velion","password":"..."}'
 curl -X POST $S/auth/signup -H 'Content-Type: application/json' \
   -d '{"username":"otro","email":"otro@...","password":"..."}'
 ```
+
+> Reintentar un signup con un username ya tomado ahora **falla limpio** (409) y **no** pisa el
+> email de la cuenta existente (antes lo sobrescribía en silencio).
 
 Cada cuenta se vuelve **owner** de un proyecto la primera vez que lo sincroniza (push).
 Para compartir un proyecto, el owner/admin agrega miembros:
@@ -85,6 +111,32 @@ omnia cloud login --username benja           # pide la contraseña; guarda el to
 
 A partir de ahí, cada sync se autentica como esa cuenta. Re-logueá cuando el token expire
 (24h) hasta que sumemos refresh.
+
+### 3.1. Scope por dispositivo (test de dos notebooks)
+
+Cada notebook se registra como un **device** al loguear con `--device`, y podés restringirlo a
+ciertos proyectos. El scope es **aditivo**: un device con scope vacío es *irrestricto* (ve todo
+lo que su cuenta puede ver); con scope no-vacío, solo esos proyectos (nunca otorga más de lo
+que el membership permite).
+
+```bash
+# en cada notebook, logueá ligando el token a un device con nombre
+omnia cloud login --username benja --device notebook-a
+omnia cloud login --username benja --device notebook-b   # en la otra máquina
+
+# administrar devices (usa el token de cuenta guardado en cloud.json)
+omnia cloud devices list                                  # nombre, id, scope, last_seen
+omnia cloud devices scope notebook-a --projects proj-trabajo
+omnia cloud devices scope notebook-b --projects proj-empresa
+omnia cloud devices scope notebook-a --projects ''        # '' = irrestricto (limpia el scope)
+omnia cloud devices revoke notebook-b
+```
+
+- `last_seen` refleja el último request autenticado de ese device (se actualiza en cada sync).
+- **Revocar** un device niega su scope **de inmediato** (fail-closed): a partir de ese momento
+  ninguna operación de proyecto con ese device pasa. El **token de cuenta** ya emitido para ese
+  device sigue válido hasta que expire (TTL 24h) o se refresque — el binding criptográfico
+  token↔device es un hardening opcional aparte, no requerido acá.
 
 ## 4. Probar el aislamiento
 

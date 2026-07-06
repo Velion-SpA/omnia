@@ -26,6 +26,10 @@ CLOUDS=(
 start_cloud() {
   local alias=$1 port=$2 db=$3 user=$4 pass=$5 project=$6
   echo "==> [$alias] fresh db + server on :$port"
+  # NOTE: open signup is closed by default (OBL-02). This dev harness seeds accounts
+  # via POST /auth/signup, so it sets ENGRAM_CLOUD_OPEN_SIGNUP=1 below to re-open it
+  # for these throwaway dev servers. Do NOT do this in production; use
+  # `omnia cloud bootstrap-admin` to provision the first admin instead.
   dropdb --if-exists "$db" 2>/dev/null || true
   createdb "$db"
   ENGRAM_DATABASE_URL="postgres://${PGUSER_MC}@localhost:5432/${db}?sslmode=disable" \
@@ -33,6 +37,7 @@ start_cloud() {
   ENGRAM_CLOUD_TOKEN="mc-${alias}-admin-token" \
   ENGRAM_CLOUD_ADMIN="mc-${alias}-dashboard-admin" \
   ENGRAM_CLOUD_ALLOWED_PROJECTS="*" \
+  ENGRAM_CLOUD_OPEN_SIGNUP="1" \
   ENGRAM_CLOUD_HOST="127.0.0.1" ENGRAM_PORT="$port" \
     "$BIN" cloud serve > "$RUN/$alias.log" 2>&1 &
   echo $! > "$RUN/$alias.pid"

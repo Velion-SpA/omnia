@@ -32,10 +32,13 @@ echo "==> build cloud binary"
 ( cd "${ROOT}" && go build -o "${BIN}" ./cmd/omnia )
 
 echo "==> launch cloud server (auth mode)"
+# Open signup is closed by default (OBL-02); this e2e test seeds accounts via
+# POST /auth/signup, so it re-opens it with ENGRAM_CLOUD_OPEN_SIGNUP=1.
 ENGRAM_DATABASE_URL="postgres://${PGUSER_E2E}@localhost:5432/${DB}?sslmode=disable" \
 ENGRAM_JWT_SECRET="e2e-jwt-secret-at-least-32-bytes-long-1234567890" \
 ENGRAM_CLOUD_TOKEN="e2e-admin-token" \
 ENGRAM_CLOUD_ALLOWED_PROJECTS="_legacy_unused" \
+ENGRAM_CLOUD_OPEN_SIGNUP="1" \
 ENGRAM_CLOUD_HOST="127.0.0.1" ENGRAM_PORT="${PORT}" \
   "${BIN}" cloud serve > "${LOG}" 2>&1 &
 SRV_PID=$!

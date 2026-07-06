@@ -7,16 +7,27 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/velion/omnia/internal/store"
 )
 
 // Device represents a registered device for an account.
 type Device struct {
-	ID            string   `json:"id"`
-	AccountID     string   `json:"account_id"`
-	Name          string   `json:"name"`
-	ScopeProjects []string `json:"scope_projects"`
+	ID            string     `json:"id"`
+	AccountID     string     `json:"account_id"`
+	Name          string     `json:"name"`
+	ScopeProjects []string   `json:"scope_projects"`
+	LastSeenAt    *time.Time `json:"last_seen_at,omitempty"`
+}
+
+// scanNullTime converts a sql.NullTime into an optional UTC *time.Time.
+func scanNullTime(v sql.NullTime) *time.Time {
+	if !v.Valid {
+		return nil
+	}
+	t := v.Time.UTC()
+	return &t
 }
 
 // GetOrCreateDevice upserts a device by (account_id, name). If the device
@@ -40,18 +51,20 @@ func (cs *CloudStore) GetOrCreateDevice(accountID, name string) (*Device, error)
         VALUES ($1, $2, '[]'::jsonb)
         ON CONFLICT (account_id, name) DO UPDATE
             SET account_id = EXCLUDED.account_id
-        RETURNING id::text, account_id, name, scope_projects`
+        RETURNING id::text, account_id, name, scope_projects, last_seen_at`
 
 	var d Device
 	var scopeRaw []byte
+	var lastSeen sql.NullTime
 	err := cs.db.QueryRowContext(context.Background(), q, accountID, name).
-		Scan(&d.ID, &d.AccountID, &d.Name, &scopeRaw)
+		Scan(&d.ID, &d.AccountID, &d.Name, &scopeRaw, &lastSeen)
 	if err != nil {
 		return nil, fmt.Errorf("cloudstore: get or create device: %w", err)
 	}
 	if err := json.Unmarshal(scopeRaw, &d.ScopeProjects); err != nil {
 		d.ScopeProjects = nil
 	}
+	d.LastSeenAt = scanNullTime(lastSeen)
 	return &d, nil
 }
 
@@ -64,11 +77,12 @@ func (cs *CloudStore) GetDevice(id string) (*Device, error) {
 	if id == "" {
 		return nil, fmt.Errorf("cloudstore: device id is required")
 	}
-	const q = `SELECT id::text, account_id, name, scope_projects FROM cloud_devices WHERE id::text = $1`
+	const q = `SELECT id::text, account_id, name, scope_projects, last_seen_at FROM cloud_devices WHERE id::text = $1`
 	var d Device
 	var scopeRaw []byte
+	var lastSeen sql.NullTime
 	err := cs.db.QueryRowContext(context.Background(), q, id).
-		Scan(&d.ID, &d.AccountID, &d.Name, &scopeRaw)
+		Scan(&d.ID, &d.AccountID, &d.Name, &scopeRaw, &lastSeen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -78,6 +92,7 @@ func (cs *CloudStore) GetDevice(id string) (*Device, error) {
 	if err := json.Unmarshal(scopeRaw, &d.ScopeProjects); err != nil {
 		d.ScopeProjects = nil
 	}
+	d.LastSeenAt = scanNullTime(lastSeen)
 	return &d, nil
 }
 
@@ -90,7 +105,7 @@ func (cs *CloudStore) ListDevicesForAccount(accountID string) ([]Device, error) 
 	if accountID == "" {
 		return nil, fmt.Errorf("cloudstore: account_id is required")
 	}
-	const q = `SELECT id::text, account_id, name, scope_projects FROM cloud_devices WHERE account_id = $1 ORDER BY id`
+	const q = `SELECT id::text, account_id, name, scope_projects, last_seen_at FROM cloud_devices WHERE account_id = $1 ORDER BY id`
 	rows, err := cs.db.QueryContext(context.Background(), q, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("cloudstore: list devices: %w", err)
@@ -100,15 +115,35 @@ func (cs *CloudStore) ListDevicesForAccount(accountID string) ([]Device, error) 
 	for rows.Next() {
 		var d Device
 		var scopeRaw []byte
-		if err := rows.Scan(&d.ID, &d.AccountID, &d.Name, &scopeRaw); err != nil {
+		var lastSeen sql.NullTime
+		if err := rows.Scan(&d.ID, &d.AccountID, &d.Name, &scopeRaw, &lastSeen); err != nil {
 			return nil, fmt.Errorf("cloudstore: scan device: %w", err)
 		}
 		if err := json.Unmarshal(scopeRaw, &d.ScopeProjects); err != nil {
 			d.ScopeProjects = nil
 		}
+		d.LastSeenAt = scanNullTime(lastSeen)
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// TouchDevice stamps last_seen_at = NOW() for the given device id. It is
+// best-effort: the caller (the authorize path) ignores the returned error so a
+// stats write never fails an authenticated request. A missing device is a no-op.
+func (cs *CloudStore) TouchDevice(ctx context.Context, id string) error {
+	if cs == nil || cs.db == nil {
+		return fmt.Errorf("cloudstore: not initialized")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("cloudstore: device id is required")
+	}
+	_, err := cs.db.ExecContext(ctx, `UPDATE cloud_devices SET last_seen_at = NOW() WHERE id::text = $1`, id)
+	if err != nil {
+		return fmt.Errorf("cloudstore: touch device: %w", err)
+	}
+	return nil
 }
 
 // SetDeviceScope replaces the scope_projects for a device. Projects are

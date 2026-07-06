@@ -11,12 +11,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/velion/omnia/internal/cloud"
 	"github.com/velion/omnia/internal/cloud/chunkcodec"
 	"github.com/velion/omnia/internal/store"
 	engramsync "github.com/velion/omnia/internal/sync"
-	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type CloudStore struct {
@@ -31,6 +31,12 @@ type CloudStore struct {
 
 var ErrChunkNotFound = errors.New("cloudstore: chunk not found")
 var ErrChunkConflict = errors.New("cloudstore: chunk id conflict")
+
+// ErrUserExists is returned by CreateUser when the username (or email) is already
+// taken. Unlike the previous ON CONFLICT DO UPDATE behaviour, a conflicting signup
+// no longer mutates the existing row — it fails cleanly so callers can surface an
+// "account already exists" error without silently overwriting the stored email.
+var ErrUserExists = errors.New("cloudstore: user already exists")
 
 func New(cfg cloud.Config) (*CloudStore, error) {
 	dsn := strings.TrimSpace(cfg.DSN)
@@ -95,16 +101,35 @@ func (cs *CloudStore) CreateUser(username, email, passwordHash string) (*User, e
 	if cs == nil || cs.db == nil {
 		return nil, fmt.Errorf("cloudstore: not initialized")
 	}
+	// Plain INSERT — no ON CONFLICT upsert. A username/email collision raises a
+	// unique violation, mapped to ErrUserExists, so the existing row is never
+	// mutated (previously the email was silently overwritten on username conflict).
 	const q = `
 		INSERT INTO cloud_users (username, email, password_hash)
 		VALUES ($1, $2, $3)
-		ON CONFLICT (username) DO UPDATE SET email = EXCLUDED.email
 		RETURNING id::text, username, email, password_hash`
 	var u User
 	if err := cs.db.QueryRowContext(context.Background(), q, strings.TrimSpace(username), strings.TrimSpace(email), passwordHash).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash); err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrUserExists
+		}
 		return nil, fmt.Errorf("cloudstore: create user: %w", err)
 	}
 	return &u, nil
+}
+
+// HasAnyUser reports whether at least one account exists in cloud_users. It backs
+// the one-time first-admin bootstrap: bootstrap refuses to run once any account
+// exists, so it cannot mint a second "first admin" (OBL-02).
+func (cs *CloudStore) HasAnyUser(ctx context.Context) (bool, error) {
+	if cs == nil || cs.db == nil {
+		return false, fmt.Errorf("cloudstore: not initialized")
+	}
+	var exists bool
+	if err := cs.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM cloud_users)`).Scan(&exists); err != nil {
+		return false, fmt.Errorf("cloudstore: check any user: %w", err)
+	}
+	return exists, nil
 }
 
 func (cs *CloudStore) GetUserByUsername(username string) (*User, error) {

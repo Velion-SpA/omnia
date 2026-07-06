@@ -1,6 +1,6 @@
 id: OBL-08
 title: Device management CLI + last_seen_at (drive the two-notebook per-device scope test)
-status: pending
+status: done
 priority: P0
 blocks_homelab_test: true
 estimated_effort: M

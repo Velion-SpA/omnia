@@ -61,6 +61,7 @@ type CloudServer struct {
 	account            AccountService
 	deviceStore        deviceScopeStore
 	dashboardAdmin     string
+	openSignup         bool
 	port               int
 	host               string
 	maxPushBodyBytes   int64
@@ -90,6 +91,19 @@ func WithProjectAuthorizer(authorizer ProjectAuthorizer) Option {
 func WithDashboardAdminToken(adminToken string) Option {
 	return func(s *CloudServer) {
 		s.dashboardAdmin = strings.TrimSpace(adminToken)
+	}
+}
+
+// WithOpenSignup controls whether the public POST /auth/signup endpoint accepts
+// new registrations. It defaults to false (closed): once the server is bootstrapped
+// with a first admin (see `omnia cloud bootstrap-admin`), anonymous self-signup is a
+// security hole on a LAN-reachable homelab. Set OMNIA_CLOUD_OPEN_SIGNUP=1 to reopen
+// it deliberately (e.g. for dev seeding). Insecure dev mode never registers the
+// signup route at all (the account service is absent), so this only affects
+// authenticated deployments.
+func WithOpenSignup(enabled bool) Option {
+	return func(s *CloudServer) {
+		s.openSignup = enabled
 	}
 }
 

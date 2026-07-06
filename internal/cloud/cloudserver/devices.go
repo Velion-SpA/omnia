@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/velion/omnia/internal/cloud/auth"
 	"github.com/velion/omnia/internal/cloud/cloudstore"
@@ -26,6 +27,9 @@ type deviceView struct {
 	AccountID     string   `json:"account_id"`
 	Name          string   `json:"name"`
 	ScopeProjects []string `json:"scope_projects"`
+	// LastSeenAt is the RFC3339 timestamp of the device's last authenticated
+	// request, or "" if it has never been seen (OBL-08).
+	LastSeenAt string `json:"last_seen_at,omitempty"`
 }
 
 func toDeviceView(d cloudstore.Device) deviceView {
@@ -33,7 +37,11 @@ func toDeviceView(d cloudstore.Device) deviceView {
 	if scope == nil {
 		scope = []string{}
 	}
-	return deviceView{ID: d.ID, AccountID: d.AccountID, Name: d.Name, ScopeProjects: scope}
+	lastSeen := ""
+	if d.LastSeenAt != nil {
+		lastSeen = d.LastSeenAt.UTC().Format(time.RFC3339)
+	}
+	return deviceView{ID: d.ID, AccountID: d.AccountID, Name: d.Name, ScopeProjects: scope, LastSeenAt: lastSeen}
 }
 
 // deviceMgr returns the store typed as a deviceManager, or (nil,false).
