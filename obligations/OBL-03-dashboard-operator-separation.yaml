@@ -1,6 +1,6 @@
 id: OBL-03
 title: Dashboard operator privilege separation (sync bearer must not see all accounts)
-status: pending
+status: done
 priority: P1
 blocks_homelab_test: false
 estimated_effort: M

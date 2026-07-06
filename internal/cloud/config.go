@@ -22,6 +22,11 @@ type Config struct {
 const DefaultJWTSecret = "engram-dev-jwt-secret-for-local-smoke-1234"
 const DefaultMaxPushBodyBytes int64 = 8 * 1024 * 1024
 
+// DefaultTokenPepper is the development-only sentinel for the managed-token
+// pepper (OBL-01). Booting with managed tokens enabled and this value (or an
+// empty pepper) is refused, mirroring the JWT-secret gate.
+const DefaultTokenPepper = "engram-dev-token-pepper-for-local-smoke"
+
 func DefaultConfig() Config {
 	return Config{
 		DSN:              "postgres://engram:engram_dev@localhost:5433/engram_cloud?sslmode=disable",
@@ -36,6 +41,14 @@ func DefaultConfig() Config {
 
 func IsDefaultJWTSecret(secret string) bool {
 	return strings.TrimSpace(secret) == DefaultJWTSecret
+}
+
+// IsDefaultTokenPepper reports whether the managed-token pepper is empty or the
+// development sentinel — either of which is refused at boot when managed tokens
+// are enabled.
+func IsDefaultTokenPepper(pepper string) bool {
+	p := strings.TrimSpace(pepper)
+	return p == "" || p == DefaultTokenPepper
 }
 
 func ConfigFromEnv() Config {

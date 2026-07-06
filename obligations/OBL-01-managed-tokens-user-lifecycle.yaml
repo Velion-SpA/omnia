@@ -1,6 +1,6 @@
 id: OBL-01
 title: Managed tokens + user lifecycle (hashed+pepper, shown-once, revocation, disable)
-status: pending
+status: done
 priority: P1
 blocks_homelab_test: false
 estimated_effort: XL

@@ -72,3 +72,14 @@ func TestIsDefaultJWTSecret(t *testing.T) {
 		}
 	})
 }
+
+func TestIsDefaultTokenPepper(t *testing.T) {
+	for _, weak := range []string{"", "   ", DefaultTokenPepper} {
+		if !IsDefaultTokenPepper(weak) {
+			t.Fatalf("expected %q to be treated as a default/weak pepper", weak)
+		}
+	}
+	if IsDefaultTokenPepper("a-strong-unique-pepper-value") {
+		t.Fatal("expected a custom pepper to be treated as non-default")
+	}
+}

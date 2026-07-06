@@ -62,6 +62,11 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 		authSvc.SetBearerToken(token)
 		authSvc.SetAllowedProjects(allowedProjects)
 		authSvc.SetDashboardSessionTokens([]string{cfg.AdminToken})
+		// Managed tokens (OBL-01): enabled explicitly; the boot gate in
+		// validateCloudServeAuthConfig has already rejected a missing/default pepper.
+		if envBool("OMNIA_CLOUD_MANAGED_TOKENS") {
+			authSvc.SetTokenPepper(envx.Get("OMNIA_CLOUD_TOKEN_PEPPER"))
+		}
 		authenticator = authSvc
 	}
 	return &defaultCloudRuntime{
@@ -1001,6 +1006,13 @@ func validateCloudServeAuthConfig() error {
 	jwtSecretEnv := strings.TrimSpace(envx.Get("OMNIA_JWT_SECRET"))
 	if insecureNoAuth && token != "" {
 		return fmt.Errorf("conflicting cloud auth configuration: ENGRAM_CLOUD_INSECURE_NO_AUTH=1 cannot be used together with ENGRAM_CLOUD_TOKEN")
+	}
+	// Managed-token boot gate (OBL-01): when managed tokens are enabled, a strong,
+	// non-default pepper is mandatory — mirroring the JWT-secret gate below.
+	if envBool("OMNIA_CLOUD_MANAGED_TOKENS") {
+		if cloud.IsDefaultTokenPepper(envx.Get("OMNIA_CLOUD_TOKEN_PEPPER")) {
+			return fmt.Errorf("managed tokens enabled (ENGRAM_CLOUD_MANAGED_TOKENS=1) require a non-default ENGRAM_CLOUD_TOKEN_PEPPER; refusing empty or development-default pepper")
+		}
 	}
 	if token != "" && len(allowlist) > 0 {
 		if jwtSecretEnv == "" {

@@ -696,6 +696,22 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 			UNIQUE(account_id, name)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_cloud_devices_account_id ON cloud_devices(account_id)`,
+		// cloud_users lifecycle: disabled_at marks a user whose tokens are rejected
+		// at runtime (OBL-01). Guarded ADD COLUMN IF NOT EXISTS is idempotent.
+		`ALTER TABLE cloud_users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ`,
+		// cloud_tokens: managed per-user tokens stored ONLY as HMAC(pepper, raw)
+		// hashes, shown once at issuance, revocable, and rejected when the owning
+		// user is disabled (OBL-01, Engram Cloud v1.18.0 parity).
+		`CREATE TABLE IF NOT EXISTS cloud_tokens (
+			id           BIGSERIAL PRIMARY KEY,
+			user_id      BIGINT NOT NULL REFERENCES cloud_users(id),
+			token_hash   TEXT NOT NULL UNIQUE,
+			label        TEXT,
+			created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			revoked_at   TIMESTAMPTZ,
+			last_used_at TIMESTAMPTZ
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_cloud_tokens_user_id ON cloud_tokens(user_id)`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {

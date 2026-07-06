@@ -195,6 +195,18 @@ func (s *CloudServer) routes() {
 			s.mux.HandleFunc("POST /devices/{id}/scope", s.withAuth(s.handleSetDeviceScope))
 			s.mux.HandleFunc("DELETE /devices/{id}", s.withAuth(s.handleDeleteDevice))
 		}
+		// Managed-token administration (OBL-01). Operator-only: each handler gates
+		// on the admin credential itself (requireAdminBearer), so these are NOT
+		// wrapped in withAuth. Registered only when the account service can issue
+		// managed tokens AND the store supports token/user lifecycle.
+		if _, ok := s.account.(managedTokenIssuer); ok {
+			if _, ok := s.store.(managedTokenAdminStore); ok {
+				s.mux.HandleFunc("POST /admin/tokens", s.handleIssueManagedToken)
+				s.mux.HandleFunc("POST /admin/tokens/{id}/revoke", s.handleRevokeManagedToken)
+				s.mux.HandleFunc("POST /admin/users/{id}/disable", s.handleDisableUser)
+				s.mux.HandleFunc("POST /admin/users/{id}/enable", s.handleEnableUser)
+			}
+		}
 	}
 
 	// Mount the unified dashboard at the root catch-all, behind the cloud's
@@ -371,20 +383,28 @@ func (s *CloudServer) dashboardSessionClaims(r *http.Request) (claims *auth.Acco
 	if info, ok := s.dashboardSessionInfo(cookie.Value); ok && strings.TrimSpace(info.AccountID) != "" {
 		return &auth.AccountClaims{AccountID: info.AccountID, Username: info.Username}, false
 	}
-	// Operator / legacy single-tenant bearer session: the dashboard bearer can only
-	// resolve to a pre-registered token (admin token or configured bearer). Treat it
-	// as the server operator (sees all), preserving pre-multi-tenant behaviour.
-	bearer, err := s.dashboardBearerToken(cookie.Value)
-	if err != nil || strings.TrimSpace(bearer) == "" {
-		return nil, false
-	}
-	if adminToken := strings.TrimSpace(s.dashboardAdmin); adminToken != "" && hmac.Equal([]byte(bearer), []byte(adminToken)) {
+	// Operator visibility (sees ALL accounts' projects) is granted ONLY by the
+	// designated admin credential (OMNIA_CLOUD_ADMIN). Routing through the
+	// timing-safe isDashboardAdmin puts that guarded comparison on the live path
+	// (OBL-03). The sync bearer — which s.auth.Authorize also accepts — must NOT
+	// grant god-mode dashboard visibility in a multi-tenant deployment.
+	if s.isDashboardAdmin(r) {
 		return nil, true
 	}
-	probe, _ := http.NewRequest(http.MethodGet, "/dashboard", nil)
-	probe.Header.Set("Authorization", "Bearer "+bearer)
-	if s.auth.Authorize(probe) == nil {
-		return nil, true
+	// Legacy single-tenant compatibility: when no account/membership store is
+	// configured, there are no per-account scopes to protect, so the sync bearer
+	// still resolves to the server operator (pre-multi-tenant behaviour). This
+	// fallback is intentionally skipped once RBAC (accountProjectAuth) is active.
+	if s.accountProjectAuth == nil {
+		bearer, err := s.dashboardBearerToken(cookie.Value)
+		if err != nil || strings.TrimSpace(bearer) == "" {
+			return nil, false
+		}
+		probe, _ := http.NewRequest(http.MethodGet, "/dashboard", nil)
+		probe.Header.Set("Authorization", "Bearer "+bearer)
+		if s.auth.Authorize(probe) == nil {
+			return nil, true
+		}
 	}
 	return nil, false
 }

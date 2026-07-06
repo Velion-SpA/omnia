@@ -25,6 +25,8 @@ type Service struct {
 	store         *cloudstore.CloudStore
 	accountStore  userStore
 	deviceStore   deviceRegistrar
+	tokenStore    managedTokenStore
+	tokenPepper   []byte
 	expectedToken string
 	dashboardAuth map[string]struct{}
 	allowed       map[string]struct{}
@@ -46,6 +48,11 @@ func NewService(store *cloudstore.CloudStore, jwtSecret string) (*Service, error
 	// Wire the device registrar when the backing store supports it.
 	if dr, ok := any(store).(deviceRegistrar); ok {
 		svc.deviceStore = dr
+	}
+	// Wire the managed-token store when the backing store supports it. Managed
+	// tokens stay inert until a pepper is configured via SetTokenPepper.
+	if ts, ok := any(store).(managedTokenStore); ok {
+		svc.tokenStore = ts
 	}
 	return svc, nil
 }
@@ -362,6 +369,20 @@ func (s *Service) AuthorizeAccount(r *http.Request) (*AccountClaims, error) {
 	}
 	if claims, err := s.ParseAccountToken(token); err == nil {
 		return claims, nil
+	}
+	// Managed per-user token: attempted only when the feature is enabled (a
+	// pepper is configured). Runtime DB enforcement lives here — a revoked token
+	// or a disabled owner is rejected on THIS request. A resolvable-but-rejected
+	// token surfaces its specific reason; an unknown token falls through to the
+	// generic invalid-bearer error.
+	if s.ManagedTokensEnabled() {
+		claims, err := s.validateManagedToken(r.Context(), token)
+		if err == nil {
+			return claims, nil
+		}
+		if !errors.Is(err, ErrInvalidManagedToken) {
+			return nil, err
+		}
 	}
 	return nil, fmt.Errorf("invalid bearer token")
 }
