@@ -1,10 +1,40 @@
 package dashboard
 
-// syncStatusPage is the dedicated /sync route with full detail.
-templ syncStatusPage(status SyncStatus) {
+// syncStatusPage is the dedicated /sync route with full detail. targets is the
+// per-cloud sync health table (nil on a backend that cannot read sync_state,
+// e.g. the cloud dashboard) — see OBL-12: a degraded/blocked target must be
+// visible here instead of silently absent.
+templ syncStatusPage(status SyncStatus, targets []SyncTargetView) {
 	@layout("Sync Status") {
 		<h1 style="font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;">Sync Status</h1>
 		<div style="display: flex; flex-direction: column; gap: 1.25rem;">
+			<!-- Sync targets card (per-cloud health) -->
+			<div class="card">
+				<span class="micro-label" style="display: block; margin-bottom: 0.25rem;">SYNC TARGETS</span>
+				if len(targets) == 0 {
+					<p style="color: var(--text-dim); font-size: 13px;">No cloud sync targets recorded yet. Run <code style="font-family: 'JetBrains Mono', monospace;">omnia cloud enroll &lt;project&gt;</code> to start replicating one.</p>
+				} else {
+					<div style="display: flex; flex-direction: column; gap: 4px;">
+						for _, t := range targets {
+							<div style="display: grid; grid-template-columns: 90px 1fr 1.5fr 90px; align-items: center; gap: 0.75rem; padding: 0.625rem 0.875rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem;">
+								<span class={ "badge", templ.KV("badge-ok", t.Lifecycle == "healthy"), templ.KV("badge-warn", t.Lifecycle == "pending" || t.Lifecycle == "running"), templ.KV("badge-bad", t.Lifecycle == "degraded") }>{ healthChipLabel(t.Lifecycle) }</span>
+								<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text);">
+									{ t.Cloud }
+									if t.Project != "" {
+										<span style="color: var(--text-faint);"> · { t.Project }</span>
+									}
+								</span>
+								if syncTargetReasonText(t) != "" {
+									<span style="font-size: 12px; color: var(--text-dim);">{ syncTargetReasonText(t) }</span>
+								} else {
+									<span style="font-size: 12px; color: var(--text-faint);">—</span>
+								}
+								<span style="font-size: 12px; color: var(--text-dim); text-align: right;">{ t.Age }</span>
+							</div>
+						}
+					</div>
+				}
+			</div>
 			<!-- Cursors card -->
 			<div class="card">
 				<span class="micro-label" style="display: block; margin-bottom: 0.25rem;">SYNC CURSORS</span>

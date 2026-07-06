@@ -240,7 +240,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			clouds := cloudMap[canonicalize(stats[i].Name)]
 			if stats[i].IsGroup {
 				for _, child := range s.groups.Children(stats[i].Name) {
-					clouds = mergeCloudNames(clouds, cloudMap[canonicalize(child)])
+					clouds = mergeCloudPlacements(clouds, cloudMap[canonicalize(child)])
 				}
 			}
 			stats[i].Clouds = clouds
@@ -892,7 +892,8 @@ func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	status := loadSyncStatus()
-	if err := syncStatusPage(status).Render(ctx, w); err != nil {
+	targets := s.syncTargetViews(ctx)
+	if err := syncStatusPage(status, targets).Render(ctx, w); err != nil {
 		s.logger.Error("render sync status", "err", err)
 	}
 }

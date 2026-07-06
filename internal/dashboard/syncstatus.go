@@ -79,6 +79,47 @@ func loadSyncStatus() SyncStatus {
 	return status
 }
 
+// SyncTargetView is a single row in the /sync page's health table: one cloud
+// sync target with its live lifecycle, reason, and freshness — rendered so a
+// degraded/blocked target is visible instead of silently absent (the gap
+// OBL-12 closes: previously this data was only reachable via `omnia cloud
+// status` or the HTTP /sync/status endpoint, never the dashboard).
+type SyncTargetView struct {
+	Cloud         string // display cloud alias, e.g. "work" (resolved via cloud.json)
+	Project       string // canonical project segment of the target key ("" for a bare/legacy key)
+	Lifecycle     string // "idle" | "pending" | "running" | "healthy" | "degraded"
+	ReasonCode    string
+	ReasonMessage string
+	LastError     string
+	Age           string // relative "last synced" time, via formatAge
+}
+
+// healthChipLabel returns the display label for a lifecycle value, defaulting
+// to "unknown" for an empty value and echoing anything unrecognized verbatim
+// (forward-compatible with a future lifecycle without hiding the row).
+func healthChipLabel(lifecycle string) string {
+	switch strings.TrimSpace(lifecycle) {
+	case "":
+		return "unknown"
+	default:
+		return lifecycle
+	}
+}
+
+// syncTargetReasonText assembles the reason shown in the health table: prefer
+// the human reason_message; fall back to the raw reason_code; fall back to
+// last_error when neither is set (e.g. a transport failure recorded only
+// there). Empty when none are present.
+func syncTargetReasonText(t SyncTargetView) string {
+	if t.ReasonMessage != "" {
+		return t.ReasonMessage
+	}
+	if t.ReasonCode != "" {
+		return t.ReasonCode
+	}
+	return t.LastError
+}
+
 // tailFile returns the last n lines of a file. Returns nil if the file can't be read.
 func tailFile(path string, n int) []string {
 	f, err := os.Open(path)

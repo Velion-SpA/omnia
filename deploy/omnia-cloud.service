@@ -1,0 +1,54 @@
+# systemd unit for the Omnia Cloud server (`omnia cloud serve`).
+#
+# Install:
+#   sudo cp deploy/omnia-cloud.service /etc/systemd/system/omnia-cloud.service
+#   sudo cp deploy/cloud.env.example /etc/omnia/cloud.env   # then edit it — see HOMELAB.md
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now omnia-cloud.service
+#
+# Logs:
+#   journalctl -u omnia-cloud.service -f
+#
+# See ../deploy/HOMELAB.md for the full from-scratch bring-up (Postgres,
+# cross-compile, env template, reverse proxy, first admin, notebooks).
+
+[Unit]
+Description=Omnia Cloud server (multi-tenant memory sync backend)
+Documentation=https://github.com/velion/omnia/blob/main/OMNIA-CLOUD.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Requires the local postgresql.service unit. If Postgres runs elsewhere
+# (a container via docker-compose.cloud.yml, or a separate host), remove this
+# line — omnia cloud serve only needs OMNIA_DATABASE_URL to be reachable at
+# start time, not a local Postgres unit.
+Requires=postgresql.service
+
+[Service]
+Type=simple
+
+# Non-root service user. Create it first:
+#   sudo useradd --system --create-home --home-dir /var/lib/omnia --shell /usr/sbin/nologin omnia
+User=omnia
+Group=omnia
+
+# All required/optional env vars for `omnia cloud serve` live here — see
+# deploy/cloud.env.example for the full annotated template.
+EnvironmentFile=/etc/omnia/cloud.env
+
+# Adjust the path if the binary is installed elsewhere (see HOMELAB.md for the
+# cross-compile + copy steps).
+ExecStart=/usr/local/bin/omnia cloud serve
+
+Restart=on-failure
+RestartSec=5
+
+# omnia cloud serve keeps no state of its own on disk — everything lives in
+# Postgres via OMNIA_DATABASE_URL — so no ReadWritePaths are needed and the
+# following hardening is safe as a default for a single-purpose service user.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

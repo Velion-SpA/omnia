@@ -38,10 +38,11 @@ type ProjectStats struct {
 	SubProjects    []SubProjectStat // per-child counts (only when IsGroup=true)
 	CoreCount      int              // parent's own observations count (only when IsGroup=true)
 	LatestUpdateAt string
-	// Clouds lists the display names of the clouds this project is loaded on
-	// (derived from the local store's sync targets + cloud.json). Empty means the
-	// project is local-only. Only meaningful when OverviewData.ShowClouds is true.
-	Clouds []string
+	// Clouds lists the clouds this project is loaded on plus each one's current
+	// health (derived from the local store's sync targets + sync_state +
+	// cloud.json). Empty means the project is local-only. Only meaningful when
+	// OverviewData.ShowClouds is true.
+	Clouds []CloudPlacement
 }
 
 // enrichObs parses the omnia-meta block from an observation and returns an ObsView.

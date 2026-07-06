@@ -193,18 +193,38 @@ templ overviewPage(data OverviewData) {
 	}
 }
 
-// cloudPills renders one pill per cloud a project is loaded on, or a single
-// muted "local-only" pill when the project is on no cloud.
-templ cloudPills(clouds []string) {
+// cloudPills renders one pill per cloud a project is loaded on, colored by
+// health (green healthy / amber pending|running / red degraded|blocked via the
+// badge-warn/badge-bad modifiers, which win the color properties over
+// .cloud-pill's defaults because they're declared later in the stylesheet) —
+// or a single muted "local-only" pill when the project is on no cloud. A
+// degraded/blocked target renders red instead of disappearing (OBL-12).
+templ cloudPills(clouds []CloudPlacement) {
 	<span class="cloud-pills">
 		if len(clouds) == 0 {
 			<span class="cloud-pill local">local-only</span>
 		} else {
 			for _, c := range clouds {
-				<span class="cloud-pill">{ c }</span>
+				<span
+					class={ "cloud-pill", templ.KV("badge-warn", c.Status == CloudPillPending), templ.KV("badge-bad", c.Status == CloudPillDegraded) }
+					title={ cloudPillTitle(c) }
+				>{ c.Name }</span>
 			}
 		}
 	</span>
+}
+
+// cloudPillTitle returns a hover tooltip explaining an unhealthy pill's reason
+// code, so the operator doesn't have to leave the overview to find out why a
+// target is amber/red. Empty for a healthy pill (nothing to explain).
+func cloudPillTitle(c CloudPlacement) string {
+	if c.Status == CloudPillHealthy {
+		return ""
+	}
+	if c.ReasonCode != "" {
+		return string(c.Status) + ": " + c.ReasonCode
+	}
+	return string(c.Status)
 }
 
 // sourceIcon renders the SVG icon for a given source key.

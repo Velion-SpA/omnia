@@ -33,6 +33,17 @@ func (f fakeStructural) CloudTargetKeys(context.Context) (map[string]struct{}, e
 	return f.targetKeys, nil
 }
 
+// fakeStructuralWithSync additionally satisfies syncStateReader, mirroring the
+// real *engramdb.DB which always implements both capabilities together.
+type fakeStructuralWithSync struct {
+	fakeStructural
+	states []engramdb.SyncTargetState
+}
+
+func (f fakeStructuralWithSync) SyncStates(context.Context) ([]engramdb.SyncTargetState, error) {
+	return f.states, nil
+}
+
 func writeCloudJSON(t *testing.T, dir, body string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, "cloud.json"), []byte(body), 0o644); err != nil {
@@ -146,9 +157,46 @@ func TestCloudsByProject(t *testing.T) {
 		if !show {
 			t.Fatal("expected ShowClouds true")
 		}
-		want := map[string][]string{
-			"omnia":  {"personal"}, // cloud:omnia and personal:omnia both → personal (deduped)
-			"velion": {"work"},
+		// fakeStructural does not implement syncStateReader, so every target
+		// CloudTargetKeys reports renders healthy — unchanged pre-OBL-12 behavior.
+		want := map[string][]CloudPlacement{
+			"omnia":  {{Name: "personal", Status: CloudPillHealthy}}, // cloud:omnia and personal:omnia both → personal (deduped)
+			"velion": {{Name: "work", Status: CloudPillHealthy}},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("degraded target with zero chunks is visible, not silently absent", func(t *testing.T) {
+		dir := t.TempDir()
+		writeCloudJSON(t, dir, `{"clouds":{"personal":{"server_url":"https://p.test"},"work":{"server_url":"https://w.test"}},"default":"personal"}`)
+		s := &Server{
+			cfg: Config{EngramDataDir: dir},
+			db: fakeStructuralWithSync{
+				fakeStructural: fakeStructural{targetKeys: map[string]struct{}{
+					"cloud:omnia": {}, // healthy: has replicated chunks
+				}},
+				states: []engramdb.SyncTargetState{
+					{TargetKey: "cloud:omnia", Lifecycle: "healthy"},
+					// work:velion never replicated a chunk (absent from
+					// CloudTargetKeys) but IS degraded — must still show up.
+					{TargetKey: "work:velion", Lifecycle: "degraded", ReasonCode: "auth_required", ReasonMessage: "token expired"},
+					// personal:notes is mid-attempt — pending, amber.
+					{TargetKey: "personal:notes", Lifecycle: "pending"},
+				},
+			},
+			groups: newGroupIndex(nil, logger),
+			logger: logger,
+		}
+		got, show := s.cloudsByProject(context.Background(), canonicalize)
+		if !show {
+			t.Fatal("expected ShowClouds true")
+		}
+		want := map[string][]CloudPlacement{
+			"omnia":  {{Name: "personal", Status: CloudPillHealthy}},
+			"velion": {{Name: "work", Status: CloudPillDegraded, ReasonCode: "auth_required"}},
+			"notes":  {{Name: "personal", Status: CloudPillPending}},
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %v, want %v", got, want)

@@ -1,6 +1,6 @@
 id: OBL-10
 title: Homelab deployment enablement (systemd, TLS, env template, cross-compile, runbook)
-status: pending
+status: done
 priority: P0
 blocks_homelab_test: true
 estimated_effort: L

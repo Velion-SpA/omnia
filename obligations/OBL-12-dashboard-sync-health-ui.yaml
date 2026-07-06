@@ -1,6 +1,6 @@
 id: OBL-12
 title: Dashboard sync-health UI — render degraded / blocked / reason codes
-status: pending
+status: done
 priority: P2
 blocks_homelab_test: false
 estimated_effort: S

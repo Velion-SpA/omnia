@@ -163,6 +163,71 @@ func (d *DB) Close() error {
 	return d.db.Close()
 }
 
+// SyncTargetState is a read-only snapshot of one internal/store sync_state row,
+// exposed so the dashboard can render per-target sync health. Nullable text
+// columns (reason_code, reason_message, last_error) surface as empty strings
+// when NULL rather than as pointers, since the dashboard only needs display
+// values, not the ability to distinguish "never set" from "empty".
+type SyncTargetState struct {
+	TargetKey     string // "<cloud-alias>:<project>" (or a bare alias for legacy rows), e.g. "work:velion"
+	Lifecycle     string // "idle" | "pending" | "running" | "healthy" | "degraded"
+	ReasonCode    string
+	ReasonMessage string
+	LastError     string
+	LastAckedSeq  int64
+	LastPulledSeq int64
+	UpdatedAt     string // "2006-01-02 15:04:05" UTC, same format as Observation timestamps
+}
+
+// SyncStates returns every recorded cloud sync target's lifecycle/health
+// snapshot from sync_state, excluding the local chunk-tracking row ("local"),
+// ordered by target_key ascending.
+//
+// Unlike CloudTargetKeys — which only reports targets that show real
+// replication activity (healthy or an advanced cursor), by design excluding a
+// degraded target that never completed a chunk — SyncStates returns EVERY row,
+// including idle/pending/running/degraded targets with zero chunks. This lets
+// the dashboard render a target that is configured but unhealthy instead of
+// letting it silently disappear (looking identical to "never configured").
+//
+// The query is strictly read-only and tolerant: on a database that predates
+// the sync_state table (or reason_code/reason_message columns, or any other
+// query error) it returns an empty result rather than failing, mirroring
+// CloudTargetKeys.
+func (d *DB) SyncStates(ctx context.Context) ([]SyncTargetState, error) {
+	const q = `
+		SELECT target_key,
+		       lifecycle,
+		       COALESCE(reason_code, ''),
+		       COALESCE(reason_message, ''),
+		       COALESCE(last_error, ''),
+		       last_acked_seq,
+		       last_pulled_seq,
+		       updated_at
+		FROM sync_state
+		WHERE target_key <> 'local'
+		ORDER BY target_key ASC`
+
+	rows, err := d.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, nil // table/columns absent (older DB) or unreadable — degrade silently
+	}
+	defer rows.Close()
+
+	var out []SyncTargetState
+	for rows.Next() {
+		var s SyncTargetState
+		if err := rows.Scan(
+			&s.TargetKey, &s.Lifecycle, &s.ReasonCode, &s.ReasonMessage, &s.LastError,
+			&s.LastAckedSeq, &s.LastPulledSeq, &s.UpdatedAt,
+		); err != nil {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // Projects returns every project that has live observations, with counts.
 // Rows where project IS NULL or empty string are excluded.
 // Ordered by count descending, then project name ascending.
