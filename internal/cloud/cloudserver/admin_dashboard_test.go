@@ -171,7 +171,9 @@ func TestAdminUsersPageOperatorOnly(t *testing.T) {
 }
 
 // TestAdminAccessPageRendersForOperator exercises the Access page templ end to end
-// (user selector, membership rows with perm checkboxes + role select, add form).
+// (user selector, the per-project override row with perm checkboxes + role select,
+// and the add-override form). Post OBL-15 the memberships section is relabeled as
+// per-project OVERRIDES that take precedence over team-derived perms.
 func TestAdminAccessPageRendersForOperator(t *testing.T) {
 	srv, store, authSvc := newAdminDashboardTestServer(t)
 	store.users = []cloudstore.AdminUser{{ID: "1", Username: "alice"}}
@@ -183,8 +185,12 @@ func TestAdminAccessPageRendersForOperator(t *testing.T) {
 		t.Fatalf("operator GET /admin/access: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "lab") || !strings.Contains(body, "ADD / UPDATE MEMBERSHIP") {
-		t.Fatalf("Access page missing membership row or add form, body=%q", body)
+	if !strings.Contains(body, "lab") || !strings.Contains(body, "ADD / UPDATE OVERRIDE") {
+		t.Fatalf("Access page missing override row or add form, body=%q", body)
+	}
+	// The override add form must use the searchable project selector (no free text).
+	if !strings.Contains(body, "data-proj-select") {
+		t.Fatalf("Access page add-override must use the searchable project selector, body=%q", body)
 	}
 	// The revoke control must target the pre-encoded delete path for this membership.
 	if !strings.Contains(body, `hx-delete="/admin/memberships/1/lab"`) {

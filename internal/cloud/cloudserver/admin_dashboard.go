@@ -141,6 +141,36 @@ type adminAccessView struct {
 	SelectedName string
 	Memberships  []adminMembershipRow
 	Roles        []string
+	// Team-derived, read-only "from teams" section (OBL-15). Populated only when
+	// the store supports teams administration. Grouped by project classification.
+	HasTeams     bool
+	TeamPersonal []adminTeamPermRow
+	TeamWork     []adminTeamPermRow
+	TeamOther    []adminTeamPermRow
+}
+
+// adminTeamPermRow is one project's team-derived effective perms for the selected
+// account: the union across every contributing team, plus which teams grant it and
+// whether a per-project override (shown above) supersedes it.
+type adminTeamPermRow struct {
+	Project    string
+	Kind       string
+	Summary    string
+	Perms      int
+	Read       bool
+	Insert     bool
+	Update     bool
+	Delete     bool
+	Overridden bool
+	Sources    []adminTeamPermSource
+}
+
+// adminTeamPermSource names a team (and the member's profile) that contributes to a
+// project's team-derived perms.
+type adminTeamPermSource struct {
+	Team    string
+	Profile string
+	Summary string
 }
 
 type adminTokenIssuedView struct {
@@ -219,6 +249,7 @@ func (s *CloudServer) handleAdminAccessPage(w http.ResponseWriter, r *http.Reque
 	}
 
 	var memRows []adminMembershipRow
+	overridden := map[string]bool{}
 	if selected != "" {
 		mems, merr := as.ListMembershipsForUser(r.Context(), selected)
 		if merr != nil {
@@ -230,6 +261,7 @@ func (s *CloudServer) handleAdminAccessPage(w http.ResponseWriter, r *http.Reque
 			row := toAdminMembershipRow(m)
 			row.DeleteURL = adminMembershipDeletePath(selected, m.Project)
 			memRows = append(memRows, row)
+			overridden[m.Project] = true
 		}
 	}
 
@@ -241,6 +273,15 @@ func (s *CloudServer) handleAdminAccessPage(w http.ResponseWriter, r *http.Reque
 		Memberships:  memRows,
 		Roles:        adminRoleOptions(),
 	}
+
+	// The read-only "from teams" section: the team-union perms per project for the
+	// selected account, shown BELOW the per-project overrides so the operator sees
+	// the full effective picture (override wins where present).
+	if ts, tok := s.teamsStore(); tok && selected != "" {
+		view.HasTeams = true
+		view.TeamPersonal, view.TeamWork, view.TeamOther = s.teamDerivedForAccount(r.Context(), ts, selected, overridden)
+	}
+
 	if err := adminAccessPage(view).Render(r.Context(), w); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 	}

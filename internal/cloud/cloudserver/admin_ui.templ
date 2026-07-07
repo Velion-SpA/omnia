@@ -20,9 +20,12 @@ templ adminPageTitle(text, sub string) {
 }
 
 templ adminNavTabs(active string) {
-	<div style="display: flex; gap: 0.5rem; margin-bottom: 1.25rem;">
+	<div style="display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.25rem;">
 		<a href="/admin" class={ "badge", templ.KV("badge-ok", active == "users") } style="text-decoration: none; padding: 0.35rem 0.75rem;">Users</a>
 		<a href="/admin/access" class={ "badge", templ.KV("badge-ok", active == "access") } style="text-decoration: none; padding: 0.35rem 0.75rem;">Access</a>
+		<a href="/admin/teams" class={ "badge", templ.KV("badge-ok", active == "teams") } style="text-decoration: none; padding: 0.35rem 0.75rem;">Teams</a>
+		<a href="/admin/profiles" class={ "badge", templ.KV("badge-ok", active == "profiles") } style="text-decoration: none; padding: 0.35rem 0.75rem;">Profiles</a>
+		<a href="/admin/projects" class={ "badge", templ.KV("badge-ok", active == "projects") } style="text-decoration: none; padding: 0.35rem 0.75rem;">Projects</a>
 	</div>
 }
 
@@ -149,7 +152,7 @@ templ adminTokenIssuedFragment(view adminTokenIssuedView) {
 
 templ adminAccessPage(view adminAccessView) {
 	@ui.Layout(view.Props) {
-		@adminPageTitle("Admin", "Grant, edit, and revoke per-project permissions. Operator-only.")
+		@adminPageTitle("Admin", "Per-project overrides take precedence over team-derived perms. Operator-only.")
 		@adminNavTabs("access")
 		<div class="card" style="margin-bottom: 1.25rem;">
 			<span class="micro-label" style="display: block; margin-bottom: 0.6rem;">ACCOUNT</span>
@@ -167,10 +170,12 @@ templ adminAccessPage(view adminAccessView) {
 			}
 		</div>
 		if view.SelectedID != "" {
-			<div class="card" style="margin-bottom: 1.25rem;">
-				<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">MEMBERSHIPS · { view.SelectedName }</span>
+			// ── Per-project OVERRIDES (top — take precedence) ──────────────────────
+			<div class="card" style="margin-bottom: 1rem; border-color: var(--border-accent);">
+				<span class="micro-label" style="display: block; margin-bottom: 0.3rem; color: var(--accent);">PER-PROJECT OVERRIDES · { view.SelectedName }</span>
+				<p style="font-size: 12px; color: var(--text-dim); margin: 0 0 0.85rem 0;">An override REPLACES the team-derived perms for that project — it wins outright (it can elevate or restrict, including to no access).</p>
 				if len(view.Memberships) == 0 {
-					<p style="color: var(--text-dim); font-size: 13px; margin-bottom: 1rem;">No memberships yet. Add one below.</p>
+					<p style="color: var(--text-dim); font-size: 13px; margin-bottom: 1rem;">No overrides. This account's access comes entirely from its teams below.</p>
 				} else {
 					<div style="display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 0.5rem;">
 						for _, m := range view.Memberships {
@@ -179,8 +184,74 @@ templ adminAccessPage(view adminAccessView) {
 					</div>
 				}
 			</div>
-			@adminAddMembershipCard(view)
+			@adminAddOverrideCard(view)
+			// ── Team-derived perms (below — read-only) ─────────────────────────────
+			if view.HasTeams {
+				<div style="margin: 1.75rem 0 0.75rem 0;">
+					<span class="micro-label" style="display: block; color: var(--text-2);">FROM TEAMS · read-only</span>
+					<p style="font-size: 12px; color: var(--text-dim); margin: 0.3rem 0 0 0;">Effective perms granted by team membership. An override above supersedes the matching project here.</p>
+				</div>
+				@adminTeamPermGroup("Personal", view.TeamPersonal)
+				@adminTeamPermGroup("Work", view.TeamWork)
+				if len(view.TeamOther) > 0 {
+					@adminTeamPermGroup("Unclassified", view.TeamOther)
+				}
+				if len(view.TeamPersonal) == 0 && len(view.TeamWork) == 0 && len(view.TeamOther) == 0 {
+					<div class="card"><p style="color: var(--text-dim); font-size: 13px; margin: 0;">This account is not on any team, or its teams have no projects yet.</p></div>
+				}
+			}
 		}
+		@adminAssets()
+	}
+}
+
+// adminAddOverrideCard adds a per-project override via the searchable project
+// selector (no free-text) + R/W/U/D + role. Posts to the OBL-13 membership upsert.
+templ adminAddOverrideCard(view adminAccessView) {
+	<div class="card" style="margin-bottom: 0.5rem;">
+		<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">ADD / UPDATE OVERRIDE</span>
+		<form data-admin-form data-method="PUT" data-url-template="/admin/memberships" data-body="form" style="display: grid; grid-template-columns: 1.6fr 1.6fr 1fr auto; gap: 0.6rem; align-items: start; margin: 0;">
+			<input type="hidden" name="account_id" value={ view.SelectedID }/>
+			@projectSelector("Search projects…")
+			@adminPermChecks(true, false, false, false)
+			@adminRoleSelect(view.Roles, "member")
+			<button type="submit" class="shell-button" style="padding: 0.35rem 0.9rem; font-size: 12px;">Save</button>
+		</form>
+		<div class="admin-form-error" data-form-error hidden></div>
+	</div>
+}
+
+// adminTeamPermGroup renders one classification bucket of the read-only team-derived
+// perms: each project with its effective (union) perms and the teams that grant them.
+templ adminTeamPermGroup(label string, rows []adminTeamPermRow) {
+	if len(rows) > 0 {
+		<div class="card" style="margin-bottom: 1rem;">
+			<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">{ label }</span>
+			<div style="display: flex; flex-direction: column; gap: 0.55rem;">
+				for _, row := range rows {
+					<div style="padding: 0.55rem 0.75rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem;">
+						<div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+							<span style="font-family: var(--mono); font-size: 13px; color: var(--text);">{ row.Project }</span>
+							<span class="badge" style="padding: 0.15rem 0.5rem;">{ row.Summary }</span>
+							if row.Overridden {
+								<span class="badge badge-warn" style="padding: 0.15rem 0.5rem;">overridden above</span>
+							}
+						</div>
+						<div style="margin-top: 0.35rem; font-size: 11px; color: var(--text-dim);">
+							for i, src := range row.Sources {
+								if i > 0 {
+									<span> · </span>
+								}
+								<span>{ src.Team }</span>
+								if src.Profile != "" {
+									<span style="color: var(--text-faint);"> ({ src.Profile })</span>
+								}
+							}
+						</div>
+					</div>
+				}
+			</div>
+		</div>
 	}
 }
 
@@ -197,19 +268,6 @@ templ adminMembershipRowView(view adminAccessView, m adminMembershipRow) {
 		<button type="submit" class="shell-button" style="padding: 0.3rem 0.8rem; font-size: 12px;">Save</button>
 		<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.8rem; font-size: 12px;" hx-delete={ m.DeleteURL } hx-swap="none">Revoke</button>
 	</form>
-}
-
-templ adminAddMembershipCard(view adminAccessView) {
-	<div class="card">
-		<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">ADD / UPDATE MEMBERSHIP</span>
-		<form hx-put="/admin/memberships" hx-swap="none" style="display: grid; grid-template-columns: 1.3fr 1.6fr 1fr auto; gap: 0.6rem; align-items: center; margin: 0;">
-			<input type="hidden" name="account_id" value={ view.SelectedID }/>
-			<input type="text" name="project" placeholder="project" required style="padding: 0.4rem 0.55rem; font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
-			@adminPermChecks(true, false, false, false)
-			@adminRoleSelect(view.Roles, "member")
-			<button type="submit" class="shell-button" style="padding: 0.35rem 0.9rem; font-size: 12px;">Save</button>
-		</form>
-	</div>
 }
 
 templ adminPermChecks(read, insert, update, del bool) {

@@ -1,6 +1,6 @@
 id: OBL-15
 title: Admin UI — teams, profiles, searchable project selector, personal/work views
-status: pending
+status: done
 priority: P1
 blocks_homelab_test: false
 estimated_effort: L

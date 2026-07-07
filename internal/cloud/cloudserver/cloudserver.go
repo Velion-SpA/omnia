@@ -263,14 +263,16 @@ func (s *CloudServer) routes() {
 		// same way adminDashboardStore is. cloud_memberships stays the override layer
 		// managed by the OBL-13 membership endpoints above.
 		if _, ok := s.store.(teamsAdminStore); ok {
-			// Profiles: operator-creatable permission presets.
-			s.mux.HandleFunc("GET /admin/profiles", s.handleAdminListProfiles)
+			// Profiles: operator-creatable permission presets. The GET routes
+			// content-negotiate — a browser navigation gets the OBL-15 HTML page, an
+			// API/HTMX/JSON caller keeps the OBL-14 JSON payload (see wantsHTMLPage).
+			s.mux.HandleFunc("GET /admin/profiles", s.handleAdminProfilesRoute)
 			s.mux.HandleFunc("PUT /admin/profiles", s.handleAdminCreateProfile)
 			s.mux.HandleFunc("PUT /admin/profiles/{id}", s.handleAdminUpdateProfile)
 			s.mux.HandleFunc("DELETE /admin/profiles/{id}", s.handleAdminDeleteProfile)
 			// Teams: grouped projects, classified personal/work.
-			s.mux.HandleFunc("GET /admin/teams", s.handleAdminListTeams)
-			s.mux.HandleFunc("GET /admin/teams/{id}", s.handleAdminGetTeam)
+			s.mux.HandleFunc("GET /admin/teams", s.handleAdminTeamsRoute)
+			s.mux.HandleFunc("GET /admin/teams/{id}", s.handleAdminTeamRoute)
 			s.mux.HandleFunc("PUT /admin/teams", s.handleAdminCreateTeam)
 			s.mux.HandleFunc("PUT /admin/teams/{id}", s.handleAdminUpdateTeam)
 			s.mux.HandleFunc("DELETE /admin/teams/{id}", s.handleAdminDeleteTeam)
@@ -280,9 +282,11 @@ func (s *CloudServer) routes() {
 			// Team ↔ member (profile) assignments.
 			s.mux.HandleFunc("PUT /admin/teams/{id}/members/{account_id}", s.handleAdminAddTeamMember)
 			s.mux.HandleFunc("DELETE /admin/teams/{id}/members/{account_id}", s.handleAdminRemoveTeamMember)
-			// Project classification + known-projects selector source.
+			// Project classification + known-projects selector source. GET
+			// content-negotiates: HTML Projects page for a browser, JSON list for the
+			// searchable selector's fetch and API callers.
 			s.mux.HandleFunc("PUT /admin/projects/{project}/meta", s.handleAdminSetProjectMeta)
-			s.mux.HandleFunc("GET /admin/projects", s.handleAdminListProjects)
+			s.mux.HandleFunc("GET /admin/projects", s.handleAdminProjectsRoute)
 		}
 	}
 

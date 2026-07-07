@@ -2082,3 +2082,93 @@
 	color: var(--calypso);
 	border-color: var(--calypso);
 }
+
+/* ─── Admin section — searchable project selector + admin forms (OBL-15) ─────
+   Scoped to the operator Admin pages. Extends the existing tokens; introduces no
+   new framework. */
+
+.proj-select { position: relative; }
+
+.proj-select-input {
+	width: 100%;
+	padding: 0.4rem 0.55rem;
+	font-size: 13px;
+	background: var(--surface-2);
+	border: 1px solid var(--border);
+	border-radius: 0.4rem;
+	color: var(--text);
+}
+
+.proj-select-input:focus {
+	outline: none;
+	border-color: var(--accent);
+}
+
+.proj-select.proj-invalid .proj-select-input { border-color: var(--bad); }
+
+.proj-list {
+	position: absolute;
+	z-index: 40;
+	left: 0;
+	right: 0;
+	margin: 0.25rem 0 0 0;
+	padding: 0.25rem;
+	list-style: none;
+	background: var(--surface-3);
+	border: 1px solid var(--border-strong);
+	border-radius: 0.5rem;
+	max-height: 260px;
+	overflow-y: auto;
+	box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+.proj-opt {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.4rem 0.55rem;
+	border-radius: 0.35rem;
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--text);
+}
+
+.proj-opt:hover,
+.proj-opt.active { background: var(--accent-dim); }
+
+.proj-opt-empty { color: var(--text-dim); cursor: default; }
+
+.proj-opt-name { font-weight: 500; }
+
+.proj-opt-id {
+	margin-left: auto;
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--text-dim);
+}
+
+.proj-chip {
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	padding: 0.05rem 0.35rem;
+	border-radius: 0.3rem;
+}
+
+.proj-chip-personal {
+	background: rgba(34, 211, 238, 0.08);
+	color: var(--accent);
+	border: 1px solid var(--border-accent);
+}
+
+.proj-chip-work {
+	background: var(--surface-2);
+	color: var(--text-2);
+	border: 1px solid var(--border-strong);
+}
+
+.admin-form-error {
+	color: var(--bad);
+	font-size: 12px;
+	margin-top: 0.45rem;
+}
