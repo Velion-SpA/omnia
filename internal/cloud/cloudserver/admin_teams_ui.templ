@@ -285,11 +285,38 @@ templ adminProjectGroup(label string, rows []adminProjectRow) {
 }
 
 templ adminProjectRowView(row adminProjectRow) {
-	<form data-admin-form data-method="PUT" data-url-template={ row.MetaURL } data-body="json" style="display: grid; grid-template-columns: 1.4fr 1.4fr auto auto; gap: 0.6rem; align-items: center; padding: 0.5rem 0.7rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.45rem; margin: 0;">
-		<span style="font-family: var(--mono); font-size: 13px; color: var(--text);">{ row.Project }</span>
-		<input type="text" name="display_name" value={ row.DisplayName } placeholder="display name (optional)" style="padding: 0.35rem 0.5rem; font-size: 13px; background: var(--surface); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
-		@adminKindSelect(row.Kind)
-		<button type="submit" class="shell-button" style="padding: 0.3rem 0.8rem; font-size: 12px;">Save</button>
-		<div class="admin-form-error" data-form-error hidden style="grid-column: 1 / -1;"></div>
-	</form>
+	<div style="display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem 0.7rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.45rem;">
+		<form data-admin-form data-method="PUT" data-url-template={ row.MetaURL } data-body="json" style="display: grid; grid-template-columns: 1.4fr 1.4fr auto auto; gap: 0.6rem; align-items: center; margin: 0;">
+			<span style="font-family: var(--mono); font-size: 13px; color: var(--text);">{ row.Project }</span>
+			<input type="text" name="display_name" value={ row.DisplayName } placeholder="display name (optional)" style="padding: 0.35rem 0.5rem; font-size: 13px; background: var(--surface); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
+			@adminKindSelect(row.Kind)
+			<button type="submit" class="shell-button" style="padding: 0.3rem 0.8rem; font-size: 12px;">Save</button>
+			<div class="admin-form-error" data-form-error hidden style="grid-column: 1 / -1;"></div>
+		</form>
+		@adminProjectSyncControl(row)
+	</div>
+}
+
+// adminProjectSyncControl surfaces the OBL-04 pause/resume control state for one
+// project: a badge (enabled/paused + reason) plus the matching action. Pause
+// carries an optional reason (HTMX form-encodes it); Resume is a single hx-post
+// like the existing enable/disable-user buttons — no body needed.
+templ adminProjectSyncControl(row adminProjectRow) {
+	<div style="display: flex; align-items: center; gap: 0.6rem; padding-top: 0.45rem; border-top: 1px dashed var(--border);">
+		if row.SyncEnabled {
+			<span class="badge badge-ok" style="padding: 0.15rem 0.5rem;">sync enabled</span>
+			<span style="flex: 1;"></span>
+			<form data-admin-form data-method="POST" data-url-template={ row.PauseURL } data-body="form" style="display: flex; align-items: center; gap: 0.4rem; margin: 0;">
+				<input type="text" name="paused_reason" placeholder="reason (optional)" style="padding: 0.3rem 0.5rem; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text); width: 180px;"/>
+				<button type="submit" class="shell-button shell-button-ghost" style="padding: 0.25rem 0.65rem; font-size: 12px;">Pause</button>
+			</form>
+		} else {
+			<span class="badge badge-bad" style="padding: 0.15rem 0.5rem;">paused</span>
+			if row.PausedReason != "" {
+				<span style="font-size: 11px; color: var(--text-dim);">{ row.PausedReason }</span>
+			}
+			<span style="flex: 1;"></span>
+			<button type="button" class="shell-button shell-button-ghost" style="padding: 0.25rem 0.65rem; font-size: 12px;" hx-post={ row.ResumeURL } hx-swap="none">Resume</button>
+		}
+	</div>
 }

@@ -20,6 +20,21 @@ const AuditActionMutationPush = "mutation_push"
 // AuditActionChunkPush discriminates chunk push rejections.
 const AuditActionChunkPush = "chunk_push"
 
+// AuditActionProjectPause discriminates an operator pausing a project's sync
+// (OBL-04 — the control side of the pause/resume enforcement above).
+const AuditActionProjectPause = "project_pause"
+
+// AuditActionProjectResume discriminates an operator resuming a project's sync.
+const AuditActionProjectResume = "project_resume"
+
+// AuditOutcomeProjectPaused is the outcome for a successful operator pause action.
+// Distinct from AuditOutcomeRejectedProjectPaused, which records a PUSH rejected
+// because the project was already paused.
+const AuditOutcomeProjectPaused = "project_paused"
+
+// AuditOutcomeProjectResumed is the outcome for a successful operator resume action.
+const AuditOutcomeProjectResumed = "project_resumed"
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 // AuditEntry is the write-side struct for inserting an audit log row.

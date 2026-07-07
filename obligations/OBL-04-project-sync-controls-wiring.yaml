@@ -1,6 +1,6 @@
 id: OBL-04
 title: Wire project sync controls (pause/resume) to an HTTP route + CLI
-status: pending
+status: done
 priority: P2
 blocks_homelab_test: false
 estimated_effort: M

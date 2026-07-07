@@ -180,12 +180,12 @@ func (c *cloudConfigV2) listClouds() []string {
 func cmdCloud(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: omnia cloud <subcommand> [options]")
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap-admin, signup, login, refresh, devices, add, list, remove, default")
+		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap-admin, signup, login, refresh, devices, project, add, list, remove, default")
 		exitFunc(1)
 	}
 	if os.Args[2] == "--help" || os.Args[2] == "-h" || os.Args[2] == "help" {
 		fmt.Println("usage: omnia cloud <subcommand> [options]")
-		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap-admin, signup, login, refresh, devices, add, list, remove, default")
+		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap-admin, signup, login, refresh, devices, project, add, list, remove, default")
 		return
 	}
 
@@ -212,6 +212,8 @@ func cmdCloud(cfg store.Config) {
 		cmdCloudRefresh(cfg)
 	case "devices":
 		cmdCloudDevices(cfg)
+	case "project":
+		cmdCloudProject(cfg)
 	case "add":
 		cmdCloudAdd(cfg)
 	case "list":
@@ -222,7 +224,7 @@ func cmdCloud(cfg store.Config) {
 		cmdCloudDefault(cfg)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown cloud command: %s\n", os.Args[2])
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap-admin, signup, login, refresh, devices, add, list, remove, default")
+		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap-admin, signup, login, refresh, devices, project, add, list, remove, default")
 		exitFunc(1)
 	}
 }

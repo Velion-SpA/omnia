@@ -139,10 +139,14 @@ type adminTeamDetailView struct {
 }
 
 type adminProjectRow struct {
-	Project     string
-	DisplayName string
-	Kind        string
-	MetaURL     string // PUT /admin/projects/{project}/meta
+	Project      string
+	DisplayName  string
+	Kind         string
+	MetaURL      string // PUT /admin/projects/{project}/meta
+	SyncEnabled  bool   // OBL-04: false when the project's sync is paused
+	PausedReason string // set only when SyncEnabled is false
+	PauseURL     string // POST /admin/projects/{project}/pause
+	ResumeURL    string // POST /admin/projects/{project}/resume
 }
 
 type adminProjectsView struct {
@@ -340,13 +344,27 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 		http.Error(w, "could not list projects", http.StatusInternalServerError)
 		return
 	}
+	pcs, hasSyncControls := s.projectSyncControlStore()
+
 	view := adminProjectsView{Props: s.adminLayoutProps("Admin · Projects", "admin")}
 	for _, k := range known {
+		escProject := url.PathEscape(k.Project)
 		row := adminProjectRow{
 			Project:     k.Project,
 			DisplayName: k.DisplayName,
 			Kind:        k.Kind,
-			MetaURL:     "/admin/projects/" + url.PathEscape(k.Project) + "/meta",
+			MetaURL:     "/admin/projects/" + escProject + "/meta",
+			SyncEnabled: true, // OBL-04 default: absent control row = enabled
+			PauseURL:    "/admin/projects/" + escProject + "/pause",
+			ResumeURL:   "/admin/projects/" + escProject + "/resume",
+		}
+		if hasSyncControls {
+			if ctrl, cerr := pcs.GetProjectSyncControl(k.Project); cerr == nil && ctrl != nil {
+				row.SyncEnabled = ctrl.SyncEnabled
+				if ctrl.PausedReason != nil {
+					row.PausedReason = *ctrl.PausedReason
+				}
+			}
 		}
 		switch k.Kind {
 		case "personal":

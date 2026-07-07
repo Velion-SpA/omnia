@@ -288,6 +288,15 @@ func (s *CloudServer) routes() {
 			s.mux.HandleFunc("PUT /admin/projects/{project}/meta", s.handleAdminSetProjectMeta)
 			s.mux.HandleFunc("GET /admin/projects", s.handleAdminProjectsRoute)
 		}
+		// Project sync pause/resume controls (OBL-04). SetProjectSyncEnabled has been
+		// implemented since project_controls.go landed but had no caller — these are
+		// it. Operator-gated (requireOperator) like the rest of the Admin section; the
+		// enforcement side (IsProjectSyncEnabled gating pushes with a 409) is untouched
+		// and already live at the chunk/mutation push paths.
+		if _, ok := s.store.(projectSyncControlAdminStore); ok {
+			s.mux.HandleFunc("POST /admin/projects/{project}/pause", s.handleAdminPauseProject)
+			s.mux.HandleFunc("POST /admin/projects/{project}/resume", s.handleAdminResumeProject)
+		}
 	}
 
 	// Mount the unified dashboard at the root catch-all, behind the cloud's
