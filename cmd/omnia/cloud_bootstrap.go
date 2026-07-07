@@ -23,10 +23,12 @@ var errBootstrapAdminExists = errors.New(
 		"/admin/users/{id}/disable, /admin/users/{id}/enable) instead",
 )
 
-// bootstrapAdminStore is the store seam used by the first-admin bootstrap: it only
-// needs to know whether any account already exists.
+// bootstrapAdminStore is the store seam used by the first-admin bootstrap: it needs
+// to know whether any account already exists and to stamp the created account with
+// the account-level admin flag (OBL-16).
 type bootstrapAdminStore interface {
 	HasAnyUser(ctx context.Context) (bool, error)
+	SetUserAdmin(ctx context.Context, accountID string, admin bool) error
 }
 
 // bootstrapAdminSignup creates the account. *auth.Service satisfies it (bcrypt +
@@ -69,6 +71,11 @@ func runBootstrapAdmin(ctx context.Context, cs bootstrapAdminStore, signup boots
 	user, err := signup.Signup(opts.Username, opts.Email, opts.Password)
 	if err != nil {
 		return bootstrapAdminResult{}, err
+	}
+	// OBL-16: the first admin is a REAL account admin — logging in with
+	// username/password grants operator, independent of the OMNIA_CLOUD_ADMIN token.
+	if err := cs.SetUserAdmin(ctx, user.ID, true); err != nil {
+		return bootstrapAdminResult{}, fmt.Errorf("set admin flag: %w", err)
 	}
 	res := bootstrapAdminResult{UserID: user.ID, Username: user.Username}
 	if opts.IssueToken {

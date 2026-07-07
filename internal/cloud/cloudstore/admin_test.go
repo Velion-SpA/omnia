@@ -2,6 +2,7 @@ package cloudstore
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -149,5 +150,62 @@ func TestAdminUserAndMembershipQueriesIntegration(t *testing.T) {
 	au, _ = findAdminUser(users, alice.ID)
 	if !au.Disabled() {
 		t.Fatal("expected alice to be disabled in ListUsers")
+	}
+}
+
+// TestUserAdminFlagRoundTripIntegration exercises the OBL-16 is_admin column end to
+// end against a live Postgres: default false, promote, ListUsers projection,
+// CountAdmins, unknown-id behaviour, and demote.
+func TestUserAdminFlagRoundTripIntegration(t *testing.T) {
+	cs := newTokenTestStore(t)
+	ctx := context.Background()
+
+	user, err := cs.CreateUser("labadmin", "labadmin@example.com", "hash")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	// A freshly created account is NOT an admin by default.
+	if isAdmin, err := cs.IsUserAdmin(ctx, user.ID); err != nil || isAdmin {
+		t.Fatalf("new account must default to is_admin=false, got %v err=%v", isAdmin, err)
+	}
+	if n, err := cs.CountAdmins(ctx); err != nil || n != 0 {
+		t.Fatalf("expected 0 admins, got n=%d err=%v", n, err)
+	}
+	users, _ := cs.ListUsers(ctx)
+	if u, ok := findAdminUser(users, user.ID); !ok || u.IsAdmin {
+		t.Fatalf("ListUsers must report IsAdmin=false initially, got %+v ok=%v", u, ok)
+	}
+
+	// Promote → flag, count, and ListUsers projection all flip.
+	if err := cs.SetUserAdmin(ctx, user.ID, true); err != nil {
+		t.Fatalf("set user admin true: %v", err)
+	}
+	if isAdmin, err := cs.IsUserAdmin(ctx, user.ID); err != nil || !isAdmin {
+		t.Fatalf("expected is_admin=true after promote, got %v err=%v", isAdmin, err)
+	}
+	if n, err := cs.CountAdmins(ctx); err != nil || n != 1 {
+		t.Fatalf("expected 1 admin, got n=%d err=%v", n, err)
+	}
+	users, _ = cs.ListUsers(ctx)
+	if u, _ := findAdminUser(users, user.ID); !u.IsAdmin {
+		t.Fatalf("ListUsers must report IsAdmin=true after promote")
+	}
+
+	// Unknown id: IsUserAdmin resolves false without error (fail-closed read).
+	if got, err := cs.IsUserAdmin(ctx, "999999"); err != nil || got {
+		t.Fatalf("unknown id must resolve is_admin=false, got %v err=%v", got, err)
+	}
+	// Unknown id: SetUserAdmin surfaces ErrManagedTokenUserNotFound (→ clean 404).
+	if err := cs.SetUserAdmin(ctx, "999999", true); !errors.Is(err, ErrManagedTokenUserNotFound) {
+		t.Fatalf("set admin on unknown id: expected ErrManagedTokenUserNotFound, got %v", err)
+	}
+
+	// Demote → back to zero admins.
+	if err := cs.SetUserAdmin(ctx, user.ID, false); err != nil {
+		t.Fatalf("set user admin false: %v", err)
+	}
+	if n, err := cs.CountAdmins(ctx); err != nil || n != 0 {
+		t.Fatalf("expected 0 admins after demote, got n=%d err=%v", n, err)
 	}
 }

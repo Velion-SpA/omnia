@@ -21,6 +21,7 @@ type fakeAdminDashboardStore struct {
 	tokens   map[string][]cloudstore.ManagedTokenView
 	revoked  []string
 	disabled map[string]bool
+	admins   map[string]bool // OBL-16: account id → is_admin
 }
 
 func newFakeAdminDashboardStore() *fakeAdminDashboardStore {
@@ -28,7 +29,32 @@ func newFakeAdminDashboardStore() *fakeAdminDashboardStore {
 		fakeMembershipStore: newFakeMembershipStore(),
 		tokens:              map[string][]cloudstore.ManagedTokenView{},
 		disabled:            map[string]bool{},
+		admins:              map[string]bool{},
 	}
+}
+
+// IsUserAdmin backs both the operator-promotion lookup (OBL-16) and the last-admin
+// guard on demote.
+func (s *fakeAdminDashboardStore) IsUserAdmin(_ context.Context, accountID string) (bool, error) {
+	return s.admins[accountID], nil
+}
+
+func (s *fakeAdminDashboardStore) SetUserAdmin(_ context.Context, accountID string, admin bool) error {
+	if s.admins == nil {
+		s.admins = map[string]bool{}
+	}
+	s.admins[accountID] = admin
+	return nil
+}
+
+func (s *fakeAdminDashboardStore) CountAdmins(context.Context) (int, error) {
+	n := 0
+	for _, v := range s.admins {
+		if v {
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (s *fakeAdminDashboardStore) ListUsers(context.Context) ([]cloudstore.AdminUser, error) {
@@ -233,6 +259,136 @@ func TestAdminListUsersGate(t *testing.T) {
 	srv.Handler().ServeHTTP(acctRec, cookieRequest(http.MethodGet, "/admin/users", accountCookie(t, authSvc, "7", "bob"), ""))
 	if acctRec.Code != http.StatusForbidden {
 		t.Fatalf("account GET /admin/users: expected 403, got %d", acctRec.Code)
+	}
+}
+
+// TestAdminAccountIsOperator is the OBL-16 acceptance guard: an account carrying
+// cloud_users.is_admin=true logs in with username/password (no operator token) and
+// is treated as operator — it sees the Admin nav on the dashboard and every
+// /admin/* route returns 200. A non-admin account still sees no Admin nav and 403.
+func TestAdminAccountIsOperator(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.users = []cloudstore.AdminUser{{ID: "1", Username: "labadmin", IsAdmin: true}}
+	store.admins["1"] = true // labadmin is an account-level admin
+
+	adminSession := accountCookie(t, authSvc, "1", "labadmin")
+
+	// Dashboard root: Admin nav renders for the admin account.
+	navRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(navRec, cookieRequest(http.MethodGet, "/", adminSession, ""))
+	if navRec.Code != http.StatusOK {
+		t.Fatalf("admin account GET /: expected 200, got %d", navRec.Code)
+	}
+	if !strings.Contains(navRec.Body.String(), `data-nav="/admin"`) {
+		t.Fatalf("admin account dashboard must show the Admin nav entry, body=%q", navRec.Body.String())
+	}
+
+	// GET /admin → 200 for the admin account.
+	pageRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(pageRec, cookieRequest(http.MethodGet, "/admin", adminSession, ""))
+	if pageRec.Code != http.StatusOK {
+		t.Fatalf("admin account GET /admin: expected 200, got %d body=%q", pageRec.Code, pageRec.Body.String())
+	}
+
+	// GET /admin/users → 200 for the admin account.
+	usersRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(usersRec, cookieRequest(http.MethodGet, "/admin/users", adminSession, ""))
+	if usersRec.Code != http.StatusOK {
+		t.Fatalf("admin account GET /admin/users: expected 200, got %d", usersRec.Code)
+	}
+
+	// A non-admin account (is_admin=false) is still forbidden and sees no Admin nav.
+	nonAdmin := accountCookie(t, authSvc, "2", "personal")
+	forbiddenRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(forbiddenRec, cookieRequest(http.MethodGet, "/admin", nonAdmin, ""))
+	if forbiddenRec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin account GET /admin: expected 403, got %d", forbiddenRec.Code)
+	}
+	navRec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(navRec2, cookieRequest(http.MethodGet, "/", nonAdmin, ""))
+	if strings.Contains(navRec2.Body.String(), `data-nav="/admin"`) {
+		t.Fatalf("non-admin dashboard must NOT show the Admin nav entry, body=%q", navRec2.Body.String())
+	}
+}
+
+// TestAdminSyncBearerNeverOperatorWithAdminFlag pins OBL-03 under OBL-16: even with
+// the account-admin lookup wired in, the plain SYNC bearer never resolves to
+// operator (its session carries no account identity, so it can't be promoted).
+func TestAdminSyncBearerNeverOperatorWithAdminFlag(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.admins["1"] = true // an admin account exists, but the sync bearer isn't it
+
+	// Sync bearer as a dashboard SESSION cookie → not operator.
+	syncSession, err := authSvc.MintDashboardSession("sync-token")
+	if err != nil {
+		t.Fatalf("mint sync session: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, cookieRequest(http.MethodGet, "/admin/users", &http.Cookie{Name: dashboardSessionCookieName, Value: syncSession}, ""))
+	if rec.Code == http.StatusOK {
+		t.Fatalf("sync bearer session must NOT be operator (OBL-03), got 200")
+	}
+}
+
+// TestAdminPromoteDemoteRoundTrip verifies the operator can grant and revoke an
+// account's admin flag from the Users page endpoints.
+func TestAdminPromoteDemoteRoundTrip(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.admins["1"] = true // keep a standing admin so demotes below aren't "last admin"
+
+	// Promote user 5.
+	promoteRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(promoteRec, cookieRequest(http.MethodPost, "/admin/users/5/promote", operatorCookie(t, authSvc), ""))
+	if promoteRec.Code != http.StatusOK {
+		t.Fatalf("promote: expected 200, got %d body=%q", promoteRec.Code, promoteRec.Body.String())
+	}
+	if !store.admins["5"] {
+		t.Fatalf("expected user 5 to be admin after promote, got %v", store.admins["5"])
+	}
+
+	// Demote user 5 (user 1 remains admin, so not the last).
+	demoteRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(demoteRec, cookieRequest(http.MethodPost, "/admin/users/5/demote", operatorCookie(t, authSvc), ""))
+	if demoteRec.Code != http.StatusOK {
+		t.Fatalf("demote: expected 200, got %d body=%q", demoteRec.Code, demoteRec.Body.String())
+	}
+	if store.admins["5"] {
+		t.Fatalf("expected user 5 to be non-admin after demote")
+	}
+
+	// A non-operator account cannot promote/demote.
+	forbidden := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(forbidden, cookieRequest(http.MethodPost, "/admin/users/5/promote", accountCookie(t, authSvc, "9", "nope"), ""))
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("non-operator promote: expected 403, got %d", forbidden.Code)
+	}
+}
+
+// TestDemoteLastAdminRefused verifies the last-admin guard: the only remaining
+// admin cannot be demoted (409), preventing an Admin-section lockout.
+func TestDemoteLastAdminRefused(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.admins["1"] = true // the ONLY admin
+
+	// Demoting the last admin is refused.
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, cookieRequest(http.MethodPost, "/admin/users/1/demote", operatorCookie(t, authSvc), ""))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("demote last admin: expected 409, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if !store.admins["1"] {
+		t.Fatalf("last admin must remain admin after a refused demote")
+	}
+
+	// With a second admin present, demoting one is allowed again.
+	store.admins["2"] = true
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, cookieRequest(http.MethodPost, "/admin/users/1/demote", operatorCookie(t, authSvc), ""))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("demote with two admins: expected 200, got %d", rec2.Code)
+	}
+	if store.admins["1"] {
+		t.Fatalf("user 1 should be demoted when another admin remains")
 	}
 }
 

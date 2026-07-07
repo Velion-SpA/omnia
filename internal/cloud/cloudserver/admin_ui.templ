@@ -73,6 +73,9 @@ templ adminUserRowView(u adminUserRow) {
 			} else {
 				<span class="badge badge-ok">active</span>
 			}
+			if u.IsAdmin {
+				<span class="badge badge-ok" style="margin-left: 0.3rem;">admin</span>
+			}
 		</td>
 		<td style="padding: 0.55rem 0.75rem; color: var(--text-dim);">{ u.Created }</td>
 		<td style="padding: 0.55rem 0.75rem;">
@@ -88,6 +91,11 @@ templ adminUserRowView(u adminUserRow) {
 					<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px;" hx-post={ "/admin/users/" + u.ID + "/enable" } hx-swap="none">Enable</button>
 				} else {
 					<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px;" hx-post={ "/admin/users/" + u.ID + "/disable" } hx-swap="none">Disable</button>
+				}
+				if u.IsAdmin {
+					<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px;" hx-post={ "/admin/users/" + u.ID + "/demote" } hx-swap="none">Demote</button>
+				} else {
+					<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px;" hx-post={ "/admin/users/" + u.ID + "/promote" } hx-swap="none">Promote</button>
 				}
 				<a href={ templ.SafeURL("/admin/access?user=" + u.ID) } class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px; text-decoration: none;">Access</a>
 				<form hx-post="/admin/tokens" hx-target="#admin-token-modal" hx-swap="innerHTML" style="display: inline-flex; gap: 0.35rem; align-items: center; margin: 0;">

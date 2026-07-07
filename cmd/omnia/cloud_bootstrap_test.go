@@ -12,12 +12,23 @@ import (
 // ─── Fakes for bootstrap-admin ───────────────────────────────────────────────
 
 type fakeBootstrapStore struct {
-	hasUser bool
-	err     error
+	hasUser        bool
+	err            error
+	adminSetID     string
+	adminSetValue  bool
+	adminSetCalled bool
+	adminErr       error
 }
 
 func (f *fakeBootstrapStore) HasAnyUser(context.Context) (bool, error) {
 	return f.hasUser, f.err
+}
+
+func (f *fakeBootstrapStore) SetUserAdmin(_ context.Context, accountID string, admin bool) error {
+	f.adminSetCalled = true
+	f.adminSetID = accountID
+	f.adminSetValue = admin
+	return f.adminErr
 }
 
 type fakeBootstrapSignup struct {
@@ -68,7 +79,8 @@ func injectBootstrapDeps(t *testing.T, cs bootstrapAdminStore, su bootstrapAdmin
 func TestBootstrapAdminCreatesFirstAdmin(t *testing.T) {
 	cfg := testConfig(t)
 	su := &fakeBootstrapSignup{user: &cloudstore.User{ID: "1", Username: "root"}}
-	injectBootstrapDeps(t, &fakeBootstrapStore{hasUser: false}, su, &fakeBootstrapIssuer{})
+	cs := &fakeBootstrapStore{hasUser: false}
+	injectBootstrapDeps(t, cs, su, &fakeBootstrapIssuer{})
 
 	stubExitWithPanic(t)
 	withArgs(t, "omnia", "cloud", "bootstrap-admin", "--username", "root", "--password", "supersecret")
@@ -79,6 +91,10 @@ func TestBootstrapAdminCreatesFirstAdmin(t *testing.T) {
 	}
 	if su.gotUser != "root" || su.gotPasswd != "supersecret" {
 		t.Fatalf("signup got unexpected args: user=%q pass=%q", su.gotUser, su.gotPasswd)
+	}
+	// OBL-16: the first admin must be stamped with the account-level admin flag.
+	if !cs.adminSetCalled || cs.adminSetID != "1" || !cs.adminSetValue {
+		t.Fatalf("expected SetUserAdmin(id=1, true), got called=%v id=%q value=%v", cs.adminSetCalled, cs.adminSetID, cs.adminSetValue)
 	}
 	if !strings.Contains(stdout, "Created first admin account") || !strings.Contains(stdout, "username=root") {
 		t.Fatalf("unexpected output: %q", stdout)

@@ -1,0 +1,112 @@
+id: OBL-14
+title: Teams + profiles + layered permission resolution (personal/work classification)
+status: pending
+priority: P1
+blocks_homelab_test: false
+estimated_effort: XL
+recommended_model: opus-4.8
+depends_on: [OBL-01, OBL-03, OBL-13]
+tags: [cloud, rbac, teams, profiles, permissions, backend]
+
+context: |
+  Evolve the flat per-(account,project) permission model into a teams + profiles model,
+  the way a real org works. A user belongs to one or more TEAMS (e.g. a Botman worker is
+  in both "Migración" and "Intervus"); belonging to a team grants access to ALL that
+  team's projects/memories. The user's PROFILE within a team sets the permission level
+  (e.g. moderator = Create/Read/Update/Delete, member = Read only). On top of teams, the
+  operator can still grant SPECIFIC per-project permissions that OVERRIDE the team-derived
+  ones. Projects are classified personal vs work (workly/trackly/velion-flow = work;
+  omnia/homelab = personal). This is the data + resolution layer; OBL-15 is the UI.
+
+  DESIGN DECISIONS (encoded here — flag on review if any is wrong):
+  - A profile is a NAMED, operator-CREATABLE permission preset: {name, perms bitfield}.
+    Seeded defaults: Moderator = R+I+U+D (15), Member = R (1), Editor = R+I+U (7).
+  - Team membership = (team, account, profile). The profile's perms apply to every
+    project in that team.
+  - Multiple teams UNION: if a user is in two teams that both include project X, the
+    effective team-perms on X is bit_or of the profiles' perms.
+  - Per-project OVERRIDE (the existing cloud_memberships row) takes PRECEDENCE over the
+    team-derived perms for that project — it REPLACES them (can elevate OR restrict).
+  - Effective perms(account, project) = override.perms if an override row exists,
+    else bit_or(profile.perms) across the user's teams that contain the project,
+    else 0 (deny). claimOrphanProject still writes an owner override on first push.
+  - Project classification (personal|work) lives per-project and is independent of teams
+    so a project can be classified even with no team.
+
+current_state: |
+  - Permission check is per-(account,project) membership only, deny-by-default.
+    evidence: internal/cloud/cloudserver/rbac.go (AuthorizeAccountProject: m==nil ||
+    !Permission(m.Perms).Has(required) -> ErrPermissionDenied)
+  - cloud_memberships(account_id,project,perms,role) is the only grant table.
+    evidence: internal/cloud/cloudstore/cloudstore.go (schema), membership.go
+  - perms bitfield Read=1/Insert=2/Update=4/Delete=8/All=15; roles owner>admin>moderator>member.
+    evidence: internal/cloud/auth/permission.go, roles.go
+  - OBL-13 added operator admin endpoints + UI over cloud_memberships.
+    evidence: internal/cloud/cloudserver/admin_dashboard.go, admin_ui.templ; cloudstore/admin.go
+
+gap: |
+  New tables (profiles, teams, team_projects, team_members, project_meta), an
+  effective-perms resolver that layers override > team-profile union, wiring it into the
+  authorization hot path, and operator CRUD endpoints for all of it.
+
+tasks: |
+  1. Migrations (additive, in migrate()):
+     cloud_profiles(id BIGSERIAL PK, name TEXT UNIQUE, perms INT NOT NULL, created_at);
+     cloud_teams(id BIGSERIAL PK, name TEXT UNIQUE, kind TEXT NOT NULL DEFAULT 'work', created_at);
+     cloud_team_projects(team_id BIGINT REFERENCES cloud_teams(id) ON DELETE CASCADE, project TEXT, PK(team_id,project));
+     cloud_team_members(team_id BIGINT REFERENCES cloud_teams(id) ON DELETE CASCADE, account_id TEXT, profile_id BIGINT REFERENCES cloud_profiles(id), PK(team_id,account_id));
+     cloud_project_meta(project TEXT PK, kind TEXT NOT NULL DEFAULT 'work', display_name TEXT).
+     Seed default profiles (Moderator=15, Member=1, Editor=7) idempotently.
+  2. Store methods (cloudstore, new teams.go/profiles.go): CRUD for profiles, teams,
+     team_projects, team_members, project_meta; plus ListTeamsForAccount,
+     ListProjectsForTeam, ListMembersOfTeam.
+  3. Effective-perms resolver (new): EffectivePerms(ctx, accountID, project) int —
+     (a) if cloud_memberships override exists → its perms; (b) else bit_or of
+     cloud_profiles.perms over cloud_team_members JOIN cloud_team_projects for that
+     account+project; (c) else 0. Prefer a single SQL with COALESCE/bit_or; keep it
+     indexed (index cloud_team_members(account_id), cloud_team_projects(project)).
+  4. Wire into the auth hot path: replace the membership-only check in
+     rbac.go AuthorizeAccountProject with EffectivePerms(...).Has(required). Preserve
+     deny-by-default (0 perms = deny) and the device-scope AND-gate (OBL-08) untouched.
+     claimOrphanProject still writes the owner override.
+  5. Operator endpoints (extend admin_dashboard.go, requireOperator):
+     profiles GET/PUT/DELETE /admin/profiles[/{id}]; teams GET/PUT/DELETE /admin/teams[/{id}];
+     team projects PUT/DELETE /admin/teams/{id}/projects/{project};
+     team members PUT/DELETE /admin/teams/{id}/members/{account_id} (body: profile);
+     project classification PUT /admin/projects/{project}/meta (kind, display_name);
+     GET /admin/projects (list known projects + kind, for the selector/classification UI).
+  6. "Known projects" source for the searchable selector: expose distinct projects from
+     cloud_chunks ∪ cloud_memberships ∪ cloud_team_projects ∪ cloud_project_meta so the
+     UI (OBL-15) can autocomplete real project names.
+  7. Tests: profile CRUD; team CRUD; add user to 2 teams → union perms on a shared
+     project; per-project override replaces team perms (elevate AND restrict); deny when
+     no team/override; moderator profile CRUD vs member read-only enforced on sync;
+     project_meta classification round-trip; claimOrphanProject still works.
+
+acceptance_criteria: |
+  - A user in team "Migración" (Moderator) and team "Intervus" (Member) gets CRUD on
+    Migración's projects and read-only on Intervus's; union is correct where they overlap.
+  - Changing a user's profile in a team changes their enforced perms on that team's
+    projects on the next sync.
+  - A per-project override for that user replaces the team-derived perms for that project.
+  - Projects are classifiable personal/work and the classification is queryable.
+  - go build/vet/test green; auth hot path still deny-by-default; device scope intact.
+
+verification: |
+  - go build ./... && go vet ./... && go test ./internal/cloud/...
+  - PG integration vs a throwaway DB for the resolver + endpoints.
+  - Manual on homelab: put usuario in a team as Member (read), confirm HP read works /
+    write denied; switch to Moderator, confirm write works.
+
+do_not_touch: |
+  - Deny-by-default semantics and the OBL-08 device-scope AND-gate (additive only).
+  - cloud_memberships stays as the per-project OVERRIDE layer (do not drop it).
+  - Cookie name, existing table/column names, LICENSE.
+
+references: |
+  - internal/cloud/cloudserver/rbac.go (AuthorizeAccountProject — the hot path)
+  - internal/cloud/cloudserver/cloudserver.go (authorizeProjectOp, checkDeviceScope)
+  - internal/cloud/cloudserver/members.go (claimOrphanProject)
+  - internal/cloud/cloudstore/cloudstore.go (migrate), membership.go, admin.go
+  - internal/cloud/auth/permission.go, roles.go (bitfield + roles)
+  - internal/cloud/cloudserver/admin_dashboard.go (OBL-13 operator endpoints to extend)

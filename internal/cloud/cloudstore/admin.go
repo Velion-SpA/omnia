@@ -3,6 +3,7 @@ package cloudstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ type AdminUser struct {
 	ID           string
 	Username     string
 	Email        string
+	IsAdmin      bool // OBL-16: account-level admin — login is treated as operator
 	CreatedAt    time.Time
 	DisabledAt   *time.Time // nil ⇒ active; non-nil ⇒ disabled at that time
 	TokenCount   int        // count of non-revoked managed tokens
@@ -52,12 +54,12 @@ func (cs *CloudStore) ListUsers(ctx context.Context) ([]AdminUser, error) {
 		return nil, fmt.Errorf("cloudstore: not initialized")
 	}
 	const q = `
-		SELECT u.id::text, u.username, u.email, u.created_at, u.disabled_at,
+		SELECT u.id::text, u.username, u.email, u.is_admin, u.created_at, u.disabled_at,
 		       COUNT(t.id) FILTER (WHERE t.revoked_at IS NULL) AS active_tokens,
 		       MAX(t.last_used_at) AS last_token_use
 		FROM cloud_users u
 		LEFT JOIN cloud_tokens t ON t.user_id = u.id
-		GROUP BY u.id, u.username, u.email, u.created_at, u.disabled_at
+		GROUP BY u.id, u.username, u.email, u.is_admin, u.created_at, u.disabled_at
 		ORDER BY u.username ASC`
 	rows, err := cs.db.QueryContext(ctx, q)
 	if err != nil {
@@ -72,7 +74,7 @@ func (cs *CloudStore) ListUsers(ctx context.Context) ([]AdminUser, error) {
 			disabledAt sql.NullTime
 			lastUse    sql.NullTime
 		)
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.CreatedAt, &disabledAt, &u.TokenCount, &lastUse); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.IsAdmin, &u.CreatedAt, &disabledAt, &u.TokenCount, &lastUse); err != nil {
 			return nil, fmt.Errorf("cloudstore: scan user: %w", err)
 		}
 		if disabledAt.Valid {
@@ -154,6 +156,67 @@ func (cs *CloudStore) DeleteMembership(ctx context.Context, accountID, project s
 		return fmt.Errorf("cloudstore: delete membership: %w", err)
 	}
 	return nil
+}
+
+// IsUserAdmin reports whether the account carries the is_admin flag (OBL-16). It
+// is the per-request lookup behind the operator gate: a logged-in account whose
+// is_admin=true is treated as operator, exactly as OBL-01 validates a managed
+// token against the DB on each request. An unknown id resolves to false (never an
+// error), so callers fail-closed to "not admin".
+func (cs *CloudStore) IsUserAdmin(ctx context.Context, accountID string) (bool, error) {
+	if cs == nil || cs.db == nil {
+		return false, fmt.Errorf("cloudstore: not initialized")
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return false, fmt.Errorf("cloudstore: account_id is required")
+	}
+	var isAdmin bool
+	err := cs.db.QueryRowContext(ctx, `SELECT is_admin FROM cloud_users WHERE id = $1::bigint`, accountID).Scan(&isAdmin)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("cloudstore: is user admin: %w", err)
+	}
+	return isAdmin, nil
+}
+
+// SetUserAdmin grants or revokes an account's admin flag (OBL-16). Returns
+// ErrManagedTokenUserNotFound when the id does not exist so the HTTP layer can map
+// it to a clean 404 (mirrors SetUserDisabled).
+func (cs *CloudStore) SetUserAdmin(ctx context.Context, accountID string, admin bool) error {
+	if cs == nil || cs.db == nil {
+		return fmt.Errorf("cloudstore: not initialized")
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return fmt.Errorf("cloudstore: account_id is required")
+	}
+	res, err := cs.db.ExecContext(ctx, `UPDATE cloud_users SET is_admin = $2 WHERE id = $1::bigint`, accountID, admin)
+	if err != nil {
+		return fmt.Errorf("cloudstore: set user admin: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrManagedTokenUserNotFound
+	}
+	return nil
+}
+
+// CountAdmins returns how many accounts carry is_admin=true (OBL-16). It backs the
+// last-admin guard on demote so the operator can never lock every account admin
+// out of the account-level Admin section (the OMNIA_CLOUD_ADMIN token stays as a
+// separate recovery path regardless).
+func (cs *CloudStore) CountAdmins(ctx context.Context) (int, error) {
+	if cs == nil || cs.db == nil {
+		return 0, fmt.Errorf("cloudstore: not initialized")
+	}
+	var n int
+	if err := cs.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM cloud_users WHERE is_admin = true`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("cloudstore: count admins: %w", err)
+	}
+	return n, nil
 }
 
 // ListManagedTokensForUser returns the operator-facing token list for a user,

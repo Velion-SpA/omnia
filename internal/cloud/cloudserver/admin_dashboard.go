@@ -3,6 +3,7 @@ package cloudserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -34,6 +35,10 @@ type adminDashboardStore interface {
 	UpsertMembership(ctx context.Context, accountID, project string, perms int, role string) error
 	DeleteMembership(ctx context.Context, accountID, project string) error
 	ListManagedTokensForUser(ctx context.Context, userID string) ([]cloudstore.ManagedTokenView, error)
+	// OBL-16: account-level admin flag administration + the last-admin guard.
+	IsUserAdmin(ctx context.Context, accountID string) (bool, error)
+	SetUserAdmin(ctx context.Context, accountID string, admin bool) error
+	CountAdmins(ctx context.Context) (int, error)
 }
 
 // Compile-time assertion: the concrete store must satisfy the admin seam.
@@ -99,6 +104,7 @@ type adminUserRow struct {
 	ID           string
 	Username     string
 	Email        string
+	IsAdmin      bool
 	Disabled     bool
 	Created      string
 	TokenCount   int
@@ -376,6 +382,93 @@ func (s *CloudServer) handleAdminDeleteMembership(w http.ResponseWriter, r *http
 	s.writeOperatorMutationResult(w, r, http.StatusOK, map[string]string{"status": "revoked", "account_id": accountID, "project": project})
 }
 
+// ─── account-level admin promote/demote (OBL-16) ─────────────────────────────
+
+// requireAdminStepUp is the checkpoint for the DEFERRED step-up admin auth
+// (OBL-16). The user deferred ("luego") the design where an account admin's
+// MUTATIONS additionally require a separate operator token on top of
+// username+password. Until that lands this is a no-op that always authorizes.
+//
+// It is deliberately wired HERE — at the operator MUTATION path, after
+// requireOperator — so that landing step-up later is a single-function change with
+// no call-site churn: fill in this body (parse a step-up token / recent-auth
+// header, verify it, write 401/403 and return false on failure) and every admin
+// mutation that already calls it is covered. It is intentionally NOT on the read
+// path, so browsing the Admin section never demands a step-up.
+func (s *CloudServer) requireAdminStepUp(_ http.ResponseWriter, _ *http.Request) bool {
+	// DEFERRED (OBL-16): step-up token verification goes here. No-op for now.
+	return true
+}
+
+// handleAdminPromoteUser handles POST /admin/users/{id}/promote — grants is_admin
+// so the account is treated as operator on its next dashboard request.
+func (s *CloudServer) handleAdminPromoteUser(w http.ResponseWriter, r *http.Request) {
+	s.setUserAdmin(w, r, true)
+}
+
+// handleAdminDemoteUser handles POST /admin/users/{id}/demote — revokes is_admin,
+// refusing to demote the LAST remaining admin so the account-level Admin section
+// can never be locked out.
+func (s *CloudServer) handleAdminDemoteUser(w http.ResponseWriter, r *http.Request) {
+	s.setUserAdmin(w, r, false)
+}
+
+func (s *CloudServer) setUserAdmin(w http.ResponseWriter, r *http.Request, admin bool) {
+	if !s.requireOperator(w, r) {
+		return
+	}
+	// DEFERRED step-up checkpoint (OBL-16): a no-op seam today, the single place
+	// where "admin also needs a token" enforcement will hook in later.
+	if !s.requireAdminStepUp(w, r) {
+		return
+	}
+	as, ok := s.adminStore()
+	if !ok {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "admin unavailable"})
+		return
+	}
+	userID := strings.TrimSpace(r.PathValue("id"))
+	if userID == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "user id is required"})
+		return
+	}
+	// Last-admin guard: demoting the only remaining admin would lock every account
+	// admin out of the Admin section, so refuse it. The OMNIA_CLOUD_ADMIN recovery
+	// token still grants operator regardless — this only protects the account model
+	// from becoming unreachable through the UI.
+	if !admin {
+		isAdmin, err := as.IsUserAdmin(r.Context(), userID)
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not check admin status"})
+			return
+		}
+		if isAdmin {
+			count, err := as.CountAdmins(r.Context())
+			if err != nil {
+				jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not count admins"})
+				return
+			}
+			if count <= 1 {
+				jsonResponse(w, http.StatusConflict, map[string]string{"error": "cannot demote the last remaining admin"})
+				return
+			}
+		}
+	}
+	if err := as.SetUserAdmin(r.Context(), userID, admin); err != nil {
+		if errors.Is(err, cloudstore.ErrManagedTokenUserNotFound) {
+			jsonResponse(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+			return
+		}
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not update admin status"})
+		return
+	}
+	status := "demoted"
+	if admin {
+		status = "promoted"
+	}
+	s.writeOperatorMutationResult(w, r, http.StatusOK, map[string]string{"status": status, "user_id": userID})
+}
+
 // ─── request parsing + response helpers ──────────────────────────────────────
 
 // parseMembershipInput reads a membership mutation from either a JSON body or an
@@ -475,6 +568,7 @@ func toAdminUserRow(u cloudstore.AdminUser, tokens []cloudstore.ManagedTokenView
 		ID:           u.ID,
 		Username:     u.Username,
 		Email:        u.Email,
+		IsAdmin:      u.IsAdmin,
 		Disabled:     u.Disabled(),
 		Created:      formatAdminTime(&u.CreatedAt),
 		TokenCount:   u.TokenCount,

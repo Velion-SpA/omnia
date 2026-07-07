@@ -724,6 +724,11 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 		// cloud_users lifecycle: disabled_at marks a user whose tokens are rejected
 		// at runtime (OBL-01). Guarded ADD COLUMN IF NOT EXISTS is idempotent.
 		`ALTER TABLE cloud_users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ`,
+		// cloud_users admin role (OBL-16): is_admin marks an account whose normal
+		// username/password dashboard login is treated as operator — a real account
+		// admin, not only the standalone OMNIA_CLOUD_ADMIN token. Guarded ADD COLUMN
+		// IF NOT EXISTS is idempotent and additive (existing rows default to false).
+		`ALTER TABLE cloud_users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false`,
 		// cloud_tokens: managed per-user tokens stored ONLY as HMAC(pepper, raw)
 		// hashes, shown once at issuance, revocable, and rejected when the owning
 		// user is disabled (OBL-01, Engram Cloud v1.18.0 parity).

@@ -42,6 +42,16 @@ type deviceScopeStore interface {
 	GetDevice(id string) (*cloudstore.Device, error)
 }
 
+// adminFlagStore is the per-request is_admin lookup seam (OBL-16). An authenticated
+// ACCOUNT session whose cloud_users.is_admin=true is treated as operator. It is
+// detected via type assertion on s.store — the same capability pattern as the
+// other store seams — so ChunkStore is NOT extended. *cloudstore.CloudStore
+// satisfies it; the local dashboard's data source never does, so account-level
+// admin stays cloud-only.
+type adminFlagStore interface {
+	IsUserAdmin(ctx context.Context, accountID string) (bool, error)
+}
+
 // RefreshService is an optional extension of AccountService.
 // Servers detect it via type assertion.
 type RefreshService interface {
@@ -235,6 +245,10 @@ func (s *CloudServer) routes() {
 			s.mux.HandleFunc("GET /admin/users/{id}/memberships", s.handleAdminListUserMemberships)
 			s.mux.HandleFunc("PUT /admin/memberships", s.handleAdminUpsertMembership)
 			s.mux.HandleFunc("DELETE /admin/memberships/{account_id}/{project}", s.handleAdminDeleteMembership)
+			// OBL-16: account-level admin promote/demote. Operator-gated like the
+			// rest of the section; demote refuses the last remaining admin.
+			s.mux.HandleFunc("POST /admin/users/{id}/promote", s.handleAdminPromoteUser)
+			s.mux.HandleFunc("POST /admin/users/{id}/demote", s.handleAdminDemoteUser)
 		}
 	}
 
@@ -410,7 +424,20 @@ func (s *CloudServer) dashboardSessionClaims(r *http.Request) (claims *auth.Acco
 	}
 	// Account session — identity embedded and HMAC-signed at mint time.
 	if info, ok := s.dashboardSessionInfo(cookie.Value); ok && strings.TrimSpace(info.AccountID) != "" {
-		return &auth.AccountClaims{AccountID: info.AccountID, Username: info.Username}, false
+		claims := &auth.AccountClaims{AccountID: info.AccountID, Username: info.Username}
+		// OBL-16: an account carrying cloud_users.is_admin=true is treated as
+		// operator — a real account admin who logs in with username/password, not
+		// only the standalone OMNIA_CLOUD_ADMIN token. This is the per-request DB
+		// lookup by AccountID (same pattern as OBL-01 managed-token validation),
+		// fail-closed. Promoting here — inside the SHARED resolver used by both
+		// requireOperator AND dashboardVisibleProjects — is what makes the Admin nav
+		// render and full-project visibility apply, not just the /admin/* gate.
+		// OBL-03 is preserved: the plain sync bearer never reaches this branch (its
+		// session carries no AccountID), so it can never be promoted to operator.
+		if s.accountIsAdmin(r.Context(), info.AccountID) {
+			return claims, true
+		}
+		return claims, false
 	}
 	// Operator visibility (sees ALL accounts' projects) is granted ONLY by the
 	// designated admin credential (OMNIA_CLOUD_ADMIN). Routing through the
@@ -436,6 +463,27 @@ func (s *CloudServer) dashboardSessionClaims(r *http.Request) (claims *auth.Acco
 		}
 	}
 	return nil, false
+}
+
+// accountIsAdmin performs the per-request DB lookup that promotes an authenticated
+// account to operator when it carries cloud_users.is_admin=true (OBL-16), mirroring
+// OBL-01's per-request managed-token validation. It is fail-closed: a missing store
+// seam (e.g. the local dashboard, or token-only unit tests) or any lookup error
+// yields false, so an account is never accidentally elevated to operator.
+func (s *CloudServer) accountIsAdmin(ctx context.Context, accountID string) bool {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return false
+	}
+	store, ok := s.store.(adminFlagStore)
+	if !ok {
+		return false
+	}
+	isAdmin, err := store.IsUserAdmin(ctx, accountID)
+	if err != nil {
+		return false
+	}
+	return isAdmin
 }
 
 // dashboardVisibleProjects implements dashboard.MountConfig.VisibleProjects. The
