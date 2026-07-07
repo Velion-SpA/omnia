@@ -466,3 +466,54 @@ func (cs *CloudStore) EffectivePerms(ctx context.Context, accountID, project str
 	}
 	return perms, nil
 }
+
+// ListReadableProjectsForAccount returns the distinct projects an account can
+// READ under the full layered model: a per-project override (cloud_memberships)
+// wins over the union of the account's team-profile perms, and a project is
+// included when its effective perms include Read. This mirrors EffectivePerms
+// across the candidate set (team projects UNION override projects) and is what
+// the dashboard uses to scope a non-operator account's visible projects — team
+// membership alone (no explicit override) now grants visibility.
+func (cs *CloudStore) ListReadableProjectsForAccount(accountID string) ([]string, error) {
+	if cs == nil || cs.db == nil {
+		return nil, fmt.Errorf("cloudstore: not initialized")
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return []string{}, nil
+	}
+	const q = `
+		SELECT cand.project FROM (
+			SELECT DISTINCT project FROM (
+				SELECT tp.project
+				FROM cloud_team_members tm
+				JOIN cloud_team_projects tp ON tp.team_id = tm.team_id
+				WHERE tm.account_id = $1
+				UNION
+				SELECT project FROM cloud_memberships WHERE account_id = $1
+			) c
+		) cand
+		WHERE (COALESCE(
+			(SELECT perms FROM cloud_memberships WHERE account_id = $1 AND project = cand.project),
+			(SELECT COALESCE(bit_or(p.perms), 0)
+			 FROM cloud_team_members tm
+			 JOIN cloud_team_projects tp ON tp.team_id = tm.team_id
+			 JOIN cloud_profiles p ON p.id = tm.profile_id
+			 WHERE tm.account_id = $1 AND tp.project = cand.project)
+		) & 1) = 1
+		ORDER BY cand.project`
+	rows, err := cs.db.QueryContext(context.Background(), q, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("cloudstore: list readable projects for account: %w", err)
+	}
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("cloudstore: scan readable project: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}

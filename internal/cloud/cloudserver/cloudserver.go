@@ -553,6 +553,19 @@ func (s *CloudServer) dashboardVisibleProjects(r *http.Request) ([]string, bool)
 	if claims == nil {
 		return []string{}, false
 	}
+	// Prefer the full layered resolution (teams ∪ per-project overrides): team
+	// membership alone must grant dashboard visibility, matching the sync auth
+	// path (EffectivePerms). Fall back to the flat membership-only path for stores
+	// that predate the teams model.
+	if teamReader, ok := s.store.(interface {
+		ListReadableProjectsForAccount(string) ([]string, error)
+	}); ok {
+		projects, err := teamReader.ListReadableProjectsForAccount(claims.AccountID)
+		if err != nil {
+			return []string{}, false
+		}
+		return projects, false
+	}
 	reader, ok := s.store.(interface {
 		ListMembershipsForAccount(string) ([]cloudstore.Membership, error)
 	})
