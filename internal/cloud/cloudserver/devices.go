@@ -149,5 +149,13 @@ func (s *CloudServer) handleDeleteDevice(w http.ResponseWriter, r *http.Request)
 		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not delete device"})
 		return
 	}
+	// OBL-05: best-effort audit of the device removal. Never blocks the response.
+	s.emitAudit(r, cloudstore.AuditEntry{
+		Contributor: claims.AccountID,
+		Project:     cloudstore.AuditProjectSentinel,
+		Action:      cloudstore.AuditActionDeviceRevoke,
+		Outcome:     cloudstore.AuditOutcomeDeviceRevoked,
+		Metadata:    map[string]any{"device_id": id, "device_name": dev.Name},
+	})
 	w.WriteHeader(http.StatusNoContent)
 }

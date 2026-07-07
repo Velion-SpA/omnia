@@ -164,6 +164,16 @@ func (s *CloudServer) handleRevokeManagedToken(w http.ResponseWriter, r *http.Re
 		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke token"})
 		return
 	}
+	// OBL-05: best-effort audit of the operator action (distinct from the
+	// atomic ISSUANCE audit in cloudstore.IssueManagedToken). Never blocks the
+	// response — a failed audit write only logs a warning.
+	s.emitAudit(r, cloudstore.AuditEntry{
+		Contributor: s.operatorActor(r),
+		Project:     cloudstore.AuditProjectSentinel,
+		Action:      cloudstore.AuditActionTokenRevoke,
+		Outcome:     cloudstore.AuditOutcomeTokenRevoked,
+		Metadata:    map[string]any{"token_id": tokenID},
+	})
 	s.writeOperatorMutationResult(w, r, http.StatusOK, map[string]string{"status": "revoked", "id": tokenID})
 }
 
@@ -200,8 +210,20 @@ func (s *CloudServer) setUserDisabled(w http.ResponseWriter, r *http.Request, di
 		return
 	}
 	status := "enabled"
+	action := cloudstore.AuditActionUserEnable
+	outcome := cloudstore.AuditOutcomeUserEnabled
 	if disabled {
 		status = "disabled"
+		action = cloudstore.AuditActionUserDisable
+		outcome = cloudstore.AuditOutcomeUserDisabled
 	}
+	// OBL-05: best-effort audit of the operator action.
+	s.emitAudit(r, cloudstore.AuditEntry{
+		Contributor: s.operatorActor(r),
+		Project:     cloudstore.AuditProjectSentinel,
+		Action:      action,
+		Outcome:     outcome,
+		Metadata:    map[string]any{"user_id": userID},
+	})
 	s.writeOperatorMutationResult(w, r, http.StatusOK, map[string]string{"status": status, "user_id": userID})
 }

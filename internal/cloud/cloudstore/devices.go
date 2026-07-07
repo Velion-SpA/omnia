@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -46,18 +47,23 @@ func (cs *CloudStore) GetOrCreateDevice(accountID, name string) (*Device, error)
 		return nil, fmt.Errorf("cloudstore: device name is required")
 	}
 
+	// (xmax = 0) is the standard Postgres upsert idiom to detect whether the
+	// RETURNING row came from the INSERT branch (xmax = 0) or the ON CONFLICT
+	// UPDATE branch (xmax != 0) — used below to audit ONLY a brand-new device.
 	const q = `
         INSERT INTO cloud_devices (account_id, name, scope_projects)
         VALUES ($1, $2, '[]'::jsonb)
         ON CONFLICT (account_id, name) DO UPDATE
             SET account_id = EXCLUDED.account_id
-        RETURNING id::text, account_id, name, scope_projects, last_seen_at`
+        RETURNING id::text, account_id, name, scope_projects, last_seen_at, (xmax = 0) AS inserted`
 
 	var d Device
 	var scopeRaw []byte
 	var lastSeen sql.NullTime
-	err := cs.db.QueryRowContext(context.Background(), q, accountID, name).
-		Scan(&d.ID, &d.AccountID, &d.Name, &scopeRaw, &lastSeen)
+	var inserted bool
+	ctx := context.Background()
+	err := cs.db.QueryRowContext(ctx, q, accountID, name).
+		Scan(&d.ID, &d.AccountID, &d.Name, &scopeRaw, &lastSeen, &inserted)
 	if err != nil {
 		return nil, fmt.Errorf("cloudstore: get or create device: %w", err)
 	}
@@ -65,6 +71,20 @@ func (cs *CloudStore) GetOrCreateDevice(accountID, name string) (*Device, error)
 		d.ScopeProjects = nil
 	}
 	d.LastSeenAt = scanNullTime(lastSeen)
+	if inserted {
+		// OBL-05: audit a NEW device registration. Best-effort — a failed audit
+		// write only logs a warning and never fails device creation itself,
+		// matching the non-blocking contract for every non-credential event.
+		if aerr := cs.InsertAuditEntry(ctx, AuditEntry{
+			Contributor: accountID,
+			Project:     AuditProjectSentinel,
+			Action:      AuditActionDeviceCreate,
+			Outcome:     AuditOutcomeDeviceCreated,
+			Metadata:    map[string]any{"device_id": d.ID, "device_name": d.Name},
+		}); aerr != nil {
+			log.Printf("cloudstore: audit insert failed (device create): %v", aerr)
+		}
+	}
 	return &d, nil
 }
 

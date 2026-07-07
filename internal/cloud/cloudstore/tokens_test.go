@@ -140,3 +140,63 @@ func TestIssueManagedTokenRejectsDisabledUserAndUnknownUser(t *testing.T) {
 		t.Fatalf("disabling unknown user must fail with ErrManagedTokenUserNotFound, got %v", err)
 	}
 }
+
+// TestIssueManagedTokenAtomicRollbackOnAuditFailure is the OBL-05 acceptance
+// test for the "no live unaudited credential" guarantee: a SIMULATED audit
+// insert failure (an unmarshalable Metadata value, which fails inside the SAME
+// insertAuditEntryTx call IssueManagedToken uses) must roll back the token row
+// too — the token must never exist without its audit trail.
+func TestIssueManagedTokenAtomicRollbackOnAuditFailure(t *testing.T) {
+	cs := newTokenTestStore(t)
+	ctx := context.Background()
+
+	user, err := cs.CreateUser("carol", "carol@example.com", "hash")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	// A channel value can never be json.Marshal'd — this fails INSIDE
+	// insertAuditEntryTx (audit_log.go / tokens.go), simulating a real audit
+	// write failure without any test-only mock.
+	badAudit := AuditEntry{
+		Contributor: "operator",
+		Metadata:    map[string]any{"bad": make(chan int)},
+	}
+	if _, err := cs.IssueManagedToken(ctx, user.ID, "hash-rollback", "laptop", badAudit); err == nil {
+		t.Fatal("expected IssueManagedToken to fail when the audit insert fails")
+	}
+
+	// The token must NOT exist — the whole transaction (token insert + audit
+	// insert) rolled back together.
+	res, err := cs.ResolveManagedToken(ctx, "hash-rollback")
+	if err != nil {
+		t.Fatalf("resolve after rollback: %v", err)
+	}
+	if res != nil {
+		t.Fatalf("expected no live token after a rolled-back audit failure, got %+v", res)
+	}
+
+	// No audit row for this user exists either — rollback is symmetric.
+	rows, total, err := cs.ListAuditEntriesPaginated(ctx, AuditFilter{Contributor: "operator"}, 10, 0)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	for _, row := range rows {
+		if m, ok := row.Metadata["user_id"]; ok && m == user.ID {
+			t.Fatalf("expected no audit row for the rolled-back issuance, found one: %+v", row)
+		}
+	}
+	if total < 0 {
+		t.Fatalf("unexpected negative total: %d", total)
+	}
+
+	// Sanity: a NORMAL issuance for the same user still succeeds afterwards —
+	// the failed attempt did not corrupt any state (e.g. leave the tx open).
+	mt, err := cs.IssueManagedToken(ctx, user.ID, "hash-recover", "laptop", AuditEntry{Contributor: "operator"})
+	if err != nil {
+		t.Fatalf("issue after rollback: %v", err)
+	}
+	if mt == nil || mt.ID == "" {
+		t.Fatalf("expected a valid token after recovery, got %+v", mt)
+	}
+}

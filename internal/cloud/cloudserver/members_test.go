@@ -163,6 +163,73 @@ func TestOwnerAddsMember(t *testing.T) {
 	}
 }
 
+// TestGrantMembershipEmitsAudit verifies OBL-05: a successful membership grant
+// emits a membership_grant audit row scoped to the project, with the granter
+// as contributor and the target account in metadata.
+func TestGrantMembershipEmitsAudit(t *testing.T) {
+	ms := newFakeMembershipStore()
+	authSvc := &fakeRBACAuth{
+		accounts: map[string]*cloudauth.AccountClaims{
+			"token-owner": {AccountID: "owner", Username: "owner"},
+		},
+	}
+	ms.grant("owner", "proj", int(cloudauth.PermAll), cloudauth.RoleOwner)
+	srv := newMemberTestServer(ms, authSvc)
+
+	body, _ := json.Marshal(addMemberRequest{AccountID: "newbie", Perms: int(cloudauth.PermRead), Role: cloudauth.RoleMember})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, makeAccountRequest(http.MethodPost, "/projects/proj/members", "token-owner", body))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.auditEntries) != 1 {
+		t.Fatalf("expected 1 audit entry after grant, got %d: %+v", len(ms.auditEntries), ms.auditEntries)
+	}
+	entry := ms.auditEntries[0]
+	if entry.Action != cloudstore.AuditActionMembershipGrant || entry.Outcome != cloudstore.AuditOutcomeMembershipGranted {
+		t.Fatalf("unexpected action/outcome: %+v", entry)
+	}
+	if entry.Contributor != "owner" || entry.Project != "proj" {
+		t.Fatalf("expected contributor=owner project=proj, got %+v", entry)
+	}
+	if entry.Metadata == nil || entry.Metadata["target_account_id"] != "newbie" {
+		t.Fatalf("expected target_account_id=newbie in metadata, got %+v", entry.Metadata)
+	}
+}
+
+// TestRemoveMemberEmitsAudit verifies OBL-05: a successful membership revoke
+// emits a membership_revoke audit row.
+func TestRemoveMemberEmitsAudit(t *testing.T) {
+	ms := newFakeMembershipStore()
+	authSvc := &fakeRBACAuth{
+		accounts: map[string]*cloudauth.AccountClaims{
+			"token-owner": {AccountID: "owner", Username: "owner"},
+		},
+	}
+	ms.grant("owner", "proj", int(cloudauth.PermAll), cloudauth.RoleOwner)
+	ms.grant("bob", "proj", int(cloudauth.PermRead), cloudauth.RoleMember)
+	srv := newMemberTestServer(ms, authSvc)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, makeAccountRequest(http.MethodDelete, "/projects/proj/members/bob", "token-owner", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.auditEntries) != 1 {
+		t.Fatalf("expected 1 audit entry after revoke, got %d: %+v", len(ms.auditEntries), ms.auditEntries)
+	}
+	entry := ms.auditEntries[0]
+	if entry.Action != cloudstore.AuditActionMembershipRevoke || entry.Outcome != cloudstore.AuditOutcomeMembershipRevoked {
+		t.Fatalf("unexpected action/outcome: %+v", entry)
+	}
+	if entry.Contributor != "owner" || entry.Project != "proj" {
+		t.Fatalf("expected contributor=owner project=proj, got %+v", entry)
+	}
+	if entry.Metadata == nil || entry.Metadata["target_account_id"] != "bob" {
+		t.Fatalf("expected target_account_id=bob in metadata, got %+v", entry.Metadata)
+	}
+}
+
 // TestAdminAddAndRemoveButCannotDeleteOwner verifies an admin can add/remove
 // members but DELETE on the owner returns 403.
 func TestAdminAddAndRemoveButCannotDeleteOwner(t *testing.T) {

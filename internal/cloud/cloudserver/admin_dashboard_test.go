@@ -370,6 +370,54 @@ func TestAdminPromoteDemoteRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPromoteDemoteEmitAudit verifies OBL-05: a successful promote/demote each
+// emit a best-effort audit row with the operator actor and the target user id.
+// The rejected non-operator attempt (403) must NOT audit.
+func TestPromoteDemoteEmitAudit(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.admins["1"] = true // standing admin so the demote below isn't "last admin"
+
+	promoteRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(promoteRec, cookieRequest(http.MethodPost, "/admin/users/5/promote", operatorCookie(t, authSvc), ""))
+	if promoteRec.Code != http.StatusOK {
+		t.Fatalf("promote: expected 200, got %d body=%q", promoteRec.Code, promoteRec.Body.String())
+	}
+
+	demoteRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(demoteRec, cookieRequest(http.MethodPost, "/admin/users/5/demote", operatorCookie(t, authSvc), ""))
+	if demoteRec.Code != http.StatusOK {
+		t.Fatalf("demote: expected 200, got %d body=%q", demoteRec.Code, demoteRec.Body.String())
+	}
+
+	if len(store.auditEntries) != 2 {
+		t.Fatalf("expected 2 audit entries (promote + demote), got %d: %+v", len(store.auditEntries), store.auditEntries)
+	}
+	promote := store.auditEntries[0]
+	if promote.Action != cloudstore.AuditActionAdminPromote || promote.Outcome != cloudstore.AuditOutcomeAdminPromoted {
+		t.Fatalf("unexpected promote audit: %+v", promote)
+	}
+	if promote.Metadata["user_id"] != "5" || promote.Project != cloudstore.AuditProjectSentinel {
+		t.Fatalf("unexpected promote audit metadata/project: %+v", promote)
+	}
+	demote := store.auditEntries[1]
+	if demote.Action != cloudstore.AuditActionAdminDemote || demote.Outcome != cloudstore.AuditOutcomeAdminDemoted {
+		t.Fatalf("unexpected demote audit: %+v", demote)
+	}
+	if demote.Metadata["user_id"] != "5" {
+		t.Fatalf("unexpected demote audit metadata: %+v", demote)
+	}
+
+	// A rejected (non-operator) promote attempt must not audit.
+	forbidden := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(forbidden, cookieRequest(http.MethodPost, "/admin/users/5/promote", accountCookie(t, authSvc, "9", "nope"), ""))
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("non-operator promote: expected 403, got %d", forbidden.Code)
+	}
+	if len(store.auditEntries) != 2 {
+		t.Fatalf("rejected promote must not audit, got %d entries", len(store.auditEntries))
+	}
+}
+
 // TestDemoteLastAdminRefused verifies the last-admin guard: the only remaining
 // admin cannot be demoted (409), preventing an Admin-section lockout.
 func TestDemoteLastAdminRefused(t *testing.T) {

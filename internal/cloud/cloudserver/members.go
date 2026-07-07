@@ -241,6 +241,14 @@ func (s *CloudServer) handleAddMember(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not grant membership"})
 		return
 	}
+	// OBL-05: best-effort audit of the grant. Never blocks the response.
+	s.emitAudit(r, cloudstore.AuditEntry{
+		Contributor: claims.AccountID,
+		Project:     project,
+		Action:      cloudstore.AuditActionMembershipGrant,
+		Outcome:     cloudstore.AuditOutcomeMembershipGranted,
+		Metadata:    map[string]any{"target_account_id": req.AccountID, "role": req.Role, "perms": perms},
+	})
 	jsonResponse(w, status, memberView{AccountID: req.AccountID, Perms: perms, Role: req.Role})
 }
 
@@ -287,6 +295,14 @@ func (s *CloudServer) handleRemoveMember(w http.ResponseWriter, r *http.Request)
 		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke membership"})
 		return
 	}
+	// OBL-05: best-effort audit of the revoke. Never blocks the response.
+	s.emitAudit(r, cloudstore.AuditEntry{
+		Contributor: claims.AccountID,
+		Project:     project,
+		Action:      cloudstore.AuditActionMembershipRevoke,
+		Outcome:     cloudstore.AuditOutcomeMembershipRevoked,
+		Metadata:    map[string]any{"target_account_id": targetID},
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 

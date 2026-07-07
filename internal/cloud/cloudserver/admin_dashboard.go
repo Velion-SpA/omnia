@@ -504,9 +504,21 @@ func (s *CloudServer) setUserAdmin(w http.ResponseWriter, r *http.Request, admin
 		return
 	}
 	status := "demoted"
+	action := cloudstore.AuditActionAdminDemote
+	outcome := cloudstore.AuditOutcomeAdminDemoted
 	if admin {
 		status = "promoted"
+		action = cloudstore.AuditActionAdminPromote
+		outcome = cloudstore.AuditOutcomeAdminPromoted
 	}
+	// OBL-05: best-effort audit of the operator promote/demote action.
+	s.emitAudit(r, cloudstore.AuditEntry{
+		Contributor: s.operatorActor(r),
+		Project:     cloudstore.AuditProjectSentinel,
+		Action:      action,
+		Outcome:     outcome,
+		Metadata:    map[string]any{"user_id": userID},
+	})
 	s.writeOperatorMutationResult(w, r, http.StatusOK, map[string]string{"status": status, "user_id": userID})
 }
 

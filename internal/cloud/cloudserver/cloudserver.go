@@ -297,6 +297,14 @@ func (s *CloudServer) routes() {
 			s.mux.HandleFunc("POST /admin/projects/{project}/pause", s.handleAdminPauseProject)
 			s.mux.HandleFunc("POST /admin/projects/{project}/resume", s.handleAdminResumeProject)
 		}
+		// Operator-only, read-only Audit page (OBL-05): surfaces the expanded
+		// audit trail alongside the rest of the Admin section. Registered only
+		// when the store supports ListAuditEntriesPaginated — the same method
+		// that already backed the pre-OBL-05 audit surface, so no new store
+		// capability is introduced here, only a UI on top of it.
+		if _, ok := s.store.(auditLogStore); ok {
+			s.mux.HandleFunc("GET /admin/audit", s.handleAdminAuditPage)
+		}
 	}
 
 	// Mount the unified dashboard at the root catch-all, behind the cloud's

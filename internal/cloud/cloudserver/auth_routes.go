@@ -72,11 +72,35 @@ func (s *CloudServer) handleSignup(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// OBL-05: best-effort signup audit. Never blocks the response — a failed
+	// audit write only logs a warning (see emitAudit).
+	s.emitAudit(r, cloudstore.AuditEntry{
+		Contributor: user.Username,
+		Project:     cloudstore.AuditProjectSentinel,
+		Action:      cloudstore.AuditActionSignup,
+		Outcome:     cloudstore.AuditOutcomeSignupSucceeded,
+		Metadata:    auditMetaWithIP(r, map[string]any{"user_id": user.ID}),
+	})
 	jsonResponse(w, http.StatusCreated, map[string]string{
 		"id":       user.ID,
 		"username": user.Username,
 		"email":    user.Email,
 	})
+}
+
+// auditMetaWithIP adds a source_ip entry to meta when the request carries a
+// resolvable caller IP, without allocating a map when meta is already nil and
+// no IP is available. meta may be nil.
+func auditMetaWithIP(r *http.Request, meta map[string]any) map[string]any {
+	ip := clientIP(r)
+	if ip == "" {
+		return meta
+	}
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	meta["source_ip"] = ip
+	return meta
 }
 
 // handleRefresh exchanges a valid account token for a newly-minted one.
@@ -130,6 +154,7 @@ func (s *CloudServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if dls, ok := s.account.(DeviceLoginService); ok {
 			token, _, err := dls.LoginForDevice(req.Username, req.Password, req.Device)
 			if err != nil {
+				s.auditLoginResult(r, req.Username, false, map[string]any{"device": req.Device})
 				if errors.Is(err, auth.ErrInvalidCredentials) {
 					jsonResponse(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 					return
@@ -137,6 +162,7 @@ func (s *CloudServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 				jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not log in"})
 				return
 			}
+			s.auditLoginResult(r, req.Username, true, map[string]any{"device": req.Device})
 			jsonResponse(w, http.StatusOK, map[string]string{"token": token})
 			return
 		}
@@ -144,6 +170,7 @@ func (s *CloudServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Fall through to normal login (no device).
 	token, _, err := s.account.Login(req.Username, req.Password)
 	if err != nil {
+		s.auditLoginResult(r, req.Username, false, nil)
 		if errors.Is(err, auth.ErrInvalidCredentials) {
 			jsonResponse(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 			return
@@ -151,5 +178,28 @@ func (s *CloudServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not log in"})
 		return
 	}
+	s.auditLoginResult(r, req.Username, true, nil)
 	jsonResponse(w, http.StatusOK, map[string]string{"token": token})
+}
+
+// auditLoginResult emits a best-effort login_success/login_failed audit row
+// (OBL-05). username is the value SUBMITTED by the caller (not a resolved
+// identity), so a failed login on an unknown username is still audited without
+// leaking whether the account exists. Never blocks the login response.
+func (s *CloudServer) auditLoginResult(r *http.Request, username string, success bool, extra map[string]any) {
+	outcome := cloudstore.AuditOutcomeLoginFailed
+	if success {
+		outcome = cloudstore.AuditOutcomeLoginSuccess
+	}
+	contributor := strings.TrimSpace(username)
+	if contributor == "" {
+		contributor = "unknown"
+	}
+	s.emitAudit(r, cloudstore.AuditEntry{
+		Contributor: contributor,
+		Project:     cloudstore.AuditProjectSentinel,
+		Action:      cloudstore.AuditActionLogin,
+		Outcome:     outcome,
+		Metadata:    auditMetaWithIP(r, extra),
+	})
 }

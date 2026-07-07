@@ -35,6 +35,94 @@ const AuditOutcomeProjectPaused = "project_paused"
 // AuditOutcomeProjectResumed is the outcome for a successful operator resume action.
 const AuditOutcomeProjectResumed = "project_resumed"
 
+// ─── OBL-05: expanded security-relevant event constants ──────────────────────
+//
+// AuditProjectSentinel is stored in the NOT NULL audit `project` column for
+// account-scoped events that are not tied to a single project: token and user
+// lifecycle, login/signup, device lifecycle, and account-admin promote/demote.
+// (Membership grant/revoke IS project-scoped and uses the real project name.)
+const AuditProjectSentinel = "*"
+
+// AuditActionTokenRevoke discriminates a managed-token revocation. Unlike
+// issuance (tokens.go, atomic with its audit row), revocation is best-effort:
+// the token is already revoked in the DB by the time the audit write happens,
+// so a failed audit insert only logs a warning (it never un-revokes the token).
+const AuditActionTokenRevoke = "token_revoke"
+
+// AuditOutcomeTokenRevoked is the outcome for a successful token revocation.
+const AuditOutcomeTokenRevoked = "revoked"
+
+// AuditActionUserDisable discriminates an operator disabling an account.
+const AuditActionUserDisable = "user_disable"
+
+// AuditOutcomeUserDisabled is the outcome for a successful user disable.
+const AuditOutcomeUserDisabled = "disabled"
+
+// AuditActionUserEnable discriminates an operator re-enabling a disabled account.
+const AuditActionUserEnable = "user_enable"
+
+// AuditOutcomeUserEnabled is the outcome for a successful user enable.
+const AuditOutcomeUserEnabled = "enabled"
+
+// AuditActionLogin discriminates a login attempt (device-bound or plain). Both
+// AuditOutcomeLoginSuccess and AuditOutcomeLoginFailed use this same action so
+// the two are trivially correlated by (action, contributor) in the audit view.
+const AuditActionLogin = "login"
+
+// AuditOutcomeLoginSuccess is the outcome for a successful login.
+const AuditOutcomeLoginSuccess = "login_success"
+
+// AuditOutcomeLoginFailed is the outcome for a login rejected on bad credentials.
+const AuditOutcomeLoginFailed = "login_failed"
+
+// AuditActionSignup discriminates a new-account signup.
+const AuditActionSignup = "signup"
+
+// AuditOutcomeSignupSucceeded is the outcome for a successful signup.
+const AuditOutcomeSignupSucceeded = "succeeded"
+
+// AuditActionMembershipGrant discriminates granting or updating a project
+// membership (project-scoped: Project carries the real project name).
+const AuditActionMembershipGrant = "membership_grant"
+
+// AuditOutcomeMembershipGranted is the outcome for a successful membership grant.
+const AuditOutcomeMembershipGranted = "granted"
+
+// AuditActionMembershipRevoke discriminates removing a project membership
+// (project-scoped: Project carries the real project name).
+const AuditActionMembershipRevoke = "membership_revoke"
+
+// AuditOutcomeMembershipRevoked is the outcome for a successful membership revoke.
+const AuditOutcomeMembershipRevoked = "revoked"
+
+// AuditActionDeviceCreate discriminates a NEW device being registered (first
+// GetOrCreateDevice for an (account, name) pair). Re-authenticating an already
+// known device does not re-emit this event.
+const AuditActionDeviceCreate = "device_create"
+
+// AuditOutcomeDeviceCreated is the outcome for a new device registration.
+const AuditOutcomeDeviceCreated = "created"
+
+// AuditActionDeviceRevoke discriminates an account removing one of its devices.
+const AuditActionDeviceRevoke = "device_revoke"
+
+// AuditOutcomeDeviceRevoked is the outcome for a successful device removal.
+const AuditOutcomeDeviceRevoked = "revoked"
+
+// AuditActionAdminPromote discriminates an operator granting the account-level
+// admin flag (OBL-16).
+const AuditActionAdminPromote = "admin_promote"
+
+// AuditOutcomeAdminPromoted is the outcome for a successful promote.
+const AuditOutcomeAdminPromoted = "promoted"
+
+// AuditActionAdminDemote discriminates an operator revoking the account-level
+// admin flag (OBL-16).
+const AuditActionAdminDemote = "admin_demote"
+
+// AuditOutcomeAdminDemoted is the outcome for a successful demote.
+const AuditOutcomeAdminDemoted = "demoted"
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 // AuditEntry is the write-side struct for inserting an audit log row.

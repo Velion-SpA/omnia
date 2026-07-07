@@ -28,10 +28,6 @@ const AuditActionTokenIssue = "token_issue"
 // AuditOutcomeTokenIssued is the audit `outcome` for a successful token mint.
 const AuditOutcomeTokenIssued = "issued"
 
-// tokenAuditProjectSentinel is stored in the NOT NULL audit `project` column for
-// token lifecycle events, which are account-scoped rather than project-scoped.
-const tokenAuditProjectSentinel = "*"
-
 var (
 	// ErrManagedTokenUserNotFound is returned when a token operation references
 	// a user id that does not exist.
@@ -124,7 +120,7 @@ func (cs *CloudStore) IssueManagedToken(ctx context.Context, userID, tokenHash, 
 	audit.Action = AuditActionTokenIssue
 	audit.Outcome = AuditOutcomeTokenIssued
 	if strings.TrimSpace(audit.Project) == "" {
-		audit.Project = tokenAuditProjectSentinel
+		audit.Project = AuditProjectSentinel
 	}
 	if strings.TrimSpace(audit.Contributor) == "" {
 		audit.Contributor = "operator"

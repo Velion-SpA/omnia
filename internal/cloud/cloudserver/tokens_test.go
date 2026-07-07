@@ -42,8 +42,9 @@ func (a *fakeAdminAuth) IssueManagedToken(_ context.Context, userID, _ string) (
 // fakeAdminStore satisfies ChunkStore (via embedded fakeStore) + managedTokenAdminStore.
 type fakeAdminStore struct {
 	fakeStore
-	revoked  []string
-	disabled map[string]bool
+	revoked      []string
+	disabled     map[string]bool
+	auditEntries []cloudstore.AuditEntry // OBL-05: captures InsertAuditEntry calls
 }
 
 func (s *fakeAdminStore) RevokeManagedToken(_ context.Context, id string) error {
@@ -55,6 +56,13 @@ func (s *fakeAdminStore) SetUserDisabled(_ context.Context, userID string, disab
 		s.disabled = make(map[string]bool)
 	}
 	s.disabled[userID] = disabled
+	return nil
+}
+
+// InsertAuditEntry records the call for OBL-05 audit-emission assertions
+// (token revoke, user disable/enable).
+func (s *fakeAdminStore) InsertAuditEntry(_ context.Context, entry cloudstore.AuditEntry) error {
+	s.auditEntries = append(s.auditEntries, entry)
 	return nil
 }
 
@@ -155,5 +163,64 @@ func TestRevokeAndDisableEndpointsRequireAdmin(t *testing.T) {
 	}
 	if store.disabled["7"] {
 		t.Fatalf("expected user 7 enabled, got %v", store.disabled)
+	}
+}
+
+// TestRevokeDisableEnableEmitAudit verifies OBL-05: revoke, disable, and
+// enable each emit a best-effort audit row with the operator actor and the
+// affected token/user id in metadata.
+func TestRevokeDisableEnableEmitAudit(t *testing.T) {
+	store := &fakeAdminStore{}
+	srv := newAdminTestServer(&fakeAdminAuth{issuedRaw: "omct_x"}, store)
+
+	post := func(path string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("Authorization", "Bearer admin-token")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d body=%q", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	post("/admin/tokens/99/revoke")
+	post("/admin/users/7/disable")
+	post("/admin/users/7/enable")
+
+	if len(store.auditEntries) != 3 {
+		t.Fatalf("expected 3 audit entries, got %d: %+v", len(store.auditEntries), store.auditEntries)
+	}
+
+	revoke := store.auditEntries[0]
+	if revoke.Action != cloudstore.AuditActionTokenRevoke || revoke.Outcome != cloudstore.AuditOutcomeTokenRevoked {
+		t.Fatalf("unexpected revoke audit: %+v", revoke)
+	}
+	if revoke.Project != cloudstore.AuditProjectSentinel || revoke.Metadata["token_id"] != "99" {
+		t.Fatalf("unexpected revoke audit project/metadata: %+v", revoke)
+	}
+
+	disable := store.auditEntries[1]
+	if disable.Action != cloudstore.AuditActionUserDisable || disable.Outcome != cloudstore.AuditOutcomeUserDisabled {
+		t.Fatalf("unexpected disable audit: %+v", disable)
+	}
+	if disable.Metadata["user_id"] != "7" {
+		t.Fatalf("unexpected disable audit metadata: %+v", disable)
+	}
+
+	enable := store.auditEntries[2]
+	if enable.Action != cloudstore.AuditActionUserEnable || enable.Outcome != cloudstore.AuditOutcomeUserEnabled {
+		t.Fatalf("unexpected enable audit: %+v", enable)
+	}
+	if enable.Metadata["user_id"] != "7" {
+		t.Fatalf("unexpected enable audit metadata: %+v", enable)
+	}
+
+	// Contributor is the operator actor — the admin Bearer path resolves to the
+	// generic "operator" label (no per-request account identity on that path).
+	for _, e := range store.auditEntries {
+		if e.Contributor != "operator" {
+			t.Fatalf("expected contributor=operator, got %+v", e)
+		}
 	}
 }

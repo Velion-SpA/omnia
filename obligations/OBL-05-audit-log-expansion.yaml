@@ -1,6 +1,6 @@
 id: OBL-05
 title: Expand and harden the audit log
-status: pending
+status: done
 priority: P2
 blocks_homelab_test: false
 estimated_effort: M

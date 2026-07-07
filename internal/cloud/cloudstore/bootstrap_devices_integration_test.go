@@ -127,3 +127,53 @@ func TestTouchDeviceAdvancesLastSeen(t *testing.T) {
 		t.Fatalf("expected listed device with last_seen_at, got %+v", list)
 	}
 }
+
+// TestGetOrCreateDeviceEmitsAuditOnlyOnce covers OBL-05: the FIRST
+// GetOrCreateDevice call for an (account, name) pair emits a device_create
+// audit row; a SECOND call for the SAME pair (an existing device
+// re-authenticating) must NOT emit a second one.
+func TestGetOrCreateDeviceEmitsAuditOnlyOnce(t *testing.T) {
+	cs := newBDTestStore(t)
+	ctx := context.Background()
+
+	user, err := cs.CreateUser("dana", "dana@example.com", "hash")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	dev, err := cs.GetOrCreateDevice(user.ID, "notebook-b")
+	if err != nil {
+		t.Fatalf("GetOrCreateDevice (create): %v", err)
+	}
+
+	rows, total, err := cs.ListAuditEntriesPaginated(ctx, AuditFilter{Contributor: user.ID}, 10, 0)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	if total != 1 || len(rows) != 1 {
+		t.Fatalf("expected exactly 1 device_create audit row, got total=%d rows=%+v", total, rows)
+	}
+	if rows[0].Action != AuditActionDeviceCreate || rows[0].Outcome != AuditOutcomeDeviceCreated {
+		t.Fatalf("unexpected audit action/outcome: %+v", rows[0])
+	}
+	if rows[0].Metadata["device_id"] != dev.ID {
+		t.Fatalf("expected device_id=%q in metadata, got %+v", dev.ID, rows[0].Metadata)
+	}
+
+	// A second call for the SAME (account, name) pair (device already exists)
+	// must NOT emit a second device_create audit row.
+	dev2, err := cs.GetOrCreateDevice(user.ID, "notebook-b")
+	if err != nil {
+		t.Fatalf("GetOrCreateDevice (re-auth): %v", err)
+	}
+	if dev2.ID != dev.ID {
+		t.Fatalf("expected the SAME device on re-auth, got %+v vs %+v", dev2, dev)
+	}
+	_, total2, err := cs.ListAuditEntriesPaginated(ctx, AuditFilter{Contributor: user.ID}, 10, 0)
+	if err != nil {
+		t.Fatalf("list audit (after re-auth): %v", err)
+	}
+	if total2 != 1 {
+		t.Fatalf("expected still exactly 1 device_create audit row after re-auth, got %d", total2)
+	}
+}

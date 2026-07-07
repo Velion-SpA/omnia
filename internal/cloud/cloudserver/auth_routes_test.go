@@ -1,6 +1,7 @@
 package cloudserver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -235,6 +236,87 @@ func TestRefreshMissingTokenReturns401(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for missing token, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// ─── OBL-05: login/signup audit-emission tests ───────────────────────────────
+
+// fakeStoreWithAuditCapture wraps fakeStore and adds InsertAuditEntry so
+// login/signup audit emission can be asserted without affecting the many
+// other auth_routes_test.go tests that use a bare &fakeStore{} (which
+// intentionally does NOT implement InsertAuditEntry).
+type fakeStoreWithAuditCapture struct {
+	fakeStore
+	auditEntries []cloudstore.AuditEntry
+}
+
+func (s *fakeStoreWithAuditCapture) InsertAuditEntry(_ context.Context, entry cloudstore.AuditEntry) error {
+	s.auditEntries = append(s.auditEntries, entry)
+	return nil
+}
+
+// TestSignupEmitsAuditRow verifies a successful signup emits a signup audit
+// row scoped account-wide (AuditProjectSentinel).
+func TestSignupEmitsAuditRow(t *testing.T) {
+	store := &fakeStoreWithAuditCapture{}
+	srv := New(store, &fakeAccountAuth{}, 0, WithOpenSignup(true))
+
+	req := httptest.NewRequest("POST", "/auth/signup",
+		strings.NewReader(`{"username":"alice","email":"alice@example.com","password":"supersecret"}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(store.auditEntries) != 1 {
+		t.Fatalf("expected 1 audit entry after signup, got %d: %+v", len(store.auditEntries), store.auditEntries)
+	}
+	entry := store.auditEntries[0]
+	if entry.Action != cloudstore.AuditActionSignup || entry.Outcome != cloudstore.AuditOutcomeSignupSucceeded {
+		t.Fatalf("unexpected signup audit: %+v", entry)
+	}
+	if entry.Contributor != "alice" || entry.Project != cloudstore.AuditProjectSentinel {
+		t.Fatalf("expected contributor=alice project=%q, got %+v", cloudstore.AuditProjectSentinel, entry)
+	}
+}
+
+// TestLoginEmitsAuditRowOnSuccessAndFailure verifies a login attempt emits
+// login_success on valid credentials and login_failed on invalid ones —
+// both best-effort (the response is never blocked by the audit write).
+func TestLoginEmitsAuditRowOnSuccessAndFailure(t *testing.T) {
+	store := &fakeStoreWithAuditCapture{}
+	srv := New(store, &fakeAccountAuth{users: map[string]string{"bob": "supersecret"}}, 0)
+
+	// Failure first: unknown/invalid credentials.
+	badRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(badRec, httptest.NewRequest("POST", "/auth/login", strings.NewReader(`{"username":"bob","password":"wrong"}`)))
+	if badRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%q", badRec.Code, badRec.Body.String())
+	}
+
+	// Then success.
+	okRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(okRec, httptest.NewRequest("POST", "/auth/login", strings.NewReader(`{"username":"bob","password":"supersecret"}`)))
+	if okRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", okRec.Code, okRec.Body.String())
+	}
+
+	if len(store.auditEntries) != 2 {
+		t.Fatalf("expected 2 audit entries, got %d: %+v", len(store.auditEntries), store.auditEntries)
+	}
+	failed := store.auditEntries[0]
+	if failed.Action != cloudstore.AuditActionLogin || failed.Outcome != cloudstore.AuditOutcomeLoginFailed {
+		t.Fatalf("unexpected failed-login audit: %+v", failed)
+	}
+	if failed.Contributor != "bob" {
+		t.Fatalf("expected contributor=bob even on failure (submitted username), got %+v", failed)
+	}
+	success := store.auditEntries[1]
+	if success.Action != cloudstore.AuditActionLogin || success.Outcome != cloudstore.AuditOutcomeLoginSuccess {
+		t.Fatalf("unexpected success-login audit: %+v", success)
+	}
+	if success.Contributor != "bob" || success.Project != cloudstore.AuditProjectSentinel {
+		t.Fatalf("expected contributor=bob project=%q, got %+v", cloudstore.AuditProjectSentinel, success)
 	}
 }
 

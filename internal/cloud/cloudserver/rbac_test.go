@@ -24,6 +24,11 @@ type fakeMembershipStore struct {
 	syncEnabledMap map[string]bool
 	mutations      []MutationEntry
 	devices        map[string]*cloudstore.Device // key: device ID
+	// auditEntries captures InsertAuditEntry calls (OBL-05): membership
+	// grant/revoke, device create/revoke, login/signup, token revoke, user
+	// disable/enable, and admin promote/demote all route through this on any
+	// server built on this fake (or one embedding it, e.g. fakeAdminDashboardStore).
+	auditEntries []cloudstore.AuditEntry
 }
 
 func newFakeMembershipStore() *fakeMembershipStore {
@@ -173,6 +178,53 @@ func (s *fakeMembershipStore) GetOrCreateDevice(accountID, name string) (*clouds
 	}
 	s.devices[id] = d
 	return d, nil
+}
+
+// ─── OBL-05: audit capture + read-side on the RBAC fake store ────────────────
+// InsertAuditEntry records every call for assertions (mirrors the established
+// fake-store audit-capture pattern: fakeProjectSyncAdminStore, fakeMutationStore,
+// fakeStoreWithAudit). ListAuditEntriesPaginated backs the new /admin/audit page
+// so it can be exercised end-to-end against this fake, with the same simple
+// contributor/project/outcome filtering fakeAuditableStoreForE2E already uses.
+
+func (s *fakeMembershipStore) InsertAuditEntry(_ context.Context, entry cloudstore.AuditEntry) error {
+	s.auditEntries = append(s.auditEntries, entry)
+	return nil
+}
+
+func (s *fakeMembershipStore) ListAuditEntriesPaginated(_ context.Context, filter cloudstore.AuditFilter, limit, offset int) ([]cloudstore.DashboardAuditRow, int, error) {
+	var matched []cloudstore.DashboardAuditRow
+	for i, entry := range s.auditEntries {
+		if filter.Contributor != "" && entry.Contributor != filter.Contributor {
+			continue
+		}
+		if filter.Project != "" && entry.Project != filter.Project {
+			continue
+		}
+		if filter.Outcome != "" && entry.Outcome != filter.Outcome {
+			continue
+		}
+		matched = append(matched, cloudstore.DashboardAuditRow{
+			ID:          int64(i + 1),
+			OccurredAt:  "2026-04-24T00:00:00Z",
+			Contributor: entry.Contributor,
+			Project:     entry.Project,
+			Action:      entry.Action,
+			Outcome:     entry.Outcome,
+			EntryCount:  entry.EntryCount,
+			ReasonCode:  entry.ReasonCode,
+			Metadata:    entry.Metadata,
+		})
+	}
+	total := len(matched)
+	if offset >= len(matched) {
+		return []cloudstore.DashboardAuditRow{}, total, nil
+	}
+	end := offset + limit
+	if end > len(matched) || limit <= 0 {
+		end = len(matched)
+	}
+	return matched[offset:end], total, nil
 }
 
 // fakeRBACAuth is an Authenticator that validates account tokens and
