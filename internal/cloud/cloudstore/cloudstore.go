@@ -742,6 +742,53 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 			last_used_at TIMESTAMPTZ
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_cloud_tokens_user_id ON cloud_tokens(user_id)`,
+		// ─── Teams + profiles + project classification (OBL-14) ──────────────────
+		// A profile is an operator-creatable permission preset {name, perms bitfield}.
+		// Teams group projects; team membership (team, account, profile) grants the
+		// profile's perms on every project in the team. cloud_memberships stays as the
+		// per-project OVERRIDE layer that takes precedence over the team-derived union
+		// (see EffectivePerms). All additive — existing tables/columns untouched.
+		`CREATE TABLE IF NOT EXISTS cloud_profiles (
+			id         BIGSERIAL PRIMARY KEY,
+			name       TEXT UNIQUE NOT NULL,
+			perms      INT NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS cloud_teams (
+			id         BIGSERIAL PRIMARY KEY,
+			name       TEXT UNIQUE NOT NULL,
+			kind       TEXT NOT NULL DEFAULT 'work',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS cloud_team_projects (
+			team_id BIGINT NOT NULL REFERENCES cloud_teams(id) ON DELETE CASCADE,
+			project TEXT NOT NULL,
+			PRIMARY KEY (team_id, project)
+		)`,
+		`CREATE TABLE IF NOT EXISTS cloud_team_members (
+			team_id    BIGINT NOT NULL REFERENCES cloud_teams(id) ON DELETE CASCADE,
+			account_id TEXT NOT NULL,
+			profile_id BIGINT REFERENCES cloud_profiles(id),
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (team_id, account_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS cloud_project_meta (
+			project      TEXT PRIMARY KEY,
+			kind         TEXT NOT NULL DEFAULT 'work',
+			display_name TEXT
+		)`,
+		// Hot-path resolver indexes (EffectivePerms joins members by account and
+		// projects by name). Deny-by-default keeps the resolver a couple of indexed
+		// lookups, per OBL-14 performance requirement.
+		`CREATE INDEX IF NOT EXISTS idx_cloud_team_members_account ON cloud_team_members(account_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_cloud_team_projects_project ON cloud_team_projects(project)`,
+		// Seed the default operator profiles idempotently. ON CONFLICT DO NOTHING so an
+		// operator's later edits to a same-named profile are never clobbered on restart.
+		`INSERT INTO cloud_profiles (name, perms) VALUES
+			('Moderator', 15),
+			('Editor', 7),
+			('Member', 1)
+		 ON CONFLICT (name) DO NOTHING`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {

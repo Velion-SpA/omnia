@@ -151,7 +151,14 @@ func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *Clo
 			// authorization attempt is rejected (deny-by-default).
 			legacy = denyAllProjects{}
 		}
-		s.accountProjectAuth = &rbacAuthorizer{authSvc: legacy, store: ms}
+		ra := &rbacAuthorizer{authSvc: legacy, store: ms}
+		// OBL-14: prefer the layered effective-perms resolver (override > team union
+		// > deny) when the store provides one. Falls back to membership-only perms
+		// otherwise, preserving deny-by-default.
+		if resolver, ok := store.(effectivePermsResolver); ok {
+			ra.resolver = resolver
+		}
+		s.accountProjectAuth = ra
 	}
 	// Detect device scope store for Phase 4 enforcement.
 	if ds, ok := store.(deviceScopeStore); ok {
@@ -249,6 +256,33 @@ func (s *CloudServer) routes() {
 			// rest of the section; demote refuses the last remaining admin.
 			s.mux.HandleFunc("POST /admin/users/{id}/promote", s.handleAdminPromoteUser)
 			s.mux.HandleFunc("POST /admin/users/{id}/demote", s.handleAdminDemoteUser)
+		}
+		// Teams + profiles + project-classification operator endpoints (OBL-14).
+		// Operator-gated (requireOperator) and the data plane the OBL-15 UI consumes.
+		// Registered only when the store supports team administration, detected the
+		// same way adminDashboardStore is. cloud_memberships stays the override layer
+		// managed by the OBL-13 membership endpoints above.
+		if _, ok := s.store.(teamsAdminStore); ok {
+			// Profiles: operator-creatable permission presets.
+			s.mux.HandleFunc("GET /admin/profiles", s.handleAdminListProfiles)
+			s.mux.HandleFunc("PUT /admin/profiles", s.handleAdminCreateProfile)
+			s.mux.HandleFunc("PUT /admin/profiles/{id}", s.handleAdminUpdateProfile)
+			s.mux.HandleFunc("DELETE /admin/profiles/{id}", s.handleAdminDeleteProfile)
+			// Teams: grouped projects, classified personal/work.
+			s.mux.HandleFunc("GET /admin/teams", s.handleAdminListTeams)
+			s.mux.HandleFunc("GET /admin/teams/{id}", s.handleAdminGetTeam)
+			s.mux.HandleFunc("PUT /admin/teams", s.handleAdminCreateTeam)
+			s.mux.HandleFunc("PUT /admin/teams/{id}", s.handleAdminUpdateTeam)
+			s.mux.HandleFunc("DELETE /admin/teams/{id}", s.handleAdminDeleteTeam)
+			// Team ↔ project attachments.
+			s.mux.HandleFunc("PUT /admin/teams/{id}/projects/{project}", s.handleAdminAddTeamProject)
+			s.mux.HandleFunc("DELETE /admin/teams/{id}/projects/{project}", s.handleAdminRemoveTeamProject)
+			// Team ↔ member (profile) assignments.
+			s.mux.HandleFunc("PUT /admin/teams/{id}/members/{account_id}", s.handleAdminAddTeamMember)
+			s.mux.HandleFunc("DELETE /admin/teams/{id}/members/{account_id}", s.handleAdminRemoveTeamMember)
+			// Project classification + known-projects selector source.
+			s.mux.HandleFunc("PUT /admin/projects/{project}/meta", s.handleAdminSetProjectMeta)
+			s.mux.HandleFunc("GET /admin/projects", s.handleAdminListProjects)
 		}
 	}
 

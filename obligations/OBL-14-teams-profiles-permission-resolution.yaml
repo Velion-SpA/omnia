@@ -1,6 +1,6 @@
 id: OBL-14
 title: Teams + profiles + layered permission resolution (personal/work classification)
-status: pending
+status: done
 priority: P1
 blocks_homelab_test: false
 estimated_effort: XL
