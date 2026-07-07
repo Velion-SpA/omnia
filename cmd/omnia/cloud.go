@@ -1000,6 +1000,9 @@ func printCloudStatusSyncDiagnostic(cfg store.Config, targetKey string) {
 // the command cloud-aware: it validates that the named cloud exists in cloud.json
 // (failing fast otherwise) and reports which cloud the project is intended for. It
 // does not create per-cloud enrollment state, because none exists.
+//
+// --cloud-name is parsed via parseCloudNameArg, which also accepts the hidden
+// --cloud back-compat alias (OBL-07/OBL-11: standardize on --cloud-name everywhere).
 func cmdCloudEnroll(cfg store.Config) {
 	args := os.Args[3:]
 	for _, arg := range args {
@@ -1014,14 +1017,11 @@ func cmdCloudEnroll(cfg store.Config) {
 	}
 
 	projectName := ""
-	cloudName := ""
+	cloudName := parseCloudNameArg(args)
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--cloud-name":
-			if i+1 < len(args) {
-				cloudName = strings.TrimSpace(args[i+1])
-				i++
-			}
+		case "--cloud-name", "--cloud":
+			i++
 		default:
 			if projectName == "" && !strings.HasPrefix(args[i], "-") {
 				projectName = strings.TrimSpace(args[i])
@@ -1280,7 +1280,7 @@ func cmdCloudServe() {
 		fatal(err)
 		return
 	}
-	fmt.Printf("Starting Engram cloud server on port %d\n", runtimeCfg.Port)
+	fmt.Printf("Starting Omnia cloud server on port %d\n", runtimeCfg.Port)
 	if err := runtime.Start(); err != nil {
 		fatal(err)
 	}

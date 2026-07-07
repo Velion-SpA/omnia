@@ -117,7 +117,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 ### Health
 
 - Local runtime (`omnia serve`): `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "0.1.0"}`
-- Cloud runtime (`omnia cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
+- Cloud runtime (`omnia cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "omnia-cloud"}`
 
 ### Sessions
 

@@ -13,11 +13,14 @@ import (
 
 // cmdDashboard starts the unified Omnia web UI dashboard (localhost only).
 //
-// Usage: omnia dashboard [--port 7800] [--engram URL] [--data-dir DIR]
+// Usage: omnia dashboard [--port 7800] [--daemon-url URL] [--data-dir DIR]
 func cmdDashboard(args []string) {
 	fs := flag.NewFlagSet("dashboard", flag.ExitOnError)
 	port := fs.Int("port", 7800, "port to listen on (localhost only)")
-	daemonURL := fs.String("engram", "", "local Omnia daemon URL (defaults to config value)")
+	daemonURL := fs.String("daemon-url", "", "local Omnia daemon URL (defaults to config value)")
+	// --engram is a hidden back-compat alias for --daemon-url (OBL-11: the flag name
+	// predated the omnia rebrand; kept working for existing scripts but undocumented).
+	fs.StringVar(daemonURL, "engram", "", "deprecated alias for --daemon-url (hidden)")
 	dataDir := fs.String("data-dir", "", "path to the Omnia data directory (default: $OMNIA_DATA_DIR or ~/.omnia)")
 	actor := fs.String("actor", "", "provisional actor identity for audit log (default: USER env var)")
 	configPath := fs.String("config", config.DefaultPath(), "path to config file")

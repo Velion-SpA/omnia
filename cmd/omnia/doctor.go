@@ -232,7 +232,7 @@ func writeDoctorJSON(report diagnostic.Report) {
 }
 
 func renderDoctorText(report diagnostic.Report) {
-	fmt.Printf("Engram Doctor: %s\n", report.Status)
+	fmt.Printf("Omnia Doctor: %s\n", report.Status)
 	if report.Project != "" {
 		fmt.Printf("Project: %s\n", report.Project)
 	}

@@ -138,7 +138,7 @@ sudo systemctl enable --now omnia-cloud.service
 journalctl -u omnia-cloud.service -f
 ```
 
-You should see `[engram-cloud] listening on 0.0.0.0:8080` (or your configured
+You should see `[omnia-cloud] listening on 0.0.0.0:8080` (or your configured
 port) with no fatal errors. A fatal error here almost always means the boot
 env gate rejected something in `cloud.env` — the message names the exact
 variable (see `cmd/omnia/cloud.go` `validateCloudServeAuthConfig`, and the

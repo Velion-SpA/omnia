@@ -135,11 +135,12 @@ ENGRAM_DATA_DIR=/tmp/omnia-local-work go run ./cmd/omnia dashboard --port 7800
 
 ## 5b. Dashboard DEL CLOUD (consola Omnia + RBAC por cuenta)
 
-Cada cloud trae su consola web en `/dashboard`, con el diseño command-center de Omnia
-(no toca producción). Muestra lo que vive en su Postgres, filtrado por tu cuenta:
+Cada cloud trae su consola web montada en la raíz (`/`), con el diseño command-center
+de Omnia (no toca producción). Muestra lo que vive en su Postgres, filtrado por tu
+cuenta. (`/dashboard` sigue andando por compatibilidad: redirige 301 a `/`.)
 
-- Work:     **http://127.0.0.1:18090/dashboard**
-- Personal: **http://127.0.0.1:18091/dashboard**
+- Work:     **http://127.0.0.1:18090/**
+- Personal: **http://127.0.0.1:18091/**
 
 **Login con tu cuenta** (botón *Sign In*, usuario/contraseña) — ves SOLO tus proyectos:
 

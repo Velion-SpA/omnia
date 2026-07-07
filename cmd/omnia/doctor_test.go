@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	mcppkg "github.com/mark3labs/mcp-go/mcp"
 	engrammcp "github.com/velion/omnia/internal/mcp"
 	"github.com/velion/omnia/internal/store"
-	mcppkg "github.com/mark3labs/mcp-go/mcp"
 	_ "modernc.org/sqlite"
 )
 
@@ -216,7 +216,7 @@ func TestCmdDoctorTextOutput(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("stderr=%q", stderr)
 	}
-	if !strings.Contains(stdout, "Engram Doctor: ok") || !strings.Contains(stdout, "manual_session_name_project_mismatch") {
+	if !strings.Contains(stdout, "Omnia Doctor: ok") || !strings.Contains(stdout, "manual_session_name_project_mismatch") {
 		t.Fatalf("stdout=%q", stdout)
 	}
 }

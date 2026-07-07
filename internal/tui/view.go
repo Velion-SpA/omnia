@@ -5,20 +5,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/velion/omnia/internal/timeutil"
 	"github.com/velion/omnia/internal/version"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // ─── Logo ────────────────────────────────────────────────────────────────────
 
 func renderLogo(version string) string {
 	logoText := []string{
-		`███████ ███    ██  ██████  ██████   █████  ███    ███ `,
-		`██      ████   ██ ██       ██   ██ ██   ██ ████  ████ `,
-		`█████   ██ ██  ██ ██   ███ ██████  ███████ ██ ████ ██ `,
-		`██      ██  ██ ██ ██    ██ ██   ██ ██   ██ ██  ██  ██ `,
-		`███████ ██   ████  ██████  ██   ██ ██   ██ ██      ██ `,
+		` ██████  ███    ███ ███    ██ ██████  █████  `,
+		`██    ██ ████  ████ ████   ██   ██   ██   ██ `,
+		`██    ██ ██ ████ ██ ██ ██  ██   ██   ███████ `,
+		`██    ██ ██  ██  ██ ██  ██ ██   ██   ██   ██ `,
+		` ██████  ██      ██ ██   ████ ██████ ██   ██ `,
 	}
 
 	frameStyle := lipgloss.NewStyle().
@@ -51,7 +51,7 @@ func renderLogo(version string) string {
 	b.WriteString("\n")
 
 	// Footer inside box
-	b.WriteString(taglineStyle.Render(" > engram " + version + " — An elephant never forgets"))
+	b.WriteString(taglineStyle.Render(" > omnia " + version + " — An elephant never forgets"))
 
 	return frameStyle.Render(b.String()) + "\n"
 }

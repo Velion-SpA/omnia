@@ -177,7 +177,7 @@ func (s *CloudServer) Start() error {
 		host = defaultHost
 	}
 	addr := fmt.Sprintf("%s:%d", host, s.port)
-	log.Printf("[engram-cloud] listening on %s", addr)
+	log.Printf("[omnia-cloud] listening on %s", addr)
 	return s.listenAndServe(addr, s.Handler())
 }
 
@@ -426,7 +426,7 @@ func dashboardCookieSecure(r *http.Request) bool {
 }
 
 func (s *CloudServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "service": "engram-cloud"})
+	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "service": "omnia-cloud"})
 }
 
 func (s *CloudServer) isDashboardAdmin(r *http.Request) bool {

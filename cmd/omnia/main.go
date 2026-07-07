@@ -1507,7 +1507,7 @@ func cmdStats(cfg store.Config) {
 		projects = strings.Join(stats.Projects, ", ")
 	}
 
-	fmt.Printf("Engram Memory Stats\n")
+	fmt.Printf("Omnia Memory Stats\n")
 	fmt.Printf("  Sessions:     %d\n", stats.TotalSessions)
 	fmt.Printf("  Observations: %d\n", stats.TotalObservations)
 	fmt.Printf("  Prompts:      %d\n", stats.TotalPrompts)
@@ -1719,7 +1719,7 @@ func cmdSync(cfg store.Config) {
 	}
 	fmt.Println()
 	fmt.Println("Add to git:")
-	fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
+	fmt.Printf("  git add .engram/ && git commit -m \"sync omnia memories\"\n")
 }
 
 // runCloudSync pushes/pulls a project to one or more configured clouds, recording

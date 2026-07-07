@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
+	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/velion/omnia/internal/mcp"
 	"github.com/velion/omnia/internal/obsidian"
 	"github.com/velion/omnia/internal/setup"
 	"github.com/velion/omnia/internal/store"
 	engramsync "github.com/velion/omnia/internal/sync"
 	versioncheck "github.com/velion/omnia/internal/version"
-	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
 func testConfig(t *testing.T) store.Config {
@@ -504,7 +504,7 @@ func TestCmdContextAndStats(t *testing.T) {
 	if statsErr != "" {
 		t.Fatalf("expected no stderr from stats, got: %q", statsErr)
 	}
-	if !strings.Contains(statsOut, "Engram Memory Stats") || !strings.Contains(statsOut, "project-x") {
+	if !strings.Contains(statsOut, "Omnia Memory Stats") || !strings.Contains(statsOut, "project-x") {
 		t.Fatalf("unexpected stats output: %q", statsOut)
 	}
 }

@@ -1,6 +1,6 @@
 id: OBL-11
 title: Rebrand tail — user-facing strings, MCP identity decision, flag consistency, stale docs
-status: pending
+status: done
 priority: P2
 blocks_homelab_test: false
 estimated_effort: M
@@ -76,6 +76,36 @@ verification: |
 do_not_touch: |
   - MCP tool NAMESPACE strings until the decision says otherwise; env names; cloud.json;
     cookie engram_dashboard_token; cloud_ tables; .engram/ dir; LICENSE/attribution.
+
+mcp_identity_decision: |
+  DECISION: KEEP "engram" as the MCP server/tool identity string across every agent
+  integration (opencode, claude-code, gemini-cli, codex, pi) and the local daemon it
+  talks to. Do NOT rename it to "omnia".
+
+  RATIONALE:
+  - "engram" is the published plugin marketplace id (github.com/Gentleman-Programming/engram,
+    npm package "gentle-engram", pi package keyword "engram-cloud", plugin:engram:engram in
+    this very session's tool namespace). It is a cross-agent compatibility surface, exactly
+    like the .engram/ repo config dir and the engram_dashboard_token cookie — renaming any of
+    these breaks every existing install silently.
+  - Concretely, renaming would require: a NEW marketplace/plugin publish, every existing
+    machine re-running `omnia setup <agent>` to rewrite ~/.claude/mcp/engram.json,
+    ~/.gemini/settings.json mcpServers.engram, ~/.codex/config.toml [mcp_servers.engram],
+    and the opencode.json MCP config — with zero backward compatibility for anyone who
+    doesn't re-run setup. The local daemon's own /health also reports
+    {"service": "engram"} (internal/server/server.go) as part of this same surface.
+  - The product name is Omnia; the tool namespace is a stable protocol identifier, not
+    branding — the same distinction as a package name outliving a company rebrand.
+  - Cost of staying: cosmetic only — a handful of accurate, intentional "engram" strings
+    remain in TUI/CLI wizard text where they name the literal MCP tool id (e.g.
+    "Add engram tools to ~/.claude/settings.json allowlist?", "mcpServers.engram").
+    These are correctly left in place by this same obligation's tasks 1-2.
+  - Migration path (deferred, not part of this obligation): only migrate the namespace
+    once Omnia ships its own plugin marketplace, and do it as an additive alias
+    (support both "engram" and "omnia" MCP configs for a deprecation window) rather than
+    a hard cutover.
+
+  This is a considered decision, not an oversight — documented here per OBL-11 task 5.
 
 references: |
   - internal/tui/view.go:16-22,54,617,651,659
