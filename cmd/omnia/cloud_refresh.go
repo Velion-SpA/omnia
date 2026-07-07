@@ -19,7 +19,7 @@ import (
 func cmdCloudRefresh(cfg store.Config) {
 	fs := flag.NewFlagSet("omnia cloud refresh", flag.ContinueOnError)
 	server := fs.String("server", "", "cloud server URL (overrides cloud.json)")
-	cloudAlias := fs.String("cloud", "", "cloud alias to refresh against (default: default cloud)")
+	cloudAlias := bindCloudNameFlag(fs, "cloud alias to refresh against (default: default cloud)")
 
 	if err := fs.Parse(os.Args[3:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)

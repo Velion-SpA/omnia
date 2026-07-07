@@ -47,7 +47,7 @@ func printCloudProjectUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: omnia cloud project <pause|resume> <project> [options]")
 	fmt.Fprintln(w, "  pause <project> [--reason \"...\"]  pause sync for a project (pushes are rejected with 409 until resumed)")
 	fmt.Fprintln(w, "  resume <project>                   resume sync for a paused project")
-	fmt.Fprintln(w, "options: --cloud <alias>  --server <url>  --admin-token <token>")
+	fmt.Fprintln(w, "options: --cloud-name <alias>  --server <url>  --admin-token <token>")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "requires the operator admin credential: --admin-token, or OMNIA_CLOUD_ADMIN in the environment")
 }
@@ -68,7 +68,7 @@ func cmdCloudProjectSetSync(cfg store.Config, enabled bool) {
 	fs := flag.NewFlagSet("omnia cloud project "+action, flag.ContinueOnError)
 	reason := fs.String("reason", "", "optional reason recorded with the pause (ignored for resume)")
 	server := fs.String("server", "", "cloud server URL (overrides cloud.json)")
-	cloudAlias := fs.String("cloud", "", "cloud alias (default: default cloud)")
+	cloudAlias := bindCloudNameFlag(fs, "cloud alias (default: default cloud)")
 	adminToken := fs.String("admin-token", "", "operator admin credential (default: OMNIA_CLOUD_ADMIN env var)")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)

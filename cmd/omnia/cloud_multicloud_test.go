@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -459,3 +460,118 @@ func TestCloudLoginUnknownAliasExitsNonZero(t *testing.T) {
 
 // Ensure http package import is used.
 var _ = http.StatusOK
+
+// extractCloudStatusBlock returns the text of one cloud's "== cloud "alias" =="
+// section from `omnia cloud status` multi-cloud output, up to (but excluding)
+// the next such header. Order-independent — avoids assuming alphabetical alias
+// ordering in the surrounding test assertions.
+func extractCloudStatusBlock(t *testing.T, stdout, alias string) string {
+	t.Helper()
+	marker := fmt.Sprintf("== cloud %q ==", alias)
+	idx := strings.Index(stdout, marker)
+	if idx < 0 {
+		t.Fatalf("expected marker %q in status output, got %q", marker, stdout)
+	}
+	rest := stdout[idx+len(marker):]
+	if next := strings.Index(rest, "== cloud "); next >= 0 {
+		rest = rest[:next]
+	}
+	return rest
+}
+
+// TestCmdCloudStatusMultiCloudShowsPerAliasHealth proves that `omnia cloud
+// status` (no --cloud-name) reports health for EVERY configured cloud, not
+// just the default (OBL-07 acceptance criterion).
+func TestCmdCloudStatusMultiCloudShowsPerAliasHealth(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	if err := saveCloudConfigV2Entry(cfg, "work", "https://work.example.test", "work-token", ""); err != nil {
+		t.Fatalf("add work cloud: %v", err)
+	}
+	if err := saveCloudConfigV2Entry(cfg, "personal", "https://personal.example.test", "", ""); err != nil {
+		t.Fatalf("add personal cloud: %v", err)
+	}
+
+	withArgs(t, "engram", "cloud", "status")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("multi-cloud status should succeed, panic=%v stderr=%q", recovered, stderr)
+	}
+	if !strings.Contains(stdout, `== cloud "work" ==`) || !strings.Contains(stdout, `== cloud "personal" ==`) {
+		t.Fatalf("expected per-cloud headers for both clouds, got %q", stdout)
+	}
+
+	workBlock := extractCloudStatusBlock(t, stdout, "work")
+	if !strings.Contains(workBlock, "Cloud status: configured (target=work)") {
+		t.Fatalf("expected work's own target key in its status block, got %q", workBlock)
+	}
+	if !strings.Contains(workBlock, "Auth status: ready") {
+		t.Fatalf("expected work cloud (has a token) to report ready auth, got %q", workBlock)
+	}
+
+	personalBlock := extractCloudStatusBlock(t, stdout, "personal")
+	if !strings.Contains(personalBlock, "Cloud status: configured (target=personal)") {
+		t.Fatalf("expected personal's own target key in its status block, got %q", personalBlock)
+	}
+	if !strings.Contains(personalBlock, "Auth status: token not configured") {
+		t.Fatalf("expected personal cloud (no token) to report missing-token readiness, got %q", personalBlock)
+	}
+}
+
+// TestCmdCloudStatusCloudNameFiltersToOneAlias proves that `omnia cloud status
+// --cloud-name <alias>` reports only that one cloud, with no multi-cloud
+// headers and no mention of sibling clouds.
+func TestCmdCloudStatusCloudNameFiltersToOneAlias(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	if err := saveCloudConfigV2Entry(cfg, "work", "https://work.example.test", "work-token", ""); err != nil {
+		t.Fatalf("add work cloud: %v", err)
+	}
+	if err := saveCloudConfigV2Entry(cfg, "personal", "https://personal.example.test", "", ""); err != nil {
+		t.Fatalf("add personal cloud: %v", err)
+	}
+
+	withArgs(t, "engram", "cloud", "status", "--cloud-name", "work")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("single-alias status should succeed, panic=%v stderr=%q", recovered, stderr)
+	}
+	if strings.Contains(stdout, "== cloud") {
+		t.Fatalf("expected no multi-cloud header when --cloud-name is given, got %q", stdout)
+	}
+	if !strings.Contains(stdout, "Cloud status: configured (target=work)") {
+		t.Fatalf("expected work's status block, got %q", stdout)
+	}
+	if strings.Contains(stdout, "personal") {
+		t.Fatalf("expected personal cloud to be excluded from --cloud-name output, got %q", stdout)
+	}
+}
+
+// TestCmdCloudStatusCloudNameHiddenAliasFlagStillWorks proves the hidden
+// --cloud back-compat alias (OBL-07/OBL-11) still filters status to one cloud,
+// exactly like --cloud-name.
+func TestCmdCloudStatusCloudNameHiddenAliasFlagStillWorks(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	if err := saveCloudConfigV2Entry(cfg, "work", "https://work.example.test", "work-token", ""); err != nil {
+		t.Fatalf("add work cloud: %v", err)
+	}
+	if err := saveCloudConfigV2Entry(cfg, "personal", "https://personal.example.test", "", ""); err != nil {
+		t.Fatalf("add personal cloud: %v", err)
+	}
+
+	withArgs(t, "engram", "cloud", "status", "--cloud", "work")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("hidden --cloud alias status should succeed, panic=%v stderr=%q", recovered, stderr)
+	}
+	if !strings.Contains(stdout, "Cloud status: configured (target=work)") {
+		t.Fatalf("expected work's status block via hidden --cloud alias, got %q", stdout)
+	}
+}

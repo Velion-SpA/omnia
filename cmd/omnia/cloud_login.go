@@ -89,7 +89,7 @@ func cmdCloudSignup(cfg store.Config) {
 	username := fs.String("username", "", "username for the new account")
 	email := fs.String("email", "", "email address for the new account")
 	password := fs.String("password", "", "password for the new account")
-	cloudAlias := fs.String("cloud", "", "cloud alias to sign up against (default: default cloud)")
+	cloudAlias := bindCloudNameFlag(fs, "cloud alias to sign up against (default: default cloud)")
 
 	if err := fs.Parse(os.Args[3:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -169,7 +169,7 @@ func cmdCloudLogin(cfg store.Config) {
 	server := fs.String("server", "", "cloud server URL (overrides cloud.json)")
 	username := fs.String("username", "", "account username")
 	password := fs.String("password", "", "account password (prompted if empty)")
-	cloudAlias := fs.String("cloud", "", "cloud alias to login to (default: default cloud)")
+	cloudAlias := bindCloudNameFlag(fs, "cloud alias to login to (default: default cloud)")
 	device := fs.String("device", "", "optional device name to bind the issued token to (restricts the token to the device's project scope)")
 
 	if err := fs.Parse(os.Args[3:]); err != nil {
@@ -198,7 +198,7 @@ func cmdCloudLogin(cfg store.Config) {
 	}
 
 	if *username == "" {
-		fmt.Fprintln(os.Stderr, "usage: omnia cloud login --username <u> [--password <p>] [--server <url>] [--cloud <alias>]")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud login --username <u> [--password <p>] [--server <url>] [--cloud-name <alias>]")
 		fmt.Fprintln(os.Stderr, "error: --username is required")
 		exitFunc(1)
 		return

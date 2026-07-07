@@ -56,7 +56,7 @@ func printCloudDevicesUsage(w io.Writer) {
 	fmt.Fprintln(w, "  list                                 list this account's devices, scope, and last-seen")
 	fmt.Fprintln(w, "  scope <device> --projects a,b,c      restrict a device to the given projects (empty = unrestricted)")
 	fmt.Fprintln(w, "  revoke <device>                      delete a device (denies its scope immediately, fail-closed)")
-	fmt.Fprintln(w, "options: --cloud <alias>  --server <url>")
+	fmt.Fprintln(w, "options: --cloud-name <alias>  --server <url>")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "note: revoking a device denies its project scope IMMEDIATELY (fail-closed), but an")
 	fmt.Fprintln(w, "      account token already issued for that device stays valid until it expires or is")
@@ -111,7 +111,7 @@ func resolveDeviceTarget(cfg store.Config, flagServer, alias string) (serverURL,
 	if entry == nil || strings.TrimSpace(entry.Token) == "" {
 		hint := ""
 		if alias != "" {
-			hint = " --cloud " + alias
+			hint = " --cloud-name " + alias
 		}
 		return "", "", fmt.Errorf("not logged in to this cloud; run `omnia cloud login --username <u>%s` first", hint)
 	}
@@ -162,7 +162,7 @@ func resolveDeviceIDByName(devices []cloudDeviceInfo, name string) (string, erro
 func cmdCloudDevicesList(cfg store.Config) {
 	fs := flag.NewFlagSet("omnia cloud devices list", flag.ContinueOnError)
 	server := fs.String("server", "", "cloud server URL (overrides cloud.json)")
-	cloudAlias := fs.String("cloud", "", "cloud alias (default: default cloud)")
+	cloudAlias := bindCloudNameFlag(fs, "cloud alias (default: default cloud)")
 	if err := fs.Parse(os.Args[4:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		exitFunc(1)
@@ -208,7 +208,7 @@ func cmdCloudDevicesScope(cfg store.Config) {
 	fs := flag.NewFlagSet("omnia cloud devices scope", flag.ContinueOnError)
 	projects := fs.String("projects", "", "comma-separated project list to restrict the device to (use --projects '' to make it unrestricted)")
 	server := fs.String("server", "", "cloud server URL (overrides cloud.json)")
-	cloudAlias := fs.String("cloud", "", "cloud alias (default: default cloud)")
+	cloudAlias := bindCloudNameFlag(fs, "cloud alias (default: default cloud)")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		exitFunc(1)
@@ -295,7 +295,7 @@ func cmdCloudDevicesRevoke(cfg store.Config) {
 	}
 	fs := flag.NewFlagSet("omnia cloud devices revoke", flag.ContinueOnError)
 	server := fs.String("server", "", "cloud server URL (overrides cloud.json)")
-	cloudAlias := fs.String("cloud", "", "cloud alias (default: default cloud)")
+	cloudAlias := bindCloudNameFlag(fs, "cloud alias (default: default cloud)")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		exitFunc(1)

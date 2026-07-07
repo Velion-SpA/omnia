@@ -1,6 +1,6 @@
 id: OBL-07
 title: Thread --cloud-name through status / upgrade / autosync
-status: pending
+status: done
 priority: P2
 blocks_homelab_test: false
 estimated_effort: M

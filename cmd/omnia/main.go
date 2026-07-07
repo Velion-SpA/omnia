@@ -874,55 +874,135 @@ func resolveServeSyncStatusProject() string {
 	return strings.TrimSpace(projectName)
 }
 
-// tryStartAutosync starts the autosync Manager if ENGRAM_CLOUD_AUTOSYNC=1 and
-// both ENGRAM_CLOUD_TOKEN and ENGRAM_CLOUD_SERVER are present.
+// tryStartAutosync starts the autosync Manager(s) if ENGRAM_CLOUD_AUTOSYNC=1 and
+// the default cloud has both a token and a server URL configured.
 // REQ-210: only exact "1" is accepted. REQ-211: missing token/server → log+skip.
 // Never fatal — autosync is optional.
 // BW7: Returns (status provider, stop func) so the caller can invoke stop
-// before os.Exit to ensure the Manager releases its sync lease.
+// before os.Exit to ensure the Manager(s) release their sync lease(s).
+//
+// OBL-07 (requires OBL-06's per-alias mutation fan-out queue): in addition to
+// the default cloud's Manager — whose Status() backs the returned
+// autosyncStatusProvider exactly as before — this also starts one Manager per
+// additional configured, non-default cloud alias, so autosync keeps EVERY
+// configured cloud in sync, not just the default. Each named alias gets:
+//   - one Manager for its project-less bucket (cloudnFor(alias, "")), and
+//   - one Manager per project enrolled AT STARTUP TIME (cloudnFor(alias, project)),
+//     since OBL-06's fan-out queue is project-scoped per alias (unlike the
+//     default cloud's single global "cloud" bucket, which already spans every
+//     project). A project enrolled after `omnia serve`/`omnia mcp` starts needs
+//     a restart to gain named-cloud autosync coverage — the same restart
+//     already required today for a newly `cloud add`-ed alias, since cloud
+//     config is likewise only read once at startup.
+//
+// Named aliases are NEVER subject to the ENGRAM_CLOUD_TOKEN/SERVER env-override
+// footgun — only the default/empty alias is (see resolveCloudRuntimeConfigForAlias
+// / cloudSyncApplyEnv, main.go:456-495, 1749-1754).
 func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (autosyncStatusProvider, func()) {
 	// REQ-210: opt-in requires exact "1".
 	if strings.TrimSpace(envx.Get("OMNIA_CLOUD_AUTOSYNC")) != "1" {
 		return nil, nil
 	}
 
-	cc, err := resolveCloudRuntimeConfig(cfg)
-	if err != nil {
-		log.Printf("[autosync] ERROR: cannot read cloud config: %v", err)
+	defaultMgrs := startAutosyncManagersForAlias(ctx, s, cfg, "", true, nil)
+	if len(defaultMgrs) == 0 {
 		return nil, nil
+	}
+	allMgrs := append([]startableAutosyncManager{}, defaultMgrs...)
+
+	if v2, err := loadCloudConfigV2(cfg); err != nil {
+		log.Printf("[autosync] WARNING: could not read cloud config for multi-cloud fan-out: %v", err)
+	} else if aliases := nonDefaultCloudAliases(v2); len(aliases) > 0 {
+		var enrolledProjects []string
+		if enrolled, err := s.ListEnrolledProjects(); err != nil {
+			log.Printf("[autosync] WARNING: could not list enrolled projects for multi-cloud fan-out: %v", err)
+		} else {
+			for _, ep := range enrolled {
+				enrolledProjects = append(enrolledProjects, ep.Project)
+			}
+		}
+		for _, alias := range aliases {
+			mgrs := startAutosyncManagersForAlias(ctx, s, cfg, alias, false, enrolledProjects)
+			allMgrs = append(allMgrs, mgrs...)
+		}
+	}
+
+	stopAll := func() {
+		for _, mgr := range allMgrs {
+			mgr.Stop()
+		}
+	}
+	return defaultMgrs[0], stopAll
+}
+
+// startAutosyncManagersForAlias resolves runtime config for one cloud alias
+// and, if a token and server are both configured, starts one background
+// autosync.Manager per target key in {cloudnFor(alias, ""), cloudnFor(alias,
+// project) for each project in extraProjects} (deduplicated). Returns an empty
+// slice — never fatal — if the alias has no server/token configured, matching
+// the original single-cloud gating (REQ-211).
+func startAutosyncManagersForAlias(ctx context.Context, s *store.Store, cfg store.Config, alias string, applyEnvOverrides bool, extraProjects []string) []startableAutosyncManager {
+	label := cloudAliasLabel(alias)
+
+	cc, err := resolveCloudRuntimeConfigForAlias(cfg, alias, applyEnvOverrides)
+	if err != nil {
+		log.Printf("[autosync] ERROR: cannot read cloud config for %q: %v", label, err)
+		return nil
 	}
 
 	token := strings.TrimSpace(cc.Token)
 	serverURL := strings.TrimSpace(cc.ServerURL)
 
 	// REQ-211: token required. The token is resolved from cloud.json first and
-	// overridden by ENGRAM_CLOUD_TOKEN when set, so both sources are tried.
-	// On Windows (Task Scheduler), the env var is often absent — the file path
-	// is the expected source (issue #421).
+	// overridden by ENGRAM_CLOUD_TOKEN when set (default alias only), so both
+	// sources are tried. On Windows (Task Scheduler), the env var is often
+	// absent — the file path is the expected source (issue #421).
 	if token == "" {
-		log.Printf("[autosync] ERROR: cloud token is not configured (set ENGRAM_CLOUD_TOKEN or store token in cloud.json via `omnia cloud config`); autosync disabled")
-		return nil, nil
+		log.Printf("[autosync] ERROR: cloud token is not configured for %q (set ENGRAM_CLOUD_TOKEN or store token in cloud.json via `omnia cloud config`); autosync disabled for this cloud", label)
+		return nil
 	}
 	// REQ-211: server URL required. Resolved from cloud.json or ENGRAM_CLOUD_SERVER.
 	if serverURL == "" {
-		log.Printf("[autosync] ERROR: cloud server URL is not configured (set ENGRAM_CLOUD_SERVER or run `omnia cloud config --server <url>`); autosync disabled")
-		return nil, nil
+		log.Printf("[autosync] ERROR: cloud server URL is not configured for %q (set ENGRAM_CLOUD_SERVER or run `omnia cloud config --server <url>`); autosync disabled for this cloud", label)
+		return nil
 	}
 
 	remoteMT, err := remote.NewMutationTransport(serverURL, token)
 	if err != nil {
-		log.Printf("[autosync] ERROR: invalid server URL %q: %v; autosync disabled", serverURL, err)
-		return nil, nil
+		log.Printf("[autosync] ERROR: invalid server URL %q for %q: %v; autosync disabled for this cloud", serverURL, label, err)
+		return nil
 	}
 	transport := &mutationTransportAdapter{remote: remoteMT}
-	mgrCfg := autosync.DefaultConfig()
-	// BR2-3: Call newAutosyncManager (injectable) instead of autosync.New directly,
-	// so tests can stub the factory and avoid real goroutine/network side effects.
-	mgr := newAutosyncManager(s, transport, mgrCfg)
 
-	go mgr.Run(ctx)
-	log.Printf("[autosync] started (server=%s)", serverURL)
-	return mgr, mgr.Stop
+	targets := make([]string, 0, len(extraProjects)+1)
+	targets = append(targets, cloudnFor(alias, ""))
+	for _, project := range extraProjects {
+		targets = append(targets, cloudnFor(alias, project))
+	}
+
+	seen := make(map[string]bool, len(targets))
+	mgrs := make([]startableAutosyncManager, 0, len(targets))
+	for _, targetKey := range targets {
+		if seen[targetKey] {
+			continue
+		}
+		seen[targetKey] = true
+
+		mgrCfg := autosync.DefaultConfig()
+		if targetKey != store.DefaultSyncTargetKey {
+			// Named/project-scoped target: distinguish from the default cloud's
+			// queue and lease so multiple Managers never collide.
+			mgrCfg.TargetKey = targetKey
+			mgrCfg.LeaseOwner = fmt.Sprintf("autosync-%s-%d", targetKey, time.Now().UnixNano())
+		}
+		// BR2-3: Call newAutosyncManager (injectable) instead of autosync.New directly,
+		// so tests can stub the factory and avoid real goroutine/network side effects.
+		mgr := newAutosyncManager(s, transport, mgrCfg)
+		go mgr.Run(ctx)
+		log.Printf("[autosync] started for cloud %q (server=%s, target=%s)", label, serverURL, mgrCfg.TargetKey)
+		mgrs = append(mgrs, mgr)
+	}
+	return mgrs
 }
 
 func cmdMCP(cfg store.Config) {

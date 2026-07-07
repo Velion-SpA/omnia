@@ -374,12 +374,41 @@ func cmdCloudUpgrade(cfg store.Config) {
 	}
 }
 
+// cmdCloudUpgradeDoctor diagnoses cloud-upgrade readiness for a project.
+//
+// --cloud-name selects which configured cloud's connectivity/policy state is
+// checked (default: the default cloud, preserving pre-OBL-07 behavior byte for
+// byte). --all previews connectivity across EVERY configured cloud instead —
+// this is read-only and does NOT persist a local upgrade stage, because
+// cloud_upgrade_state is keyed only by project (no cloud dimension), so a
+// single alias's outcome would arbitrarily overwrite another's.
 func cmdCloudUpgradeDoctor(cfg store.Config) {
-	project := parseCloudUpgradeProjectArg(os.Args[4:])
+	args := os.Args[4:]
+	for _, arg := range args {
+		switch strings.TrimSpace(arg) {
+		case "--help", "-h", "help":
+			fmt.Println("usage: omnia cloud upgrade doctor --project <name> [--cloud-name <alias> | --all]")
+			fmt.Println("--cloud-name checks connectivity/policy against one named cloud (default: default cloud).")
+			fmt.Println("--all previews connectivity across every configured cloud (read-only; does not update local upgrade stage).")
+			return
+		}
+	}
+	project := parseCloudUpgradeProjectArg(args)
 	if project == "" {
-		fmt.Fprintln(os.Stderr, "usage: omnia cloud upgrade doctor --project <name>")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud upgrade doctor --project <name> [--cloud-name <alias> | --all]")
 		fmt.Fprintln(os.Stderr, "error: --project is required")
 		exitFunc(1)
+		return
+	}
+	explicitAlias := parseCloudNameArg(args)
+	doAll := hasCloudUpgradeFlag(args, "--all")
+	if doAll && explicitAlias != "" {
+		fmt.Fprintln(os.Stderr, "error: --cloud-name and --all are mutually exclusive")
+		exitFunc(1)
+		return
+	}
+	if err := validateCloudAliasExists(cfg, explicitAlias); err != nil {
+		fatal(err)
 		return
 	}
 
@@ -390,84 +419,138 @@ func cmdCloudUpgradeDoctor(cfg store.Config) {
 	}
 	defer s.Close()
 
-	cloudConfigured := false
-	if cc, cfgErr := resolveCloudRuntimeConfig(cfg); cfgErr == nil {
-		if cc != nil {
-			if validated, err := validateCloudServerURL(cc.ServerURL); err == nil && strings.TrimSpace(validated) != "" {
-				cloudConfigured = true
-			}
-		}
-	}
 	enrolled, err := s.IsProjectEnrolled(project)
 	if err != nil {
 		fatal(fmt.Errorf("cloud upgrade doctor enrollment check: %w", err))
 		return
 	}
-	policyDenied, err := cloudUpgradePolicyDenied(s, project)
-	if err != nil {
-		fatal(fmt.Errorf("cloud upgrade doctor policy check: %w", err))
-		return
-	}
-
-	report, err := engramsync.DiagnoseCloudUpgrade(engramsync.UpgradeDiagnosisInput{
-		Project:         project,
-		CloudConfigured: cloudConfigured,
-		ProjectEnrolled: enrolled,
-		PolicyDenied:    policyDenied,
-	})
-	if err != nil {
-		fatal(err)
-		return
-	}
-
 	legacyReport, err := s.DiagnoseCloudUpgradeLegacyMutations(project)
 	if err != nil {
 		fatal(fmt.Errorf("cloud upgrade doctor legacy mutation diagnosis: %w", err))
 		return
 	}
-	if legacyReport.BlockedCount > 0 {
-		first := legacyReport.Findings[0]
-		report = engramsync.UpgradeDiagnosisReport{
-			Status:  engramsync.UpgradeStatusBlocked,
-			Class:   engramsync.UpgradeReasonClassBlocked,
-			Code:    store.UpgradeReasonBlockedLegacyMutationManual,
-			Message: fmt.Sprintf("manual-action-required: %s (seq=%d entity=%s op=%s)", first.Message, first.Seq, first.Entity, first.Op),
+
+	// reportFor computes the diagnosis for one cloud alias. The legacy-mutation
+	// findings are project-scoped (alias-independent) and always take priority,
+	// exactly like the pre-OBL-07 single-cloud implementation.
+	reportFor := func(alias string, applyEnvOverrides bool) (engramsync.UpgradeDiagnosisReport, error) {
+		cloudConfigured := false
+		if cc, cfgErr := resolveCloudRuntimeConfigForAlias(cfg, alias, applyEnvOverrides); cfgErr == nil && cc != nil {
+			if validated, err := validateCloudServerURL(cc.ServerURL); err == nil && strings.TrimSpace(validated) != "" {
+				cloudConfigured = true
+			}
 		}
-	} else if legacyReport.RepairableCount > 0 {
-		report = engramsync.UpgradeDiagnosisReport{
-			Status:  engramsync.UpgradeStatusBlocked,
-			Class:   engramsync.UpgradeReasonClassRepairable,
-			Code:    store.UpgradeReasonRepairableLegacyMutationPayload,
-			Message: fmt.Sprintf("project %q has %d repairable legacy mutation payload issue(s); run `omnia cloud upgrade repair --project %s --apply`", project, legacyReport.RepairableCount, project),
+		policyDenied, err := cloudUpgradePolicyDeniedForAlias(s, project, alias)
+		if err != nil {
+			return engramsync.UpgradeDiagnosisReport{}, fmt.Errorf("cloud upgrade doctor policy check: %w", err)
 		}
+		report, err := engramsync.DiagnoseCloudUpgrade(engramsync.UpgradeDiagnosisInput{
+			Project:         project,
+			CloudConfigured: cloudConfigured,
+			ProjectEnrolled: enrolled,
+			PolicyDenied:    policyDenied,
+		})
+		if err != nil {
+			return engramsync.UpgradeDiagnosisReport{}, err
+		}
+		if legacyReport.BlockedCount > 0 {
+			first := legacyReport.Findings[0]
+			report = engramsync.UpgradeDiagnosisReport{
+				Status:  engramsync.UpgradeStatusBlocked,
+				Class:   engramsync.UpgradeReasonClassBlocked,
+				Code:    store.UpgradeReasonBlockedLegacyMutationManual,
+				Message: fmt.Sprintf("manual-action-required: %s (seq=%d entity=%s op=%s)", first.Message, first.Seq, first.Entity, first.Op),
+			}
+		} else if legacyReport.RepairableCount > 0 {
+			report = engramsync.UpgradeDiagnosisReport{
+				Status:  engramsync.UpgradeStatusBlocked,
+				Class:   engramsync.UpgradeReasonClassRepairable,
+				Code:    store.UpgradeReasonRepairableLegacyMutationPayload,
+				Message: fmt.Sprintf("project %q has %d repairable legacy mutation payload issue(s); run `omnia cloud upgrade repair --project %s --apply`", project, legacyReport.RepairableCount, project),
+			}
+		}
+		return report, nil
 	}
 
-	stage := store.UpgradeStageDoctorBlocked
-	if report.Status == engramsync.UpgradeStatusReady {
-		stage = store.UpgradeStageDoctorReady
+	if !doAll {
+		// Single target: explicitAlias (validated above) or the default cloud.
+		// applyEnvOverrides mirrors cloudSyncApplyEnv's footgun protection: only
+		// the default/empty alias honors ENGRAM_CLOUD_SERVER/TOKEN.
+		report, err := reportFor(explicitAlias, explicitAlias == "")
+		if err != nil {
+			fatal(err)
+			return
+		}
+		stage := store.UpgradeStageDoctorBlocked
+		if report.Status == engramsync.UpgradeStatusReady {
+			stage = store.UpgradeStageDoctorReady
+		}
+		if err := s.SaveCloudUpgradeState(store.CloudUpgradeState{
+			Project:          project,
+			Stage:            stage,
+			RepairClass:      report.Class,
+			LastErrorCode:    report.Code,
+			LastErrorMessage: report.Message,
+		}); err != nil {
+			fatal(err)
+			return
+		}
+		fmt.Printf("project: %s\n", project)
+		fmt.Printf("status: %s\n", report.Status)
+		fmt.Printf("class: %s\n", report.Class)
+		fmt.Printf("reason_code: %s\n", report.Code)
+		fmt.Printf("message: %s\n", report.Message)
+		return
 	}
-	_ = s.SaveCloudUpgradeState(store.CloudUpgradeState{
-		Project:          project,
-		Stage:            stage,
-		RepairClass:      report.Class,
-		LastErrorCode:    report.Code,
-		LastErrorMessage: report.Message,
-	})
 
+	// --all: read-only multi-cloud preview; local upgrade stage is untouched.
+	v2, err := loadCloudConfigV2(cfg)
+	if err != nil {
+		fatal(fmt.Errorf("cloud upgrade doctor config error: %w", err))
+		return
+	}
+	aliases := v2.listClouds()
+	if len(aliases) == 0 {
+		aliases = []string{""}
+	}
+	defaultAlias := effectiveDefaultAlias(v2)
 	fmt.Printf("project: %s\n", project)
-	fmt.Printf("status: %s\n", report.Status)
-	fmt.Printf("class: %s\n", report.Class)
-	fmt.Printf("reason_code: %s\n", report.Code)
-	fmt.Printf("message: %s\n", report.Message)
+	for _, alias := range aliases {
+		label := cloudAliasLabel(alias)
+		applyEnvOverrides := alias == "" || alias == defaultAlias
+		report, err := reportFor(alias, applyEnvOverrides)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cloud %q: %v\n", label, err)
+			continue
+		}
+		fmt.Printf("== cloud %q ==\n", label)
+		fmt.Printf("status: %s\n", report.Status)
+		fmt.Printf("class: %s\n", report.Class)
+		fmt.Printf("reason_code: %s\n", report.Code)
+		fmt.Printf("message: %s\n", report.Message)
+	}
+	fmt.Println("note: --all is a read-only preview; local upgrade stage was not updated (re-run with --cloud-name <alias> to persist a stage against one cloud).")
 }
 
+// cloudUpgradePolicyDenied checks the DEFAULT cloud's sync state for a policy
+// denial. Retained for callers that don't target a specific alias; delegates
+// to the alias-aware form.
 func cloudUpgradePolicyDenied(s *store.Store, project string) (bool, error) {
-	targets := []string{cloudTargetKeyForProject(project)}
-	if cloudTargetKeyForProject(project) != constants.TargetKeyCloud {
-		targets = append(targets, constants.TargetKeyCloud)
+	return cloudUpgradePolicyDeniedForAlias(s, project, "")
+}
+
+// cloudUpgradePolicyDeniedForAlias checks a specific cloud alias's sync state
+// (both its project-scoped and bare target keys) for a policy denial. For the
+// default alias this checks exactly the same two keys as the pre-OBL-07
+// implementation (cloudTargetKeyForProject(project) and "cloud").
+func cloudUpgradePolicyDeniedForAlias(s *store.Store, project, alias string) (bool, error) {
+	targetKey := cloudnFor(alias, project)
+	targets := []string{targetKey}
+	if bareKey := cloudnFor(alias, ""); bareKey != targetKey {
+		targets = append(targets, bareKey)
 	}
-	for _, targetKey := range targets {
-		state, err := s.GetSyncState(targetKey)
+	for _, tk := range targets {
+		state, err := s.GetSyncState(tk)
 		if err != nil {
 			return false, err
 		}
@@ -493,6 +576,54 @@ func parseCloudUpgradeProjectArg(args []string) string {
 		return strings.TrimSpace(project)
 	}
 	return ""
+}
+
+// parseCloudNameArg scans a raw argument slice for the cloud alias, accepting
+// the canonical --cloud-name flag and the hidden --cloud back-compat alias
+// (OBL-07/OBL-11: standardize on --cloud-name everywhere). Used by subcommands
+// that parse args manually rather than via flag.FlagSet. Last occurrence wins,
+// matching flag.FlagSet's "last value on the command line wins" semantics.
+func parseCloudNameArg(args []string) string {
+	val := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--cloud-name", "--cloud":
+			if i+1 < len(args) {
+				val = strings.TrimSpace(args[i+1])
+				i++
+			}
+		}
+	}
+	return val
+}
+
+// bindCloudNameFlag registers the canonical --cloud-name flag on fs, plus a
+// hidden --cloud back-compat alias bound to the SAME variable (OBL-07/OBL-11).
+// Only --cloud-name should appear in printed usage/help text; --cloud keeps
+// working for existing scripts/tests but is intentionally undocumented.
+func bindCloudNameFlag(fs *flag.FlagSet, usage string) *string {
+	v := fs.String("cloud-name", "", usage)
+	fs.StringVar(v, "cloud", "", usage)
+	return v
+}
+
+// validateCloudAliasExists returns an error if alias is non-empty and not
+// present in cloud.json. A no-op for the empty (default) alias.
+func validateCloudAliasExists(cfg store.Config, alias string) error {
+	if strings.TrimSpace(alias) == "" {
+		return nil
+	}
+	v2, err := loadCloudConfigV2(cfg)
+	if err != nil {
+		return fmt.Errorf("cloud config error: %w", err)
+	}
+	if v2 == nil {
+		return fmt.Errorf("cloud %q not found; run `omnia cloud add %s --server <url>` first", alias, alias)
+	}
+	if _, ok := v2.getCloud(alias); !ok {
+		return fmt.Errorf("cloud %q not found; run `omnia cloud add %s --server <url>` first", alias, alias)
+	}
+	return nil
 }
 
 func cmdCloudUpgradeRepair(cfg store.Config) {
@@ -522,14 +653,45 @@ func cmdCloudUpgradeRepair(cfg store.Config) {
 	fmt.Printf("applied: %t\n", report.Applied)
 }
 
+// cmdCloudUpgradeBootstrap bootstraps a project onto the cloud.
+//
+// --cloud-name selects which configured cloud to bootstrap against (default:
+// the default cloud, preserving pre-OBL-07 behavior byte for byte). There is
+// no --all: cloud_upgrade_state's bootstrap stage machine is keyed only by
+// project (no cloud dimension), so once it reaches bootstrap_verified any
+// further bootstrap call is a no-op (see engramsync.BootstrapProject) —
+// running --all would silently skip every cloud after the first. Bootstrap a
+// project once with --cloud-name, then use `omnia sync --cloud-name <alias>
+// --project <name>` to replicate it to additional clouds.
 func cmdCloudUpgradeBootstrap(cfg store.Config) {
-	project := parseCloudUpgradeProjectArg(os.Args[4:])
+	args := os.Args[4:]
+	for _, arg := range args {
+		switch strings.TrimSpace(arg) {
+		case "--help", "-h", "help":
+			fmt.Println("usage: omnia cloud upgrade bootstrap --project <name> [--cloud-name <alias>] [--resume]")
+			fmt.Println("--cloud-name selects which configured cloud to bootstrap against (default: default cloud).")
+			return
+		}
+	}
+	project := parseCloudUpgradeProjectArg(args)
 	if project == "" {
-		fmt.Fprintln(os.Stderr, "usage: omnia cloud upgrade bootstrap --project <name> [--resume]")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud upgrade bootstrap --project <name> [--cloud-name <alias>] [--resume]")
 		fmt.Fprintln(os.Stderr, "error: --project is required")
 		exitFunc(1)
 		return
 	}
+	if hasCloudUpgradeFlag(args, "--all") {
+		fmt.Fprintln(os.Stderr, "error: omnia cloud upgrade bootstrap does not support --all: bootstrap progress is tracked per-project, not per-cloud")
+		fmt.Fprintln(os.Stderr, "hint: bootstrap once against one cloud with --cloud-name, then use `omnia sync --cloud-name <alias> --project <name>` to replicate to additional clouds")
+		exitFunc(1)
+		return
+	}
+	explicitAlias := parseCloudNameArg(args)
+	if err := validateCloudAliasExists(cfg, explicitAlias); err != nil {
+		fatal(err)
+		return
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
@@ -537,7 +699,9 @@ func cmdCloudUpgradeBootstrap(cfg store.Config) {
 	}
 	defer s.Close()
 
-	cc, err := resolveCloudRuntimeConfig(cfg)
+	// applyEnvOverrides mirrors cloudSyncApplyEnv's footgun protection: only the
+	// default/empty alias honors ENGRAM_CLOUD_SERVER/TOKEN (main.go:1728-1733).
+	cc, err := resolveCloudRuntimeConfigForAlias(cfg, explicitAlias, explicitAlias == "")
 	if err != nil {
 		fatal(err)
 		return
@@ -710,27 +874,74 @@ func hasCloudUpgradeFlag(args []string, flag string) bool {
 	return false
 }
 
+// cmdCloudStatus reports cloud sync health. Without --cloud-name, it iterates
+// EVERY configured cloud (OBL-07); --cloud-name reports just that one alias.
+// With zero or one configured cloud (the common case, including legacy
+// env-only setups with no cloud.json), output is byte-for-byte identical to
+// the pre-OBL-07 single-cloud implementation.
 func cmdCloudStatus(cfg store.Config) {
-	cc, err := resolveCloudRuntimeConfig(cfg)
+	args := os.Args[3:]
+	for _, arg := range args {
+		switch strings.TrimSpace(arg) {
+		case "--help", "-h", "help":
+			fmt.Println("usage: omnia cloud status [--cloud-name <alias>]")
+			fmt.Println("Reports cloud sync health. Without --cloud-name, iterates every configured cloud.")
+			return
+		}
+	}
+	explicitAlias := parseCloudNameArg(args)
+
+	aliases, defaultAlias, err := resolveCloudSyncAliases(cfg, explicitAlias)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: unable to read cloud runtime config: %v\n", err)
 		exitFunc(1)
 		return
 	}
+
+	if len(aliases) == 1 {
+		if err := printCloudStatusForAlias(cfg, aliases[0], defaultAlias, explicitAlias); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			exitFunc(1)
+		}
+		return
+	}
+
+	var failed []string
+	for _, alias := range aliases {
+		label := cloudAliasLabel(alias)
+		fmt.Printf("== cloud %q ==\n", label)
+		if err := printCloudStatusForAlias(cfg, alias, defaultAlias, explicitAlias); err != nil {
+			fmt.Fprintf(os.Stderr, "cloud %q: %v\n", label, err)
+			failed = append(failed, label)
+		}
+	}
+	if len(failed) > 0 {
+		fatal(fmt.Errorf("cloud status failed for %d of %d cloud(s): %s", len(failed), len(aliases), strings.Join(failed, ", ")))
+	}
+}
+
+// printCloudStatusForAlias prints one cloud's status block. applyEnvOverrides
+// (via cloudSyncApplyEnv) preserves the env-override footgun protection: only
+// the default/empty alias is ever subject to ENGRAM_CLOUD_SERVER/TOKEN.
+func printCloudStatusForAlias(cfg store.Config, alias, defaultAlias, explicitAlias string) error {
+	applyEnvOverrides := cloudSyncApplyEnv(explicitAlias, alias, defaultAlias)
+	cc, err := resolveCloudRuntimeConfigForAlias(cfg, alias, applyEnvOverrides)
+	if err != nil {
+		return err
+	}
+	targetKey := cloudnFor(alias, "")
 	if cc == nil || cc.ServerURL == "" {
 		fmt.Println("Cloud status: not configured")
-		return
+		return nil
 	}
 	validatedURL, err := validateCloudServerURL(cc.ServerURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid cloud runtime server URL: %v\n", err)
-		exitFunc(1)
-		return
+		return fmt.Errorf("invalid cloud runtime server URL: %w", err)
 	}
 	cc.ServerURL = validatedURL
 	token := strings.TrimSpace(cc.Token)
 	insecureNoAuth := envBool("OMNIA_CLOUD_INSECURE_NO_AUTH")
-	fmt.Printf("Cloud status: configured (target=%s)\n", constants.TargetKeyCloud)
+	fmt.Printf("Cloud status: configured (target=%s)\n", targetKey)
 	fmt.Printf("Server: %s\n", cc.ServerURL)
 	if token == "" {
 		if insecureNoAuth {
@@ -738,23 +949,24 @@ func cmdCloudStatus(cfg store.Config) {
 			fmt.Println("Sync readiness: ready for explicit --project sync (project must be enrolled)")
 			fmt.Println("Warning: bearer auth is disabled in insecure mode; do not use in production")
 			printCloudStatusDaemonProbe()
-			printCloudStatusSyncDiagnostic(cfg)
-			return
+			printCloudStatusSyncDiagnostic(cfg, targetKey)
+			return nil
 		}
 		fmt.Println("Auth status: token not configured (client token is optional at preflight)")
 		fmt.Println("Sync readiness: ready to attempt explicit --project sync (project must be enrolled)")
 		fmt.Println("Hint: if the remote server enforces bearer auth, set ENGRAM_CLOUD_TOKEN")
 		printCloudStatusDaemonProbe()
-		printCloudStatusSyncDiagnostic(cfg)
-		return
+		printCloudStatusSyncDiagnostic(cfg, targetKey)
+		return nil
 	}
 	fmt.Println("Auth status: ready (token provided via runtime cloud config)")
 	fmt.Println("Sync readiness: ready for explicit --project sync (project must be enrolled)")
 	printCloudStatusDaemonProbe()
-	printCloudStatusSyncDiagnostic(cfg)
+	printCloudStatusSyncDiagnostic(cfg, targetKey)
+	return nil
 }
 
-func printCloudStatusSyncDiagnostic(cfg store.Config) {
+func printCloudStatusSyncDiagnostic(cfg store.Config, targetKey string) {
 	if _, err := os.Stat(datadir.DBPath(cfg.DataDir)); err != nil {
 		return
 	}
@@ -764,7 +976,7 @@ func printCloudStatusSyncDiagnostic(cfg store.Config) {
 		return
 	}
 	defer s.Close()
-	state, err := s.GetSyncState(constants.TargetKeyCloud)
+	state, err := s.GetSyncState(targetKey)
 	if err != nil || state == nil {
 		return
 	}
@@ -862,15 +1074,15 @@ func cmdCloudEnroll(cfg store.Config) {
 
 func cmdCloudConfig(cfg store.Config) {
 	fs := flag.NewFlagSet("omnia cloud config", flag.ContinueOnError)
-	cloudAlias := fs.String("cloud", "", "cloud alias (default: default cloud)")
+	cloudAlias := bindCloudNameFlag(fs, "cloud alias (default: default cloud)")
 	server := fs.String("server", "", "cloud server URL")
 	if err := fs.Parse(os.Args[3:]); err != nil {
-		fmt.Fprintln(os.Stderr, "usage: omnia cloud config --server <url> [--cloud <alias>]")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud config --server <url> [--cloud-name <alias>]")
 		exitFunc(1)
 		return
 	}
 	if *server == "" {
-		fmt.Fprintln(os.Stderr, "usage: omnia cloud config --server <url> [--cloud <alias>]")
+		fmt.Fprintln(os.Stderr, "usage: omnia cloud config --server <url> [--cloud-name <alias>]")
 		exitFunc(1)
 		return
 	}
