@@ -1,0 +1,103 @@
+id: OBL-13
+title: Admin dashboard UI — manage users, memberships, and permissions on screen
+status: done
+priority: P1
+blocks_homelab_test: false
+estimated_effort: L
+recommended_model: opus-4.8
+depends_on: [OBL-01, OBL-03]
+tags: [dashboard, admin, rbac, ui, users, permissions]
+
+context: |
+  The operator wants to manage everything from the dashboard: log in as admin and, in
+  a dedicated Admin section, list users, grant/edit/revoke per-project memberships with
+  specific permissions (read / write / update / delete), enable/disable users, and
+  issue/revoke tokens — instead of doing it via psql or raw API calls. Today the unified
+  dashboard has NO admin section (nav is only Overview/Browse/Graph/Sync/Activity) even
+  though most of the backend API already exists. This is the missing UI layer, mirroring
+  what upstream Engram Cloud v1.18.0 shipped as "dashboard administration".
+
+current_state: |
+  - Dashboard nav has no Admin item; sections are Overview/Browse/Graph/Sync/Activity.
+    evidence: internal/dashboard/layout_templ.go (NavItem labels); no admin templ page
+    (internal/dashboard/*.templ = activity, browse, detail, graph, layout, overview, syncpage)
+  - Operator visibility already gated to admin via the timing-safe isDashboardAdmin (OBL-03).
+    evidence: internal/cloud/cloudserver/cloudserver.go (dashboardSessionClaims/isDashboardAdmin)
+  - Backend API that EXISTS (JSON): token issue/revoke + user disable/enable (OBL-01),
+    per-project member management.
+    evidence: /admin/tokens, /admin/tokens/{id}/revoke, /admin/users/{id}/disable|enable
+    (internal/cloud/cloudserver/tokens.go); /projects/{project}/members[/{id}]
+    (internal/cloud/cloudserver/members.go)
+  - Membership perms are a bitfield Read=1/Insert=2/Update=4/Delete=8/All=15, roles
+    owner>admin>moderator>member. evidence: internal/cloud/auth/permission.go, roles.go
+  - The dashboard is mounted on the cloud over the same internal/dashboard.Server via a
+    DataSource; the local dashboard has no accounts, so the Admin section must be
+    cloud-only (gated on the cloud data source + operator session).
+    evidence: internal/cloud/cloudserver/dashboard_mount.go, internal/cloud/clouddash/
+
+gap: |
+  A dashboard Admin section (operator-only) with: Users list (+ enable/disable, tokens),
+  and a Memberships/Access editor to grant/edit/revoke a user's permissions on a project
+  (read/write/update/delete checkboxes + role). Plus the operator-level backend endpoints
+  the UI needs that don't exist yet (list all users; grant/edit membership for ANY
+  project as operator — today member endpoints require being owner/admin of that project).
+
+tasks: |
+  1. Backend — add operator-gated endpoints (reuse the OBL-03 admin gate): GET
+     /admin/users (list users incl. disabled_at), GET /admin/users/{id}/memberships,
+     PUT /admin/memberships (grant/update {account_id, project, perms, role}), DELETE
+     /admin/memberships/{account_id}/{project}. These let the operator manage ANY
+     project's memberships without being a per-project owner (the current
+     /projects/{project}/members path stays for project owners).
+  2. Store — add the read/write methods behind those endpoints (ListUsers,
+     ListMembershipsForUser, UpsertMembership, DeleteMembership) in cloudstore; UpsertMembership
+     mirrors the psql upsert used to seed (ON CONFLICT (account_id,project) DO UPDATE).
+  3. Dashboard nav — add an "Admin" NavItem that renders ONLY when the session is an
+     operator (LayoutProps already carries user/logout; extend it with an IsAdmin flag or
+     gate in the cloud mount) and ONLY on the cloud surface.
+  4. Admin Users page (new templ): table of users (username, email, status, created,
+     last token use), with enable/disable actions (POST /admin/users/{id}/disable|enable)
+     and an "issue token" action (POST /admin/tokens → show the raw token ONCE in a modal)
+     and a token list with revoke.
+  5. Admin Access/Memberships page (new templ): pick a user (or a project) and edit
+     memberships — a row per (user, project) with checkboxes Read/Insert/Update/Delete
+     mapping to the perms bitfield + a role dropdown, Save → PUT /admin/memberships,
+     Revoke → DELETE. Show the effective perms clearly (e.g. "read-only", "read+write").
+  6. Use HTMX (already in the stack) for the mutations; keep the existing design system
+     (internal/ui CSS, badges). No new CSS framework.
+  7. Gate everything server-side too: every /admin/* mutation must re-check operator
+     (never trust the UI); non-operator sessions get 403 and never see the Admin nav.
+  8. Tests: operator can list/grant/edit/revoke via the new endpoints; non-operator gets
+     403; perms bitfield round-trips (read-only→read+write); disabled user reflected;
+     templ pages render for operator and are absent for non-operator.
+
+acceptance_criteria: |
+  - Logging into the dashboard as the operator (OMNIA_CLOUD_ADMIN) shows an Admin section.
+  - From the Users page the operator can disable/enable a user and issue/revoke a token
+    (raw token shown once).
+  - From the Access page the operator can set a user's permission on a project to
+    read-only / read+write / read+write+update (etc.) and the change is enforced on the
+    next sync (verified end to end).
+  - A non-operator account never sees the Admin nav and every /admin/* call returns 403.
+
+verification: |
+  - go build ./... && go vet ./... && go test ./internal/cloud/... ./internal/dashboard/...
+  - templ generate ./internal/dashboard/... ./internal/ui/...
+  - Manual on the homelab: log in as operator, flip `usuario`'s perms on `lab` from the
+    Access page, then confirm from the HP that a push now succeeds / fails accordingly.
+
+do_not_touch: |
+  - The local (non-cloud) dashboard must NOT gain an Admin section (no accounts there) —
+    gate on the cloud data source.
+  - The per-project /projects/{project}/members endpoints (owner-facing) stay as-is.
+  - Cookie name, table/column names, LICENSE.
+
+references: |
+  - internal/dashboard/layout.templ + layout_templ.go (nav)
+  - internal/dashboard/*.templ (page pattern to mirror)
+  - internal/cloud/cloudserver/cloudserver.go (isDashboardAdmin, operator gate)
+  - internal/cloud/cloudserver/tokens.go (existing /admin endpoints)
+  - internal/cloud/cloudserver/members.go (per-project member mgmt + perms)
+  - internal/cloud/cloudstore/membership.go (membership store)
+  - internal/cloud/auth/permission.go, roles.go (bitfield + roles)
+  - internal/cloud/cloudserver/dashboard_mount.go (cloud mount + operator session)

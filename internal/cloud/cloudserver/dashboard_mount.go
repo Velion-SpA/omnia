@@ -103,6 +103,12 @@ func (s *CloudServer) dashboardGate(dashHandler http.Handler) http.Handler {
 		// account can never observe another account's memories.
 		projects, all := s.dashboardVisibleProjects(r)
 		ctx := clouddash.WithScope(r.Context(), clouddash.NewScope(all, projects))
+		// Operator sessions additionally get the Admin nav entry on every dashboard
+		// page (OBL-13). The flag is set ONLY for operators and ONLY on the cloud
+		// surface, so the local dashboard never grows an Admin section.
+		if all {
+			ctx = dashboard.WithAdminNav(ctx)
+		}
 		dashHandler.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

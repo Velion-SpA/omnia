@@ -6,7 +6,7 @@ import "github.com/velion/omnia/internal/ui"
 // The local and cloud dashboards now render the exact same shell + CSS — the design
 // base lives in one place and can no longer drift between them.
 templ layout(title string) {
-	@ui.Layout(localLayoutProps(title)) {
+	@ui.Layout(layoutPropsForContext(ctx, title)) {
 		{ children... }
 	}
 }
@@ -17,13 +17,7 @@ func localLayoutProps(title string) ui.LayoutProps {
 		BrandTitle: "Omnia",
 		BrandSub:   "Unified Knowledge",
 		BrandHref:  "/",
-		Nav: []ui.NavItem{
-			{Href: "/", Label: "Overview", ID: "overview"},
-			{Href: "/browse", Label: "Browse", ID: "browse"},
-			{Href: "/graph", Label: "Graph", ID: "graph"},
-			{Href: "/sync", Label: "Sync", ID: "sync"},
-			{Href: "/activity", Label: "Activity", ID: "activity"},
-		},
+		Nav:        BaseNavItems(),
 		StatusText: "Online",
 		AssetBase:  "/static",
 	}

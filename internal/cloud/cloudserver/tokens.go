@@ -59,14 +59,40 @@ func (s *CloudServer) requireAdminBearer(w http.ResponseWriter, r *http.Request)
 }
 
 type issueTokenRequest struct {
-	UserID string `json:"user_id"`
-	Label  string `json:"label"`
+	UserID   string `json:"user_id"`
+	Label    string `json:"label"`
+	Username string `json:"username"`
+}
+
+// parseIssueTokenInput reads an issue-token request from a JSON body (CLI/API) or
+// an HTMX form (the Admin Users page). Username is display-only.
+func (s *CloudServer) parseIssueTokenInput(w http.ResponseWriter, r *http.Request) (issueTokenRequest, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAuthBodyBytes)
+	var req issueTokenRequest
+	if isFormContentType(r) {
+		if err := r.ParseForm(); err != nil {
+			return issueTokenRequest{}, err
+		}
+		req.UserID = r.PostFormValue("user_id")
+		req.Label = r.PostFormValue("label")
+		req.Username = r.PostFormValue("username")
+	} else {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return issueTokenRequest{}, err
+		}
+	}
+	req.UserID = strings.TrimSpace(req.UserID)
+	req.Label = strings.TrimSpace(req.Label)
+	req.Username = strings.TrimSpace(req.Username)
+	return req, nil
 }
 
 // handleIssueManagedToken handles POST /admin/tokens. On success it returns the
-// RAW token EXACTLY ONCE — it is never retrievable again.
+// RAW token EXACTLY ONCE — it is never retrievable again. For an HTMX request the
+// raw token is shown in a one-time modal fragment; for an API request it is
+// returned as JSON.
 func (s *CloudServer) handleIssueManagedToken(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminBearer(w, r) {
+	if !s.requireOperator(w, r) {
 		return
 	}
 	issuer, ok := s.account.(managedTokenIssuer)
@@ -74,17 +100,16 @@ func (s *CloudServer) handleIssueManagedToken(w http.ResponseWriter, r *http.Req
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "managed tokens unavailable"})
 		return
 	}
-	var req issueTokenRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAuthBodyBytes)).Decode(&req); err != nil {
+	req, err := s.parseIssueTokenInput(w, r)
+	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
-	req.UserID = strings.TrimSpace(req.UserID)
 	if req.UserID == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "user_id is required"})
 		return
 	}
-	raw, tokenID, err := issuer.IssueManagedToken(r.Context(), req.UserID, strings.TrimSpace(req.Label))
+	raw, tokenID, err := issuer.IssueManagedToken(r.Context(), req.UserID, req.Label)
 	if err != nil {
 		switch {
 		case errors.Is(err, cloudstore.ErrManagedTokenUserNotFound):
@@ -99,17 +124,30 @@ func (s *CloudServer) handleIssueManagedToken(w http.ResponseWriter, r *http.Req
 		return
 	}
 	// The raw token is shown ONCE here and never persisted or logged.
+	if isHTMXRequest(r) {
+		who := req.Username
+		if who == "" {
+			who = "user " + req.UserID
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusCreated)
+		if rerr := adminTokenIssuedFragment(adminTokenIssuedView{Username: who, Raw: raw, TokenID: tokenID}).Render(r.Context(), w); rerr != nil {
+			// Response already committed; nothing actionable beyond logging upstream.
+			return
+		}
+		return
+	}
 	jsonResponse(w, http.StatusCreated, map[string]string{
 		"id":      tokenID,
 		"user_id": req.UserID,
 		"token":   raw,
-		"label":   strings.TrimSpace(req.Label),
+		"label":   req.Label,
 	})
 }
 
 // handleRevokeManagedToken handles POST /admin/tokens/{id}/revoke. Idempotent.
 func (s *CloudServer) handleRevokeManagedToken(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminBearer(w, r) {
+	if !s.requireOperator(w, r) {
 		return
 	}
 	adminStore, ok := s.store.(managedTokenAdminStore)
@@ -126,7 +164,7 @@ func (s *CloudServer) handleRevokeManagedToken(w http.ResponseWriter, r *http.Re
 		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke token"})
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]string{"status": "revoked", "id": tokenID})
+	s.writeOperatorMutationResult(w, r, http.StatusOK, map[string]string{"status": "revoked", "id": tokenID})
 }
 
 // handleDisableUser handles POST /admin/users/{id}/disable.
@@ -140,7 +178,7 @@ func (s *CloudServer) handleEnableUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *CloudServer) setUserDisabled(w http.ResponseWriter, r *http.Request, disabled bool) {
-	if !s.requireAdminBearer(w, r) {
+	if !s.requireOperator(w, r) {
 		return
 	}
 	adminStore, ok := s.store.(managedTokenAdminStore)
@@ -165,5 +203,5 @@ func (s *CloudServer) setUserDisabled(w http.ResponseWriter, r *http.Request, di
 	if disabled {
 		status = "disabled"
 	}
-	jsonResponse(w, http.StatusOK, map[string]string{"status": status, "user_id": userID})
+	s.writeOperatorMutationResult(w, r, http.StatusOK, map[string]string{"status": status, "user_id": userID})
 }

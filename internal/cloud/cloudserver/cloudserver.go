@@ -221,6 +221,21 @@ func (s *CloudServer) routes() {
 				s.mux.HandleFunc("POST /admin/users/{id}/enable", s.handleEnableUser)
 			}
 		}
+		// Operator dashboard Admin section (OBL-13): Users + Access pages and the
+		// operator-level endpoints the UI needs. Every handler re-checks the
+		// operator session (requireOperator) — the UI is never trusted. Registered
+		// only when the store supports operator administration (adminDashboardStore),
+		// which the local dashboard's data source never does, so the Admin section
+		// is cloud-only. GET pages fall through the dashboard's GET / catch-all
+		// unless registered here explicitly, so these specific patterns take it over.
+		if _, ok := s.store.(adminDashboardStore); ok {
+			s.mux.HandleFunc("GET /admin", s.handleAdminUsersPage)
+			s.mux.HandleFunc("GET /admin/access", s.handleAdminAccessPage)
+			s.mux.HandleFunc("GET /admin/users", s.handleAdminListUsers)
+			s.mux.HandleFunc("GET /admin/users/{id}/memberships", s.handleAdminListUserMemberships)
+			s.mux.HandleFunc("PUT /admin/memberships", s.handleAdminUpsertMembership)
+			s.mux.HandleFunc("DELETE /admin/memberships/{account_id}/{project}", s.handleAdminDeleteMembership)
+		}
 	}
 
 	// Mount the unified dashboard at the root catch-all, behind the cloud's
