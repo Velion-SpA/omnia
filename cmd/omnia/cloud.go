@@ -177,6 +177,71 @@ func (c *cloudConfigV2) listClouds() []string {
 	return out
 }
 
+// effectiveDefaultAlias resolves which configured cloud is the default: the
+// explicit "default" field, or the sole cloud when exactly one is configured.
+func effectiveDefaultAlias(v2 *cloudConfigV2) string {
+	if v2 == nil {
+		return ""
+	}
+	if strings.TrimSpace(v2.Default) != "" {
+		return strings.TrimSpace(v2.Default)
+	}
+	if len(v2.Clouds) == 1 {
+		for alias := range v2.Clouds {
+			return alias
+		}
+	}
+	return ""
+}
+
+// nonDefaultCloudAliases returns the configured cloud aliases that are NOT the
+// default (and not the canonical "cloud"). These require dedicated per-alias
+// mutation fan-out queues.
+func nonDefaultCloudAliases(v2 *cloudConfigV2) []string {
+	if v2 == nil {
+		return nil
+	}
+	defaultAlias := effectiveDefaultAlias(v2)
+	var out []string
+	for _, alias := range v2.listClouds() {
+		if strings.TrimSpace(alias) == "" || strings.EqualFold(alias, constants.TargetKeyCloud) {
+			continue
+		}
+		if defaultAlias != "" && strings.EqualFold(alias, defaultAlias) {
+			continue
+		}
+		out = append(out, alias)
+	}
+	return out
+}
+
+// reconcileCloudFanoutTargets aligns the store's fan-out registry with cloud.json
+// so subsequent local writes enqueue one pending row per non-default cloud. It is
+// best-effort: a failure is reported to stderr but never blocks the caller. When
+// s is nil, a short-lived store is opened from cfg.
+func reconcileCloudFanoutTargets(cfg store.Config, s *store.Store) {
+	v2, err := loadCloudConfigV2(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not load cloud config for fan-out registry: %v\n", err)
+		return
+	}
+	aliases := nonDefaultCloudAliases(v2)
+
+	target := s
+	if target == nil {
+		opened, err := storeNew(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not open store for fan-out registry: %v\n", err)
+			return
+		}
+		defer opened.Close()
+		target = opened
+	}
+	if err := target.ReplaceCloudSyncTargets(aliases); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not update cloud fan-out registry: %v\n", err)
+	}
+}
+
 func cmdCloud(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: omnia cloud <subcommand> [options]")
@@ -862,6 +927,7 @@ func cmdCloudAdd(cfg store.Config) {
 		fatal(err)
 		return
 	}
+	reconcileCloudFanoutTargets(cfg, nil)
 	fmt.Printf("✓ Cloud %q configured (server=%s)\n", alias, validatedURL)
 }
 
@@ -927,6 +993,7 @@ func cmdCloudRemove(cfg store.Config) {
 		fatal(err)
 		return
 	}
+	reconcileCloudFanoutTargets(cfg, nil)
 	fmt.Printf("✓ Cloud %q removed\n", alias)
 }
 
@@ -962,6 +1029,7 @@ func cmdCloudDefault(cfg store.Config) {
 		fatal(err)
 		return
 	}
+	reconcileCloudFanoutTargets(cfg, nil)
 	fmt.Printf("✓ Default cloud set to %q\n", alias)
 }
 

@@ -1,6 +1,6 @@
 id: OBL-06
 title: Fix multi-cloud fan-out — alias-scope the local mutation queue
-status: pending
+status: done
 priority: P1
 blocks_homelab_test: false   # each notebook targets ONE cloud; this blocks the "one local -> many clouds" product feature
 estimated_effort: L

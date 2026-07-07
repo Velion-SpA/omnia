@@ -124,6 +124,32 @@ type Syncer struct {
 	transport Transport // Pluggable I/O backend (filesystem, remote, etc.)
 	cloudMode bool
 	project   string
+
+	// Multi-cloud alias scoping. Both empty for the default cloud (legacy behavior).
+	//   mutationTargetKey      — where pending local mutations are read/acked.
+	//                            Empty => store.DefaultSyncTargetKey ("cloud").
+	//   chunkTargetKeyOverride — where synced chunks / sync_state health are tracked.
+	//                            Empty => cloudTargetKey(project) ("cloud:<project>").
+	mutationTargetKey      string
+	chunkTargetKeyOverride string
+}
+
+// SetCloudTargetKeys scopes a cloud-mode Syncer to a specific alias for
+// multi-cloud fan-out. mutationKey selects the per-alias mutation queue that this
+// cloud drains and acks; chunkKey selects the per-alias chunk-tracking / health
+// target. Empty values fall back to the legacy default keys, so the default cloud
+// (single-cloud/env-only) keeps its exact prior behavior.
+func (sy *Syncer) SetCloudTargetKeys(mutationKey, chunkKey string) {
+	sy.mutationTargetKey = strings.TrimSpace(mutationKey)
+	sy.chunkTargetKeyOverride = strings.TrimSpace(chunkKey)
+}
+
+// mutationsTargetKey is the sync_mutations queue key this Syncer reads and acks.
+func (sy *Syncer) mutationsTargetKey() string {
+	if key := strings.TrimSpace(sy.mutationTargetKey); key != "" {
+		return key
+	}
+	return store.DefaultSyncTargetKey
 }
 
 type UpgradeBootstrapOptions struct {
@@ -410,7 +436,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	// Nothing new to export
 	if len(chunk.Sessions) == 0 && len(chunk.Observations) == 0 && len(chunk.Prompts) == 0 && len(chunk.Mutations) == 0 {
 		if sy.cloudMode && len(mutationSeqs) > 0 {
-			if err := storeAckMutationSeq(sy.store, store.DefaultSyncTargetKey, mutationSeqs); err != nil {
+			if err := storeAckMutationSeq(sy.store, sy.mutationsTargetKey(), mutationSeqs); err != nil {
 				return nil, fmt.Errorf("ack synced mutations: %w", err)
 			}
 		}
@@ -445,7 +471,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 			}
 		}
 		if sy.cloudMode && len(mutationSeqs) > 0 {
-			if err := storeAckMutationSeq(sy.store, store.DefaultSyncTargetKey, mutationSeqs); err != nil {
+			if err := storeAckMutationSeq(sy.store, sy.mutationsTargetKey(), mutationSeqs); err != nil {
 				return nil, fmt.Errorf("ack synced mutations: %w", err)
 			}
 		}
@@ -479,7 +505,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		return nil, fmt.Errorf("record synced chunk: %w", err)
 	}
 	if sy.cloudMode && len(mutationSeqs) > 0 {
-		if err := storeAckMutationSeq(sy.store, store.DefaultSyncTargetKey, mutationSeqs); err != nil {
+		if err := storeAckMutationSeq(sy.store, sy.mutationsTargetKey(), mutationSeqs); err != nil {
 			return nil, fmt.Errorf("ack synced mutations: %w", err)
 		}
 	}
@@ -849,6 +875,9 @@ func mutationIdentityKey(mutation store.SyncMutation) string {
 func (sy *Syncer) chunkTrackingTargetKey(project string) string {
 	if !sy.cloudMode {
 		return store.LocalChunkTargetKey
+	}
+	if key := strings.TrimSpace(sy.chunkTargetKeyOverride); key != "" {
+		return key
 	}
 	projectName := strings.TrimSpace(project)
 	if projectName == "" {
@@ -1319,7 +1348,7 @@ func (sy *Syncer) listPendingMutationsForExport() ([]store.SyncMutation, error) 
 	mutations := make([]store.SyncMutation, 0, pageSize)
 
 	for {
-		batch, err := storeListMutationsAfterSeq(sy.store, store.DefaultSyncTargetKey, afterSeq, pageSize)
+		batch, err := storeListMutationsAfterSeq(sy.store, sy.mutationsTargetKey(), afterSeq, pageSize)
 		if err != nil {
 			return nil, err
 		}

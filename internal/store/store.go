@@ -808,6 +808,15 @@ func (s *Store) migrate() error {
 				applied_actions    TEXT,
 				updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
 			);
+
+			-- Registered NON-default cloud aliases that require a dedicated per-alias
+			-- mutation fan-out queue (multi-cloud). The default cloud ("cloud"/empty)
+			-- is implicit and never stored here; it keeps using the legacy global
+			-- "cloud" queue, so single-cloud/default deployments are unaffected.
+			CREATE TABLE IF NOT EXISTS sync_cloud_targets (
+				alias      TEXT PRIMARY KEY,
+				created_at TEXT NOT NULL DEFAULT (datetime('now'))
+			);
 		`
 	if _, err := s.execHook(s.db, schema); err != nil {
 		return err
@@ -3958,6 +3967,40 @@ func (s *Store) HasPendingSyncMutationsForProject(project string) (bool, error) 
 	return count > 0, nil
 }
 
+// HasPendingSyncMutationsForTarget reports whether the given sync target key still
+// has un-acked local mutations. For the default global queue ("cloud") it filters
+// by project (the queue is shared across projects); for an alias-scoped queue
+// ("<alias>:<project>") the project is already encoded in the key so it counts all
+// un-acked rows for that key. This lets each cloud in a multi-cloud fan-out be
+// marked healthy only after ITS OWN queue drained.
+func (s *Store) HasPendingSyncMutationsForTarget(targetKey, project string) (bool, error) {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	var count int
+	if targetKey == DefaultSyncTargetKey {
+		project, _ = NormalizeProject(project)
+		project = strings.TrimSpace(project)
+		if project == "" {
+			return false, nil
+		}
+		err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM sync_mutations WHERE target_key = ? AND project = ? AND acked_at IS NULL`,
+			targetKey, project,
+		).Scan(&count)
+		if err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	}
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sync_mutations WHERE target_key = ? AND acked_at IS NULL`,
+		targetKey,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func (s *Store) refreshProjectSyncStateTx(tx *sql.Tx, project string) error {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
@@ -5412,13 +5455,100 @@ func (s *Store) enqueueSyncMutationTx(tx *sql.Tx, entity, entityKey, op string, 
 	); err != nil {
 		return err
 	}
-	_, err = s.execHook(tx,
+	if _, err := s.execHook(tx,
 		`UPDATE sync_state
 		 SET lifecycle = ?, last_enqueued_seq = ?, updated_at = datetime('now')
 		 WHERE target_key = ?`,
 		SyncLifecyclePending, seq, projectTargetKey,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+
+	// Multi-cloud fan-out: replicate the mutation into each registered non-default
+	// cloud's own project-scoped queue so `omnia sync` delivers a single local
+	// write to EVERY configured cloud independently. Without this, the first alias
+	// drained and acked the shared "cloud" queue above and later aliases found
+	// nothing pending (falsely reported "Nothing new to sync" / HEALTHY). The
+	// default cloud keeps using the legacy "cloud" queue, so single-cloud/env-only
+	// deployments are byte-for-byte unchanged.
+	return s.enqueueCloudFanoutMutationsTx(tx, entity, entityKey, op, string(encoded), project, projectTargetKey)
+}
+
+// enqueueCloudFanoutMutationsTx inserts one additional sync_mutations row per
+// registered non-default cloud alias, keyed by aliasTargetKeyForProject(alias,
+// project). Each fan-out row gets its own autoincrement seq and its own
+// sync_state row, so per-cloud acked/pulled cursors stay fully independent.
+func (s *Store) enqueueCloudFanoutMutationsTx(tx *sql.Tx, entity, entityKey, op, payload, project, projectTargetKey string) error {
+	aliases, err := s.cloudFanoutAliasesTx(tx)
+	if err != nil {
+		return err
+	}
+	for _, alias := range aliases {
+		fanKey := normalizeSyncTargetKey(aliasTargetKeyForProject(alias, project))
+		// Never shadow the legacy default queue or the derived per-project default
+		// state row — the default cloud already consumes those above.
+		if fanKey == DefaultSyncTargetKey || fanKey == projectTargetKey {
+			continue
+		}
+		if _, err := s.execHook(tx,
+			`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, ?, datetime('now'))`,
+			fanKey, SyncLifecycleIdle,
+		); err != nil {
+			return err
+		}
+		res, err := s.execHook(tx,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			fanKey, entity, entityKey, op, payload, SyncSourceLocal, project,
+		)
+		if err != nil {
+			return err
+		}
+		fanSeq, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		if _, err := s.execHook(tx,
+			`UPDATE sync_state
+			 SET lifecycle = ?, last_enqueued_seq = ?, updated_at = datetime('now')
+			 WHERE target_key = ?`,
+			SyncLifecyclePending, fanSeq, fanKey,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cloudFanoutAliasesTx returns the registered non-default cloud aliases within the
+// given transaction. Rows are fully consumed before returning so the caller can
+// safely run further statements on the same tx.
+func (s *Store) cloudFanoutAliasesTx(tx *sql.Tx) ([]string, error) {
+	rows, err := s.queryItHook(tx, `SELECT alias FROM sync_cloud_targets ORDER BY alias ASC`)
+	if err != nil {
+		return nil, err
+	}
+	aliases := make([]string, 0)
+	for rows.Next() {
+		var alias string
+		if err := rows.Scan(&alias); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		alias = normalizeCloudSyncAlias(alias)
+		if alias == "" || alias == DefaultSyncTargetKey {
+			continue
+		}
+		aliases = append(aliases, alias)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return aliases, nil
 }
 
 func syncTargetKeyForProject(project string) string {
@@ -5428,6 +5558,102 @@ func syncTargetKeyForProject(project string) string {
 		return DefaultSyncTargetKey
 	}
 	return fmt.Sprintf("%s:%s", DefaultSyncTargetKey, project)
+}
+
+// aliasTargetKeyForProject returns the sync target key for a given cloud alias and
+// project. It mirrors the CLI's cloudnFor: for the default alias ("cloud" or
+// empty) it equals syncTargetKeyForProject(project), preserving the legacy key so
+// the default cloud never gets an orphaned row.
+func aliasTargetKeyForProject(alias, project string) string {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		alias = DefaultSyncTargetKey
+	}
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return alias
+	}
+	return fmt.Sprintf("%s:%s", alias, project)
+}
+
+func normalizeCloudSyncAlias(alias string) string {
+	return strings.TrimSpace(strings.ToLower(alias))
+}
+
+// RegisterCloudSyncTarget records a named cloud alias that requires a dedicated
+// per-alias mutation fan-out queue. The default cloud ("cloud"/empty) is implicit
+// and never registered — it keeps using the legacy global "cloud" queue.
+func (s *Store) RegisterCloudSyncTarget(alias string) error {
+	alias = normalizeCloudSyncAlias(alias)
+	if alias == "" || alias == DefaultSyncTargetKey {
+		return nil
+	}
+	_, err := s.execHook(s.db,
+		`INSERT OR IGNORE INTO sync_cloud_targets (alias, created_at) VALUES (?, datetime('now'))`,
+		alias,
+	)
+	return err
+}
+
+// UnregisterCloudSyncTarget removes a cloud alias from the fan-out registry.
+func (s *Store) UnregisterCloudSyncTarget(alias string) error {
+	alias = normalizeCloudSyncAlias(alias)
+	if alias == "" {
+		return nil
+	}
+	_, err := s.execHook(s.db, `DELETE FROM sync_cloud_targets WHERE alias = ?`, alias)
+	return err
+}
+
+// ListCloudSyncTargets returns the registered non-default cloud aliases (sorted).
+func (s *Store) ListCloudSyncTargets() ([]string, error) {
+	rows, err := s.queryItHook(s.db, `SELECT alias FROM sync_cloud_targets ORDER BY alias ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	aliases := make([]string, 0)
+	for rows.Next() {
+		var alias string
+		if err := rows.Scan(&alias); err != nil {
+			return nil, err
+		}
+		alias = normalizeCloudSyncAlias(alias)
+		if alias == "" || alias == DefaultSyncTargetKey {
+			continue
+		}
+		aliases = append(aliases, alias)
+	}
+	return aliases, rows.Err()
+}
+
+// ReplaceCloudSyncTargets sets the registered non-default cloud aliases to exactly
+// the provided set (default/empty aliases are ignored). Used by the CLI to keep
+// the fan-out registry in sync with cloud.json.
+func (s *Store) ReplaceCloudSyncTargets(aliases []string) error {
+	want := make(map[string]struct{}, len(aliases))
+	for _, alias := range aliases {
+		alias = normalizeCloudSyncAlias(alias)
+		if alias == "" || alias == DefaultSyncTargetKey {
+			continue
+		}
+		want[alias] = struct{}{}
+	}
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := s.execHook(tx, `DELETE FROM sync_cloud_targets`); err != nil {
+			return err
+		}
+		for alias := range want {
+			if _, err := s.execHook(tx,
+				`INSERT OR IGNORE INTO sync_cloud_targets (alias, created_at) VALUES (?, datetime('now'))`,
+				alias,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func extractSessionIDFromPayload(payload any) string {

@@ -5,6 +5,10 @@ Probar en tu máquina, antes del homelab: **subida de memorias** + **aislamiento
 Simulamos el escenario real: un Omnia local enlazado a DOS clouds a la vez (trabajo + personal),
 cada uno con su cuenta y sus proyectos, sin que se mezclen.
 
+Las secciones 1–3 usan **dos data dirs separados** para probar el AISLAMIENTO (proyectos
+distintos que no deben cruzarse). La sección **5c** prueba lo contrario y ya soportado: un
+**único data dir** del que una sola escritura se replica (fan-out) a AMBOS clouds a la vez.
+
 ---
 
 ## ⚠️ Lo único que tenés que recordar (gotcha)
@@ -164,11 +168,56 @@ Qué comprobar:
 
 ---
 
+## 5c. Fan-out real — UN data dir, UNA escritura, DOS clouds
+
+Antes hacía falta un data dir por cloud (secciones 1–2) porque la cola local de mutaciones
+estaba fijada al target `"cloud"`: el primer cloud del loop la vaciaba y los demás recibían
+"Nothing new to sync" (y quedaban marcados HEALTHY sin haber recibido nada). **Ya está corregido:**
+la cola hace fan-out por alias, así que una sola memoria local se entrega a cada cloud configurado.
+
+```bash
+BIN=/tmp/omnia-mc-engram
+DD3=/tmp/omnia-local-fanout       # UN solo data dir para AMBOS clouds
+run3(){ env -u ENGRAM_CLOUD_TOKEN ENGRAM_DATA_DIR="$DD3" "$BIN" "$@"; }
+
+# 1) configurar los DOS clouds como alias en el MISMO data dir
+run3 cloud add work     --server http://127.0.0.1:18090
+run3 cloud add personal --server http://127.0.0.1:18091
+run3 cloud login --cloud work     --username benja-work     --password workpass123
+run3 cloud login --cloud personal --username benja-personal --password personalpass123
+
+# 2) habilitar el MISMO proyecto en ambos clouds
+run3 cloud enroll proj-compartido --cloud-name work
+run3 cloud enroll proj-compartido --cloud-name personal
+
+# 3) UNA sola escritura local
+run3 save "Memoria compartida" "Una escritura, dos destinos" --project proj-compartido
+
+# 4) sync SIN --cloud-name: se replica a TODOS los clouds configurados
+run3 sync --cloud --project proj-compartido
+# Esperado: dos bloques "== cloud "work" ==" / "== cloud "personal" ==",
+#           cada uno con "Cloud sync complete for project proj-compartido".
+```
+
+Verificar que la MISMA memoria llegó a los DOS Postgres:
+
+```bash
+echo -n "work     tiene proj-compartido (=1): " && psql -tA engram_cloud_work     -c "SELECT count(*) FROM cloud_mutations WHERE project='proj-compartido' AND entity='observation';"
+echo -n "personal tiene proj-compartido (=1): " && psql -tA engram_cloud_personal -c "SELECT count(*) FROM cloud_mutations WHERE project='proj-compartido' AND entity='observation';"
+# Ambos = 1: una escritura, entregada a los dos clouds desde un solo data dir.
+```
+
+> Nota: los clouds deben estar configurados (`cloud add`) ANTES de la escritura para que el
+> fan-out la encole en la cola de cada alias. Memorias guardadas antes de agregar un cloud no se
+> reenvían retroactivamente a ese cloud nuevo.
+
+---
+
 ## 6. Parar / limpiar
 
 ```bash
-cd ~/code/omnia-core && scripts/dev-multicloud-down.sh     # baja los dos clouds
-rm -rf /tmp/omnia-local-work /tmp/omnia-local-personal     # borra los data dirs de prueba
+cd ~/code/omnia-core && scripts/dev-multicloud-down.sh                          # baja los dos clouds
+rm -rf /tmp/omnia-local-work /tmp/omnia-local-personal /tmp/omnia-local-fanout  # borra los data dirs de prueba
 ```
 
 Tu memoria real (`~/.omnia`) y tu cloud de producción **no se tocan** en ningún paso.

@@ -97,7 +97,7 @@ var (
 	storeDeleteProject     = func(s *store.Store, name string, hard bool) (*store.DeleteProjectResult, error) {
 		return s.DeleteProject(name, hard)
 	}
-	storeTimeline       = func(s *store.Store, observationID int64, before, after int) (*store.TimelineResult, error) {
+	storeTimeline = func(s *store.Store, observationID int64, before, after int) (*store.TimelineResult, error) {
 		return s.Timeline(observationID, before, after)
 	}
 	storeFormatContext = func(s *store.Store, project, scope string) (string, error) { return s.FormatContext(project, scope) }
@@ -618,6 +618,19 @@ func cloudnFor(alias, project string) string {
 		return alias
 	}
 	return fmt.Sprintf("%s:%s", alias, project)
+}
+
+// isDefaultCloudAlias reports whether the alias resolves to the legacy default
+// cloud, which consumes the shared "cloud" mutation queue rather than a dedicated
+// fan-out queue. The empty alias (env-only), the canonical "cloud" name, and the
+// configured default alias all map to the default queue.
+func isDefaultCloudAlias(alias, defaultAlias string) bool {
+	alias = strings.TrimSpace(alias)
+	if alias == "" || strings.EqualFold(alias, constants.TargetKeyCloud) {
+		return true
+	}
+	defaultAlias = strings.TrimSpace(defaultAlias)
+	return defaultAlias != "" && strings.EqualFold(alias, defaultAlias)
 }
 
 func markCloudSyncFailure(s *store.Store, targetKey string, syncErr error) {
@@ -1652,9 +1665,17 @@ func runCloudSync(cfg store.Config, s *store.Store, project, syncDir, explicitAl
 		return
 	}
 
+	// Keep the store's fan-out registry aligned with cloud.json so future local
+	// writes enqueue one pending row per non-default cloud (best-effort — config
+	// commands are the primary registration point). Only reconcile the whole set
+	// when syncing every cloud; a targeted --cloud-name run must not drop siblings.
+	if explicitAlias == "" {
+		reconcileCloudFanoutTargets(cfg, s)
+	}
+
 	if len(aliases) == 1 {
 		alias := aliases[0]
-		if err := runCloudSyncTarget(cfg, s, project, syncDir, alias, cloudSyncApplyEnv(explicitAlias, alias, defaultAlias), doStatus, doImport); err != nil {
+		if err := runCloudSyncTarget(cfg, s, project, syncDir, alias, defaultAlias, cloudSyncApplyEnv(explicitAlias, alias, defaultAlias), doStatus, doImport); err != nil {
 			fatal(err)
 		}
 		return
@@ -1664,7 +1685,7 @@ func runCloudSync(cfg store.Config, s *store.Store, project, syncDir, explicitAl
 	for _, alias := range aliases {
 		label := cloudAliasLabel(alias)
 		fmt.Printf("== cloud %q ==\n", label)
-		if err := runCloudSyncTarget(cfg, s, project, syncDir, alias, cloudSyncApplyEnv(explicitAlias, alias, defaultAlias), doStatus, doImport); err != nil {
+		if err := runCloudSyncTarget(cfg, s, project, syncDir, alias, defaultAlias, cloudSyncApplyEnv(explicitAlias, alias, defaultAlias), doStatus, doImport); err != nil {
 			fmt.Fprintf(os.Stderr, "cloud %q: %v\n", label, err)
 			failed = append(failed, label)
 		}
@@ -1735,8 +1756,19 @@ func cloudSyncApplyEnv(explicitAlias, alias, defaultAlias string) bool {
 // runCloudSyncTarget performs a single cloud's push/pull for project, recording
 // sync state under cloudnFor(alias, project). It returns a formatted error instead
 // of exiting, so callers can either fatal (single cloud) or aggregate (multi-cloud).
-func runCloudSyncTarget(cfg store.Config, s *store.Store, project, syncDir, alias string, applyEnvOverrides, doStatus, doImport bool) error {
+func runCloudSyncTarget(cfg store.Config, s *store.Store, project, syncDir, alias, defaultAlias string, applyEnvOverrides, doStatus, doImport bool) error {
 	targetKey := cloudnFor(alias, project)
+
+	// The default cloud keeps consuming the legacy global "cloud" mutation queue
+	// (and its derived "cloud:<project>" state), preserving single-cloud/env-only
+	// behavior. Every other named cloud drains its OWN alias-scoped fan-out queue,
+	// so multi-cloud sync delivers each local write to all clouds independently.
+	isDefaultQueue := isDefaultCloudAlias(alias, defaultAlias)
+	var mutationKey, chunkKey string
+	if !isDefaultQueue {
+		mutationKey = targetKey
+		chunkKey = targetKey
+	}
 
 	cc, err := preflightCloudSyncForAlias(s, cfg, project, alias, applyEnvOverrides, !doStatus)
 	if err != nil {
@@ -1750,6 +1782,7 @@ func runCloudSyncTarget(cfg store.Config, s *store.Store, project, syncDir, alia
 		return errors.New(cloudSyncFailureMessage(project, err))
 	}
 	sy := engramsync.NewCloudWithTransport(s, transport, project)
+	sy.SetCloudTargetKeys(mutationKey, chunkKey)
 
 	markCloudHealthy := func() error {
 		if err := s.MarkSyncHealthy(targetKey); err != nil {
@@ -1758,7 +1791,15 @@ func runCloudSyncTarget(cfg store.Config, s *store.Store, project, syncDir, alia
 		return nil
 	}
 	markCloudSyncOutcome := func() error {
-		hasPending, err := s.HasPendingSyncMutationsForProject(project)
+		// Only this cloud's OWN queue may keep it pending — never a sibling alias
+		// that already emptied a shared queue.
+		var hasPending bool
+		var err error
+		if isDefaultQueue {
+			hasPending, err = s.HasPendingSyncMutationsForProject(project)
+		} else {
+			hasPending, err = s.HasPendingSyncMutationsForTarget(mutationKey, project)
+		}
 		if err != nil {
 			return fmt.Errorf("cloud sync state update: %w", err)
 		}
