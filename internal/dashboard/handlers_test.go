@@ -652,7 +652,7 @@ func TestDistinctTypes_SortedAndDeduped(t *testing.T) {
 		{Obs: Observation{Type: "decision"}},
 		{Obs: Observation{Type: "architecture"}},
 		{Obs: Observation{Type: "decision"}}, // duplicate
-		{Obs: Observation{Type: ""}},          // empty — must be excluded
+		{Obs: Observation{Type: ""}},         // empty — must be excluded
 		{Obs: Observation{Type: "bugfix"}},
 	}
 	got := distinctTypes(views)
@@ -728,19 +728,10 @@ func TestSortedTypeCounts_EmptyMap(t *testing.T) {
 
 // --- knownProjects tests ---
 
-func TestKnownProjects_AlwaysIncludesOmnia(t *testing.T) {
+func TestKnownProjects_EmptyConfigYieldsNoDefault(t *testing.T) {
 	got := knownProjects(SyncStatus{}, Config{})
-	if len(got) == 0 {
-		t.Fatal("expected at least one project")
-	}
-	found := false
-	for _, p := range got {
-		if p == "omnia" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected 'omnia' in result, got %v", got)
+	if len(got) != 0 {
+		t.Errorf("empty config: expected no projects (no hard-coded default), got %v", got)
 	}
 }
 
@@ -751,7 +742,6 @@ func TestKnownProjects_UnionWithConfigProjects(t *testing.T) {
 	got := knownProjects(SyncStatus{}, cfg)
 
 	want := map[string]bool{
-		"omnia":   true,
 		"workly":  true,
 		"trackly": true,
 		"homelab": true,
@@ -767,15 +757,14 @@ func TestKnownProjects_UnionWithConfigProjects(t *testing.T) {
 func TestKnownProjects_UnionWithRouteTargets(t *testing.T) {
 	cfg := Config{
 		Routes: map[string]string{
-			"github/arratiabenjamin/saluvita":  "saluvita",
+			"github/arratiabenjamin/saluvita":   "saluvita",
 			"github/arratiabenjamin/velion-web": "velion-web",
 		},
 	}
 	got := knownProjects(SyncStatus{}, cfg)
 
 	want := map[string]bool{
-		"omnia":     true,
-		"saluvita":  true,
+		"saluvita":   true,
 		"velion-web": true,
 	}
 	for _, p := range got {
@@ -829,10 +818,10 @@ func TestKnownProjects_DropsEmptyStrings(t *testing.T) {
 	}
 }
 
-func TestKnownProjects_EmptyConfigYieldsOmnia(t *testing.T) {
+func TestKnownProjects_EmptyConfigYieldsEmpty(t *testing.T) {
 	got := knownProjects(SyncStatus{}, Config{})
-	if len(got) != 1 || got[0] != "omnia" {
-		t.Errorf("empty config: expected [omnia], got %v", got)
+	if len(got) != 0 {
+		t.Errorf("empty config: expected [], got %v", got)
 	}
 }
 

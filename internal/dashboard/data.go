@@ -26,13 +26,13 @@ type SubProjectStat struct {
 
 // ProjectStats holds per-project counts for the overview page.
 type ProjectStats struct {
-	Name       string
-	Total      int
-	Ingested   int // observations WITH a valid omnia-meta block
-	Curated    int // observations WITHOUT a valid omnia-meta block
-	BySource   map[string]int
-	ByType     map[string]int
-	ByKind     map[string]int
+	Name     string
+	Total    int
+	Ingested int // observations WITH a valid omnia-meta block
+	Curated  int // observations WITHOUT a valid omnia-meta block
+	BySource map[string]int
+	ByType   map[string]int
+	ByKind   map[string]int
 	// IsGroup is true when this is a group parent card with sub-projects.
 	IsGroup        bool
 	SubProjects    []SubProjectStat // per-child counts (only when IsGroup=true)
@@ -312,8 +312,8 @@ type OverviewData struct {
 	Projects       []ProjectStats
 	TotalMemories  int
 	TotalProjects  int
-	LastSync       string   // human-readable age, e.g. "2 min ago"
-	LastSyncSource string   // e.g. "github"
+	LastSync       string // human-readable age, e.g. "2 min ago"
+	LastSyncSource string // e.g. "github"
 	ByType         []TypeCount
 	LiveFeed       []FeedItem
 	Sources        []SourceStat
@@ -359,14 +359,17 @@ func typeColor(t string) string {
 
 // knownProjects returns the deduplicated, sorted set of Engram project names
 // that the dashboard should display. The set is the UNION of:
-//   - the hard-coded "omnia" default
 //   - cfg.Projects (explicit list from config yaml or --projects flag)
 //   - all routing targets from cfg.Routes (values of the routes map)
 //
-// Empty strings are dropped. The result is always sorted alphabetically.
+// It deliberately seeds NO hard-coded default: the cloud dashboard scopes each
+// account to its visible projects, and injecting a fixed "omnia" here would leak
+// that name into every account's overview (a project it can't actually access).
+// The local dashboard still shows any project that has data via the DB rows it is
+// merged with. Empty strings are dropped; the result is always sorted.
 // status is kept as a parameter for future use (e.g. cursor-derived projects).
 func knownProjects(status SyncStatus, cfg Config) []string {
-	seen := map[string]struct{}{"omnia": {}}
+	seen := map[string]struct{}{}
 
 	// From explicit projects list.
 	for _, p := range cfg.Projects {
