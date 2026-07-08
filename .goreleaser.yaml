@@ -41,12 +41,16 @@ changelog:
 
 brews:
   - repository:
-      owner: velion
+      owner: Velion-SpA
       name: homebrew-tap
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
     directory: Formula
+    # TODO: flip to false once the TAP_GITHUB_TOKEN secret (PAT with contents:write
+    # on Velion-SpA/homebrew-tap) is configured — until then the formula is updated
+    # manually and the release must not depend on the secret.
+    skip_upload: true
     name: omnia
-    homepage: "https://github.com/velion/omnia"
+    homepage: "https://github.com/Velion-SpA/omnia"
     description: "Persistent memory for AI coding agents — local-first with self-hosted multi-tenant cloud sync"
     license: "MIT"
     commit_author:
