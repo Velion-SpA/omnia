@@ -1,0 +1,73 @@
+package cloudserver
+
+import "github.com/Velion-SpA/omnia/internal/ui"
+
+// Admin Audit page (OBL-05). Operator-only, cloud-only, read-only. Renders
+// inside the shared Omnia command-center shell exactly like the rest of the
+// Admin section (admin_ui.templ).
+templ adminAuditPage(view adminAuditView) {
+	@ui.Layout(view.Props) {
+		@adminPageTitle("Admin", "Read-only security audit trail. Operator-only.")
+		@adminNavTabs("audit")
+		<div class="card" style="margin-bottom: 1.25rem;">
+			<span class="micro-label" style="display: block; margin-bottom: 0.6rem;">FILTER</span>
+			<form method="get" action="/admin/audit" style="display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; margin: 0;">
+				<input type="text" name="contributor" placeholder="contributor" value={ view.Contributor } style="padding: 0.4rem 0.6rem; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
+				<input type="text" name="project" placeholder="project" value={ view.Project } style="padding: 0.4rem 0.6rem; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
+				<input type="text" name="outcome" placeholder="outcome" value={ view.Outcome } style="padding: 0.4rem 0.6rem; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
+				<button type="submit" class="shell-button" style="padding: 0.35rem 0.9rem; font-size: 12px;">Filter</button>
+				<a href="/admin/audit" class="shell-button shell-button-ghost" style="padding: 0.35rem 0.9rem; font-size: 12px; text-decoration: none;">Clear</a>
+			</form>
+		</div>
+		<div class="card">
+			<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">AUDIT LOG · { formatAuditTotal(view.Total) }</span>
+			if len(view.Rows) == 0 {
+				<p style="color: var(--text-dim); font-size: 13px;">No audit entries match this filter.</p>
+			} else {
+				<div style="overflow-x: auto;">
+					<table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+						<thead>
+							<tr style="text-align: left; color: var(--text-faint);">
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Occurred</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Contributor</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Project</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Action</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Outcome</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Reason</th>
+							</tr>
+						</thead>
+						<tbody>
+							for _, row := range view.Rows {
+								@adminAuditRowView(row)
+							}
+						</tbody>
+					</table>
+				</div>
+			}
+			if view.PageCount > 1 {
+				<div style="display: flex; gap: 0.5rem; margin-top: 1rem; align-items: center; font-size: 12px; color: var(--text-dim);">
+					<span>Page { formatAuditPage(view.Page) } of { formatAuditPage(view.PageCount) }</span>
+					if view.Page > 1 {
+						<a href={ templ.SafeURL(adminAuditPagePath(view, view.Page-1)) } class="shell-button shell-button-ghost" style="padding: 0.25rem 0.6rem; font-size: 12px; text-decoration: none;">Prev</a>
+					}
+					if view.Page < view.PageCount {
+						<a href={ templ.SafeURL(adminAuditPagePath(view, view.Page+1)) } class="shell-button shell-button-ghost" style="padding: 0.25rem 0.6rem; font-size: 12px; text-decoration: none;">Next</a>
+					}
+				</div>
+			}
+		</div>
+	}
+}
+
+templ adminAuditRowView(row adminAuditRow) {
+	<tr style="border-bottom: 1px solid var(--border);">
+		<td style="padding: 0.5rem 0.75rem; color: var(--text-dim); white-space: nowrap;">{ row.OccurredAt }</td>
+		<td style="padding: 0.5rem 0.75rem; color: var(--text); font-family: 'JetBrains Mono', monospace;">{ row.Contributor }</td>
+		<td style="padding: 0.5rem 0.75rem; color: var(--text-dim); font-family: 'JetBrains Mono', monospace;">{ row.Project }</td>
+		<td style="padding: 0.5rem 0.75rem; color: var(--text);">{ row.Action }</td>
+		<td style="padding: 0.5rem 0.75rem;">
+			<span class="badge">{ row.Outcome }</span>
+		</td>
+		<td style="padding: 0.5rem 0.75rem; color: var(--text-faint);">{ row.ReasonCode }</td>
+	</tr>
+}

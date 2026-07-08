@@ -1,0 +1,32 @@
+package ui
+
+import "strconv"
+
+// OmniaMark renders the Omnia logomark — the concentric cyan "core" used across
+// every Omnia surface. size is the rendered width/height in px.
+templ OmniaMark(size int) {
+	<svg
+		width={ strconv.Itoa(size) }
+		height={ strconv.Itoa(size) }
+		viewBox="0 0 36 36"
+		fill="none"
+		xmlns="http://www.w3.org/2000/svg"
+		aria-label="Omnia"
+		style="flex-shrink:0;"
+	>
+		<defs>
+			<radialGradient id="omnia-core" cx="50%" cy="50%" r="50%">
+				<stop offset="0%" stop-color="#22d3ee"></stop>
+				<stop offset="100%" stop-color="#0e9ab5"></stop>
+			</radialGradient>
+		</defs>
+		<circle cx="18" cy="18" r="16.5" stroke="rgba(34,211,238,0.22)" stroke-width="0.75"></circle>
+		<circle cx="18" cy="18" r="11.5" stroke="rgba(34,211,238,0.40)" stroke-width="0.75" stroke-dasharray="3 2.5"></circle>
+		<circle cx="18" cy="18" r="5" fill="url(#omnia-core)"></circle>
+		<circle cx="18" cy="18" r="2.2" fill="#080a10" opacity="0.5"></circle>
+		<line x1="18" y1="1.5" x2="18" y2="6.5" stroke="#22d3ee" stroke-width="1.4" stroke-linecap="round"></line>
+		<line x1="34.5" y1="18" x2="29.5" y2="18" stroke="#22d3ee" stroke-width="1.4" stroke-linecap="round"></line>
+		<line x1="18" y1="34.5" x2="18" y2="29.5" stroke="#22d3ee" stroke-width="1.4" stroke-linecap="round"></line>
+		<line x1="1.5" y1="18" x2="6.5" y2="18" stroke="#22d3ee" stroke-width="1.4" stroke-linecap="round"></line>
+	</svg>
+}

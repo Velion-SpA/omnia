@@ -1,0 +1,34 @@
+# Caddy reverse proxy for the Omnia Cloud server. Omnia's binary speaks plain
+# HTTP only by design (see OMNIA-CLOUD.md and OBL-10: TLS termination is
+# deliberately NOT built into the Go binary) — Caddy sits in front of it and
+# terminates TLS. Keep omnia cloud serve bound to 127.0.0.1 (or a private
+# interface) and never expose its raw port directly on the LAN/internet.
+#
+# Install:
+#   sudo apt install caddy        # or: brew install caddy / see caddyserver.com
+#   sudo cp deploy/Caddyfile.example /etc/caddy/Caddyfile   # then edit the domain below
+#   sudo systemctl reload caddy    # or: systemctl enable --now caddy
+#
+# Validate before reloading:
+#   caddy validate --config /etc/caddy/Caddyfile
+
+# ── Option A: public domain, automatic HTTPS via Let's Encrypt ──────────────
+# Requires the domain's DNS to point at this box and port 80/443 reachable
+# from the internet for the ACME HTTP-01 challenge (or use a DNS-01 provider
+# module for a fully LAN-only box with a public domain). This is genuinely
+# the entire reverse-proxy config: Caddy auto-provisions and renews the cert.
+cloud.yourdomain.tld {
+	reverse_proxy 127.0.0.1:8080
+}
+
+# ── Option B: LAN-only, no public domain (typical homelab) ──────────────────
+# `tls internal` makes Caddy mint its own local CA and a cert for the given
+# name/IP — no internet-facing ports needed. Each notebook must trust Caddy's
+# local CA once (see `caddy trust` on the notebook, or import
+# /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt).
+# Comment out Option A above and uncomment this block instead:
+#
+# https://homelab.local:8443 {
+# 	tls internal
+# 	reverse_proxy 127.0.0.1:8080
+# }

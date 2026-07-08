@@ -1,0 +1,46 @@
+package dashboard
+
+import "github.com/Velion-SpA/omnia/internal/ui"
+
+// layout wraps page content in the SHARED Omnia command-center shell (internal/ui).
+// The local and cloud dashboards now render the exact same shell + CSS — the design
+// base lives in one place and can no longer drift between them.
+templ layout(title string) {
+	@ui.Layout(layoutPropsForContext(ctx, title)) {
+		{ children... }
+	}
+}
+
+func localLayoutProps(title string) ui.LayoutProps {
+	return ui.LayoutProps{
+		Title:      title,
+		BrandTitle: "Omnia",
+		BrandSub:   "Unified Knowledge",
+		BrandHref:  "/",
+		Nav:        BaseNavItems(),
+		StatusText: "Online",
+		AssetBase:  "/static",
+	}
+}
+
+// pageTitle is a small helper for consistent H1 rendering.
+templ pageTitle(text string) {
+	<h1 style="font-family: var(--display); font-size: 24px; font-weight: 800; color: var(--text); letter-spacing: 0.04em; text-transform: uppercase; margin: 0 0 1.5rem 0;">{ text }</h1>
+}
+
+// errorBanner renders an error message in a styled banner.
+templ errorBanner(msg string) {
+	<div style="background: rgba(251,113,133,0.1); border: 1px solid rgba(251,113,133,0.25); border-radius: var(--radius); padding: 0.75rem 1rem; color: var(--bad); font-size: 13px; margin-bottom: 1rem;">
+		{ msg }
+	</div>
+}
+
+// emptyState renders a "no results" message.
+templ emptyState(msg string) {
+	<div style="text-align: center; padding: 4rem 0; color: var(--text-faint);">
+		<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin: 0 auto 0.75rem; display: block; opacity: 0.35;">
+			<path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z"/>
+		</svg>
+		<p style="font-size: 14px; color: var(--text-2);">{ msg }</p>
+	</div>
+}

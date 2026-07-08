@@ -1,0 +1,93 @@
+package ui
+
+// Layout is the shared command-center shell used by BOTH dashboards. The header
+// (logomark + wordmark + nav + clock + status), the page frame and the footer are
+// identical everywhere; only LayoutProps differs (brand, nav items, optional user).
+templ Layout(props LayoutProps) {
+	<!DOCTYPE html>
+	<html lang="en" data-theme="dark">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+			<title>{ props.Title } — Omnia</title>
+			<link rel="preconnect" href="https://fonts.googleapis.com"/>
+			<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+			<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=Barlow+Condensed:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
+			<link rel="stylesheet" href={ props.AssetBase + "/pico.min.css" }/>
+			<link rel="stylesheet" href={ props.AssetBase + "/omnia.css" }/>
+			<script src={ props.AssetBase + "/htmx.min.js" }></script>
+		</head>
+		<body>
+			<div class="app">
+				<nav class="cmd-nav">
+					<a href={ templ.SafeURL(props.BrandHref) } class="nav-brand">
+						@OmniaMark(34)
+						<div class="wordmark">
+							<div class="wordmark-title">{ props.BrandTitle }</div>
+							<div class="wordmark-sub">{ props.BrandSub }</div>
+						</div>
+					</a>
+					<div class="nav-divider"></div>
+					<div class="nav-links">
+						for _, item := range props.Nav {
+							@navLink(item, props.Active)
+						}
+					</div>
+					<div class="nav-spacer"></div>
+					<div class="nav-meta">
+						<div class="nav-clock" id="cmd-clock">--:--:--</div>
+						<div class="status-chip">
+							<div class="pulse">
+								<div class="pulse-core"></div>
+								<div class="pulse-ring"></div>
+								<div class="pulse-ring pulse-ring-2"></div>
+							</div>
+							<span class="status-text">{ props.StatusText }</span>
+						</div>
+						if props.User != "" {
+							<span class="nav-user">{ props.User }</span>
+							if props.LogoutURL != "" {
+								<form method="post" action={ templ.SafeURL(props.LogoutURL) } style="margin:0">
+									<button type="submit" class="nav-logout">Logout</button>
+								</form>
+							}
+						}
+					</div>
+				</nav>
+				<main class="page-main">
+					{ children... }
+				</main>
+				<footer class="page-footer">
+					<small class="micro-label">{ props.BrandTitle } — { props.BrandSub }</small>
+				</footer>
+			</div>
+			<script>
+				(function() {
+					var path = window.location.pathname;
+					document.querySelectorAll('.nav-link[data-nav]').forEach(function(a) {
+						var nav = a.getAttribute('data-nav');
+						if (path === nav || (nav.length > 1 && path.indexOf(nav) === 0)) {
+							a.classList.add('active');
+						}
+					});
+					function tick() {
+						var el = document.getElementById('cmd-clock');
+						if (!el) return;
+						var d = new Date(), p = function(n){ return String(n).padStart(2,'0'); };
+						el.textContent = p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+					}
+					tick();
+					setInterval(tick, 1000);
+				})();
+			</script>
+		</body>
+	</html>
+}
+
+templ navLink(item NavItem, active string) {
+	if item.ID == active {
+		<a href={ templ.SafeURL(item.Href) } class="nav-link active" data-nav={ item.Href } aria-current="page">{ item.Label }</a>
+	} else {
+		<a href={ templ.SafeURL(item.Href) } class="nav-link" data-nav={ item.Href }>{ item.Label }</a>
+	}
+}

@@ -1,0 +1,48 @@
+# systemd USER unit for a notebook running Omnia's local agent
+# (`omnia serve`, the local HTTP server used by the dashboard + MCP tools).
+# This is optional — most notebooks are fine running `omnia serve` from a
+# terminal, launchd (macOS), or on demand. Use this if you want a Linux
+# notebook to keep the local server up across reboots/logins.
+#
+# This is a USER service (not root, not EnvironmentFile-gated like the cloud
+# server) — it runs as the logged-in notebook user and reads the SAME config
+# ~/.config/omnia/config.yaml and ~/.omnia data dir that the CLI already uses.
+#
+# Install (as the notebook user, no sudo):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/omnia-agent.service ~/.config/systemd/user/omnia-agent.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now omnia-agent.service
+#   loginctl enable-linger "$USER"   # start on boot even without an active login session
+#
+# Logs:
+#   journalctl --user -u omnia-agent.service -f
+#
+# Optional overrides (port, HTTP token, etc. — see `omnia help` Environment
+# section) can be set in ~/.config/omnia/agent.env; uncomment EnvironmentFile
+# below if you use one.
+#
+# Why this unit runs `omnia serve` and NOT `omnia mcp`: MCP tools are spawned
+# on demand by the agent client itself over stdio (see the MCP config block
+# in `omnia help`, e.g. {"command": "omnia", "args": ["mcp", "--tools=agent"]})
+# — they are per-session subprocesses, not a long-running network daemon, so
+# there is nothing durable for systemd to supervise there. `omnia serve` is
+# the one persistent local process (dashboard + HTTP API) worth keeping alive
+# across reboots.
+
+[Unit]
+Description=Omnia local agent (HTTP server for dashboard + MCP)
+Documentation=https://github.com/Velion-SpA/omnia/blob/main/OMNIA-CLOUD.md
+After=network.target
+
+[Service]
+Type=simple
+# %h expands to the invoking user's home directory in a user unit.
+# Adjust if `omnia` is installed to a different path (check `which omnia`).
+ExecStart=%h/.local/bin/omnia serve
+# EnvironmentFile=%h/.config/omnia/agent.env
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

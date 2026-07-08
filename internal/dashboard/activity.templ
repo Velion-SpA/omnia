@@ -1,0 +1,79 @@
+package dashboard
+
+import (
+	"fmt"
+	"github.com/Velion-SpA/omnia/internal/audit"
+)
+
+// activityPage renders the audit log newest-first.
+templ activityPage(entries []audit.Entry) {
+	@layout("Activity") {
+		<h1 style="font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;">Activity Log</h1>
+		if len(entries) == 0 {
+			@emptyState("No activity recorded yet. Edits and deletes will appear here.")
+		} else {
+			<div class="card" style="padding: 0; overflow: hidden;">
+				<table class="data-table">
+					<thead>
+						<tr>
+							<th style="width: 160px;">Time</th>
+							<th style="width: 80px;">Actor</th>
+							<th style="width: 110px;">Action</th>
+							<th style="width: 80px;">Obs</th>
+							<th style="width: 80px;">Project</th>
+							<th>Summary</th>
+							<th style="width: 60px;">Result</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, e := range entries {
+							@activityRow(e)
+						}
+					</tbody>
+				</table>
+			</div>
+		}
+	}
+}
+
+templ activityRow(e audit.Entry) {
+	<tr class="obs-row">
+		<td class="micro-label" style="color: var(--text-faint); white-space: nowrap;">{ e.Ts }</td>
+		<td style="font-size: 12px; color: var(--text-dim);">{ e.Actor }</td>
+		<td>
+			@actionBadge(e.Action)
+		</td>
+		<td>
+			<a href={ templ.SafeURL(fmt.Sprintf("/detail/%d", e.ObservationID)) } style="color: var(--calypso); font-family: 'JetBrains Mono', monospace; font-size: 11px;">
+				{ fmt.Sprintf("#%d", e.ObservationID) }
+			</a>
+		</td>
+		<td style="font-size: 12px; color: var(--text-dim);">{ e.Project }</td>
+		<td style="font-size: 12px; color: var(--text-dim);">{ e.Summary }</td>
+		<td>
+			@resultBadge(e.Result)
+		</td>
+	</tr>
+}
+
+templ actionBadge(a audit.Action) {
+	switch a {
+		case audit.ActionEdit:
+			<span class="badge badge-ok">edit</span>
+		case audit.ActionSoftDelete:
+			<span class="badge badge-source">soft_delete</span>
+		case audit.ActionHardDelete:
+			<span class="badge badge-bad">hard_delete</span>
+		default:
+			<span class="badge badge-source">{ string(a) }</span>
+	}
+}
+
+templ resultBadge(result string) {
+	switch result {
+		case "ok":
+			<span class="badge badge-ok">ok</span>
+		default:
+			<span class="badge badge-bad">{ result }</span>
+	}
+}

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.velion.omnia</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Build: go build -o ~/.local/bin/omnia ./cmd/omnia -->
+        <!-- launchd does not expand ~ — replace /Users/yourname with your actual home directory -->
+        <string>/Users/benja/.local/bin/omnia</string>
+        <string>--source</string>
+        <string>github</string>
+        <string>sync</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <!-- Replace /Users/benja with your home directory in the paths below -->
+    <key>StandardOutPath</key>
+    <string>/Users/benja/Library/Logs/omnia/omnia.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/benja/Library/Logs/omnia/omnia.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- GitHub token: omit to rely on `gh auth token` fallback (requires gh in PATH above) -->
+        <!-- To set explicitly: add GITHUB_TOKEN key with your token value -->
+        <!-- Discord bot token: set when enabling discord source -->
+        <!-- <key>DISCORD_BOT_TOKEN</key> -->
+        <!-- <string>your-discord-bot-token-here</string> -->
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,26 @@
+engram:
+  base_url: http://127.0.0.1:7437
+  default_project: omnia
+
+# Per-origin project routing.
+# Resolution order: routes map → default (repo name / guild slug) → default_project.
+# github key format: github/{owner}/{repo}
+# discord key format: discord/{channel_id}
+routes:
+  github/arratiabenjamin/saluvita: saluvita
+  # discord/123456789: saluvita
+
+sources:
+  discord:
+    enabled: false
+    channels:
+      - id: "123456789"
+        name: dev-help
+        guild: my-server
+
+  github:
+    enabled: true
+    repos:
+      - owner/repo
+
+backfill_days: 30

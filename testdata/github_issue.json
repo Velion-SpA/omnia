@@ -1,0 +1,12 @@
+{
+  "number": 42,
+  "title": "Add rate limiting to the API gateway",
+  "state": "open",
+  "created_at": "2024-01-10T08:00:00Z",
+  "updated_at": "2024-01-15T14:30:00Z",
+  "html_url": "https://github.com/velion/api/issues/42",
+  "body": "## Problem\n\nThe API gateway currently has no rate limiting, which allows clients to overwhelm downstream services.\n\n## Proposed Solution\n\nImplement token bucket rate limiting at the gateway level with configurable limits per client tier:\n\n- Free tier: 100 req/min\n- Pro tier: 1000 req/min\n- Enterprise: unlimited\n\n## Acceptance Criteria\n\n- [ ] Rate limiter middleware implemented\n- [ ] Limits configurable via environment variables\n- [ ] 429 responses include Retry-After header\n- [ ] Metrics exposed for monitoring",
+  "user": {"login": "alice"},
+  "labels": [{"name": "enhancement"}, {"name": "api"}, {"name": "performance"}],
+  "assignees": [{"login": "bob"}, {"login": "carol"}]
+}

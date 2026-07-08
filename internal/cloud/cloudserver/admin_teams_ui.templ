@@ -1,0 +1,322 @@
+package cloudserver
+
+import (
+	"strconv"
+
+	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	"github.com/Velion-SpA/omnia/internal/ui"
+)
+
+// OBL-15 Admin section pages: Profiles, Teams (+ detail), Projects, and the
+// reusable searchable project selector. Operator-only, cloud-only. They render in
+// the SHARED Omnia shell (internal/ui) exactly like the OBL-13 pages and drive the
+// OBL-14 operator endpoints through admin.js (searchable selector + path-param /
+// JSON form submission). Every mutation still lands on a server-side operator gate.
+
+// ─── reusable bits ────────────────────────────────────────────────────────────
+
+// adminAssets loads the Admin progressive-enhancement script (searchable selector
+// + admin form submission). Cloud-only pages, so the /static prefix is fixed.
+templ adminAssets() {
+	<script src="/static/admin.js" defer></script>
+}
+
+// projectSelector is the reusable type-to-filter project picker. The visible input
+// only FILTERS; the submitted value (hidden "project") is set solely when the
+// operator picks a known project — no free-text project names. admin.js enhances it.
+templ projectSelector(placeholder string) {
+	<div class="proj-select" data-proj-select data-required data-endpoint="/admin/projects">
+		<input type="text" class="proj-select-input" data-proj-input placeholder={ placeholder } autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false"/>
+		<input type="hidden" name="project" data-proj-value/>
+		<ul class="proj-list" data-proj-list role="listbox" hidden></ul>
+	</div>
+}
+
+// adminPermBitChecks renders R/I/U/D checkboxes carrying their permission bit, which
+// admin.js folds into the integer "perms" field of the JSON body (profiles).
+templ adminPermBitChecks(read, insert, update, del bool) {
+	<div style="display: flex; gap: 0.7rem; font-size: 12px; color: var(--text-2);">
+		<label style="display: flex; align-items: center; gap: 0.2rem;"><input type="checkbox" data-perm-bit="1" checked?={ read }/> R</label>
+		<label style="display: flex; align-items: center; gap: 0.2rem;"><input type="checkbox" data-perm-bit="2" checked?={ insert }/> I</label>
+		<label style="display: flex; align-items: center; gap: 0.2rem;"><input type="checkbox" data-perm-bit="4" checked?={ update }/> U</label>
+		<label style="display: flex; align-items: center; gap: 0.2rem;"><input type="checkbox" data-perm-bit="8" checked?={ del }/> D</label>
+	</div>
+}
+
+templ adminKindSelect(current string) {
+	<select name="kind" style="padding: 0.4rem 0.5rem; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);">
+		<option value="work" selected?={ current != "personal" }>work</option>
+		<option value="personal" selected?={ current == "personal" }>personal</option>
+	</select>
+}
+
+templ kindBadge(kind string) {
+	if kind == "personal" {
+		<span class="badge badge-ok" style="padding: 0.15rem 0.5rem;">personal</span>
+	} else if kind == "work" {
+		<span class="badge" style="padding: 0.15rem 0.5rem;">work</span>
+	} else {
+		<span class="badge badge-warn" style="padding: 0.15rem 0.5rem;">unclassified</span>
+	}
+}
+
+// ─── Profiles page ─────────────────────────────────────────────────────────────
+
+templ adminProfilesPage(view adminProfilesView) {
+	@ui.Layout(view.Props) {
+		@adminPageTitle("Admin", "Profiles are permission presets applied to a team's projects. Operator-only.")
+		@adminNavTabs("profiles")
+		<div class="card" style="margin-bottom: 1.25rem;">
+			<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">PROFILES</span>
+			if len(view.Profiles) == 0 {
+				<p style="color: var(--text-dim); font-size: 13px;">No profiles yet. Create one below.</p>
+			} else {
+				<div style="display: flex; flex-direction: column; gap: 0.6rem;">
+					for _, p := range view.Profiles {
+						@adminProfileRowView(p)
+					}
+				</div>
+			}
+		</div>
+		@adminCreateProfileCard()
+		@adminAssets()
+	}
+}
+
+templ adminProfileRowView(p adminProfileRow) {
+	<div style="display: grid; grid-template-columns: 1fr auto; gap: 0.6rem; align-items: center; padding: 0.6rem 0.75rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem;">
+		<form data-admin-form data-method="PUT" data-url-template={ p.UpdateURL } data-body="json" data-perms-into="perms" style="display: grid; grid-template-columns: 1.4fr auto auto; gap: 0.75rem; align-items: center; margin: 0;">
+			<input type="text" name="name" value={ p.Name } required style="padding: 0.4rem 0.55rem; font-size: 13px; background: var(--surface); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text); font-family: var(--mono);"/>
+			@adminPermBitChecks(p.Read, p.Insert, p.Update, p.Delete)
+			<button type="submit" class="shell-button" style="padding: 0.3rem 0.8rem; font-size: 12px;">Save</button>
+			<div class="admin-form-error" data-form-error hidden style="grid-column: 1 / -1;"></div>
+		</form>
+		<form data-admin-form data-method="DELETE" data-url-template={ p.DeleteURL } data-body="none" data-error-409="This profile is still assigned to team members. Reassign them to another profile first, then delete." style="margin: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 0.25rem;">
+			<button type="submit" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.8rem; font-size: 12px;">Delete</button>
+			<div class="admin-form-error" data-form-error hidden style="max-width: 220px; text-align: right;"></div>
+		</form>
+	</div>
+}
+
+templ adminCreateProfileCard() {
+	<div class="card">
+		<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">NEW PROFILE</span>
+		<form data-admin-form data-method="PUT" data-url-template="/admin/profiles" data-body="json" data-perms-into="perms" style="display: grid; grid-template-columns: 1.4fr auto auto; gap: 0.75rem; align-items: center; margin: 0;">
+			<input type="text" name="name" placeholder="profile name" required style="padding: 0.4rem 0.55rem; font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
+			@adminPermBitChecks(true, false, false, false)
+			<button type="submit" class="shell-button" style="padding: 0.35rem 0.9rem; font-size: 12px;">Create</button>
+			<div class="admin-form-error" data-form-error hidden style="grid-column: 1 / -1;"></div>
+		</form>
+	</div>
+}
+
+// ─── Teams page ────────────────────────────────────────────────────────────────
+
+templ adminTeamsPage(view adminTeamsView) {
+	@ui.Layout(view.Props) {
+		@adminPageTitle("Admin", "Teams group projects and grant a profile's perms to members. Operator-only.")
+		@adminNavTabs("teams")
+		@adminCreateTeamCard()
+		@adminTeamGroup("Personal teams", view.Personal)
+		@adminTeamGroup("Work teams", view.Work)
+		@adminAssets()
+	}
+}
+
+templ adminCreateTeamCard() {
+	<div class="card" style="margin-bottom: 1.25rem;">
+		<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">NEW TEAM</span>
+		<form data-admin-form data-method="PUT" data-url-template="/admin/teams" data-body="json" style="display: grid; grid-template-columns: 1.6fr auto auto; gap: 0.75rem; align-items: center; margin: 0;">
+			<input type="text" name="name" placeholder="team name" required style="padding: 0.4rem 0.55rem; font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
+			@adminKindSelect("work")
+			<button type="submit" class="shell-button" style="padding: 0.35rem 0.9rem; font-size: 12px;">Create</button>
+			<div class="admin-form-error" data-form-error hidden style="grid-column: 1 / -1;"></div>
+		</form>
+	</div>
+}
+
+templ adminTeamGroup(label string, teams []adminTeamListRow) {
+	<div class="card" style="margin-bottom: 1.25rem;">
+		<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">{ label }</span>
+		if len(teams) == 0 {
+			<p style="color: var(--text-dim); font-size: 13px; margin: 0;">None yet.</p>
+		} else {
+			<div style="display: flex; flex-direction: column; gap: 0.55rem;">
+				for _, t := range teams {
+					@adminTeamListRowView(t)
+				}
+			</div>
+		}
+	</div>
+}
+
+templ adminTeamListRowView(t adminTeamListRow) {
+	<div style="display: flex; align-items: center; gap: 0.7rem; padding: 0.55rem 0.75rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem;">
+		<a href={ templ.SafeURL(t.DetailURL) } style="font-family: var(--display); font-size: 15px; font-weight: 700; color: var(--text); text-decoration: none; letter-spacing: 0.02em;">{ t.Name }</a>
+		@kindBadge(t.Kind)
+		<span style="font-size: 11px; color: var(--text-dim);">{ strconv.Itoa(t.ProjectCount) } projects · { strconv.Itoa(t.MemberCount) } members</span>
+		<span style="flex: 1;"></span>
+		<a href={ templ.SafeURL(t.DetailURL) } class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px; text-decoration: none;">Manage</a>
+		<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px;" hx-delete={ t.DetailURL } hx-swap="none">Delete</button>
+	</div>
+}
+
+// ─── Team detail page ──────────────────────────────────────────────────────────
+
+templ adminTeamDetailPage(view adminTeamDetailView) {
+	@ui.Layout(view.Props) {
+		@adminPageTitle(view.Name, "Team projects and members. Operator-only.")
+		@adminNavTabs("teams")
+		<div style="margin-bottom: 1rem;"><a href="/admin/teams" style="font-size: 12px; color: var(--text-dim); text-decoration: none;">← All teams</a></div>
+		<div class="card" style="margin-bottom: 1.25rem;">
+			<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">TEAM</span>
+			<form data-admin-form data-method="PUT" data-url-template={ view.UpdateURL } data-body="json" style="display: grid; grid-template-columns: 1.6fr auto auto auto; gap: 0.75rem; align-items: center; margin: 0;">
+				<input type="text" name="name" value={ view.Name } required style="padding: 0.4rem 0.55rem; font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
+				@adminKindSelect(view.Kind)
+				<button type="submit" class="shell-button" style="padding: 0.3rem 0.8rem; font-size: 12px;">Save</button>
+				<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.8rem; font-size: 12px;" hx-delete={ view.DeleteURL } hx-swap="none">Delete team</button>
+				<div class="admin-form-error" data-form-error hidden style="grid-column: 1 / -1;"></div>
+			</form>
+		</div>
+		// Projects
+		<div class="card" style="margin-bottom: 1.25rem;">
+			<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">PROJECTS</span>
+			if len(view.Projects) == 0 {
+				<p style="color: var(--text-dim); font-size: 13px; margin: 0 0 0.85rem 0;">No projects. Add one below.</p>
+			} else {
+				<div style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 0.85rem;">
+					for _, p := range view.Projects {
+						<div style="display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.7rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.45rem;">
+							<span style="font-family: var(--mono); font-size: 13px; color: var(--text);">{ p.Project }</span>
+							@kindBadge(p.Kind)
+							<span style="flex: 1;"></span>
+							<button type="button" class="shell-button shell-button-ghost" style="padding: 0.25rem 0.65rem; font-size: 12px;" hx-delete={ p.RemoveURL } hx-swap="none">Remove</button>
+						</div>
+					}
+				</div>
+			}
+			<form data-admin-form data-method="PUT" data-url-template={ view.AddProjectTemplate } data-body="none" style="display: grid; grid-template-columns: 1fr auto; gap: 0.6rem; align-items: start; margin: 0;">
+				@projectSelector("Search projects to add…")
+				<button type="submit" class="shell-button" style="padding: 0.4rem 0.9rem; font-size: 12px;">Add project</button>
+				<div class="admin-form-error" data-form-error hidden style="grid-column: 1 / -1;"></div>
+			</form>
+		</div>
+		// Members
+		<div class="card">
+			<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">MEMBERS</span>
+			if len(view.Members) == 0 {
+				<p style="color: var(--text-dim); font-size: 13px; margin: 0 0 0.85rem 0;">No members. Add one below.</p>
+			} else {
+				<div style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 0.85rem;">
+					for _, m := range view.Members {
+						@adminTeamMemberRowView(view, m)
+					}
+				</div>
+			}
+			if len(view.Users) > 0 {
+				<form data-admin-form data-method="PUT" data-url-template={ view.AddMemberTemplate } data-body="json" style="display: grid; grid-template-columns: 1fr 1fr auto; gap: 0.6rem; align-items: center; margin: 0;">
+					<select name="account_id" required style="padding: 0.4rem 0.5rem; font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);">
+						for _, u := range view.Users {
+							<option value={ u.ID }>{ u.Username }</option>
+						}
+					</select>
+					@teamProfileSelect(view.Profiles, "")
+					<button type="submit" class="shell-button" style="padding: 0.4rem 0.9rem; font-size: 12px;">Add member</button>
+					<div class="admin-form-error" data-form-error hidden style="grid-column: 1 / -1;"></div>
+				</form>
+			}
+		</div>
+		@adminAssets()
+	}
+}
+
+templ adminTeamMemberRowView(view adminTeamDetailView, m adminTeamMemberRow) {
+	<div style="display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.7rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.45rem;">
+		<span style="font-family: var(--mono); font-size: 13px; color: var(--text); min-width: 120px;">{ m.Username }</span>
+		<span style="font-size: 11px; color: var(--text-faint);">{ m.Summary }</span>
+		<span style="flex: 1;"></span>
+		<form data-admin-form data-method="PUT" data-url-template={ m.UpdateURL } data-body="json" style="display: flex; align-items: center; gap: 0.5rem; margin: 0;">
+			@teamProfileSelect(view.Profiles, m.ProfileID)
+			<button type="submit" class="shell-button" style="padding: 0.25rem 0.65rem; font-size: 12px;">Save</button>
+		</form>
+		<button type="button" class="shell-button shell-button-ghost" style="padding: 0.25rem 0.65rem; font-size: 12px;" hx-delete={ m.RemoveURL } hx-swap="none">Remove</button>
+	</div>
+}
+
+templ teamProfileSelect(profiles []cloudstore.Profile, current string) {
+	<select name="profile_id" required style="padding: 0.35rem 0.5rem; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);">
+		for _, p := range profiles {
+			<option value={ p.ID } selected?={ p.ID == current }>{ p.Name }</option>
+		}
+	</select>
+}
+
+// ─── Projects page ─────────────────────────────────────────────────────────────
+
+templ adminProjectsPage(view adminProjectsView) {
+	@ui.Layout(view.Props) {
+		@adminPageTitle("Admin", "Classify projects Personal / Work. Operator-only.")
+		@adminNavTabs("projects")
+		@adminProjectGroup("Personal", view.Personal)
+		@adminProjectGroup("Work", view.Work)
+		if len(view.Unclassified) > 0 {
+			@adminProjectGroup("Unclassified", view.Unclassified)
+		}
+		if len(view.Personal) == 0 && len(view.Work) == 0 && len(view.Unclassified) == 0 {
+			<div class="card"><p style="color: var(--text-dim); font-size: 13px; margin: 0;">No projects known yet.</p></div>
+		}
+		@adminAssets()
+	}
+}
+
+templ adminProjectGroup(label string, rows []adminProjectRow) {
+	<div class="card" style="margin-bottom: 1.25rem;">
+		<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">{ label }</span>
+		if len(rows) == 0 {
+			<p style="color: var(--text-dim); font-size: 13px; margin: 0;">None.</p>
+		} else {
+			<div style="display: flex; flex-direction: column; gap: 0.5rem;">
+				for _, row := range rows {
+					@adminProjectRowView(row)
+				}
+			</div>
+		}
+	</div>
+}
+
+templ adminProjectRowView(row adminProjectRow) {
+	<div style="display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem 0.7rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.45rem;">
+		<form data-admin-form data-method="PUT" data-url-template={ row.MetaURL } data-body="json" style="display: grid; grid-template-columns: 1.4fr 1.4fr auto auto; gap: 0.6rem; align-items: center; margin: 0;">
+			<span style="font-family: var(--mono); font-size: 13px; color: var(--text);">{ row.Project }</span>
+			<input type="text" name="display_name" value={ row.DisplayName } placeholder="display name (optional)" style="padding: 0.35rem 0.5rem; font-size: 13px; background: var(--surface); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
+			@adminKindSelect(row.Kind)
+			<button type="submit" class="shell-button" style="padding: 0.3rem 0.8rem; font-size: 12px;">Save</button>
+			<div class="admin-form-error" data-form-error hidden style="grid-column: 1 / -1;"></div>
+		</form>
+		@adminProjectSyncControl(row)
+	</div>
+}
+
+// adminProjectSyncControl surfaces the OBL-04 pause/resume control state for one
+// project: a badge (enabled/paused + reason) plus the matching action. Pause
+// carries an optional reason (HTMX form-encodes it); Resume is a single hx-post
+// like the existing enable/disable-user buttons — no body needed.
+templ adminProjectSyncControl(row adminProjectRow) {
+	<div style="display: flex; align-items: center; gap: 0.6rem; padding-top: 0.45rem; border-top: 1px dashed var(--border);">
+		if row.SyncEnabled {
+			<span class="badge badge-ok" style="padding: 0.15rem 0.5rem;">sync enabled</span>
+			<span style="flex: 1;"></span>
+			<form data-admin-form data-method="POST" data-url-template={ row.PauseURL } data-body="form" style="display: flex; align-items: center; gap: 0.4rem; margin: 0;">
+				<input type="text" name="paused_reason" placeholder="reason (optional)" style="padding: 0.3rem 0.5rem; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text); width: 180px;"/>
+				<button type="submit" class="shell-button shell-button-ghost" style="padding: 0.25rem 0.65rem; font-size: 12px;">Pause</button>
+			</form>
+		} else {
+			<span class="badge badge-bad" style="padding: 0.15rem 0.5rem;">paused</span>
+			if row.PausedReason != "" {
+				<span style="font-size: 11px; color: var(--text-dim);">{ row.PausedReason }</span>
+			}
+			<span style="flex: 1;"></span>
+			<button type="button" class="shell-button shell-button-ghost" style="padding: 0.25rem 0.65rem; font-size: 12px;" hx-post={ row.ResumeURL } hx-swap="none">Resume</button>
+		}
+	</div>
+}
