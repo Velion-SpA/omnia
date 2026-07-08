@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	mcppkg "github.com/mark3labs/mcp-go/mcp"
 	"github.com/velion/omnia/internal/project"
 	"github.com/velion/omnia/internal/store"
-	mcppkg "github.com/mark3labs/mcp-go/mcp"
 )
 
 func newMCPTestStore(t *testing.T) *store.Store {
@@ -670,6 +670,157 @@ func TestHandleSaveDoesNotSuggestWhenTopicKeyProvided(t *testing.T) {
 	text := callResultText(t, res)
 	if strings.Contains(text, "Suggested topic_key:") {
 		t.Fatalf("did not expect suggestion when topic_key provided, got %q", text)
+	}
+}
+
+// TestContentHasKeywordsLine covers the "MISSING KEYWORDS" soft-lint heuristic
+// in isolation, including the markdown decorations it must tolerate.
+func TestContentHasKeywordsLine(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"plain keywords line", "Some text\nKeywords: foo, bar\n", true},
+		{"lowercase keywords line", "Some text\nkeywords: foo, bar\n", true},
+		{"bold keywords line", "Some text\n**Keywords**: foo, bar\n", true},
+		{"bulleted keywords line", "Some text\n- Keywords: foo, bar\n", true},
+		{"heading keywords line", "Some text\n### Keywords: foo, bar\n", true},
+		{"ordered list keywords line", "Some text\n1. Keywords: foo, bar\n", true},
+		{"missing keywords line", "Some text without any label\n", false},
+		{"keywords mentioned mid-sentence does not count", "We used several keywords: foo in the sentence\n", false},
+		{"empty content", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := contentHasKeywordsLine(tt.content); got != tt.want {
+				t.Fatalf("contentHasKeywordsLine(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTitleIsVague covers the "VAGUE TITLE" soft-lint heuristic in isolation:
+// generic-only phrases, short titles, and the concrete-component/word-count
+// escapes that keep it conservative.
+func TestTitleIsVague(t *testing.T) {
+	tests := []struct {
+		name  string
+		title string
+		want  bool
+	}{
+		{"empty title is not flagged by this check", "", false},
+		{"generic: Fixed bug", "Fixed bug", true},
+		{"generic: Update", "Update", true},
+		{"generic: Changes", "Changes", true},
+		{"generic: Fix", "Fix", true},
+		{"generic: Mejora", "Mejora", true},
+		{"generic: Arreglo", "Arreglo", true},
+		{"short with no concrete component", "Improve error handling", true},
+		{"four words escapes vague check", "Improve error handling now", false},
+		{"path escapes despite short title", "internal/mcp handleSave", false},
+		{"dotted identifier escapes", "mem_save.go regression", false},
+		{"flag identifier escapes", "add --daemon-url flag", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := titleIsVague(tt.title); got != tt.want {
+				t.Fatalf("titleIsVague(%q) = %v, want %v", tt.title, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHandleSave_SearchabilityHint is the end-to-end regression: mem_save
+// must never fail because of these soft lints, and searchability_hint must
+// appear in the envelope exactly when a check fires — with the save result
+// message left intact either way.
+func TestHandleSave_SearchabilityHint(t *testing.T) {
+	tests := []struct {
+		name         string
+		title        string
+		content      string
+		wantHint     bool
+		wantContains []string
+	}{
+		{
+			name:     "concrete title + keywords line: no hint",
+			title:    "internal/mcp handleSave: add searchability lint",
+			content:  "Added soft lint checks to mem_save.\n\nKeywords: mem_save, searchability, keywords line, vague title, palabra clave",
+			wantHint: false,
+		},
+		{
+			name:         "missing keywords line fires hint",
+			title:        "internal/mcp handleSave: add searchability lint",
+			content:      "Added soft lint checks to mem_save. No keywords section here.",
+			wantHint:     true,
+			wantContains: []string{"Keywords:"},
+		},
+		{
+			name:         "vague title fires hint",
+			title:        "Fixed bug",
+			content:      "Some content.\n\nKeywords: foo, bar",
+			wantHint:     true,
+			wantContains: []string{"vague title"},
+		},
+		{
+			name:     "concrete short title does not fire vague check",
+			title:    "mem_save.go fix",
+			content:  "Some content.\n\nKeywords: foo, bar",
+			wantHint: false,
+		},
+		{
+			name:         "both checks fire and are joined",
+			title:        "Update",
+			content:      "Body with no label.",
+			wantHint:     true,
+			wantContains: []string{"Keywords:", "vague title"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+			req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+				"title":   tt.title,
+				"content": tt.content,
+				"type":    "discovery",
+			}}}
+			res, err := h(context.Background(), req)
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if res.IsError {
+				t.Fatalf("save must never fail due to searchability hints: %s", callResultText(t, res))
+			}
+
+			text := callResultText(t, res)
+			var envelope map[string]any
+			if err := json.Unmarshal([]byte(text), &envelope); err != nil {
+				t.Fatalf("response is not valid JSON: %v — got %q", err, text)
+			}
+
+			hint, hasHint := envelope["searchability_hint"].(string)
+			if tt.wantHint && !hasHint {
+				t.Fatalf("expected searchability_hint in envelope, got none: %q", text)
+			}
+			if !tt.wantHint && hasHint {
+				t.Fatalf("expected no searchability_hint, got %q", hint)
+			}
+			for _, sub := range tt.wantContains {
+				if !strings.Contains(hint, sub) {
+					t.Fatalf("expected hint to contain %q, got %q", sub, hint)
+				}
+			}
+
+			// The save result message must stay intact regardless of hints.
+			result, _ := envelope["result"].(string)
+			if !strings.HasPrefix(result, `Memory saved: "`) {
+				t.Fatalf("result message must stay intact, got %q", result)
+			}
+		})
 	}
 }
 

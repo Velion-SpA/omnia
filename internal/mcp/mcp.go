@@ -20,15 +20,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 	"github.com/velion/omnia/internal/diagnostic"
 	projectpkg "github.com/velion/omnia/internal/project"
 	"github.com/velion/omnia/internal/store"
 	"github.com/velion/omnia/internal/timeutil"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 )
 
 const sourceProcessOverride = "process_override"
@@ -1164,6 +1165,94 @@ func handlePin(s *store.Store, pinned bool) server.ToolHandlerFunc {
 	}
 }
 
+// searchabilityHint runs conservative, non-blocking lint checks over a
+// mem_save request so agents get nudged toward findable memories. It NEVER
+// fails or alters the save — callers only attach the result to the response
+// envelope as an informational field. Returns "" when nothing fires.
+func searchabilityHint(title, content string) string {
+	var hints []string
+	if !contentHasKeywordsLine(content) {
+		hints = append(hints, "hint: add a 'Keywords:' line (exact error strings, file paths, flags, EN+ES synonyms) so this memory can be found later")
+	}
+	if titleIsVague(title) {
+		hints = append(hints, "hint: vague title — name the component and the symptom/action")
+	}
+	return strings.Join(hints, " | ")
+}
+
+// keywordsOrderedListPrefixRe strips a leading ordered-list marker ("1.",
+// "2)") so "1. Keywords: ..." is still recognized.
+var keywordsOrderedListPrefixRe = regexp.MustCompile(`^\d+[.)]\s*`)
+
+// contentHasKeywordsLine reports whether content contains a line that
+// declares "Keywords:", allowing common markdown decoration around it
+// (bold/italic markers, bullet points, headings, ordered-list numbering).
+func contentHasKeywordsLine(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		if lineDeclaresKeywords(line) {
+			return true
+		}
+	}
+	return false
+}
+
+func lineDeclaresKeywords(line string) bool {
+	s := strings.NewReplacer("*", "", "_", "").Replace(line)
+	s = strings.TrimSpace(s)
+	s = keywordsOrderedListPrefixRe.ReplaceAllString(s, "")
+	s = strings.TrimLeft(s, "-+# \t")
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(strings.ToLower(s), "keywords:")
+}
+
+// concreteIdentifierRe matches an embedded path/flag/identifier separator
+// (word char, then . / or -, then word char) so titles naming a real
+// component (e.g. "internal/mcp handleSave", "mem_save.go", "--daemon-url")
+// are never flagged as vague, regardless of word count.
+var concreteIdentifierRe = regexp.MustCompile(`\w[./-]\w`)
+
+// genericOnlyTitles are titles that name no concrete component regardless of
+// how they're capitalized — kept short and conservative to avoid false
+// positives on legitimate short-but-specific titles.
+var genericOnlyTitles = map[string]bool{
+	"fix":       true,
+	"fixes":     true,
+	"fix bug":   true,
+	"fixed bug": true,
+	"bug fix":   true,
+	"bugfix":    true,
+	"update":    true,
+	"updates":   true,
+	"change":    true,
+	"changes":   true,
+	"mejora":    true,
+	"mejoras":   true,
+	"arreglo":   true,
+	"arreglos":  true,
+}
+
+func isGenericOnlyTitle(title string) bool {
+	normalized := strings.ToLower(strings.Trim(title, ".!¡¿? "))
+	return genericOnlyTitles[normalized]
+}
+
+// titleIsVague flags titles that are too short or generic to be findable
+// later. A title escapes the check if it names a concrete component (a
+// path, or an identifier containing a dot/slash/dash) or has 4+ words.
+func titleIsVague(title string) bool {
+	trimmed := strings.TrimSpace(title)
+	if trimmed == "" {
+		return false // absence of a title is a separate concern from vagueness
+	}
+	if isGenericOnlyTitle(trimmed) {
+		return true
+	}
+	if concreteIdentifierRe.MatchString(trimmed) {
+		return false
+	}
+	return len(strings.Fields(trimmed)) < 4
+}
+
 func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		title, _ := req.GetArguments()["title"].(string)
@@ -1288,6 +1377,13 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Post-transaction conflict candidate detection (REQ-001).
 		// Errors are logged and swallowed — detection failure never fails the save.
 		extra := map[string]any{}
+
+		// Soft searchability lint (non-blocking): nudge toward findable memories.
+		// The save has already succeeded above — this only annotates the envelope.
+		if hint := searchabilityHint(title, content); hint != "" {
+			extra["searchability_hint"] = hint
+		}
+
 		// Build CandidateOptions, forwarding any MCPConfig overrides.
 		// nil fields mean "use store defaults"; explicit pointer values override.
 		candOpts := store.CandidateOptions{
