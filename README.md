@@ -1,34 +1,34 @@
 <p align="center">
-  <img src="assets/branding/omnia-banner.png" alt="Omnia — persistent memory for AI coding agents" width="100%">
+  <img src="assets/branding/omnia-banner.png" alt="Omnia — memoria persistente para agentes de codificación con IA" width="100%">
 </p>
 
 # Omnia
 
-Omnia is persistent memory for AI coding agents — local-first, single binary, with optional self-hosted multi-tenant cloud sync. It runs as a local daemon (HTTP + MCP) that agents save observations to and search against, so context survives across sessions and compactions instead of being re-explained every time.
+Omnia es memoria persistente para agentes de codificación con IA: local-first, un solo binario, con sincronización cloud multi-tenant self-hosted opcional. Se ejecuta como un daemon local (HTTP + MCP) en el que los agentes guardan observaciones y contra el que realizan búsquedas, de modo que el contexto persiste entre sesiones y compactaciones en lugar de tener que volver a explicarse cada vez.
 
-See [DOCS.md](DOCS.md) for the full technical reference (database schema, HTTP API, MCP tools, cloud sync internals).
+Consulte [DOCS.md](DOCS.md) para la referencia técnica completa (esquema de la base de datos, API HTTP, herramientas MCP, funcionamiento interno de cloud sync).
 
-## Cloud dashboard
+## Dashboard Cloud
 
-The self-hosted cloud ships with a command-center dashboard: every account sees only the projects its teams grant, and admins manage users, teams, profiles and per-project permissions on screen.
+La nube self-hosted incluye un dashboard tipo centro de comando: cada cuenta ve únicamente los proyectos que sus equipos le otorgan, y los administradores gestionan usuarios, equipos, perfiles y permisos por proyecto desde la pantalla.
 
-**Overview** — projects, memory-type breakdown and a live feed of incoming observations:
+**Vista general** — proyectos, desglose por tipo de memoria y un feed en vivo de observaciones entrantes:
 
-<img src="assets/cloud/cloud-overview.png" alt="Omnia Cloud — overview" width="100%">
+<img src="assets/cloud/cloud-overview.png" alt="Omnia Cloud — vista general" width="100%">
 
-**Teams** — group projects and grant a profile's permissions (Moderator / Editor / Member) to members:
+**Equipos** — agrupa proyectos y asigna los permisos de un perfil (Moderator / Editor / Member) a los miembros:
 
-<img src="assets/cloud/cloud-admin-teams.png" alt="Omnia Cloud — teams admin" width="100%">
+<img src="assets/cloud/cloud-admin-teams.png" alt="Omnia Cloud — administración de equipos" width="100%">
 
-**Users & access** — manage accounts, per-project overrides (R/W/U/D) and device-scoped tokens:
+**Usuarios y accesos** — gestiona cuentas, anulaciones por proyecto (R/W/U/D) y tokens vinculados a dispositivos:
 
-<img src="assets/cloud/cloud-admin-users.png" alt="Omnia Cloud — users admin" width="100%">
+<img src="assets/cloud/cloud-admin-users.png" alt="Omnia Cloud — administración de usuarios" width="100%">
 
-**Audit** — every admin and sync action is recorded:
+**Auditoría** — cada acción administrativa y de sincronización queda registrada:
 
-<img src="assets/cloud/cloud-admin-audit.png" alt="Omnia Cloud — audit log" width="100%">
+<img src="assets/cloud/cloud-admin-audit.png" alt="Omnia Cloud — registro de auditoría" width="100%">
 
-## Installation
+## Instalación
 
 ### Homebrew (macOS/Linux)
 
@@ -43,7 +43,7 @@ brew install omnia
 curl -fsSL https://raw.githubusercontent.com/Velion-SpA/omnia/main/scripts/install.sh | sh
 ```
 
-Detects your OS/arch, downloads the matching release from [GitHub Releases](https://github.com/Velion-SpA/omnia/releases), verifies its checksum, and installs to `~/.local/bin` (or `/usr/local/bin` with `sudo` if run as root).
+Detecta el sistema operativo y la arquitectura, descarga el release correspondiente desde [GitHub Releases](https://github.com/Velion-SpA/omnia/releases), verifica su checksum, y lo instala en `~/.local/bin` (o en `/usr/local/bin` con `sudo` si se ejecuta como root).
 
 ### go install
 
@@ -51,7 +51,7 @@ Detects your OS/arch, downloads the matching release from [GitHub Releases](http
 go install github.com/Velion-SpA/omnia/cmd/omnia@latest
 ```
 
-### Quickstart
+### Inicio rápido
 
 ```sh
 omnia cloud add <alias> --server https://your-cloud-server
@@ -59,22 +59,22 @@ omnia cloud login
 omnia sync
 ```
 
-`omnia setup` walks through first-run configuration (agent integration, data directory) interactively.
+`omnia setup` guía la configuración inicial (integración con el agente, directorio de datos) de forma interactiva.
 
-## Knowledge ingestion (external sources)
+## Ingesta de conocimiento (fuentes externas)
 
-This repository also carries source-adapter packages (`internal/core`, `internal/source/discord`,
+Este repositorio también incluye paquetes adaptadores de fuente (`internal/core`, `internal/source/discord`,
 `internal/source/github`, `internal/sink/engram`, `internal/config`, `internal/state`,
-`internal/enrich`) for a companion ingestor that syncs Discord/GitHub activity into memory.
-The sections below describe that ingestor's original CLI surface; it predates the current
-`cmd/omnia` binary and is not wired into it today — treat the commands below as
-aspirational/legacy until re-integrated. See `internal/source/*` for the underlying code.
+`internal/enrich`) para un ingestor complementario que sincroniza actividad de Discord/GitHub hacia la memoria.
+Las secciones siguientes describen la superficie de CLI original de ese ingestor: es anterior al binario
+actual `cmd/omnia` y, por el momento, no está integrado en él — los comandos que siguen deben considerarse
+aspiracionales/legacy hasta su reintegración. Consulte `internal/source/*` para el código subyacente.
 
-### Sync GitHub
+### Sincronizar GitHub
 
-> **Note:** Global flags (`--source`, `--dry-run`, `--since`, `--config`) must come
-> **before** the subcommand, e.g. `omnia --source github sync`.
-> Flags placed after the subcommand are treated as arguments and silently ignored.
+> **Nota:** Las flags globales (`--source`, `--dry-run`, `--since`, `--config`) deben ir
+> **antes** del subcomando, por ejemplo `omnia --source github sync`.
+> Las flags ubicadas después del subcomando se interpretan como argumentos y se ignoran silenciosamente.
 
 ```sh
 # Uses GITHUB_TOKEN env var, or gh auth token fallback
@@ -88,30 +88,31 @@ omnia --source github --dry-run sync
 omnia --source github --since $(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ) sync
 ```
 
-**Note on incremental sync:** After the first run, per-repo cursors are stored in
-`~/.local/state/omnia/state.json`. On each subsequent run omnia reads these cursors
-and passes the latest `updated_at` timestamp to the GitHub API as the `since` parameter,
-so only items updated after the last sync are fetched. The cursor is only advanced after
-all sink writes succeed — if a write fails, omnia exits non-zero and does **not** move
-the cursor forward. Re-running is safe because Engram upserts on `topic_key+project`
-(no duplicates, just a revision bump).
+**Nota sobre la sincronización incremental:** Después de la primera ejecución, los cursores por repositorio
+se almacenan en `~/.local/state/omnia/state.json`. En cada ejecución posterior, omnia lee estos cursores
+y pasa el timestamp `updated_at` más reciente a la API de GitHub como parámetro `since`, de modo que solo
+se obtienen los elementos actualizados después de la última sincronización. El cursor solo avanza una vez
+que todas las escrituras al sink tienen éxito — si una escritura falla, omnia finaliza con código distinto
+de cero y **no** avanza el cursor. Volver a ejecutarlo es seguro porque Engram hace upsert sobre
+`topic_key+project` (sin duplicados, solo un incremento de revisión).
 
-### Sync Discord
+### Sincronizar Discord
 
 ```sh
 export DISCORD_BOT_TOKEN=your_bot_token
 omnia --source discord sync
 ```
 
-### Check status
+### Verificar estado
 
 ```sh
 omnia status
 ```
 
-## Per-project routing
+## Enrutamiento por proyecto
 
-By default, Omnia routes GitHub items to the repo name (without owner) as the Engram project, and Discord items to the guild slug. You can override this with the `routes` map:
+De forma predeterminada, Omnia enruta los elementos de GitHub al nombre del repositorio (sin el owner) como
+proyecto de Engram, y los elementos de Discord al slug del guild. Esto puede sobrescribirse con el mapa `routes`:
 
 ```yaml
 routes:
@@ -119,32 +120,39 @@ routes:
   # discord/123456789: saluvita
 ```
 
-Resolution order per item: `routes` map → default derivation (repo name / guild slug) → `engram.default_project`. Project names are normalized to lowercase. This means a PR from `arratiabenjamin/saluvita` lands in the `saluvita` project — the same project Engram detects when a developer opens that repo in Claude Code.
+Orden de resolución por elemento: mapa `routes` → derivación por defecto (nombre del repo / slug del guild) →
+`engram.default_project`. Los nombres de proyecto se normalizan a minúsculas. Esto significa que un PR de
+`arratiabenjamin/saluvita` termina en el proyecto `saluvita` — el mismo proyecto que Engram detecta cuando
+un desarrollador abre ese repositorio en Claude Code.
 
-## Structured metadata (omnia-meta)
+## Metadatos estructurados (omnia-meta)
 
-Every observation Omnia writes ends with a fenced `omnia-meta` block containing structured metadata: source, kind, project, author, participants, URL, timestamps, and chunk info. The block is machine-facing and appended to every chunk so each chunk is independently parseable. It is the foundation for the future Omnia index (vector search + structured filters).
+Cada observación que Omnia escribe finaliza con un bloque `omnia-meta` delimitado que contiene metadatos
+estructurados: source, kind, project, author, participants, URL, timestamps y datos del chunk. El bloque
+está pensado para ser leído por máquinas y se agrega a cada chunk para que cada uno pueda analizarse de
+forma independiente. Es la base para el futuro índice de Omnia (vector search + filtros estructurados).
 
-See [docs/METADATA.md](docs/METADATA.md) for the full field reference and versioning policy.
+Consulte [docs/METADATA.md](docs/METADATA.md) para la referencia completa de campos y la política de versionado.
 
-## Config reference
+## Referencia de configuración
 
-| Key | Default | Description |
+| Clave | Predeterminado | Descripción |
 |-----|---------|-------------|
-| `engram.base_url` | `http://127.0.0.1:7437` | Engram daemon URL |
-| `engram.default_project` | `omnia` | Default Engram project (last-resort fallback) |
-| `routes` | `{}` | Per-origin project routing map |
-| `sources.github.enabled` | `false` | Enable GitHub ingestion |
-| `sources.github.repos` | `[]` | List of `owner/repo` strings |
-| `sources.discord.enabled` | `false` | Enable Discord ingestion |
-| `sources.discord.channels` | `[]` | List of `{id, name, guild}` |
-| `backfill_days` | `30` | Days to look back on first run |
+| `engram.base_url` | `http://127.0.0.1:7437` | URL del daemon de Engram |
+| `engram.default_project` | `omnia` | Proyecto de Engram predeterminado (fallback de último recurso) |
+| `routes` | `{}` | Mapa de enrutamiento de proyecto por origen |
+| `sources.github.enabled` | `false` | Habilita la ingesta de GitHub |
+| `sources.github.repos` | `[]` | Lista de strings `owner/repo` |
+| `sources.discord.enabled` | `false` | Habilita la ingesta de Discord |
+| `sources.discord.channels` | `[]` | Lista de `{id, name, guild}` |
+| `backfill_days` | `30` | Días hacia atrás a considerar en la primera ejecución |
 
-## Omnia Cloud (optional)
+## Omnia Cloud (opcional)
 
-Omnia is local-first: local SQLite is the source of truth; cloud features are optional replication/shared access.
+Omnia es local-first: el SQLite local es la fuente de verdad; las funciones cloud son replicación/acceso
+compartido opcional.
 
-To set up cloud replication:
+Para configurar la replicación cloud:
 
 ```bash
 omnia cloud config --server http://127.0.0.1:18080
@@ -157,10 +165,11 @@ omnia cloud upgrade status --project smoke-project
 omnia cloud serve
 ```
 
-Cloud env vars: `ENGRAM_CLOUD_TOKEN` (bearer token), `ENGRAM_JWT_SECRET` (required in auth mode), `ENGRAM_CLOUD_ADMIN` (optional admin token).
-Dashboard routes: `/dashboard/login`, `/dashboard/contributors`.
+Variables de entorno de cloud: `ENGRAM_CLOUD_TOKEN` (bearer token), `ENGRAM_JWT_SECRET` (requerido en modo
+auth), `ENGRAM_CLOUD_ADMIN` (token de admin opcional).
+Rutas del dashboard: `/dashboard/login`, `/dashboard/contributors`.
 
-## Architecture
+## Arquitectura
 
 ```
 cmd/omnia/           CLI (sync, status)
@@ -172,18 +181,18 @@ internal/source/     Source adapters (github, discord)
 internal/sink/       Sink adapters (engram)
 ```
 
-## Adding a new source
+## Agregar una nueva fuente
 
-1. Create `internal/source/<name>/<name>.go`
-2. Implement the `core.Source` interface (`Name() string`, `Fetch(ctx, since) ([]Item, error)`)
-3. Wire it up in `cmd/omnia/main.go` under `runSync`
-4. Add config fields to `internal/config/config.go`
+1. Crear `internal/source/<name>/<name>.go`
+2. Implementar la interfaz `core.Source` (`Name() string`, `Fetch(ctx, since) ([]Item, error)`)
+3. Conectarlo en `cmd/omnia/main.go`, dentro de `runSync`
+4. Agregar los campos de configuración a `internal/config/config.go`
 
-See `docs/WHATSAPP.md` and `docs/JIRA.md` for in-progress source plans.
+Consulte `docs/WHATSAPP.md` y `docs/JIRA.md` para los planes de fuentes en progreso.
 
-## Scheduled runs (macOS)
+## Ejecuciones programadas (macOS)
 
-Copy and edit the launchd plist:
+Copie y edite el plist de launchd:
 
 ```sh
 # 1. Build and install the binary first
@@ -198,9 +207,9 @@ cp deploy/com.velion.omnia.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.velion.omnia.plist
 ```
 
-This runs `omnia sync` every night at 2am.
+Esto ejecuta `omnia sync` todas las noches a las 2am.
 
-**Failure behavior:** If omnia exits non-zero (e.g. Engram is unreachable or a write fails),
-the state cursors are not advanced. The next scheduled run will re-fetch the same window
-and attempt to write again. Because Engram upserts by `topic_key+project`, re-ingesting
-the same items is always safe.
+**Comportamiento ante fallos:** Si omnia finaliza con un código distinto de cero (por ejemplo, si Engram
+no está disponible o una escritura falla), los cursores de estado no avanzan. La siguiente ejecución
+programada volverá a obtener la misma ventana e intentará escribir nuevamente. Como Engram hace upsert
+por `topic_key+project`, volver a ingerir los mismos elementos siempre es seguro.
