@@ -1,8 +1,32 @@
+<p align="center">
+  <img src="assets/branding/omnia-banner.png" alt="Omnia — persistent memory for AI coding agents" width="100%">
+</p>
+
 # Omnia
 
 Omnia is persistent memory for AI coding agents — local-first, single binary, with optional self-hosted multi-tenant cloud sync. It runs as a local daemon (HTTP + MCP) that agents save observations to and search against, so context survives across sessions and compactions instead of being re-explained every time.
 
 See [DOCS.md](DOCS.md) for the full technical reference (database schema, HTTP API, MCP tools, cloud sync internals).
+
+## Cloud dashboard
+
+The self-hosted cloud ships with a command-center dashboard: every account sees only the projects its teams grant, and admins manage users, teams, profiles and per-project permissions on screen.
+
+**Overview** — projects, memory-type breakdown and a live feed of incoming observations:
+
+<img src="assets/cloud/cloud-overview.png" alt="Omnia Cloud — overview" width="100%">
+
+**Teams** — group projects and grant a profile's permissions (Moderator / Editor / Member) to members:
+
+<img src="assets/cloud/cloud-admin-teams.png" alt="Omnia Cloud — teams admin" width="100%">
+
+**Users & access** — manage accounts, per-project overrides (R/W/U/D) and device-scoped tokens:
+
+<img src="assets/cloud/cloud-admin-users.png" alt="Omnia Cloud — users admin" width="100%">
+
+**Audit** — every admin and sync action is recorded:
+
+<img src="assets/cloud/cloud-admin-audit.png" alt="Omnia Cloud — audit log" width="100%">
 
 ## Installation
 
