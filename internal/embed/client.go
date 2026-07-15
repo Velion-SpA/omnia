@@ -16,18 +16,23 @@ import (
 	"time"
 )
 
-// Task types map to nomic-embed-text's asymmetric retrieval prefixes. Documents
-// (stored memories) and queries are embedded with different prefixes; the
-// trailing space is part of the prefix the model was trained on.
-const (
-	TaskDocument = "search_document"
-	TaskQuery    = "search_query"
-)
+// embedContextTokens is sent as options.num_ctx on every request. Ollama's
+// /api/embed serves a hard-coded 2048-token context unless the caller
+// overrides it per request, which surfaces as an HTTP 500 on longer prompts
+// (a serving bug, not model-specific — see Ollama issues #7741/#7008/#13054).
+// jina-embeddings-v2-base-es and bge-m3 both support real 8192-token context
+// via ALiBi/RoPE, so this override is safe for either candidate model.
+const embedContextTokens = 8192
 
-// Embedder produces a unit-normalized embedding for text under a task type.
-// It is an interface so Reconcile and tests can run without a live Ollama.
+// Embedder produces a unit-normalized embedding for text. It is an interface
+// so Reconcile and tests can run without a live Ollama.
+//
+// Unlike the prior nomic-embed-text client, there is no asymmetric task
+// parameter: jina-embeddings-v2-base-es (and bge-m3) have no
+// search_document:/search_query: prefix convention, so the same call embeds
+// both stored memories and interactive queries.
 type Embedder interface {
-	Embed(ctx context.Context, text, task string) ([]float32, error)
+	Embed(ctx context.Context, text string) ([]float32, error)
 }
 
 // Client is an Ollama embeddings HTTP client.
@@ -48,37 +53,39 @@ func New(baseURL, model string, dim int) *Client {
 	}
 }
 
-func prefixFor(task string) (string, error) {
-	switch task {
-	case TaskDocument:
-		return "search_document: ", nil
-	case TaskQuery:
-		return "search_query: ", nil
-	default:
-		return "", fmt.Errorf("embed: unknown task %q", task)
-	}
+type embedOptions struct {
+	NumCtx int `json:"num_ctx"`
 }
 
 type embedRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
+	Model    string       `json:"model"`
+	Input    string       `json:"input"`
+	Truncate bool         `json:"truncate"`
+	Options  embedOptions `json:"options"`
 }
 
+// embedResponse mirrors Ollama's /api/embed shape, which batches: Embeddings
+// is a list of vectors (one per Input element). We always send a single
+// string Input, so we expect exactly one vector back.
 type embedResponse struct {
-	Embedding []float32 `json:"embedding"`
+	Embeddings [][]float32 `json:"embeddings"`
 }
 
-// Embed posts prefix+text to Ollama and returns a unit-normalized vector.
-func (c *Client) Embed(ctx context.Context, text, task string) ([]float32, error) {
-	prefix, err := prefixFor(task)
-	if err != nil {
-		return nil, err
-	}
-	body, err := json.Marshal(embedRequest{Model: c.model, Prompt: prefix + text})
+// Embed posts text to Ollama's /api/embed endpoint and returns a
+// unit-normalized vector. truncate:true + options.num_ctx:8192 replace the
+// former client-side shrinking-rune-budget retry loop: the server truncates
+// over-long input itself instead of Omnia guessing a safe rune cap.
+func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
+	body, err := json.Marshal(embedRequest{
+		Model:    c.model,
+		Input:    text,
+		Truncate: true,
+		Options:  embedOptions{NumCtx: embedContextTokens},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("embed: marshal: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/embeddings", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/embed", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("embed: new request: %w", err)
 	}
@@ -97,10 +104,14 @@ func (c *Client) Embed(ctx context.Context, text, task string) ([]float32, error
 	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
 		return nil, fmt.Errorf("embed: decode: %w", err)
 	}
-	if c.dim > 0 && len(er.Embedding) != c.dim {
-		return nil, fmt.Errorf("embed: expected dim %d, got %d", c.dim, len(er.Embedding))
+	if len(er.Embeddings) == 0 {
+		return nil, fmt.Errorf("embed: ollama returned no embeddings")
 	}
-	return normalize(er.Embedding)
+	vec := er.Embeddings[0]
+	if c.dim > 0 && len(vec) != c.dim {
+		return nil, fmt.Errorf("embed: expected dim %d, got %d", c.dim, len(vec))
+	}
+	return normalize(vec)
 }
 
 // normalize scales v to unit length. It errors on a zero-norm vector, which

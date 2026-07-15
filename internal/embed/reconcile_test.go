@@ -40,7 +40,7 @@ const metaOnlyContent = "```omnia-meta\n" +
 
 type stubEmbedder struct{ calls int }
 
-func (s *stubEmbedder) Embed(ctx context.Context, text, task string) ([]float32, error) {
+func (s *stubEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	s.calls++
 	return []float32{1, 0, 0}, nil // valid unit vector, dim 3
 }
@@ -52,7 +52,7 @@ type lenLimitedEmbedder struct {
 	calls int
 }
 
-func (s *lenLimitedEmbedder) Embed(ctx context.Context, text, task string) ([]float32, error) {
+func (s *lenLimitedEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	s.calls++
 	if len([]rune(text)) > s.limit {
 		return nil, fmt.Errorf("simulated ollama status 500 (input too long)")

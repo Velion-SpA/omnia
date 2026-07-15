@@ -80,15 +80,14 @@ func (l *localDataSource) Close() error {
 	return nil
 }
 
-// localSemantic adapts the embeddings store + client to SemanticIndex. EmbedQuery
-// pins the search_query task so interactive queries embed with the correct prefix.
+// localSemantic adapts the embeddings store + client to SemanticIndex.
 type localSemantic struct {
 	store     *embed.Store
 	embClient embed.Embedder
 }
 
 func (s localSemantic) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
-	return s.embClient.Embed(ctx, text, embed.TaskQuery)
+	return s.embClient.Embed(ctx, text)
 }
 
 func (s localSemantic) Search(ctx context.Context, vec []float32, k int) ([]embed.Hit, error) {

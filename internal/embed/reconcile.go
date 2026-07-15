@@ -126,7 +126,7 @@ var embedBudgets = []int{4000, 2000, 1000}
 func embedDocument(ctx context.Context, emb Embedder, input string) ([]float32, error) {
 	var lastErr error
 	for _, budget := range embedBudgets {
-		vec, err := emb.Embed(ctx, truncateRunes(input, budget), TaskDocument)
+		vec, err := emb.Embed(ctx, truncateRunes(input, budget))
 		if err == nil {
 			return vec, nil
 		}
