@@ -46,8 +46,8 @@ type EngramConfig struct {
 type EmbeddingsConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	BaseURL string `yaml:"base_url"` // Ollama base URL, e.g. http://localhost:11434
-	Model   string `yaml:"model"`    // e.g. nomic-embed-text
-	Dim     int    `yaml:"dim"`      // embedding dimension, e.g. 768 for nomic-embed-text
+	Model   string `yaml:"model"`    // e.g. jina/jina-embeddings-v2-base-es (default), bge-m3
+	Dim     int    `yaml:"dim"`      // embedding dimension, e.g. 768 for jina-v2-es, 1024 for bge-m3
 	DBPath  string `yaml:"db_path"`  // path to Omnia's own embeddings SQLite file
 }
 
@@ -174,7 +174,10 @@ func applyDefaults(cfg *Config) {
 		cfg.Embeddings.BaseURL = "http://localhost:11434"
 	}
 	if cfg.Embeddings.Model == "" {
-		cfg.Embeddings.Model = "nomic-embed-text"
+		// jina/jina-embeddings-v2-base-es: purpose-built ES<->EN shared-space
+		// model, 768-dim (matches the prior nomic default, no schema change),
+		// 8192-token context. See engram obs #1401 (supersedes design.md D3).
+		cfg.Embeddings.Model = "jina/jina-embeddings-v2-base-es"
 	}
 	if cfg.Embeddings.Dim == 0 {
 		cfg.Embeddings.Dim = 768
