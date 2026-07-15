@@ -45,50 +45,62 @@ func (s *stubEmbedder) Embed(ctx context.Context, text string) ([]float32, error
 	return []float32{1, 0, 0}, nil // valid unit vector, dim 3
 }
 
-// lenLimitedEmbedder mimics Ollama rejecting an over-long prompt (HTTP 500),
-// so embedDocument's shrink-and-retry path can be exercised.
-type lenLimitedEmbedder struct {
-	limit int
+// callCountingEmbedder records every text it was asked to embed, so tests can
+// assert embedDocument makes exactly one call regardless of input length (the
+// server-side truncate:true + options.num_ctx:8192 in the /api/embed client
+// now replace the old client-side shrinking-rune-budget retry loop).
+type callCountingEmbedder struct {
 	calls int
+	texts []string
 }
 
-func (s *lenLimitedEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+func (s *callCountingEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	s.calls++
-	if len([]rune(text)) > s.limit {
-		return nil, fmt.Errorf("simulated ollama status 500 (input too long)")
-	}
+	s.texts = append(s.texts, text)
 	return []float32{1, 0, 0}, nil
 }
 
-func TestTruncateRunes(t *testing.T) {
-	if got := truncateRunes("héllo", 3); got != "hél" {
-		t.Errorf("truncateRunes rune-safe: got %q, want %q", got, "hél")
-	}
-	if got := truncateRunes("ab", 5); got != "ab" {
-		t.Errorf("truncateRunes shorter-than-n: got %q, want %q", got, "ab")
-	}
-}
+// TestEmbedDocument_SingleCallNoShrinkRetry guards the removal of the old
+// embedBudgets/truncateRunes shrink-and-retry loop: a memory far larger than
+// any of the former budgets (4000/2000/1000 runes) must embed in exactly ONE
+// Embed call, with the full untruncated text passed through — truncation, if
+// any, is now the server's job (truncate:true).
+func TestEmbedDocument_SingleCallNoShrinkRetry(t *testing.T) {
+	emb := &callCountingEmbedder{}
+	longInput := strings.Repeat("x", 5000)
 
-func TestEmbedDocument_ShrinksOnFailure(t *testing.T) {
-	// limit 1500 → budgets 4000 and 2000 fail, 1000 succeeds (3 calls).
-	emb := &lenLimitedEmbedder{limit: 1500}
-	vec, err := embedDocument(context.Background(), emb, strings.Repeat("x", 5000))
+	vec, err := embedDocument(context.Background(), emb, longInput)
 	if err != nil {
 		t.Fatalf("embedDocument: %v", err)
 	}
 	if len(vec) != 3 {
 		t.Errorf("vec dim: got %d, want 3", len(vec))
 	}
-	if emb.calls != 3 {
-		t.Errorf("calls: got %d, want 3 (4000→2000→1000)", emb.calls)
+	if emb.calls != 1 {
+		t.Errorf("calls: got %d, want 1 (no client-side shrink retry)", emb.calls)
+	}
+	if len(emb.texts) == 1 && emb.texts[0] != longInput {
+		t.Errorf("input: got truncated to %d runes, want the full %d-rune input passed through", len([]rune(emb.texts[0])), len([]rune(longInput)))
 	}
 }
 
-func TestEmbedDocument_AllBudgetsFail(t *testing.T) {
-	emb := &lenLimitedEmbedder{limit: 10} // even 1000 runes is too long
-	if _, err := embedDocument(context.Background(), emb, strings.Repeat("x", 5000)); err == nil {
-		t.Error("expected error when every budget fails, got nil")
+// TestEmbedDocument_PropagatesEmbedError guards that a single Ollama failure
+// surfaces directly (no retry loop to hide behind).
+func TestEmbedDocument_PropagatesEmbedError(t *testing.T) {
+	emb := &erroringEmbedder{}
+	if _, err := embedDocument(context.Background(), emb, "some content"); err == nil {
+		t.Error("expected the embed error to propagate, got nil")
 	}
+	if emb.calls != 1 {
+		t.Errorf("calls: got %d, want 1 (no retry loop)", emb.calls)
+	}
+}
+
+type erroringEmbedder struct{ calls int }
+
+func (s *erroringEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	s.calls++
+	return nil, fmt.Errorf("simulated ollama failure")
 }
 
 func execEngram(t *testing.T, path, query string, args ...any) {
