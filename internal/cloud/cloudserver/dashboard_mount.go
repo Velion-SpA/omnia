@@ -109,6 +109,14 @@ func (s *CloudServer) dashboardGate(dashHandler http.Handler) http.Handler {
 		if all {
 			ctx = dashboard.WithAdminNav(ctx)
 		}
+		// Authenticated account sessions get their username + a logout action in
+		// the shared shell's nav on EVERY dashboard page, not just Admin. claims is
+		// nil for the bare operator-token path (OMNIA_CLOUD_ADMIN / legacy sync
+		// bearer) since there's no account username to show there; the Admin pages
+		// keep their own hardcoded "operator" label for that case (adminLayoutProps).
+		if claims, _ := s.dashboardSessionClaims(r); claims != nil && strings.TrimSpace(claims.Username) != "" {
+			ctx = dashboard.WithUserIdentity(ctx, claims.Username, dashboardLogoutPath)
+		}
 		dashHandler.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
