@@ -63,9 +63,9 @@ type StructuralReader interface {
 	Types(ctx context.Context) ([]engramdb.TypeCount, error)
 }
 
-// SemanticIndex is the embeddings surface. EmbedQuery embeds an interactive query
-// (search_query task); Search and Graph return the same embed types the graph
-// view already consumes.
+// SemanticIndex is the embeddings surface. EmbedQuery embeds an interactive
+// query; Search and Graph return the same embed types the graph view already
+// consumes.
 type SemanticIndex interface {
 	EmbedQuery(ctx context.Context, text string) ([]float32, error)
 	Search(ctx context.Context, vec []float32, k int) ([]embed.Hit, error)
