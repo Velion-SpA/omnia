@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/velion/omnia/internal/cloud/chunkcodec"
@@ -294,7 +295,11 @@ func (rt *RemoteTransport) PullMutations(_ int64, _ int) (*PullMutationsResponse
 // MutationTransport handles push/pull of fine-grained mutations to the cloud server.
 // Unlike RemoteTransport (which handles chunk-level sync), this operates on the
 // mutation journal and supports cursor-based pull.
+//
+// The token field is guarded by mu to allow proactive rotation: SetToken may be
+// called from a background goroutine while Push/Pull run on the sync goroutine.
 type MutationTransport struct {
+	mu         sync.RWMutex
 	baseURL    string
 	token      string
 	httpClient *http.Client
@@ -316,9 +321,22 @@ func NewMutationTransport(baseURL, token string) (*MutationTransport, error) {
 	}, nil
 }
 
+// SetToken atomically replaces the bearer token used by all subsequent
+// requests. It is safe to call from a goroutine concurrent with PushMutations
+// or PullMutations. The very next HTTP request after SetToken returns will use
+// the new token.
+func (mt *MutationTransport) SetToken(token string) {
+	mt.mu.Lock()
+	mt.token = strings.TrimSpace(token)
+	mt.mu.Unlock()
+}
+
 func (mt *MutationTransport) setAuthorization(req *http.Request) {
-	if mt.token != "" {
-		req.Header.Set("Authorization", "Bearer "+mt.token)
+	mt.mu.RLock()
+	tok := mt.token
+	mt.mu.RUnlock()
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 }
 

@@ -1002,6 +1002,13 @@ func startAutosyncManagersForAlias(ctx context.Context, s *store.Store, cfg stor
 		log.Printf("[autosync] started for cloud %q (server=%s, target=%s)", label, serverURL, mgrCfg.TargetKey)
 		mgrs = append(mgrs, mgr)
 	}
+
+	// Start the proactive token refresher for this alias. All managers above
+	// share the same underlying MutationTransport (remoteMT), so passing it once
+	// is sufficient — SetToken updates the token for every request in flight on
+	// any of the target-key managers.
+	startTokenRefresher(ctx, cfg, alias, applyEnvOverrides, []*remote.MutationTransport{remoteMT})
+
 	return mgrs
 }
 
