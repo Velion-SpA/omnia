@@ -28,6 +28,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/velion/omnia/internal/diagnostic"
 	projectpkg "github.com/velion/omnia/internal/project"
+	"github.com/velion/omnia/internal/recall"
 	"github.com/velion/omnia/internal/store"
 	"github.com/velion/omnia/internal/timeutil"
 )
@@ -57,6 +58,15 @@ type MCPConfig struct {
 	// mem_save call (REQ-001). nil means "use the store default" (3).
 	// An explicit pointer value (including 0) is forwarded directly.
 	Limit *int
+
+	// Recall, when non-nil, enables hybrid (lexical+semantic) recall fusion
+	// for mem_search (design D1/D2/D6, human-like-memory PR3). nil (the
+	// default) means recall.enabled=false in config — handleSearch calls
+	// store.Search directly, exactly as it always has (D7 rollback
+	// guarantee: byte-for-byte today's FTS5-only path, zero data migration).
+	// Built by cmd/omnia/main.go from RecallConfig + EmbeddingsConfig when
+	// recall.enabled is true.
+	Recall *recall.Service
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -1001,14 +1011,36 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
-		results, err := s.Search(query, store.SearchOptions{
-			Type:    typ,
-			Project: searchProject,
-			Scope:   scope,
-			Limit:   limit,
-		})
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", err)), nil
+		// Recall wiring (design D6/D7, PR3): when cfg.Recall is non-nil
+		// (recall.enabled=true in config), fuse lexical + semantic hits via
+		// recall.Service and hydrate the fused, ranked ID list back into full
+		// store.SearchResult records ("rank then hydrate" — recall.Fuse never
+		// carries Project/Type/Content). When nil (the default), this branch
+		// is skipped entirely: the else branch below is byte-for-byte today's
+		// FTS5-only store.Search call, unchanged, so rollback is always safe.
+		var results []store.SearchResult
+		if cfg.Recall != nil {
+			fused, ferr := cfg.Recall.Search(ctx, query, recall.LexicalSearchOptions{
+				Type:    typ,
+				Project: searchProject,
+				Scope:   scope,
+				Limit:   limit,
+			})
+			if ferr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", ferr)), nil
+			}
+			results = hydrateFusedResults(s, fused, limit)
+		} else {
+			r, serr := s.Search(query, store.SearchOptions{
+				Type:    typ,
+				Project: searchProject,
+				Scope:   scope,
+				Limit:   limit,
+			})
+			if serr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", serr)), nil
+			}
+			results = r
 		}
 
 		if len(results) == 0 {
