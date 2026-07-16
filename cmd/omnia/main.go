@@ -31,6 +31,7 @@ import (
 	"github.com/velion/omnia/internal/cloud/constants"
 	"github.com/velion/omnia/internal/cloud/remote"
 	"github.com/velion/omnia/internal/cloud/syncguidance"
+	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/datadir"
 	"github.com/velion/omnia/internal/diagnostic"
 	"github.com/velion/omnia/internal/envx"
@@ -1063,6 +1064,14 @@ func cmdMCP(cfg store.Config) {
 	defer stopAutosync()
 
 	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride}
+	// Recall wiring (design D6/D7, human-like-memory PR3): only constructs
+	// the embeddings store/Ollama client/recall.Service when recall.enabled
+	// is true in config.yaml. A missing/unparseable config file degrades
+	// silently (mcpCfg.Recall stays nil), matching every other `omnia`
+	// subcommand's config.Load graceful-degradation convention.
+	if appCfg, cfgErr := config.Load(config.DefaultPath()); cfgErr == nil {
+		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings)
+	}
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
 

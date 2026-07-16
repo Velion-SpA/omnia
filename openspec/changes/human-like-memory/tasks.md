@@ -67,12 +67,12 @@ branch, PR2 targets PR1's branch, etc.) — orchestrator to confirm before apply
 
 ## Phase 3: MCP Wiring + Flag (PR 3)
 
-- [ ] 3.1 [RED] `internal/config/config_test.go`: `RecallConfig` defaults (`enabled:false`, `rrf_k:60`, `dense_k:5`, `strong_floor:0.65`, `base_floor:0.55`, `max_results:50`).
-- [ ] 3.2 [GREEN] `internal/config/config.go`: add `RecallConfig` struct + yaml tag + defaults.
-- [ ] 3.3 [RED] `internal/mcp/mcp_test.go`: `recall.enabled=false` → `handleSearch` output byte-identical to today's FTS5-only path (regression pin). [REQ7 / rollback]
-- [ ] 3.4 [RED] same file: `recall.enabled=true` with a fake `recall.Service` → fused results surface a paraphrase FTS5 alone would miss. [REQ1]
-- [ ] 3.5 [GREEN] `internal/mcp/mcp.go`: add `Recall *recall.Service` to `MCPConfig`; `handleSearch` calls it when non-nil+enabled, else `s.Search` unchanged.
-- [ ] 3.6 [GREEN] `cmd/omnia/main.go` `cmdMCP`: construct `embed.Store`/`embed.Searcher`/`recall.Service` from config, pass into `mcp.MCPConfig`.
+- [x] 3.1 [RED] `internal/config/config_test.go`: `RecallConfig` defaults (`enabled:false`, `rrf_k:60`, `dense_k:5`, `strong_floor:0.65`, `base_floor:0.55`, `max_results:50`).
+- [x] 3.2 [GREEN] `internal/config/config.go`: add `RecallConfig` struct + yaml tag + defaults.
+- [x] 3.3 [RED] `internal/mcp/mcp_test.go`: `recall.enabled=false` → `handleSearch` output byte-identical to today's FTS5-only path (regression pin). [REQ7 / rollback]
+- [x] 3.4 [RED] same file: `recall.enabled=true` with a fake `recall.Service` → fused results surface a paraphrase FTS5 alone would miss. [REQ1]
+- [x] 3.5 [GREEN] `internal/mcp/mcp.go`: add `Recall *recall.Service` to `MCPConfig`; `handleSearch` calls it when non-nil+enabled, else `s.Search` unchanged.
+- [x] 3.6 [GREEN] `cmd/omnia/main.go` `cmdMCP`: construct `embed.Store`/`embed.Searcher`/`recall.Service` from config, pass into `mcp.MCPConfig`.
 
 ## Phase 4: Async Auto-Embed Worker (PR 4, both entrypoints)
 
