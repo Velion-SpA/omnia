@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"log/slog"
+	"os"
 
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/embed"
@@ -35,5 +37,10 @@ func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig) *embed.Worker {
 		return nil
 	}
 	client := embed.New(embCfg.BaseURL, embCfg.Model, embCfg.Dim)
-	return embed.NewWorker(embStore, client, embCfg.Model, embCfg.Dim, 0, nil)
+	// A real logger (mirroring cmdEmbed's construction in cmd/omnia/embed.go)
+	// so queue-full drops (Debug) and embed/upsert failures (Warn) actually
+	// surface somewhere instead of vanishing silently — operators need that
+	// signal to know when to run `omnia embed` themselves.
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	return embed.NewWorker(embStore, client, embCfg.Model, embCfg.Dim, 0, logger)
 }
