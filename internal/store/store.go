@@ -516,6 +516,11 @@ type Store struct {
 	db    *sql.DB
 	cfg   Config
 	hooks storeHooks
+
+	// onEmbeddingPulled is an optional hook invoked by applyEmbeddingUpsertTx
+	// for every successfully decoded pulled SyncEntityEmbedding mutation. See
+	// SetEmbeddingPulledHook / EmbeddingPulled (human-like-memory PR5 slice 2).
+	onEmbeddingPulled EmbeddingPulledHook
 }
 
 type execer interface {
@@ -5809,6 +5814,8 @@ func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 	switch mutation.Entity {
 	case SyncEntityRelation:
 		return s.applyRelationUpsertTx(tx, mutation)
+	case SyncEntityEmbedding:
+		return s.applyEmbeddingUpsertTx(tx, mutation)
 	case SyncEntitySession:
 		var payload syncSessionPayload
 		if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
@@ -5917,6 +5924,86 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 		return fmt.Errorf("applyRelationUpsertTx: clear deferred: %w", err)
 	}
 
+	return nil
+}
+
+// EmbeddingPulled is the decoded, validated payload of a pulled
+// SyncEntityEmbedding mutation, handed to an optional hook installed via
+// SetEmbeddingPulledHook. It is a plain struct — not embed.Row — so
+// internal/store never imports internal/embed (see syncEmbeddingPayload doc).
+type EmbeddingPulled struct {
+	SyncID      string
+	Project     string
+	Type        string
+	Model       string
+	Dim         int
+	Vector      []float32
+	ContentHash string
+	UpdatedAt   string
+}
+
+// EmbeddingPulledHook is invoked after a pulled embedding mutation decodes and
+// validates successfully. A nil hook (the default) means this device does not
+// wire pulled vectors anywhere — see applyEmbeddingUpsertTx doc for why that
+// is a correct, intentional default rather than a gap.
+type EmbeddingPulledHook func(EmbeddingPulled)
+
+// SetEmbeddingPulledHook installs hook, called by applyEmbeddingUpsertTx for
+// every successfully decoded pulled embedding mutation. A nil hook restores
+// the no-op default. Not required for correctness — see applyEmbeddingUpsertTx.
+func (s *Store) SetEmbeddingPulledHook(hook EmbeddingPulledHook) { s.onEmbeddingPulled = hook }
+
+// applyEmbeddingUpsertTx handles a pulled mutation with entity=SyncEntityEmbedding
+// and op='upsert'. human-like-memory PR5 slice 2.
+//
+// Unlike relations (whose target table, memory_relations, lives in this same
+// engram.db), a locally computed vector lives in internal/embed's OWN sqlite
+// file — a package this store must never import (architecture-guardrails:
+// store must not couple to the Ollama-dependent embed package, keeping
+// degrade-to-FTS clean; design.md's own architecture decision states this
+// explicitly). So this function only decodes and validates the payload
+// (mirroring applyRelationUpsertTx's step 1 decode / step 1b field
+// validation) and, if a hook is installed, hands it the decoded vector; it
+// never writes to engram.db itself.
+//
+// Each device already recomputes its own vectors locally via Reconcile once
+// the underlying observation syncs (session/observation/prompt entities), so
+// a peer's pushed vector is redundant data on THIS device — pushing it exists
+// to populate cloud_embeddings for cloud-side semantic search (PR5 slice 3),
+// not to replicate vectors between local peers. Decoding without a mandatory
+// write is therefore correct: the no-op default (hook unset) is safe, and
+// idempotency is trivial — decode-and-optionally-notify has no local state to
+// duplicate, so applying the identical mutation any number of times behaves
+// identically every time (this is also guarded upstream: ApplyPulledMutation
+// never re-applies a Seq at or below the target's last_pulled_seq).
+//
+// Decode failures or a missing/malformed vector return ErrApplyDead
+// (non-retryable), matching applyRelationUpsertTx's contract for a
+// permanently malformed payload.
+func (s *Store) applyEmbeddingUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
+	var p syncEmbeddingPayload
+	if err := decodeSyncPayload([]byte(mutation.Payload), &p); err != nil {
+		return fmt.Errorf("%w: decode embedding payload: %v", ErrApplyDead, err)
+	}
+	if strings.TrimSpace(p.SyncID) == "" || len(p.Vector) == 0 {
+		return fmt.Errorf("%w: embedding payload missing required sync_id or vector", ErrApplyDead)
+	}
+	vec, err := decodeSyncVectorFloat32(p.Vector)
+	if err != nil {
+		return fmt.Errorf("%w: embedding payload has a malformed vector: %v", ErrApplyDead, err)
+	}
+	if s.onEmbeddingPulled != nil {
+		s.onEmbeddingPulled(EmbeddingPulled{
+			SyncID:      strings.TrimSpace(p.SyncID),
+			Project:     strings.TrimSpace(p.Project),
+			Type:        strings.TrimSpace(p.Type),
+			Model:       strings.TrimSpace(p.Model),
+			Dim:         p.Dim,
+			Vector:      vec,
+			ContentHash: strings.TrimSpace(p.ContentHash),
+			UpdatedAt:   strings.TrimSpace(p.UpdatedAt),
+		})
+	}
 	return nil
 }
 
