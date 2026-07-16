@@ -834,6 +834,17 @@ func cmdServe(cfg store.Config) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Auto-embed-on-save (human-like-memory PR4): when embeddings are enabled,
+	// run the worker on this shutdown ctx so POST /observations embeds new
+	// memories out-of-band. nil (disabled) leaves the save path byte-for-byte
+	// today's.
+	if appCfg, cfgErr := config.Load(config.DefaultPath()); cfgErr == nil {
+		if worker := buildAutoEmbedWorker(appCfg.Embeddings); worker != nil {
+			worker.Start(ctx)
+			srv.SetAutoEmbed(worker)
+		}
+	}
+
 	// Try to start autosync (opt-in via ENGRAM_CLOUD_AUTOSYNC=1).
 	// BW7: tryStartAutosync returns (status provider, stop func) so the signal
 	// handler can call mgrStop() before os.Exit, giving the manager time to
@@ -1071,6 +1082,13 @@ func cmdMCP(cfg store.Config) {
 	// subcommand's config.Load graceful-degradation convention.
 	if appCfg, cfgErr := config.Load(config.DefaultPath()); cfgErr == nil {
 		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings)
+		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
+		// enabled, run the worker on the same ctx cancelled at shutdown so
+		// mem_save embeds new memories out-of-band. nil when disabled.
+		if worker := buildAutoEmbedWorker(appCfg.Embeddings); worker != nil {
+			worker.Start(ctx)
+			mcpCfg.AutoEmbed = worker
+		}
 	}
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
