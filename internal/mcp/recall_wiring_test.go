@@ -273,3 +273,127 @@ type staticTestError string
 func (e staticTestError) Error() string { return string(e) }
 
 const errOllamaDownForTest = staticTestError("ollama down: connection refused")
+
+// TestHandleSearch_RecallEnabled_SemanticLegScopedByProject is the
+// cross-project isolation regression test for the semantic-leak bug found by
+// adversarial review before PR3 merged to PR4: embed.Store.Search has no
+// project WHERE clause (it ranks across every project in the shared,
+// machine-wide embeddings DB), so a fake embed.Searcher that scores a
+// project-B memory highly must NOT leak it into a project-A mem_search
+// response — while a genuine project-A semantic-only paraphrase (no lexical
+// overlap with the query at all) must still surface, proving the fix filters
+// by project rather than disabling the semantic-only-hit feature entirely.
+func TestHandleSearch_RecallEnabled_SemanticLegScopedByProject(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-proj-a", "proj-a", "/tmp/proj-a"); err != nil {
+		t.Fatalf("create session (proj-a): %v", err)
+	}
+	if err := s.CreateSession("s-proj-b", "proj-b", "/tmp/proj-b"); err != nil {
+		t.Fatalf("create session (proj-b): %v", err)
+	}
+
+	lexicalID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-proj-a",
+		Type:      "bugfix",
+		Title:     "Fix login timeout",
+		Content:   "Fix login timeout under load",
+		Project:   "proj-a",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add lexical observation (proj-a): %v", err)
+	}
+
+	// Legitimate same-project paraphrase: no lexical overlap with the query
+	// "login timeout" at all, so only the semantic leg can surface it — this
+	// must keep working after the fix.
+	paraphraseID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-proj-a",
+		Type:      "bugfix",
+		Title:     "Session drops under heavy traffic",
+		Content:   "Users get disconnected when the server is busy",
+		Project:   "proj-a",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add paraphrase observation (proj-a): %v", err)
+	}
+
+	// Cross-project semantic-only memory: belongs to proj-b, no lexical
+	// overlap with the query, but the fake semantic side scores it highest —
+	// this must NEVER surface in a proj-a search.
+	leakID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-proj-b",
+		Type:      "secret",
+		Title:     "Project B database credentials",
+		Content:   "Rotated the prod database credentials for project B",
+		Project:   "proj-b",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add cross-project observation (proj-b): %v", err)
+	}
+
+	// Sanity: neither semantic-only observation is a lexical match for the
+	// query under proj-a's own scoped lexical search.
+	lexical, err := NewStoreLexicalSearcher(s).Search(context.Background(), "login timeout", recall.LexicalSearchOptions{
+		Project: "proj-a", Scope: "project", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("sanity lexical search: %v", err)
+	}
+	for _, h := range lexical {
+		if h.ID == paraphraseID {
+			t.Fatalf("test setup invalid: paraphrase observation unexpectedly matched lexically")
+		}
+	}
+
+	// The fake semantic searcher simulates the machine-wide, unscoped
+	// embeddings DB: it returns both the legitimate proj-a paraphrase AND the
+	// proj-b leak, ranked with the leak scoring even higher — proving a naive
+	// fix that merely "takes the top hits" would still leak.
+	semantic := fakeEmbedSearcher{hits: []embed.Hit{
+		{ObsID: int(leakID), Score: 0.95},
+		{ObsID: int(paraphraseID), Score: 0.9},
+	}}
+	svc := recall.NewService(NewStoreLexicalSearcher(s), semantic, recall.DefaultFuseParams())
+
+	search := handleSearch(s, MCPConfig{Recall: svc}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":   "login timeout",
+		"project": "proj-a",
+		"scope":   "project",
+		"limit":   10.0,
+	}}}
+	res, err := search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleSearch error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected search error: %s", callResultText(t, res))
+	}
+
+	body := callResultJSON(t, res)
+	gotIDs := searchResultIDs(t, body)
+
+	foundLexical, foundParaphrase, foundLeak := false, false, false
+	for _, id := range gotIDs {
+		switch id {
+		case lexicalID:
+			foundLexical = true
+		case paraphraseID:
+			foundParaphrase = true
+		case leakID:
+			foundLeak = true
+		}
+	}
+	if foundLeak {
+		t.Fatalf("cross-project leak: proj-b memory (id %d) surfaced in proj-a search, got %v", leakID, gotIDs)
+	}
+	if !foundLexical {
+		t.Fatalf("expected lexical match (id %d) in fused results, got %v", lexicalID, gotIDs)
+	}
+	if !foundParaphrase {
+		t.Fatalf("expected same-project semantic-only paraphrase (id %d) to still surface, got %v", paraphraseID, gotIDs)
+	}
+}

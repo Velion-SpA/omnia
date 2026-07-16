@@ -6462,6 +6462,15 @@ func normalizeScope(scope string) string {
 	}
 }
 
+// NormalizeScope applies the same scope-folding rule Search/AddObservation
+// already use internally (normalizeScope): "personal"/"global" pass through,
+// anything else (including "") folds to "project". Exported so wiring layers
+// outside internal/store (e.g. internal/mcp's recall hydration re-check) can
+// mirror Search's scope-matching semantics without duplicating the rule.
+func NormalizeScope(scope string) string {
+	return normalizeScope(scope)
+}
+
 // NormalizeProject applies canonical project name normalization:
 // lowercase + trim whitespace + collapse consecutive hyphens/underscores.
 // Returns the normalized name and a warning message if the name was changed

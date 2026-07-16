@@ -134,7 +134,7 @@ func TestHydrateFusedResults_OrdersAndCapsAndSkipsMissing(t *testing.T) {
 		{ID: ids[1], Score: 0.1},
 	}
 
-	hydrated := hydrateFusedResults(s, fused, 2)
+	hydrated := hydrateFusedResults(s, fused, 2, recallScopeFilter{})
 
 	if len(hydrated) != 2 {
 		t.Fatalf("expected cap at limit=2, got %d results: %#v", len(hydrated), hydrated)
