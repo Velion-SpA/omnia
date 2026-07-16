@@ -27,6 +27,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/velion/omnia/internal/diagnostic"
+	"github.com/velion/omnia/internal/embed"
 	projectpkg "github.com/velion/omnia/internal/project"
 	"github.com/velion/omnia/internal/recall"
 	"github.com/velion/omnia/internal/store"
@@ -67,6 +68,15 @@ type MCPConfig struct {
 	// Built by cmd/omnia/main.go from RecallConfig + EmbeddingsConfig when
 	// recall.enabled is true.
 	Recall *recall.Service
+
+	// AutoEmbed, when non-nil, is the async worker that embeds a memory
+	// out-of-band right after it is saved, so it becomes semantically
+	// searchable within seconds without a manual `omnia embed` run
+	// (human-like-memory PR4). nil (the default) means embeddings are
+	// disabled in config — mem_save enqueues nothing and the save path is
+	// byte-for-byte today's. Enqueue is non-blocking, so the save never waits
+	// on the embedding.
+	AutoEmbed *embed.Worker
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -85,6 +95,39 @@ func currentWorkingDirectory() string {
 		return ""
 	}
 	return cwd
+}
+
+// enqueueAutoEmbed schedules an out-of-band embedding for a just-saved memory
+// so it becomes semantically searchable within seconds, without a manual
+// `omnia embed` run. It is a no-op when the worker is disabled (nil). Enqueue
+// is non-blocking, and a fetch or full-queue miss is intentionally swallowed:
+// the periodic Reconcile backstop re-embeds anything missed, so a save must
+// never fail or slow down because of embedding.
+func enqueueAutoEmbed(cfg MCPConfig, s *store.Store, obsID int64) {
+	if cfg.AutoEmbed == nil {
+		return
+	}
+	obs, err := s.GetObservation(obsID)
+	if err != nil {
+		return
+	}
+	cfg.AutoEmbed.Enqueue(embed.Job{
+		SyncID:    obs.SyncID,
+		ObsID:     int(obs.ID),
+		Project:   strFromPtr(obs.Project),
+		Type:      obs.Type,
+		TopicKey:  strFromPtr(obs.TopicKey),
+		Title:     obs.Title,
+		Content:   obs.Content,
+		UpdatedAt: obs.UpdatedAt,
+	})
+}
+
+func strFromPtr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string) error {
@@ -1384,6 +1427,11 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
 		}
+
+		// Auto-embed the just-saved memory out-of-band (non-blocking): it
+		// becomes semantically searchable within seconds without slowing the
+		// save. No-op when embeddings are disabled.
+		enqueueAutoEmbed(cfg, s, savedID)
 
 		if capturePrompt && activity != nil {
 			if prompt, ok := activity.CurrentPrompt(sessionID, project); ok {
