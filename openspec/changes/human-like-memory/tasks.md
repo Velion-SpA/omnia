@@ -54,16 +54,16 @@ branch, PR2 targets PR1's branch, etc.) — orchestrator to confirm before apply
 
 ## Phase 2: Recall Core (PR 2) — pure, unwired
 
-- [ ] 2.1 [RED] `internal/embed/searcher_test.go`: `Searcher.EmbedQuery`/`Search` delegate correctly to a fake store+client (promoted `localSemantic` contract). [REQ6]
-- [ ] 2.2 [GREEN] `internal/embed/searcher.go` (new): `Searcher` interface + `NewSearcher(store, client)`, promoting `dashboard.localSemantic`.
-- [ ] 2.3 `internal/dashboard/local_datasource.go`: adopt `embed.Searcher`, delete the local duplicate `localSemantic` type. [REQ6]
-- [ ] 2.4 [RED] `internal/recall/recall_test.go`: table-driven `Fuse()` — RRF order (`k=60`), tie-break (both-lists → `updated_at DESC` → `id ASC`), `maxResults` cap, `topic_key` sentinel (-1000) pre-empts. [REQ1]
-- [ ] 2.5 [RED] same file: adaptive floor — sparse-hit widen (baseFloor 0.55), dense-hit tighten (strongFloor 0.65, denseK=5). [REQ3]
-- [ ] 2.6 [GREEN] `internal/recall/recall.go` (new): `FuseParams` + `Fuse(lexical, semantic, params)` pure function; no Ollama/DB import.
-- [ ] 2.7 [RED] `internal/recall/service_test.go`: `Service.Search` degrades to FTS5-only on nil `Searcher`, `EmbedQuery` error, or Ollama-down; zero-FTS5-match returns empty set, not an error. [REQ4]
-- [ ] 2.8 [GREEN] `internal/recall/recall.go` (or `service.go`): `Service{store, searcher, cfg}` composing `store.Search` + `Searcher` + `Fuse`, degrade-safe.
-- [ ] 2.9 [RED] `internal/recall/bilingual_test.go` (Ollama-gated): fixed ES-query→EN-memory and EN-query→ES-memory pairs appear within top-k. [REQ2]
-- [ ] 2.10 [GREEN] N/A (gate passes with embeddings-only per Phase 0); if it fails, stub `recall.bilingual_expansion` (default off) reusing `internal/llm` `AgentRunner` — flagged, deferred unless gate fails.
+- [x] 2.1 [RED] `internal/embed/searcher_test.go`: `Searcher.EmbedQuery`/`Search` delegate correctly to a fake store+client (promoted `localSemantic` contract). [REQ6]
+- [x] 2.2 [GREEN] `internal/embed/searcher.go` (new): `Searcher` interface + `NewSearcher(store, client)`, promoting `dashboard.localSemantic`.
+- [x] 2.3 `internal/dashboard/local_datasource.go`: adopt `embed.Searcher`, delete the local duplicate `localSemantic` type. [REQ6]
+- [x] 2.4 [RED] `internal/recall/recall_test.go`: table-driven `Fuse()` — RRF order (`k=60`), tie-break (both-lists → `updated_at DESC` → `id ASC`), `maxResults` cap, `topic_key` sentinel (-1000) pre-empts. [REQ1]
+- [x] 2.5 [RED] same file: adaptive floor — sparse-hit widen (baseFloor 0.55), dense-hit tighten (strongFloor 0.65, denseK=5). [REQ3]
+- [x] 2.6 [GREEN] `internal/recall/recall.go` (new): `FuseParams` + `Fuse(lexical, semantic, params)` pure function; no Ollama/DB import.
+- [x] 2.7 [RED] `internal/recall/service_test.go`: `Service.Search` degrades to FTS5-only on nil `Searcher`, `EmbedQuery` error, or Ollama-down; zero-FTS5-match returns empty set, not an error. [REQ4]
+- [x] 2.8 [GREEN] `internal/recall/recall.go` (or `service.go`): `Service{store, searcher, cfg}` composing `store.Search` + `Searcher` + `Fuse`, degrade-safe.
+- [x] 2.9 [RED] `internal/recall/bilingual_test.go` (Ollama-gated): fixed ES-query→EN-memory and EN-query→ES-memory pairs appear within top-k. [REQ2]
+- [x] 2.10 [GREEN] N/A (gate passes with embeddings-only per Phase 0); if it fails, stub `recall.bilingual_expansion` (default off) reusing `internal/llm` `AgentRunner` — flagged, deferred unless gate fails.
 
 ## Phase 3: MCP Wiring + Flag (PR 3)
 
