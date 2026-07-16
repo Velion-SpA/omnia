@@ -37,14 +37,30 @@ type Job struct {
 // embedder is isolated — logged and skipped, never crashing the worker or the
 // caller.
 type Worker struct {
-	store  *Store
-	emb    Embedder
-	model  string
-	dim    int
-	queue  chan Job
-	logger *slog.Logger
-	wg     sync.WaitGroup
+	store    *Store
+	emb      Embedder
+	model    string
+	dim      int
+	queue    chan Job
+	logger   *slog.Logger
+	wg       sync.WaitGroup
+	onUpsert UpsertHook
 }
+
+// UpsertHook is invoked after a successful local vector upsert, with the row
+// that was just persisted. It exists so a composition root (e.g. cmd/omnia)
+// can record a sync mutation for cloud propagation (human-like-memory PR5
+// slice 2, cloud semantic parity) without this package importing
+// internal/store or internal/sync — internal/embed only depends on the
+// Ollama-backed Embedder and its own leaf Store (architecture-guardrails:
+// keep plugin/adaptor layers thin; do not hide cross-system coupling inside
+// this leaf package). A nil hook (the default) disables the behavior.
+type UpsertHook func(row Row)
+
+// SetUpsertHook installs hook, called after every successful local upsert
+// performed by this worker's process loop. Safe to call before or after
+// Start; a nil hook restores the no-op default.
+func (w *Worker) SetUpsertHook(hook UpsertHook) { w.onUpsert = hook }
 
 // NewWorker builds an auto-embed worker. A queueSize <= 0 uses the default.
 func NewWorker(store *Store, emb Embedder, model string, dim, queueSize int, logger *slog.Logger) *Worker {
@@ -135,6 +151,10 @@ func (w *Worker) process(ctx context.Context, job Job) {
 		if w.logger != nil {
 			w.logger.Warn("auto-embed upsert failed", "sync_id", job.SyncID, "err", err)
 		}
+		return
+	}
+	if w.onUpsert != nil {
+		w.onUpsert(row)
 	}
 }
 

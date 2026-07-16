@@ -76,6 +76,62 @@ func TestWorker_ProcessEmbedsAndUpserts(t *testing.T) {
 	}
 }
 
+// TestWorker_ProcessInvokesUpsertHookOnSuccess (RED, human-like-memory PR5
+// slice 2) asserts that a successful embed+upsert calls the installed
+// UpsertHook exactly once with the row that was just persisted. This is the
+// seam a composition root uses to record a sync mutation without this
+// package importing internal/store or internal/sync (architecture-guardrails:
+// internal/embed stays a leaf package).
+func TestWorker_ProcessInvokesUpsertHookOnSuccess(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	w := NewWorker(store, &workerStubEmbedder{vec: []float32{1, 0, 0}}, "jina/jina-embeddings-v2-base-es", 3, 0, nil)
+
+	var gotRows []Row
+	w.SetUpsertHook(func(row Row) { gotRows = append(gotRows, row) })
+
+	w.process(ctx, sampleJob())
+
+	if len(gotRows) != 1 {
+		t.Fatalf("expected UpsertHook to be called exactly once; got %d calls", len(gotRows))
+	}
+	if gotRows[0].SyncID != "obs-abc" {
+		t.Errorf("hook row SyncID: want %q, got %q", "obs-abc", gotRows[0].SyncID)
+	}
+	if gotRows[0].Model != "jina/jina-embeddings-v2-base-es" || gotRows[0].Dim != 3 {
+		t.Errorf("hook row model/dim: got model=%q dim=%d", gotRows[0].Model, gotRows[0].Dim)
+	}
+}
+
+// TestWorker_ProcessDoesNotInvokeHookOnEmbedFailure (RED, triangulation)
+// asserts the hook is NOT called when the embed call fails (nothing was
+// upserted, so nothing should be reported as upserted).
+func TestWorker_ProcessDoesNotInvokeHookOnEmbedFailure(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	w := NewWorker(store, &workerStubEmbedder{err: errors.New("ollama down")}, "m", 3, 0, nil)
+
+	called := false
+	w.SetUpsertHook(func(row Row) { called = true })
+
+	w.process(ctx, sampleJob())
+
+	if called {
+		t.Fatal("expected UpsertHook NOT to be called when embed failed")
+	}
+}
+
+// TestWorker_ProcessWithNilHookDoesNotPanic (RED, triangulation) asserts the
+// default (no hook installed) path is safe — the common case for every
+// existing caller/test that never calls SetUpsertHook.
+func TestWorker_ProcessWithNilHookDoesNotPanic(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	w := NewWorker(store, &workerStubEmbedder{vec: []float32{1, 0, 0}}, "m", 3, 0, nil)
+
+	w.process(ctx, sampleJob()) // must not panic with no hook installed
+}
+
 func TestWorker_ProcessEmbedErrorIsolated(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

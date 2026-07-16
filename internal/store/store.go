@@ -9,11 +9,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -231,6 +233,14 @@ const (
 	SyncEntityObservation = "observation"
 	SyncEntityPrompt      = "prompt"
 	SyncEntityRelation    = "relation"
+	// SyncEntityEmbedding carries a locally computed vector (human-like-memory
+	// PR5 slice 2, cloud semantic parity) as an opaque BLOB payload — mirrors
+	// SyncEntityRelation's precedent of a free-text entity needing no new
+	// engram.db DDL. Unlike relation rows (which live in memory_relations,
+	// inside this same package's DB), embeddings live in internal/embed's own
+	// separate sqlite file, which this package must never import (keeps
+	// degrade-to-FTS clean — see design.md "store must not import embed").
+	SyncEntityEmbedding = "embedding"
 
 	SyncOpUpsert = "upsert"
 	SyncOpDelete = "delete"
@@ -430,6 +440,27 @@ type syncRelationPayload struct {
 	Project        string   `json:"project"`
 	CreatedAt      string   `json:"created_at"`
 	UpdatedAt      string   `json:"updated_at"`
+}
+
+// syncEmbeddingPayload is the wire format for a locally computed embedding
+// vector sent over the sync_mutations / cloud_mutations rails (entity =
+// SyncEntityEmbedding, op = 'upsert'). human-like-memory PR5 slice 2.
+//
+// Vector is the SAME little-endian float32 encoding internal/embed.Row and
+// cloudstore.EmbeddingRow use — duplicated here (not imported) so
+// internal/store stays free of the Ollama-dependent embed package, matching
+// the precedent cloudstore/embeddings.go already set for its own encode/decode
+// pair in slice 1. json.Marshal renders a []byte field as base64, which is
+// exactly the "opaque BLOB" shape the design calls for.
+type syncEmbeddingPayload struct {
+	SyncID      string `json:"sync_id"`
+	Project     string `json:"project"`
+	Type        string `json:"type,omitempty"`
+	Model       string `json:"model"`
+	Dim         int    `json:"dim"`
+	Vector      []byte `json:"vector"`
+	ContentHash string `json:"content_hash"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 // ExportData is the full serializable dump of the engram database.
@@ -5693,6 +5724,87 @@ func (s *Store) resolveSessionProjectTx(tx *sql.Tx, sessionID string) (string, e
 	return project, nil
 }
 
+// EmbeddingSyncInput carries the fields needed to record a sync mutation for a
+// locally computed embedding vector (human-like-memory PR5 slice 2). It is a
+// plain struct — not embed.Row — so internal/store never imports
+// internal/embed (mirrors the "store must not import embed" rule that keeps
+// degrade-to-FTS clean, and the same no-cross-import precedent cloudstore set
+// for cloud_embeddings in slice 1).
+type EmbeddingSyncInput struct {
+	SyncID      string
+	Project     string
+	Type        string
+	Model       string
+	Dim         int
+	Vector      []float32
+	ContentHash string
+	UpdatedAt   string
+}
+
+// EnqueueEmbeddingMutation records a sync mutation for a locally computed
+// embedding vector so autosync propagates it toward cloud_embeddings,
+// mirroring how JudgeRelation enqueues relation mutations. It is called from
+// the composition root's embed.Worker upsert hook — internal/embed never
+// imports internal/sync or internal/store directly (architecture-guardrails).
+//
+// Unlike relations (gated on project enrollment — REQ-001), embeddings are
+// unconditionally enqueued, matching how observation/prompt mutations are
+// always enqueued regardless of enrollment.
+func (s *Store) EnqueueEmbeddingMutation(input EmbeddingSyncInput) error {
+	syncID := strings.TrimSpace(input.SyncID)
+	if syncID == "" {
+		return fmt.Errorf("EnqueueEmbeddingMutation: sync_id is required")
+	}
+	if len(input.Vector) == 0 {
+		return fmt.Errorf("EnqueueEmbeddingMutation: vector is required")
+	}
+	blob, err := encodeSyncVectorFloat32(input.Vector)
+	if err != nil {
+		return fmt.Errorf("EnqueueEmbeddingMutation: %w", err)
+	}
+	project, _ := NormalizeProject(strings.TrimSpace(input.Project))
+	payload := syncEmbeddingPayload{
+		SyncID:      syncID,
+		Project:     strings.TrimSpace(project),
+		Type:        strings.TrimSpace(input.Type),
+		Model:       strings.TrimSpace(input.Model),
+		Dim:         input.Dim,
+		Vector:      blob,
+		ContentHash: strings.TrimSpace(input.ContentHash),
+		UpdatedAt:   strings.TrimSpace(input.UpdatedAt),
+	}
+	return s.withTx(func(tx *sql.Tx) error {
+		return s.enqueueSyncMutationTx(tx, SyncEntityEmbedding, syncID, SyncOpUpsert, payload)
+	})
+}
+
+// encodeSyncVectorFloat32 serializes v as little-endian float32 (dim*4 bytes)
+// — the SAME encoding internal/embed.encodeVector and
+// cloudstore.encodeEmbeddingVector use, duplicated here per the no-cross-import
+// precedent (see syncEmbeddingPayload doc).
+func encodeSyncVectorFloat32(v []float32) ([]byte, error) {
+	if len(v) == 0 {
+		return nil, fmt.Errorf("refuse to encode empty vector")
+	}
+	buf := make([]byte, len(v)*4)
+	for i, x := range v {
+		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(x))
+	}
+	return buf, nil
+}
+
+// decodeSyncVectorFloat32 reverses encodeSyncVectorFloat32.
+func decodeSyncVectorFloat32(b []byte) ([]float32, error) {
+	if len(b) == 0 || len(b)%4 != 0 {
+		return nil, fmt.Errorf("bad vector blob length %d", len(b))
+	}
+	out := make([]float32, len(b)/4)
+	for i := range out {
+		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return out, nil
+}
+
 func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 	switch mutation.Entity {
 	case SyncEntityRelation:
@@ -5826,6 +5938,8 @@ func extractProjectFromPayload(payload any) string {
 		}
 		return ""
 	case syncRelationPayload:
+		return p.Project
+	case syncEmbeddingPayload:
 		return p.Project
 	default:
 		// Fallback: marshal to JSON and extract $.project via json.Unmarshal.
