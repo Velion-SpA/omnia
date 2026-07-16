@@ -789,6 +789,26 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 			('Editor', 7),
 			('Member', 1)
 		 ON CONFLICT (name) DO NOTHING`,
+		// cloud_embeddings: server-side vector store for cloud semantic parity
+		// (human-like-memory PR5). Vectors are computed LOCALLY (where Ollama
+		// runs) and synced here as an opaque BLOB — no pgvector dependency
+		// (verified not installed on the homelab Postgres, see design D5).
+		// Scoped by (account_id, project), the same multi-tenant boundary as
+		// cloud_memberships/cloud_devices; SearchEmbeddings only ever loads
+		// rows matching that scope.
+		`CREATE TABLE IF NOT EXISTS cloud_embeddings (
+			account_id   TEXT NOT NULL,
+			project      TEXT NOT NULL,
+			sync_id      TEXT NOT NULL,
+			type         TEXT NOT NULL DEFAULT '',
+			vector       BYTEA NOT NULL,
+			model        TEXT NOT NULL,
+			dim          INT NOT NULL,
+			content_hash TEXT NOT NULL DEFAULT '',
+			updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (account_id, project, sync_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_cloud_embeddings_scope ON cloud_embeddings(account_id, project)`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {
