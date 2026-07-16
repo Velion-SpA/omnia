@@ -34,6 +34,7 @@ import (
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/datadir"
 	"github.com/velion/omnia/internal/diagnostic"
+	"github.com/velion/omnia/internal/embed"
 	"github.com/velion/omnia/internal/envx"
 	"github.com/velion/omnia/internal/mcp"
 	"github.com/velion/omnia/internal/obsidian"
@@ -837,11 +838,14 @@ func cmdServe(cfg store.Config) {
 	// Auto-embed-on-save (human-like-memory PR4): when embeddings are enabled,
 	// run the worker on this shutdown ctx so POST /observations embeds new
 	// memories out-of-band. nil (disabled) leaves the save path byte-for-byte
-	// today's.
+	// today's. Hoisted to function scope so the SIGINT/SIGTERM handler below
+	// can Stop() it (graceful drain) before the process exits.
+	var autoEmbedWorker *embed.Worker
 	if appCfg, cfgErr := config.Load(config.DefaultPath()); cfgErr == nil {
 		if worker := buildAutoEmbedWorker(appCfg.Embeddings); worker != nil {
 			worker.Start(ctx)
 			srv.SetAutoEmbed(worker)
+			autoEmbedWorker = worker
 		}
 	}
 
@@ -866,6 +870,12 @@ func cmdServe(cfg store.Config) {
 		cancel()
 		if mgrStop != nil {
 			mgrStop() // BW7: wait for Manager to release lease before exiting
+		}
+		// Drain the auto-embed worker (human-like-memory PR4 review fix):
+		// ctx is already cancelled above, so Stop() waits for the in-flight
+		// job (if any) to finish rather than letting os.Exit kill it mid-embed.
+		if autoEmbedWorker != nil {
+			autoEmbedWorker.Stop()
 		}
 		exitFunc(0)
 	}()
@@ -1061,6 +1071,10 @@ func cmdMCP(cfg store.Config) {
 	// startup fatal when cloud config is missing or invalid.
 	ctx, cancel := context.WithCancel(context.Background())
 	_, mgrStop := tryStartAutosync(ctx, s, cfg)
+	// Hoisted to function scope (human-like-memory PR4 review fix) so
+	// stopAutosync below can Stop() it — draining the worker's in-flight
+	// job instead of leaving it to be killed mid-embed by process exit.
+	var autoEmbedWorker *embed.Worker
 	autosyncStopped := false
 	stopAutosync := func() {
 		if autosyncStopped {
@@ -1070,6 +1084,9 @@ func cmdMCP(cfg store.Config) {
 		cancel()
 		if mgrStop != nil {
 			mgrStop()
+		}
+		if autoEmbedWorker != nil {
+			autoEmbedWorker.Stop()
 		}
 	}
 	defer stopAutosync()
@@ -1088,6 +1105,7 @@ func cmdMCP(cfg store.Config) {
 		if worker := buildAutoEmbedWorker(appCfg.Embeddings); worker != nil {
 			worker.Start(ctx)
 			mcpCfg.AutoEmbed = worker
+			autoEmbedWorker = worker
 		}
 	}
 	allowlist := resolveMCPTools(toolsFilter)
