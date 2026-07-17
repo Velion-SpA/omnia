@@ -4283,11 +4283,14 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 					return fmt.Errorf("ApplyPulledMutation: write deferred row: %w", deferErr)
 				}
 				// Fall through to advance the cursor (ACK the seq).
-			} else if mutation.Entity == SyncEntityRelation && errors.Is(applyErr, ErrApplyDead) {
+			} else if (mutation.Entity == SyncEntityRelation || mutation.Entity == SyncEntityEmbedding) && errors.Is(applyErr, ErrApplyDead) {
 				// Payload is permanently undecodable — write directly as dead and ACK.
 				// There is no point retrying; a malformed payload will never become valid.
-				log.Printf("[store] ApplyPulledMutation: relation payload dead seq=%d entity_key=%s err=%v — marking dead",
-					mutation.Seq, mutation.EntityKey, applyErr)
+				// Embeddings have no FK-miss equivalent (no target table in this
+				// db to reference — see applyEmbeddingUpsertTx's doc), so only
+				// this dead-payload branch applies to SyncEntityEmbedding.
+				log.Printf("[store] ApplyPulledMutation: %s payload dead seq=%d entity_key=%s err=%v — marking dead",
+					mutation.Entity, mutation.Seq, mutation.EntityKey, applyErr)
 				if _, deferErr := s.execHook(tx, `
 					INSERT INTO sync_apply_deferred
 						(sync_id, entity, payload, apply_status, retry_count, first_seen_at)

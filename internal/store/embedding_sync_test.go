@@ -281,3 +281,91 @@ func TestApplyPulledEmbedding_MissingVectorReturnsErrApplyDead(t *testing.T) {
 		t.Errorf("expected ErrApplyDead; got %v", err)
 	}
 }
+
+// ─── PR5 slice 2 bugfix — pull cursor must not wedge on a dead embedding ────
+//
+// CRITICAL (found by adversarial review): ApplyPulledMutation (the PUBLIC
+// entry point the autosync pull loop actually calls — see
+// internal/cloud/autosync/manager.go's pullMutations) only special-cased
+// SyncEntityRelation in its ErrApplyDead branch. A malformed
+// SyncEntityEmbedding mutation therefore fell into the generic `else` branch,
+// propagated applyErr all the way up, made withTx roll back, and left
+// last_pulled_seq un-advanced — permanently wedging that device's pull cursor
+// behind the bad row (every entity type queued after it in the seq-ordered
+// stream would be retried forever). This test drives the malformed payload
+// through the PUBLIC ApplyPulledMutation (NOT applyEmbeddingMutation /
+// applyPulledMutationTx directly, which bypasses the classification switch
+// entirely and is why the pre-existing Test*ReturnsErrApplyDead tests above
+// did not catch this) and asserts the cursor ADVANCES — mirrors
+// TestApplyPulledRelation_MalformedPayload_StraightToDead exactly, adapted to
+// entity=embedding.
+func TestApplyPulledEmbedding_MalformedPayload_StraightToDead(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{
+			name:    "invalid JSON",
+			payload: "not valid json",
+		},
+		{
+			name:    "missing sync_id and vector",
+			payload: `{"project":"proj-emb-malformed"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.ensureSyncState(DefaultSyncTargetKey); err != nil {
+				t.Fatalf("ensureSyncState: %v", err)
+			}
+
+			embSyncID := newSyncID("emb-malformed")
+			m := SyncMutation{
+				Entity:    SyncEntityEmbedding,
+				EntityKey: embSyncID,
+				Op:        SyncOpUpsert,
+				Payload:   tc.payload,
+				Source:    SyncSourceRemote,
+				Seq:       7,
+				TargetKey: DefaultSyncTargetKey,
+			}
+
+			// ApplyPulledMutation must return nil — malformed embedding
+			// payloads are ACK-ed (cursor advances) but written as dead to
+			// sync_apply_deferred, exactly like relations. Before the fix,
+			// this returned the raw ErrApplyDead-wrapped error and halted
+			// the pull loop instead.
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, m); err != nil {
+				t.Fatalf("ApplyPulledMutation: expected nil for dead embedding payload (cursor should advance), got %v", err)
+			}
+
+			// The row must be in sync_apply_deferred with apply_status='dead'.
+			var applyStatus string
+			var retryCount int
+			if err := s.db.QueryRow(
+				`SELECT apply_status, retry_count FROM sync_apply_deferred WHERE sync_id = ?`, embSyncID,
+			).Scan(&applyStatus, &retryCount); err != nil {
+				t.Fatalf("scan deferred row: %v", err)
+			}
+			if applyStatus != "dead" {
+				t.Errorf("apply_status: want %q, got %q", "dead", applyStatus)
+			}
+			if retryCount != 0 {
+				t.Errorf("retry_count: want 0, got %d", retryCount)
+			}
+
+			// The cursor MUST advance to this mutation's seq — this is the
+			// actual regression: before the fix, last_pulled_seq stayed at 0
+			// because the transaction rolled back on the propagated error.
+			state, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil {
+				t.Fatalf("GetSyncState: %v", err)
+			}
+			if state.LastPulledSeq != m.Seq {
+				t.Errorf("cursor did not advance: want last_pulled_seq=%d, got %d — a dead embedding mutation would wedge the pull cursor for every entity type behind it", m.Seq, state.LastPulledSeq)
+			}
+		})
+	}
+}
