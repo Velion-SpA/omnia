@@ -15,6 +15,7 @@ import (
 	"github.com/velion/omnia/internal/cloud/chunkcodec"
 	"github.com/velion/omnia/internal/cloud/cloudstore"
 	"github.com/velion/omnia/internal/cloud/constants"
+	"github.com/velion/omnia/internal/embed"
 	engramproject "github.com/velion/omnia/internal/project"
 	"github.com/velion/omnia/internal/store"
 	engramsync "github.com/velion/omnia/internal/sync"
@@ -77,6 +78,15 @@ type CloudServer struct {
 	maxPushBodyBytes   int64
 	mux                *http.ServeMux
 	listenAndServe     func(addr string, handler http.Handler) error
+
+	// cloudSemanticEnabled/cloudSemanticEmbedder wire cloud semantic parity
+	// (design D5, PR5 slice 3) into the mounted dashboard's clouddash.Source.
+	// Disabled by default (D7 rollback guarantee, cloud side); embedder may
+	// be nil even when enabled (no reachable Ollama endpoint configured for
+	// the cloud host) — see clouddash.WithCloudSemantic for the degrade
+	// contract.
+	cloudSemanticEnabled  bool
+	cloudSemanticEmbedder embed.Embedder
 }
 
 const defaultHost = "127.0.0.1"
@@ -122,6 +132,18 @@ func WithMaxPushBodyBytes(limit int64) Option {
 		if limit > 0 {
 			s.maxPushBodyBytes = limit
 		}
+	}
+}
+
+// WithCloudSemantic enables cloud semantic parity (design D5, PR5 slice 3)
+// on the mounted dashboard. embedder may be nil: interactive query embedding
+// then degrades cleanly while corpus-side search over vectors already
+// synced in from devices that DO run Ollama still works for any caller that
+// supplies its own query vector (see clouddash.WithCloudSemantic).
+func WithCloudSemantic(enabled bool, embedder embed.Embedder) Option {
+	return func(s *CloudServer) {
+		s.cloudSemanticEnabled = enabled
+		s.cloudSemanticEmbedder = embedder
 	}
 }
 

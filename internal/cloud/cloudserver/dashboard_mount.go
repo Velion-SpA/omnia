@@ -33,7 +33,7 @@ const (
 // dashboard renders an empty—but fully functional—shell.
 func (s *CloudServer) dashboardSource() *clouddash.Source {
 	if store, ok := s.store.(clouddash.CloudStore); ok {
-		return clouddash.New(store)
+		return clouddash.New(store, clouddash.WithCloudSemantic(s.cloudSemanticEnabled, s.cloudSemanticEmbedder))
 	}
 	return clouddash.New(emptyCloudStore{})
 }
@@ -100,9 +100,17 @@ func (s *CloudServer) dashboardGate(dashHandler http.Handler) http.Handler {
 
 		// Inject the per-request visibility scope (operator → all, account → its
 		// memberships). The cloud data source reads this from the context and an
-		// account can never observe another account's memories.
+		// account can never observe another account's memories. claims also
+		// carries the account_id cloud semantic search scopes cloud_embeddings
+		// by (PR5 slice 3) — "" for the operator/legacy-no-RBAC path, exactly
+		// mirroring materializeEmbeddingMutations' own account resolution.
 		projects, all := s.dashboardVisibleProjects(r)
-		ctx := clouddash.WithScope(r.Context(), clouddash.NewScope(all, projects))
+		claims, _ := s.dashboardSessionClaims(r)
+		accountID := ""
+		if claims != nil {
+			accountID = claims.AccountID
+		}
+		ctx := clouddash.WithScope(r.Context(), clouddash.NewScope(all, projects, accountID))
 		// Operator sessions additionally get the Admin nav entry on every dashboard
 		// page (OBL-13). The flag is set ONLY for operators and ONLY on the cloud
 		// surface, so the local dashboard never grows an Admin section.
@@ -114,7 +122,7 @@ func (s *CloudServer) dashboardGate(dashHandler http.Handler) http.Handler {
 		// nil for the bare operator-token path (OMNIA_CLOUD_ADMIN / legacy sync
 		// bearer) since there's no account username to show there; the Admin pages
 		// keep their own hardcoded "operator" label for that case (adminLayoutProps).
-		if claims, _ := s.dashboardSessionClaims(r); claims != nil && strings.TrimSpace(claims.Username) != "" {
+		if claims != nil && strings.TrimSpace(claims.Username) != "" {
 			ctx = dashboard.WithUserIdentity(ctx, claims.Username, dashboardLogoutPath)
 		}
 		dashHandler.ServeHTTP(w, r.WithContext(ctx))
