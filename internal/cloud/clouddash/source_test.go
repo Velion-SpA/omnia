@@ -2,6 +2,7 @@ package clouddash
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -160,9 +161,16 @@ type embeddingFixture struct {
 type fakeEmbeddingsCloudStore struct {
 	fakeCloudStore
 	fixtures []embeddingFixture
+	// searchErr, when set, is returned unconditionally by SearchEmbeddings —
+	// simulates the embeddings backend (e.g. Postgres) erroring mid-request,
+	// distinct from the "no fixture for this account/project" empty case.
+	searchErr error
 }
 
 func (f fakeEmbeddingsCloudStore) SearchEmbeddings(_ context.Context, accountID, project string, _ []float32, k int) ([]cloudstore.EmbeddingHit, error) {
+	if f.searchErr != nil {
+		return nil, f.searchErr
+	}
 	for _, fx := range f.fixtures {
 		if fx.accountID == accountID && fx.project == project {
 			hits := fx.hits
@@ -182,9 +190,16 @@ func (f fakeEmbeddingsCloudStore) SearchEmbeddings(_ context.Context, accountID,
 // zero vector.
 type fakeEmbedder struct {
 	vectors map[string][]float32
+	// err, when set, is returned unconditionally by Embed — used to simulate a
+	// down/failing embedder mid-request (e.g. Ollama unreachable), distinct
+	// from the "no fixture vector" test-setup-bug case below.
+	err error
 }
 
 func (f fakeEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	if v, ok := f.vectors[text]; ok {
 		return v, nil
 	}
@@ -288,6 +303,70 @@ func TestSearchDegradesWithoutEmbedding(t *testing.T) {
 	}
 	if !found["a1"] || !found["a2"] {
 		t.Fatalf("both the embedded and unembedded-but-synced memory must surface via the lexical leg, got %+v", results)
+	}
+}
+
+// TestCloudSearch_EmbedQueryError_DegradesToLexicalOnly proves that when the
+// configured embedder ERRORS mid-request (e.g. an unreachable Ollama on the
+// cloud host), cloudRecords.Search still returns the lexical/substring
+// results instead of propagating the error or returning empty — mirroring
+// internal/recall.Service's TestService_Search_EmbedQueryError_DegradesToLexicalOnly
+// degrade contract on the cloud side. Existing coverage only proved the "row
+// never embedded" gap (TestSearchDegradesWithoutEmbedding); this proves the
+// embedder-failure gap. [cloud REQ4]
+func TestCloudSearch_EmbedQueryError_DegradesToLexicalOnly(t *testing.T) {
+	store := fakeEmbeddingsCloudStore{
+		fakeCloudStore: fakeCloudStore{
+			projects: []cloudstore.DashboardProjectRow{{Project: "alpha", Observations: 1}},
+			obs: []cloudstore.DashboardObservationRow{
+				{Project: "alpha", SessionID: "s-a", SyncID: "a1", Type: "decision", Title: "Deploy runbook", Content: "steps to deploy the service", CreatedAt: "2026-01-01 00:00:00"},
+			},
+		},
+		// A fixture exists, but the embedder failing must short-circuit before
+		// SearchEmbeddings is ever consulted — the lexical leg must carry the
+		// whole result on its own.
+		fixtures: []embeddingFixture{
+			{accountID: "acct-a", project: "alpha", hits: []cloudstore.EmbeddingHit{{SyncID: "a1", Score: 0.9}}},
+		},
+	}
+	src := New(store, WithCloudSemantic(true, fakeEmbedder{err: errors.New("ollama unreachable")}))
+	ctx := WithScope(context.Background(), NewScope(false, []string{"alpha"}, "acct-a"))
+
+	results, err := src.Records().Search(ctx, "deploy", "", 10)
+	if err != nil {
+		t.Fatalf("Search: expected no error (degrade to lexical-only), got %v", err)
+	}
+	if len(results) != 1 || results[0].SyncID != "a1" {
+		t.Fatalf("expected the lexical match to surface despite the embedder failing, got %+v", results)
+	}
+}
+
+// TestCloudSearch_SearchEmbeddingsError_DegradesToLexicalOnly proves that when
+// SearchEmbeddings itself ERRORS mid-request (e.g. the Postgres embeddings
+// backend is down or the query times out), cloudRecords.Search still returns
+// the lexical/substring results — cloudSemanticIndex.Search treats a
+// per-project SearchEmbeddings error as "no hits for that project", never a
+// hard failure (source.go's Search: "one bad/unreachable project must not
+// fail semantic search for every other visible project"). [cloud REQ4]
+func TestCloudSearch_SearchEmbeddingsError_DegradesToLexicalOnly(t *testing.T) {
+	store := fakeEmbeddingsCloudStore{
+		fakeCloudStore: fakeCloudStore{
+			projects: []cloudstore.DashboardProjectRow{{Project: "alpha", Observations: 1}},
+			obs: []cloudstore.DashboardObservationRow{
+				{Project: "alpha", SessionID: "s-a", SyncID: "a1", Type: "decision", Title: "Deploy runbook", Content: "steps to deploy the service", CreatedAt: "2026-01-01 00:00:00"},
+			},
+		},
+		searchErr: errors.New("cloud_embeddings query failed"),
+	}
+	src := New(store, WithCloudSemantic(true, fakeEmbedder{vectors: map[string][]float32{"deploy": {0.1, 0.2}}}))
+	ctx := WithScope(context.Background(), NewScope(false, []string{"alpha"}, "acct-a"))
+
+	results, err := src.Records().Search(ctx, "deploy", "", 10)
+	if err != nil {
+		t.Fatalf("Search: expected no error (degrade to lexical-only), got %v", err)
+	}
+	if len(results) != 1 || results[0].SyncID != "a1" {
+		t.Fatalf("expected the lexical match to surface despite SearchEmbeddings failing, got %+v", results)
 	}
 }
 
