@@ -7,6 +7,7 @@ import (
 
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/embed"
+	"github.com/velion/omnia/internal/store"
 )
 
 // buildAutoEmbedWorker constructs the async auto-embed worker wired into
@@ -24,7 +25,15 @@ import (
 // The caller must Start the returned worker on a context cancelled at
 // shutdown, then pass it into the save paths. A nil return is safe both to
 // Start-guard on and to pass along.
-func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig) *embed.Worker {
+//
+// s (the engram Store) is used to wire the human-like-memory PR5 slice 2
+// cloud-parity seam: after every successful local vector upsert, the worker
+// records a SyncEntityEmbedding sync mutation via s.EnqueueEmbeddingMutation,
+// exactly as JudgeRelation does for relations. internal/embed itself never
+// imports internal/store — this composition root supplies the hook
+// (architecture-guardrails: keep embed a leaf package). A nil s (not expected
+// from real callers, but defensive) simply skips wiring the hook.
+func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig, s *store.Store) *embed.Worker {
 	if !embCfg.Enabled {
 		return nil
 	}
@@ -42,5 +51,39 @@ func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig) *embed.Worker {
 	// surface somewhere instead of vanishing silently — operators need that
 	// signal to know when to run `omnia embed` themselves.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	return embed.NewWorker(embStore, client, embCfg.Model, embCfg.Dim, 0, logger)
+	worker := embed.NewWorker(embStore, client, embCfg.Model, embCfg.Dim, 0, logger)
+	if s != nil {
+		worker.SetUpsertHook(buildEmbeddingSyncHook(s, logger))
+	}
+	return worker
+}
+
+// buildEmbeddingSyncHook returns an embed.UpsertHook that records a
+// SyncEntityEmbedding sync mutation for every successfully upserted row via
+// s.EnqueueEmbeddingMutation, exactly as JudgeRelation does for relations
+// (human-like-memory PR5 slice 2, cloud semantic parity). Extracted as its
+// own function so it can be exercised directly in tests without depending on
+// a real Ollama HTTP round trip.
+func buildEmbeddingSyncHook(s *store.Store, logger *slog.Logger) embed.UpsertHook {
+	return func(row embed.Row) {
+		if err := s.EnqueueEmbeddingMutation(store.EmbeddingSyncInput{
+			SyncID:      row.SyncID,
+			Project:     row.Project,
+			Type:        row.Type,
+			Model:       row.Model,
+			Dim:         row.Dim,
+			Vector:      row.Vector,
+			ContentHash: row.ContentHash,
+			UpdatedAt:   row.UpdatedAt,
+		}); err != nil {
+			// Never fail the embed on a sync-queue problem — cloud parity is
+			// a soft, additive concern (mirrors the fail-closed philosophy
+			// above): the vector is already searchable locally either way,
+			// and the next successful upsert for this sync_id (or
+			// Reconcile's next pass) will retry.
+			if logger != nil {
+				logger.Warn("auto-embed: enqueue cloud sync mutation failed", "sync_id", row.SyncID, "err", err)
+			}
+		}
+	}
 }
