@@ -86,18 +86,18 @@ branch, PR2 targets PR1's branch, etc.) — orchestrator to confirm before apply
 
 ## Phase 5: Cloud Semantic Parity (PR 5)
 
-- [ ] 5.1 [RED] `internal/cloud/cloudstore/embeddings_test.go`: upsert + brute-force cosine search round trip (test Postgres fixture) — top-k order, dim-mismatch skip, project scoping. [cloud REQ1]
-- [ ] 5.2 [GREEN] `internal/cloud/cloudstore/embeddings.go` (new): `cloud_embeddings(sync_id PK, project, model, dim, vector BLOB, content_hash, updated_at)` + `UpsertEmbedding` + `SearchEmbeddings(project, vec, k)` (reuse `decodeVector`/`dot`, CGO-free).
-- [ ] 5.3 [GREEN] `internal/cloud/cloudstore/cloudstore.go` `migrate()`: add `CREATE TABLE IF NOT EXISTS cloud_embeddings` to the DDL slice.
-- [ ] 5.4 [RED] `internal/sync` test: `SyncEntityEmbedding` push/pull round-trip (opaque BLOB payload, idempotent apply) — mirrors `SyncEntityRelation` precedent.
-- [ ] 5.5 [GREEN] `internal/store/store.go`: add `SyncEntityEmbedding` constant near `SyncEntityRelation`; `internal/sync/sync.go`: push/pull case handling; `embed.Worker` emits the mutation on upsert.
-- [ ] 5.6 [RED] `internal/cloud/clouddash/source_test.go`: `TestSemanticAvailable` (`Semantic()` returns a real index, not `(nil,false)`); `TestSemanticScopeIsolation` (out-of-scope project excluded despite high score); `TestSearchDegradesWithoutEmbedding` (unembedded-but-synced memory still returned lexically). [cloud REQ1, REQ3, REQ4]
-- [ ] 5.7 [GREEN] `internal/cloud/clouddash/source.go`: `Semantic()` returns a `cloudstore`-backed `dashboard.SemanticIndex`, scoped by `scopeFrom(ctx)`/`CanView`; fuse cloud lexical (`cloudRecords.Search`) + cloud semantic via `recall.Fuse`.
-- [ ] 5.8 [RED] same file: ES query returns EN-authored synced+embedded memory (cloud bilingual parity). [cloud REQ2]
-- [ ] 5.9 [GREEN] Covered by 5.7 wiring — verification-only, no new prod code.
+- [x] 5.1 [RED] `internal/cloud/cloudstore/embeddings_test.go`: upsert + brute-force cosine search round trip (test Postgres fixture) — top-k order, dim-mismatch skip, project scoping. [cloud REQ1]
+- [x] 5.2 [GREEN] `internal/cloud/cloudstore/embeddings.go` (new): `cloud_embeddings(account_id, project, sync_id, type, vector BYTEA, model, dim, content_hash, updated_at)` + `UpsertEmbedding` + `SearchEmbeddings(accountID, project, vec, k)` (reuses the same little-endian float32 encode/decode + dot-product cosine convention as `internal/embed`, duplicated locally — cloudstore does not import `internal/embed`). Scoped by (account_id, project), not project alone — matches cloud_memberships/cloud_devices.
+- [x] 5.3 [GREEN] `internal/cloud/cloudstore/cloudstore.go` `migrate()`: add `CREATE TABLE IF NOT EXISTS cloud_embeddings` + scoped index to the DDL slice.
+- [x] 5.4 [RED] `internal/sync` test: `SyncEntityEmbedding` push/pull round-trip (opaque BLOB payload, idempotent apply) — mirrors `SyncEntityRelation` precedent.
+- [x] 5.5 [GREEN] `internal/store/store.go`: add `SyncEntityEmbedding` constant near `SyncEntityRelation`; `internal/sync/sync.go`: push/pull case handling; `embed.Worker` emits the mutation on upsert. Also wired the server-side apply (`internal/cloud/cloudserver`) so a pushed embedding mutation materializes into `cloud_embeddings` via `cloudstore.UpsertEmbedding` under RBAC account scope.
+- [x] 5.6 [RED] `internal/cloud/clouddash/source_test.go`: `TestSemanticAvailable` (`Semantic()` returns a real index, not `(nil,false)`); `TestSemanticScopeIsolation` (out-of-scope project excluded despite high score); `TestSearchDegradesWithoutEmbedding` (unembedded-but-synced memory still returned lexically). [cloud REQ1, REQ3, REQ4]
+- [x] 5.7 [GREEN] `internal/cloud/clouddash/source.go`: `Semantic()` returns a `cloudstore`-backed `dashboard.SemanticIndex`, scoped by `scopeFrom(ctx)`/`CanView`; fuse cloud lexical (`cloudRecords.Search`) + cloud semantic via `recall.Fuse`. Gated behind a new `cloud_semantic.enabled` flag (`internal/cloud/config.go` `Config.CloudSemanticEnabled` + `OMNIA_CLOUD_SEMANTIC_ENABLED`, wired through `cloudserver.WithCloudSemantic` and `cmd/omnia/cloud.go`'s `newCloudRuntime`). Query embedding uses an OPTIONAL Ollama endpoint (`OMNIA_CLOUD_SEMANTIC_EMBED_BASE_URL/MODEL/DIM`, empty by default since the cloud has no Ollama instance) — corpus-side search over already-synced vectors works regardless.
+- [x] 5.8 [RED] same file: ES query returns EN-authored synced+embedded memory (cloud bilingual parity). [cloud REQ2] — `TestBilingualCloudSemanticParity`.
+- [x] 5.9 [GREEN] Covered by 5.7 wiring — verification-only, no new prod code.
 
 ## Phase 6: Cleanup / Full-Suite Verification (tail of PR 5)
 
-- [ ] 6.1 Update config docs (`config.yaml` example / README config section) with `recall:` block and new `embeddings.model` default.
-- [ ] 6.2 Run `go test ./...` and `go test -cover ./...`; report per-package coverage for `internal/recall`, `internal/embed`, `internal/cloud/cloudstore`, `internal/cloud/clouddash`, `internal/mcp`.
-- [ ] 6.3 Confirm rollback: `recall.enabled=false` and `cloud_semantic.enabled=false` both reproduce pre-change behavior byte-for-byte (regression pins from 3.3 and 5.6 stay green).
+- [x] 6.1 Update config docs (`config.yaml` example / README config section) with `recall:` block and new `embeddings.model` default. Also documented the new `cloud_semantic.*` env vars (README "Cloud semantic parity" section).
+- [x] 6.2 Run `go test ./...` and `go test -cover ./...`; report per-package coverage for `internal/recall`, `internal/embed`, `internal/cloud/cloudstore`, `internal/cloud/clouddash`, `internal/mcp`.
+- [x] 6.3 Confirm rollback: `recall.enabled=false` and `cloud_semantic.enabled=false` both reproduce pre-change behavior byte-for-byte (regression pins from 3.3 and 5.6 stay green) — `TestCloudSemanticDisabledReproducesSubstringSearch` added for the cloud side.

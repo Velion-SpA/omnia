@@ -103,6 +103,18 @@ See [docs/METADATA.md](docs/METADATA.md) for the full field reference and versio
 | `sources.discord.enabled` | `false` | Enable Discord ingestion |
 | `sources.discord.channels` | `[]` | List of `{id, name, guild}` |
 | `backfill_days` | `30` | Days to look back on first run |
+| `embeddings.enabled` | `false` | Enable Omnia's own local semantic-search index |
+| `embeddings.base_url` | `http://localhost:11434` | Ollama base URL |
+| `embeddings.model` | `jina/jina-embeddings-v2-base-es` | Embedding model (also `bge-m3`) |
+| `embeddings.dim` | `768` | Embedding dimension (must match the model) |
+| `recall.enabled` | `false` | Enable hybrid (lexical+semantic) recall fusion for `mem_search` |
+| `recall.rrf_k` | `60` | Reciprocal-rank-fusion `k` constant |
+| `recall.dense_k` | `5` | "Many strong hits" threshold for the adaptive relevance floor |
+| `recall.strong_floor` | `0.65` | Cosine floor once `dense_k` strong hits are present |
+| `recall.base_floor` | `0.55` | Cosine floor otherwise (widen when hits are sparse) |
+| `recall.max_results` | `50` | Cap on the final fused result count |
+
+Both `embeddings` and `recall` default to disabled: off reproduces today's FTS5-only `mem_search` path byte-for-byte, so turning them on is a pure config flip with zero `engram.db` migration.
 
 ## Omnia Cloud (optional)
 
@@ -123,6 +135,19 @@ omnia cloud serve
 
 Cloud env vars: `ENGRAM_CLOUD_TOKEN` (bearer token), `ENGRAM_JWT_SECRET` (required in auth mode), `ENGRAM_CLOUD_ADMIN` (optional admin token).
 Dashboard routes: `/dashboard/login`, `/dashboard/contributors`.
+
+### Cloud semantic parity (optional)
+
+The cloud dashboard's search matches the local hybrid (lexical+semantic) recall quality once cloud semantic parity is enabled. Disabled by default: off reproduces the cloud dashboard's original substring-only search byte-for-byte — zero migration risk, since `cloud_embeddings` is an additive-only table.
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `OMNIA_CLOUD_SEMANTIC_ENABLED` | `false` | Enable cloud semantic search (fuses substring + `cloud_embeddings` cosine hits via `recall.Fuse`) |
+| `OMNIA_CLOUD_SEMANTIC_EMBED_BASE_URL` | `""` | OPTIONAL Ollama base URL for embedding interactive dashboard search queries. The cloud has no Ollama instance by default; set this only when one is reachable from the cloud host (e.g. the same homelab LAN). Empty disables interactive query embedding cleanly — vectors already synced in from devices that DO run Ollama stay searchable via any caller that supplies its own query vector. |
+| `OMNIA_CLOUD_SEMANTIC_EMBED_MODEL` | `jina/jina-embeddings-v2-base-es` | Query embedding model (mirrors `embeddings.model`'s default) |
+| `OMNIA_CLOUD_SEMANTIC_EMBED_DIM` | `768` | Query embedding dimension (must match the model and the vectors devices sync in) |
+
+Every `OMNIA_CLOUD_*` var also accepts its legacy `ENGRAM_CLOUD_*` name.
 
 ## Architecture
 
