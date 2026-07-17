@@ -2,6 +2,7 @@ package clouddash
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"sort"
@@ -168,13 +169,16 @@ func (c cloudSemanticIndex) Search(ctx context.Context, vec []float32, k int) ([
 	return out, nil
 }
 
-// Graph is a deliberate no-op: design D5 covers SEARCH parity only, not the
-// k-NN similarity graph. Returning empty (not an error) matches
-// SemanticIndex's degrade-safe contract — the graph page renders with zero
-// nodes instead of the prior "unavailable" banner, a disclosed, minor UX
-// tradeoff, never fabricated data.
+// Graph is deliberately unsupported: design D5 covers SEARCH parity only, not
+// the k-NN similarity graph. It MUST return a non-nil error (never a silent
+// empty result): internal/dashboard's handleGraph takes its honest
+// "Available: false" branch only when Semantic() is unavailable OR Graph()
+// errors — buildGraphView unconditionally sets Available: true on any
+// non-error return, even zero nodes. A silent (nil, nil, nil) would render
+// the cloud graph page as a false "0 memories" state instead of the honest
+// "graph unsupported over cloud semantic" banner.
 func (c cloudSemanticIndex) Graph(k int, minScore float32) ([]embed.GraphNode, []embed.GraphEdge, error) {
-	return nil, nil, nil
+	return nil, nil, errors.New("clouddash: knowledge graph is not supported over cloud semantic search (design D5 scopes cloud parity to search only)")
 }
 
 // Mutations is unavailable: the cloud dashboard is a read-only view over

@@ -318,6 +318,36 @@ func TestBilingualCloudSemanticParity(t *testing.T) {
 	}
 }
 
+// TestCloudGraphReportsUnavailableNotEmpty proves cloudSemanticIndex.Graph()
+// returns a non-nil error rather than silently fabricating an empty result
+// when cloud semantic parity is enabled — design D5 explicitly scopes cloud
+// parity to SEARCH only, never the k-NN similarity graph. This matters
+// because internal/dashboard's handleGraph only takes its honest
+// "Available: false" branch when Semantic() is unavailable OR Graph()
+// errors; buildGraphView unconditionally sets Available: true on ANY
+// non-error return, including zero nodes. Before this fix Graph() returned
+// (nil, nil, nil), so the cloud graph page rendered a false "0 memories"
+// state instead of the honest "graph unsupported over cloud semantic" banner.
+// [WARNING fix, PR5 slice 3]
+func TestCloudGraphReportsUnavailableNotEmpty(t *testing.T) {
+	store := fakeEmbeddingsCloudStore{fakeCloudStore: fakeCloudStore{
+		projects: []cloudstore.DashboardProjectRow{{Project: "alpha", Observations: 1}},
+	}}
+	src := New(store, WithCloudSemantic(true, fakeEmbedder{}))
+	sem, ok := src.Semantic()
+	if !ok {
+		t.Fatal("setup: Semantic() must be available when cloud_semantic.enabled")
+	}
+
+	nodes, edges, err := sem.Graph(10, 0.5)
+	if err == nil {
+		t.Fatal("Graph() must return a non-nil error over cloud semantic — a silent (nil, nil, nil) makes internal/dashboard's handleGraph render a false \"0 memories\" state instead of the honest unavailable banner")
+	}
+	if nodes != nil || edges != nil {
+		t.Fatalf("Graph() must not fabricate nodes/edges alongside its error, got nodes=%v edges=%v", nodes, edges)
+	}
+}
+
 // TestCloudSemanticDisabledReproducesSubstringSearch is the Phase 6.3
 // rollback confirmation: cloud_semantic.enabled=false (the default, no
 // WithCloudSemantic option) must reproduce the cloud dashboard's original
