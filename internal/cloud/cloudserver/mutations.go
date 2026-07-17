@@ -224,8 +224,9 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	}
 
 	// REQ-006 / REQ-008: Validate each entry's payload before storage.
-	// Relation entries are strictly validated (all required fields).
-	// Legacy entities (session, observation, prompt) use the lenient floor only.
+	// Relation and embedding entries are strictly validated (all required
+	// fields, plus a decodable vector for embeddings). Legacy entities
+	// (session, observation, prompt) use the lenient floor only.
 	// Any failure rejects the ENTIRE batch (atomic — no partial inserts).
 	var invalid []map[string]any
 	for i, entry := range req.Entries {
@@ -239,7 +240,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	}
 	if len(invalid) > 0 {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{
-			"error":       "invalid relation payload",
+			"error":       "invalid mutation payload",
 			"reason_code": "validation_error",
 			"invalid":     invalid,
 		})
@@ -430,12 +431,61 @@ func validateLegacyPayload(_ string, _ json.RawMessage) (string, bool) {
 	return "", true
 }
 
+// embeddingRequiredFields lists the fields that MUST be present and non-empty
+// in every embedding mutation payload. CRITICAL bugfix (human-like-memory
+// PR5, found by adversarial review): before this validator existed,
+// validateMutationEntry had NO case for "embedding" and fell through to the
+// lenient validateLegacyPayload no-op, so a malformed embedding payload
+// (missing sync_id/project/vector, or an undecodable vector) could enter the
+// shared cloud_mutations journal at push time and poison every peer that
+// later pulls it — see applyEmbeddingUpsertTx / ApplyPulledMutation on the
+// pull side, which now marks such a mutation dead+ACKed rather than halting,
+// but the correct fix is to reject it here BEFORE it is ever stored.
+var embeddingRequiredFields = []string{
+	"sync_id",
+	"project",
+	"vector",
+}
+
+// validateEmbeddingPayload checks that all required embedding fields are
+// present and non-empty, and that the vector field decodes to a valid,
+// non-empty, 4-byte-aligned little-endian float32 BLOB (mirrors
+// validateRelationPayload's contract). Returns (missingField, false) on
+// failure, ("", true) on success.
+func validateEmbeddingPayload(payload json.RawMessage) (string, bool) {
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		// Malformed JSON: treat sync_id as missing (first required field).
+		return "sync_id", false
+	}
+	for _, field := range embeddingRequiredFields {
+		v, ok := fields[field]
+		if !ok {
+			return field, false
+		}
+		s, isStr := v.(string)
+		if !isStr || strings.TrimSpace(s) == "" {
+			return field, false
+		}
+	}
+	var p syncEmbeddingMutationPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return "vector", false
+	}
+	if _, err := decodeEmbeddingMutationVector(p.Vector); err != nil {
+		return "vector", false
+	}
+	return "", true
+}
+
 // validateMutationEntry dispatches to the correct validator for the entry's
 // entity type. Returns (missingField, false) on validation failure.
 func validateMutationEntry(entry MutationEntry) (string, bool) {
 	switch entry.Entity {
 	case "relation":
 		return validateRelationPayload(entry.Payload)
+	case store.SyncEntityEmbedding:
+		return validateEmbeddingPayload(entry.Payload)
 	default:
 		return validateLegacyPayload(entry.Entity, entry.Payload)
 	}
