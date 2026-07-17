@@ -69,7 +69,7 @@ func (s *Service) Search(ctx context.Context, query string, opts LexicalSearchOp
 		return nil, fmt.Errorf("recall: lexical search: %w", err)
 	}
 
-	semantic := s.semanticHits(ctx, query, opts.Limit)
+	semantic := s.semanticHits(ctx, query, opts.Project, opts.Limit)
 	return Fuse(lexical, semantic, s.Params), nil
 }
 
@@ -77,7 +77,16 @@ func (s *Service) Search(ctx context.Context, query string, opts LexicalSearchOp
 // candidates. Any failure along the way (nil Semantic, EmbedQuery error,
 // Search error) yields an empty slice so Search degrades to lexical-only
 // instead of failing the whole recall.
-func (s *Service) semanticHits(ctx context.Context, query string, limit int) []SemanticHit {
+//
+// Bugfix (engram obs #1436): when project is known and the configured
+// Semantic searcher implements embed.ScopedSearcher, this calls SearchScoped
+// instead of Search so the top-k is computed WITHIN project — otherwise a
+// project that is a small fraction of the shared embeddings store can be
+// crowded out of the global top-k by other, larger projects before any
+// caller-side project filter runs. project == "" (e.g. scope=personal, which
+// is cross-project by definition) or a Searcher that doesn't implement
+// ScopedSearcher both fall back to the original unscoped Search, unchanged.
+func (s *Service) semanticHits(ctx context.Context, query, project string, limit int) []SemanticHit {
 	if s.Semantic == nil {
 		return nil
 	}
@@ -89,7 +98,13 @@ func (s *Service) semanticHits(ctx context.Context, query string, limit int) []S
 	if k <= 0 {
 		k = defaultSemanticK
 	}
-	hits, err := s.Semantic.Search(ctx, vec, k)
+
+	var hits []embed.Hit
+	if scoped, ok := s.Semantic.(embed.ScopedSearcher); ok && project != "" {
+		hits, err = scoped.SearchScoped(ctx, vec, k, project)
+	} else {
+		hits, err = s.Semantic.Search(ctx, vec, k)
+	}
 	if err != nil {
 		return nil
 	}

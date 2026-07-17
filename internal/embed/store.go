@@ -153,8 +153,43 @@ func (s *Store) Count(ctx context.Context) (int, error) {
 // vector and the query are unit-normalized, cosine == dot product. Rows whose
 // stored dimension differs from the query's are skipped defensively (e.g. a
 // half-migrated store after a model change). k <= 0 returns all ranked hits.
+//
+// This is a brute-force scan over EVERY project's vectors — callers that need
+// the top-k WITHIN a single project (recall's semantic leg; see
+// recall.Service.semanticHits) must use SearchScoped instead, otherwise a
+// project that is a small fraction of the store can be crowded out of this
+// global top-k by other, larger projects before any caller-side filter runs
+// (engram obs #1436's root-cause analysis).
 func (s *Store) Search(ctx context.Context, query []float32, k int) ([]Hit, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT sync_id, obs_id, vector FROM embeddings`)
+	return s.search(ctx, query, k, "")
+}
+
+// SearchScoped is Search restricted to project via a SQL WHERE clause,
+// mirroring cloudstore.SearchEmbeddings' account+project scoping
+// (internal/cloud/cloudstore/embeddings.go). project == "" behaves exactly
+// like Search — no WHERE clause is added, so unscoped callers (the dashboard
+// browse semantic search, memory-conflict-semantic's future FindCandidates)
+// are byte-for-byte unaffected by this addition.
+//
+// Scoping at the SQL level (rather than filtering Search's global top-k
+// after the fact) is the fix for the crowding-out bug: computing the top-k
+// WITHIN project means a project's valid matches can never be pushed out of
+// the result set by other projects' higher-scoring vectors.
+func (s *Store) SearchScoped(ctx context.Context, query []float32, k int, project string) ([]Hit, error) {
+	return s.search(ctx, query, k, project)
+}
+
+// search is the shared brute-force cosine scan behind Search and
+// SearchScoped. project == "" scans every row (Search's behavior); a
+// non-empty project restricts the scan to that project's rows via WHERE.
+func (s *Store) search(ctx context.Context, query []float32, k int, project string) ([]Hit, error) {
+	q := `SELECT sync_id, obs_id, vector FROM embeddings`
+	var args []any
+	if project != "" {
+		q += ` WHERE project = ?`
+		args = append(args, project)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("embed: Search: %w", err)
 	}

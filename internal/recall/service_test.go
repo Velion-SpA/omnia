@@ -46,6 +46,101 @@ func (f *fakeSemanticSearcher) Search(ctx context.Context, vec []float32, k int)
 	return f.hits, f.searchErr
 }
 
+// fakeScopedSemanticSearcher additionally implements embed.ScopedSearcher,
+// so tests can assert Service.semanticHits prefers SearchScoped (and forwards
+// opts.Project into it) whenever the concrete Searcher supports it — the
+// crowding-out bugfix (engram obs #1436).
+type fakeScopedSemanticSearcher struct {
+	fakeSemanticSearcher
+	scopedHits        []embed.Hit
+	scopedErr         error
+	scopedCalls       int
+	lastScopedProject string
+	lastScopedK       int
+}
+
+func (f *fakeScopedSemanticSearcher) SearchScoped(ctx context.Context, vec []float32, k int, project string) ([]embed.Hit, error) {
+	f.scopedCalls++
+	f.lastScopedProject = project
+	f.lastScopedK = k
+	return f.scopedHits, f.scopedErr
+}
+
+// TestService_Search_PrefersScopedSearchWhenProjectKnown proves the
+// crowding-out bugfix's wiring: when opts.Project is set AND the configured
+// Semantic searcher implements embed.ScopedSearcher, Service.Search calls
+// SearchScoped (forwarding the project) instead of the unscoped Search, and
+// uses its results.
+func TestService_Search_PrefersScopedSearchWhenProjectKnown(t *testing.T) {
+	lex := &fakeLexicalSearcher{}
+	sem := &fakeScopedSemanticSearcher{
+		fakeSemanticSearcher: fakeSemanticSearcher{vec: []float32{1, 0, 0}},
+		scopedHits:           []embed.Hit{{ObsID: 7, Score: 0.9}},
+	}
+	svc := NewService(lex, sem, DefaultFuseParams())
+
+	got, err := svc.Search(context.Background(), "hola", LexicalSearchOptions{Project: "omnia", Limit: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if sem.scopedCalls != 1 {
+		t.Fatalf("SearchScoped calls: got %d, want 1", sem.scopedCalls)
+	}
+	if sem.searchCalls != 0 {
+		t.Fatalf("unscoped Search calls: got %d, want 0 (SearchScoped should be preferred)", sem.searchCalls)
+	}
+	if sem.lastScopedProject != "omnia" {
+		t.Errorf("SearchScoped project: got %q, want %q", sem.lastScopedProject, "omnia")
+	}
+	assertIDOrder(t, got, []int64{7})
+}
+
+// TestService_Search_NoProject_UsesUnscopedSearchEvenWithScopedSearcher
+// proves an empty opts.Project degrades to the plain, unscoped Search even
+// when the configured Searcher supports ScopedSearcher — mirrors
+// SearchScoped("")'s own "no restriction" semantics.
+func TestService_Search_NoProject_UsesUnscopedSearchEvenWithScopedSearcher(t *testing.T) {
+	lex := &fakeLexicalSearcher{}
+	sem := &fakeScopedSemanticSearcher{
+		fakeSemanticSearcher: fakeSemanticSearcher{
+			vec:  []float32{1, 0, 0},
+			hits: []embed.Hit{{ObsID: 9, Score: 0.9}},
+		},
+	}
+	svc := NewService(lex, sem, DefaultFuseParams())
+
+	got, err := svc.Search(context.Background(), "hola", LexicalSearchOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if sem.searchCalls != 1 || sem.scopedCalls != 0 {
+		t.Fatalf("expected unscoped Search=1/SearchScoped=0 calls, got Search=%d SearchScoped=%d", sem.searchCalls, sem.scopedCalls)
+	}
+	assertIDOrder(t, got, []int64{9})
+}
+
+// TestService_Search_ScopedSearcherWithoutProject_FallsBackToUnscopedSearch
+// proves backward compatibility: a Semantic searcher that does NOT implement
+// embed.ScopedSearcher (e.g. today's test fakes / cloud-side adapters) keeps
+// working exactly as before, via plain Search, regardless of opts.Project.
+func TestService_Search_ScopedSearcherWithoutProject_FallsBackToUnscopedSearch(t *testing.T) {
+	lex := &fakeLexicalSearcher{}
+	sem := &fakeSemanticSearcher{
+		vec:  []float32{1, 0, 0},
+		hits: []embed.Hit{{ObsID: 3, Score: 0.9}},
+	}
+	svc := NewService(lex, sem, DefaultFuseParams())
+
+	got, err := svc.Search(context.Background(), "hola", LexicalSearchOptions{Project: "omnia", Limit: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if sem.searchCalls != 1 {
+		t.Fatalf("unscoped Search calls: got %d, want 1 (fallback when Searcher lacks ScopedSearcher)", sem.searchCalls)
+	}
+	assertIDOrder(t, got, []int64{3})
+}
+
 func TestService_Search_FusesLexicalAndSemantic(t *testing.T) {
 	lex := &fakeLexicalSearcher{hits: []LexicalHit{
 		{ID: 1, UpdatedAt: "2024-01-01"},

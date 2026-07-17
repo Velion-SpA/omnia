@@ -2,6 +2,7 @@ package embed
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"testing"
 )
@@ -184,6 +185,113 @@ func TestStore_Prune_EmptyLiveSetRemovesAll(t *testing.T) {
 	}
 	if n, _ := store.Count(ctx); n != 0 {
 		t.Errorf("Count after prune-all: got %d, want 0", n)
+	}
+}
+
+// TestStore_SearchScoped_TargetProjectSurfacesDespiteGlobalCrowdOut
+// reproduces the exact recall bug (engram obs #1436): Store.Search does a
+// brute-force cosine scan over ALL projects, so a target project that is a
+// small fraction of the store can be crowded out of the global top-K by many
+// higher-scoring rows from other projects — even though the target project
+// has a valid match. This seeds 20 "other"-project vectors that all score
+// higher against the query than the single "target"-project vector (so an
+// unscoped Search(ctx, query, k=5) would never return it), then asserts
+// SearchScoped(ctx, query, k=5, "target") still surfaces it because the
+// top-K is computed WITHIN the project, not globally-then-filtered.
+func TestStore_SearchScoped_TargetProjectSurfacesDespiteGlobalCrowdOut(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	query := []float32{1, 0, 0}
+
+	// 20 "other"-project vectors, all closely aligned with the query
+	// (score ~0.99+), so every one of them outranks "target"'s vector.
+	for i := 0; i < 20; i++ {
+		r := unitRow(fmt.Sprintf("other-%d", i), i+1, []float32{0.995, 0.0999, 0})
+		r.Project = "other"
+		mustUpsert(t, store, r)
+	}
+
+	// The one "target"-project vector: a valid match (well above a typical
+	// relevance floor) but scored lower than every "other" row above, so it
+	// sits beyond global rank 20.
+	targetRow := unitRow("target-1", 1000, []float32{0.6, 0.8, 0})
+	targetRow.Project = "target"
+	mustUpsert(t, store, targetRow)
+
+	// Sanity: prove the crowd-out actually happens — an unscoped top-5 must
+	// NOT contain the target row.
+	globalHits, err := store.Search(ctx, query, 5)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	for _, h := range globalHits {
+		if h.SyncID == "target-1" {
+			t.Fatalf("test setup invalid: target-1 unexpectedly present in unscoped global top-5: %+v", globalHits)
+		}
+	}
+
+	// The fix: project-scoped search computes the top-K WITHIN "target" only,
+	// so the sole target row is rank 1 there regardless of global crowding.
+	scopedHits, err := store.SearchScoped(ctx, query, 5, "target")
+	if err != nil {
+		t.Fatalf("SearchScoped: %v", err)
+	}
+	if len(scopedHits) != 1 || scopedHits[0].SyncID != "target-1" {
+		t.Fatalf("SearchScoped(project=target): got %+v, want exactly [target-1]", scopedHits)
+	}
+}
+
+// TestStore_SearchScoped_EmptyProjectMatchesUnscopedSearch proves
+// SearchScoped("") is equivalent to Search — existing unscoped callers
+// (dashboard, memory-conflict-semantic) are unaffected by this addition.
+func TestStore_SearchScoped_EmptyProjectMatchesUnscopedSearch(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	mustUpsert(t, store, unitRow("A", 1, []float32{1, 0, 0}))
+	mustUpsert(t, store, unitRow("B", 2, []float32{0, 1, 0}))
+
+	want, err := store.Search(ctx, []float32{1, 0, 0}, 2)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	got, err := store.SearchScoped(ctx, []float32{1, 0, 0}, 2, "")
+	if err != nil {
+		t.Fatalf("SearchScoped: %v", err)
+	}
+	if len(got) != len(want) || len(got) != 2 || got[0].SyncID != want[0].SyncID || got[1].SyncID != want[1].SyncID {
+		t.Errorf("SearchScoped(project=\"\") = %+v, want same as Search() = %+v", got, want)
+	}
+}
+
+// TestStore_SearchScoped_UnknownProjectReturnsEmpty proves the WHERE clause
+// actually restricts rows (not just a no-op filter) — a project with no
+// stored rows returns zero hits, never other projects' rows.
+func TestStore_SearchScoped_UnknownProjectReturnsEmpty(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	mustUpsert(t, store, unitRow("A", 1, []float32{1, 0, 0}))
+
+	got, err := store.SearchScoped(ctx, []float32{1, 0, 0}, 5, "nonexistent")
+	if err != nil {
+		t.Fatalf("SearchScoped: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("SearchScoped(project=nonexistent): got %+v, want empty", got)
 	}
 }
 
