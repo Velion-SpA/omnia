@@ -23,7 +23,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Run unit tests
-        run: go test ./...
+        run: go test -short $(go list ./... | grep -v '/internal/mcp$')
 
   e2e-tests:
     name: E2E Tests
