@@ -52,8 +52,43 @@ type EmbeddingsConfig struct {
 }
 
 type SourcesConfig struct {
-	Discord DiscordConfig `yaml:"discord"`
-	GitHub  GitHubConfig  `yaml:"github"`
+	Discord   DiscordConfig   `yaml:"discord"`
+	GitHub    GitHubConfig    `yaml:"github"`
+	Atlassian AtlassianConfig `yaml:"atlassian"`
+}
+
+// AtlassianConfig holds ONE shared Atlassian Cloud site + Basic-auth
+// credential pair (email + API token), used by both the Jira and Confluence
+// adapters (design decision: single shared Cloud token/site, not one token
+// per adapter). Jira/Confluence keep their own Enabled flag, project/space
+// keys, and Engram Project so each source can be toggled and routed
+// independently even though auth is shared.
+//
+// Phase 2 (this skeleton) only declares the config shape and its defaults.
+// Router.ResolveJira/ResolveConfluence and collect.go wiring land with the
+// Jira/Confluence adapters themselves (later phases).
+type AtlassianConfig struct {
+	SiteURL    string           `yaml:"site_url"`
+	Email      string           `yaml:"email"`
+	Token      string           `yaml:"token"`
+	Jira       JiraConfig       `yaml:"jira"`
+	Confluence ConfluenceConfig `yaml:"confluence"`
+}
+
+type JiraConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// ProjectKeys lists the Jira project keys to ingest (e.g. "ENG", "OPS").
+	ProjectKeys []string `yaml:"project_keys"`
+	// Project is the Engram project this source's items route to by default.
+	Project string `yaml:"project"`
+}
+
+type ConfluenceConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// SpaceKeys lists the Confluence space keys to ingest.
+	SpaceKeys []string `yaml:"space_keys"`
+	// Project is the Engram project this source's items route to by default.
+	Project string `yaml:"project"`
 }
 
 type DiscordConfig struct {
@@ -169,6 +204,12 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Sources.GitHub.Project == "" {
 		cfg.Sources.GitHub.Project = cfg.Engram.DefaultProject
+	}
+	if cfg.Sources.Atlassian.Jira.Project == "" {
+		cfg.Sources.Atlassian.Jira.Project = cfg.Engram.DefaultProject
+	}
+	if cfg.Sources.Atlassian.Confluence.Project == "" {
+		cfg.Sources.Atlassian.Confluence.Project = cfg.Engram.DefaultProject
 	}
 	if cfg.Embeddings.BaseURL == "" {
 		cfg.Embeddings.BaseURL = "http://localhost:11434"
