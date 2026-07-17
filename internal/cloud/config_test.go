@@ -73,6 +73,68 @@ func TestIsDefaultJWTSecret(t *testing.T) {
 	})
 }
 
+// TestConfigFromEnvCloudSemantic covers the cloud_semantic.enabled feature
+// flag (design D5, human-like-memory PR5 slice 3) and its optional query
+// embedder settings. Disabled by default: off keeps CloudSemanticEnabled
+// false and the cloud dashboard's Semantic() unavailable, exactly as before
+// this slice (D7 rollback guarantee, cloud side).
+func TestConfigFromEnvCloudSemantic(t *testing.T) {
+	t.Run("disabled by default", func(t *testing.T) {
+		t.Setenv("OMNIA_CLOUD_SEMANTIC_ENABLED", "")
+		cfg := ConfigFromEnv()
+		if cfg.CloudSemanticEnabled {
+			t.Fatal("expected cloud semantic to default to disabled")
+		}
+	})
+
+	t.Run("env enables cloud semantic", func(t *testing.T) {
+		t.Setenv("OMNIA_CLOUD_SEMANTIC_ENABLED", "true")
+		cfg := ConfigFromEnv()
+		if !cfg.CloudSemanticEnabled {
+			t.Fatal("expected OMNIA_CLOUD_SEMANTIC_ENABLED=true to enable cloud semantic")
+		}
+	})
+
+	t.Run("legacy ENGRAM_ prefix also enables cloud semantic", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_SEMANTIC_ENABLED", "1")
+		cfg := ConfigFromEnv()
+		if !cfg.CloudSemanticEnabled {
+			t.Fatal("expected legacy ENGRAM_CLOUD_SEMANTIC_ENABLED=1 to enable cloud semantic")
+		}
+	})
+
+	t.Run("default query embedder settings mirror the local jina default", func(t *testing.T) {
+		t.Setenv("OMNIA_CLOUD_SEMANTIC_EMBED_MODEL", "")
+		t.Setenv("OMNIA_CLOUD_SEMANTIC_EMBED_DIM", "")
+		cfg := ConfigFromEnv()
+		if cfg.CloudSemanticEmbedModel != "jina/jina-embeddings-v2-base-es" {
+			t.Fatalf("expected default cloud semantic embed model, got %q", cfg.CloudSemanticEmbedModel)
+		}
+		if cfg.CloudSemanticEmbedDim != 768 {
+			t.Fatalf("expected default cloud semantic embed dim 768, got %d", cfg.CloudSemanticEmbedDim)
+		}
+		if cfg.CloudSemanticEmbedBaseURL != "" {
+			t.Fatalf("expected no default query embedder base URL (no Ollama in the cloud by default), got %q", cfg.CloudSemanticEmbedBaseURL)
+		}
+	})
+
+	t.Run("env overrides query embedder settings", func(t *testing.T) {
+		t.Setenv("OMNIA_CLOUD_SEMANTIC_EMBED_BASE_URL", "http://homelab-ollama:11434")
+		t.Setenv("OMNIA_CLOUD_SEMANTIC_EMBED_MODEL", "bge-m3")
+		t.Setenv("OMNIA_CLOUD_SEMANTIC_EMBED_DIM", "1024")
+		cfg := ConfigFromEnv()
+		if cfg.CloudSemanticEmbedBaseURL != "http://homelab-ollama:11434" {
+			t.Fatalf("expected overridden base URL, got %q", cfg.CloudSemanticEmbedBaseURL)
+		}
+		if cfg.CloudSemanticEmbedModel != "bge-m3" {
+			t.Fatalf("expected overridden model, got %q", cfg.CloudSemanticEmbedModel)
+		}
+		if cfg.CloudSemanticEmbedDim != 1024 {
+			t.Fatalf("expected overridden dim 1024, got %d", cfg.CloudSemanticEmbedDim)
+		}
+	})
+}
+
 func TestIsDefaultTokenPepper(t *testing.T) {
 	for _, weak := range []string{"", "   ", DefaultTokenPepper} {
 		if !IsDefaultTokenPepper(weak) {
