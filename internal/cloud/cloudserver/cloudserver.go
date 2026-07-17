@@ -241,6 +241,10 @@ func (s *CloudServer) routes() {
 		s.mux.HandleFunc("GET /projects/{project}/members", s.withAuth(s.handleListMembers))
 		s.mux.HandleFunc("POST /projects/{project}/members", s.withAuth(s.handleAddMember))
 		s.mux.HandleFunc("DELETE /projects/{project}/members/{account_id}", s.withAuth(s.handleRemoveMember))
+		// Account-facing project discovery: returns the caller's own readable
+		// projects (teams ∪ membership overrides), so a read-only account can
+		// enumerate what it can pull without operator access to GET /admin/projects.
+		s.mux.HandleFunc("GET /projects", s.withAuth(s.handleListProjects))
 		// Device-management endpoints. Account-only (requires withAuth + claims != nil).
 		// Registered only when device management is available.
 		if _, ok := s.store.(deviceManager); ok {
