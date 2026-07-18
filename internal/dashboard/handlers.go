@@ -163,6 +163,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Pages
 	mux.HandleFunc("GET /", s.handleOverview)
 	mux.HandleFunc("GET /browse", s.handleBrowse)
+	mux.HandleFunc("GET /project/{name}", s.handleProjectDetail)
 	mux.HandleFunc("GET /detail/{id}", s.handleDetail)
 	mux.HandleFunc("GET /sync", s.handleSyncStatus)
 	mux.HandleFunc("GET /activity", s.handleActivity)
