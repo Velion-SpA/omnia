@@ -165,6 +165,20 @@ func (r *Router) ResolveDiscord(channelID string, guildSlug string) string {
 	return r.defaultProject
 }
 
+// ResolveJira returns the project for a Jira project key.
+// Key tried: "jira/{projectKey}" → falls back to the (normalized) project key
+// itself → defaultProject. Mirrors ResolveGitHub/ResolveDiscord's pattern.
+func (r *Router) ResolveJira(projectKey string) string {
+	key := "jira/" + projectKey
+	if p, ok := r.routes[key]; ok {
+		return p
+	}
+	if projectKey != "" {
+		return normalizeProject(projectKey)
+	}
+	return r.defaultProject
+}
+
 func normalizeProject(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
