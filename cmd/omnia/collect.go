@@ -13,6 +13,7 @@ import (
 	"github.com/velion/omnia/internal/core"
 	engramsink "github.com/velion/omnia/internal/sink/engram"
 	"github.com/velion/omnia/internal/source/atlassian"
+	confluence "github.com/velion/omnia/internal/source/confluence"
 	discord "github.com/velion/omnia/internal/source/discord"
 	github "github.com/velion/omnia/internal/source/github"
 	jira "github.com/velion/omnia/internal/source/jira"
@@ -25,7 +26,7 @@ import (
 //
 // Usage:
 //
-//	omnia collect [--config PATH] [--dry-run] [--source github|discord|jira] [--since RFC3339]
+//	omnia collect [--config PATH] [--dry-run] [--source github|discord|jira|confluence] [--since RFC3339]
 //	omnia collect status [--config PATH]
 func cmdCollect(args []string) {
 	// A bare "status" sub-argument switches to the status report.
@@ -39,7 +40,7 @@ func cmdCollect(args []string) {
 	fs := flag.NewFlagSet("collect", flag.ExitOnError)
 	configPath := fs.String("config", config.DefaultPath(), "path to collectors config file")
 	dryRun := fs.Bool("dry-run", false, "print what would be saved without writing")
-	sourceFlag := fs.String("source", "", "run only this source (github|discord|jira)")
+	sourceFlag := fs.String("source", "", "run only this source (github|discord|jira|confluence)")
 	sinceFlag := fs.String("since", "", "override since time (RFC3339)")
 	if err := fs.Parse(args); err != nil {
 		fatal(err)
@@ -144,6 +145,24 @@ func runCollect(configPath string, dryRun bool, sourceFilter, sinceStr string) e
 		}
 	}
 
+	if (sourceFilter == "" || sourceFilter == "confluence") && cfg.Sources.Atlassian.Confluence.Enabled {
+		if cfg.Sources.Atlassian.Email == "" || cfg.Sources.Atlassian.Token == "" {
+			logger.Warn("confluence source enabled but no Atlassian credentials configured; set sources.atlassian.email/token in config")
+		}
+		client := atlassian.New(cfg.Sources.Atlassian.SiteURL, cfg.Sources.Atlassian.Email, cfg.Sources.Atlassian.Token)
+		src := confluence.New(client, cfg.Sources.Atlassian.Confluence.SpaceKeys, router, st)
+		sources = append(sources, src)
+
+		if !dryRun {
+			for _, key := range cfg.Sources.Atlassian.Confluence.SpaceKeys {
+				project := router.ResolveConfluence(key)
+				if err := sink.EnsureSession(ctx, project, sessionDir); err != nil {
+					logger.Warn("could not ensure omnia session", "project", project, "error", err)
+				}
+			}
+		}
+	}
+
 	if len(sources) == 0 {
 		logger.Info("no sources enabled; check your config")
 		return nil
@@ -218,8 +237,17 @@ func runCollectStatus(args []string) error {
 			}
 		}
 	}
+	if cfg.Sources.Atlassian.Confluence.Enabled {
+		for _, key := range cfg.Sources.Atlassian.Confluence.SpaceKeys {
+			if v, ok := st.GetCursor("confluence", key); ok {
+				fmt.Printf("  confluence cursor [%s]: %s\n", key, v)
+			} else {
+				fmt.Printf("  confluence cursor [%s]: (none — will fetch all pages)\n", key)
+			}
+		}
+	}
 
-	fmt.Printf("sources: github=%v discord=%v jira=%v\n",
-		cfg.Sources.GitHub.Enabled, cfg.Sources.Discord.Enabled, cfg.Sources.Atlassian.Jira.Enabled)
+	fmt.Printf("sources: github=%v discord=%v jira=%v confluence=%v\n",
+		cfg.Sources.GitHub.Enabled, cfg.Sources.Discord.Enabled, cfg.Sources.Atlassian.Jira.Enabled, cfg.Sources.Atlassian.Confluence.Enabled)
 	return nil
 }

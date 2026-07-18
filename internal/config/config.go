@@ -204,6 +204,20 @@ func (r *Router) ResolveJira(projectKey string) string {
 	return r.defaultProject
 }
 
+// ResolveConfluence returns the project for a Confluence space key.
+// Key tried: "confluence/{spaceKey}" → falls back to the (normalized) space
+// key itself → defaultProject. Mirrors ResolveJira's pattern.
+func (r *Router) ResolveConfluence(spaceKey string) string {
+	key := "confluence/" + spaceKey
+	if p, ok := r.routes[key]; ok {
+		return p
+	}
+	if spaceKey != "" {
+		return normalizeProject(spaceKey)
+	}
+	return r.defaultProject
+}
+
 // normalizeProject delegates to the canonical internal/projectname leaf
 // package so config-sourced project names normalize identically to the
 // store and project-detection paths (see internal/store.NormalizeProject
