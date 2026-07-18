@@ -278,6 +278,13 @@ func (s *CloudServer) routes() {
 			s.mux.HandleFunc("GET /admin/users/{id}/memberships", s.handleAdminListUserMemberships)
 			s.mux.HandleFunc("PUT /admin/memberships", s.handleAdminUpsertMembership)
 			s.mux.HandleFunc("DELETE /admin/memberships/{account_id}/{project}", s.handleAdminDeleteMembership)
+			// Command Center v2, Slice 3: the unified Access page's per-row
+			// edit-in-place fragments. Pure view wiring (no store mutation) —
+			// same convention as the Slice 2 delete-confirm/-cancel routes
+			// above. The mutations they trigger are the two routes right above.
+			s.mux.HandleFunc("GET /admin/access/rows/{account_id}/{project}", s.handleAdminAccessRowView)
+			s.mux.HandleFunc("GET /admin/access/rows/{account_id}/{project}/edit", s.handleAdminAccessRowEdit)
+			s.mux.HandleFunc("GET /admin/access/rows/{account_id}/{project}/revoke", s.handleAdminAccessRowRevokeConfirm)
 			// OBL-16: account-level admin promote/demote. Operator-gated like the
 			// rest of the section; demote refuses the last remaining admin.
 			s.mux.HandleFunc("POST /admin/users/{id}/promote", s.handleAdminPromoteUser)

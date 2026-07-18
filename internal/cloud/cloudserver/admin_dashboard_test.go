@@ -471,13 +471,16 @@ func TestAdminUserDeleteConfirmRequiresOperator(t *testing.T) {
 	}
 }
 
-// TestAdminAccessPageRendersForOperator exercises the Access page templ end to end
-// (user selector, the per-project override row with perm checkboxes + role select,
-// and the add-override form). Post OBL-15 the memberships section is relabeled as
-// per-project OVERRIDES that take precedence over team-derived perms.
+// TestAdminAccessPageRendersForOperator exercises the Command Center v2,
+// Slice 3 unified Access page end to end: the searchable account picker, and
+// ONE merged row per project showing its effective label + R/W/U/D chips,
+// its Override source badge, and the edit-in-place triggers (Edit/Revoke).
+// The actual mutation still lands on the pre-existing PUT/DELETE
+// /admin/memberships routes — only the Slice 3 view-only row fragments are
+// new (asserted separately in TestAdminAccessRowEditRevokeRoundTrip).
 func TestAdminAccessPageRendersForOperator(t *testing.T) {
 	srv, store, authSvc := newAdminDashboardTestServer(t)
-	store.users = []cloudstore.AdminUser{{ID: "1", Username: "alice"}}
+	store.users = []cloudstore.AdminUser{{ID: "1", Username: "alice", Email: "alice@x.io"}}
 	store.grant("1", "lab", int(cloudauth.PermRead|cloudauth.PermInsert), "member")
 
 	rec := httptest.NewRecorder()
@@ -486,16 +489,83 @@ func TestAdminAccessPageRendersForOperator(t *testing.T) {
 		t.Fatalf("operator GET /admin/access: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "lab") || !strings.Contains(body, "ADD / UPDATE OVERRIDE") {
-		t.Fatalf("Access page missing override row or add form, body=%q", body)
+	for _, want := range []string{
+		"lab",
+		"badge-warn",
+		">Override<",
+		"Partial", // read+insert, no update/delete
+		`data-acct-select`,
+		`hx-get="/admin/access/rows/1/lab/edit"`,
+		`hx-get="/admin/access/rows/1/lab/revoke"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Access page missing %q, body=%q", want, body)
+		}
 	}
-	// The override add form must use the searchable project selector (no free text).
-	if !strings.Contains(body, "data-proj-select") {
-		t.Fatalf("Access page add-override must use the searchable project selector, body=%q", body)
+}
+
+// TestAdminAccessRowEditRevokeRoundTrip exercises the Slice 3 per-row
+// edit-in-place fragments: the default view shows the Override source, the
+// edit fragment PUTs to the pre-existing /admin/memberships route with a
+// Cancel back to the view fragment, and the revoke-confirm fragment reuses
+// ui.ConfirmDialog wired to the pre-existing DELETE route. An unknown project
+// for the account is a clean 404, and every route is operator-gated.
+func TestAdminAccessRowEditRevokeRoundTrip(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.users = []cloudstore.AdminUser{{ID: "1", Username: "alice"}}
+	store.grant("1", "lab", int(cloudauth.PermRead), "member")
+
+	viewRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(viewRec, cookieRequest(http.MethodGet, "/admin/access/rows/1/lab", operatorCookie(t, authSvc), ""))
+	if viewRec.Code != http.StatusOK {
+		t.Fatalf("row view: expected 200, got %d body=%q", viewRec.Code, viewRec.Body.String())
 	}
-	// The revoke control must target the pre-encoded delete path for this membership.
-	if !strings.Contains(body, `hx-delete="/admin/memberships/1/lab"`) {
-		t.Fatalf("Access page missing revoke control for lab, body=%q", body)
+	if !strings.Contains(viewRec.Body.String(), ">Override<") {
+		t.Fatalf("row view must show the Override source, body=%q", viewRec.Body.String())
+	}
+
+	editRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(editRec, cookieRequest(http.MethodGet, "/admin/access/rows/1/lab/edit", operatorCookie(t, authSvc), ""))
+	if editRec.Code != http.StatusOK {
+		t.Fatalf("row edit: expected 200, got %d body=%q", editRec.Code, editRec.Body.String())
+	}
+	editBody := editRec.Body.String()
+	if !strings.Contains(editBody, `hx-put="/admin/memberships"`) {
+		t.Fatalf("row edit must PUT to the existing membership route, body=%q", editBody)
+	}
+	if !strings.Contains(editBody, `hx-get="/admin/access/rows/1/lab"`) {
+		t.Fatalf("row edit must have a Cancel back to the view fragment, body=%q", editBody)
+	}
+
+	confirmRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(confirmRec, cookieRequest(http.MethodGet, "/admin/access/rows/1/lab/revoke", operatorCookie(t, authSvc), ""))
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("row revoke-confirm: expected 200, got %d body=%q", confirmRec.Code, confirmRec.Body.String())
+	}
+	confirmBody := confirmRec.Body.String()
+	if !strings.Contains(confirmBody, `hx-delete="/admin/memberships/1/lab"`) {
+		t.Fatalf("revoke-confirm must wire the existing DELETE route, body=%q", confirmBody)
+	}
+	if !strings.Contains(confirmBody, `hx-get="/admin/access/rows/1/lab"`) {
+		t.Fatalf("revoke-confirm must have a Cancel back to the view fragment, body=%q", confirmBody)
+	}
+
+	missingRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(missingRec, cookieRequest(http.MethodGet, "/admin/access/rows/1/ghost", operatorCookie(t, authSvc), ""))
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("unknown project row: expected 404, got %d", missingRec.Code)
+	}
+
+	for _, url := range []string{
+		"/admin/access/rows/1/lab",
+		"/admin/access/rows/1/lab/edit",
+		"/admin/access/rows/1/lab/revoke",
+	} {
+		forbiddenRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(forbiddenRec, cookieRequest(http.MethodGet, url, accountCookie(t, authSvc, "1", "alice"), ""))
+		if forbiddenRec.Code != http.StatusForbidden {
+			t.Fatalf("non-operator GET %s: expected 403, got %d", url, forbiddenRec.Code)
+		}
 	}
 }
 
@@ -916,6 +986,11 @@ func TestAdminEndpointsAllForbiddenForNonOperator(t *testing.T) {
 		// swap-in-place fragments.
 		{http.MethodGet, "/admin/users/1/delete-confirm", "", ""},
 		{http.MethodGet, "/admin/users/1/delete-cancel", "", ""},
+		// Command Center v2, Slice 3: the unified Access page's per-row
+		// edit-in-place fragments.
+		{http.MethodGet, "/admin/access/rows/1/lab", "", ""},
+		{http.MethodGet, "/admin/access/rows/1/lab/edit", "", ""},
+		{http.MethodGet, "/admin/access/rows/1/lab/revoke", "", ""},
 	}
 	for _, c := range cases {
 		rec := httptest.NewRecorder()

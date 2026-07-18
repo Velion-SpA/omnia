@@ -19,6 +19,86 @@
 (function () {
   "use strict";
 
+  // ─── Generic searchable combobox core ──────────────────────────────────────
+  //
+  // Shared UI mechanics (open/close, keyboard nav, mouse pick, blur-to-close)
+  // for every type-to-filter combobox in the Admin section. A per-instance
+  // `cfg.source(query)` promise supplies the matching items and
+  // `cfg.renderItem(item)` builds its <li> (plain content only — this core
+  // adds the shared `.proj-opt`/role/mousedown wiring); it owns none of the
+  // data shape or fetch/filter strategy. The project selector below (OBL-15,
+  // fetch-backed) and the Access page's account selector (Command Center v2,
+  // Slice 3 — its first extra consumer, filtering data already in the page)
+  // both wire through this instead of duplicating the interaction logic —
+  // this is the "searchable selector, everywhere" foundation item Slice 0
+  // deferred.
+  function wireSearchSelect(root, cfg) {
+    var input = root.querySelector(cfg.inputSel);
+    var list = root.querySelector(cfg.listSel);
+    if (!input || !list) return null;
+    var active = -1;
+    var options = [];
+
+    function close() {
+      list.hidden = true;
+      active = -1;
+      input.setAttribute("aria-expanded", "false");
+    }
+
+    function render(items) {
+      options = items;
+      list.innerHTML = "";
+      if (!items.length) {
+        var empty = document.createElement("li");
+        empty.className = "proj-opt proj-opt-empty";
+        empty.textContent = cfg.emptyText || "No matches";
+        list.appendChild(empty);
+      } else {
+        items.forEach(function (item, i) {
+          var li = cfg.renderItem(item);
+          li.classList.add("proj-opt");
+          li.setAttribute("role", "option");
+          li.addEventListener("mousedown", function (e) { e.preventDefault(); pick(i); });
+          list.appendChild(li);
+        });
+      }
+      list.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+    }
+
+    function highlight(idx) {
+      var lis = list.querySelectorAll(".proj-opt:not(.proj-opt-empty)");
+      lis.forEach(function (li, i) { li.classList.toggle("active", i === idx); });
+      active = idx;
+      if (idx >= 0 && lis[idx]) lis[idx].scrollIntoView({ block: "nearest" });
+    }
+
+    function filter() {
+      cfg.source(input.value.trim()).then(render);
+    }
+
+    function pick(idx) {
+      var item = options[idx];
+      if (!item) return;
+      cfg.onPick(item);
+      close();
+    }
+
+    input.addEventListener("focus", filter);
+    input.addEventListener("input", function () { if (cfg.onInput) cfg.onInput(); filter(); });
+    input.addEventListener("keydown", function (e) {
+      if (list.hidden && (e.key === "ArrowDown" || e.key === "ArrowUp")) { filter(); return; }
+      if (e.key === "ArrowDown") { e.preventDefault(); highlight(Math.min(active + 1, options.length - 1)); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); highlight(Math.max(active - 1, 0)); }
+      else if (e.key === "Enter") { if (active >= 0) { e.preventDefault(); pick(active); } }
+      else if (e.key === "Escape") { close(); }
+    });
+    // Delay close so a mousedown pick on an option registers first.
+    input.addEventListener("blur", function () { setTimeout(close, 150); });
+
+    return { close: close };
+  }
+
   // ─── Searchable project selector ───────────────────────────────────────────
 
   var projectsCache = null;
@@ -47,103 +127,118 @@
     var endpoint = root.getAttribute("data-endpoint") || "/admin/projects";
     var input = root.querySelector("[data-proj-input]");
     var hidden = root.querySelector("[data-proj-value]");
-    var list = root.querySelector("[data-proj-list]");
-    if (!input || !hidden || !list) return;
+    if (!input || !hidden) return;
     var kindFilter = (root.getAttribute("data-kind") || "").toLowerCase();
-    var active = -1;
-    var options = [];
-
-    function close() {
-      list.hidden = true;
-      active = -1;
-      input.setAttribute("aria-expanded", "false");
-    }
 
     function clearValue() {
       hidden.value = "";
       root.removeAttribute("data-picked");
     }
 
-    function render(items) {
-      options = items;
-      list.innerHTML = "";
-      if (!items.length) {
-        var empty = document.createElement("li");
-        empty.className = "proj-opt proj-opt-empty";
-        empty.textContent = "No matching projects";
-        list.appendChild(empty);
-      } else {
-        items.forEach(function (p, i) {
-          var li = document.createElement("li");
-          li.className = "proj-opt";
-          li.setAttribute("role", "option");
-          li.dataset.project = p.project;
-          var name = document.createElement("span");
-          name.className = "proj-opt-name";
-          name.textContent = projectLabel(p);
-          li.appendChild(name);
-          if (p.kind) {
-            var chip = document.createElement("span");
-            chip.className = "proj-chip proj-chip-" + p.kind;
-            chip.textContent = p.kind;
-            li.appendChild(chip);
-          }
-          if (projectLabel(p) !== p.project) {
-            var raw = document.createElement("span");
-            raw.className = "proj-opt-id";
-            raw.textContent = p.project;
-            li.appendChild(raw);
-          }
-          li.addEventListener("mousedown", function (e) { e.preventDefault(); pick(i); });
-          list.appendChild(li);
+    wireSearchSelect(root, {
+      inputSel: "[data-proj-input]",
+      listSel: "[data-proj-list]",
+      emptyText: "No matching projects",
+      source: function (q) {
+        return loadProjects(endpoint).then(function (all) {
+          var query = q.toLowerCase();
+          return all.filter(function (p) {
+            if (kindFilter && (p.kind || "") !== kindFilter) return false;
+            if (!query) return true;
+            return p.project.toLowerCase().indexOf(query) !== -1 ||
+              (p.display_name || "").toLowerCase().indexOf(query) !== -1;
+          });
         });
+      },
+      renderItem: function (p) {
+        var li = document.createElement("li");
+        li.dataset.project = p.project;
+        var name = document.createElement("span");
+        name.className = "proj-opt-name";
+        name.textContent = projectLabel(p);
+        li.appendChild(name);
+        if (p.kind) {
+          var chip = document.createElement("span");
+          chip.className = "proj-chip proj-chip-" + p.kind;
+          chip.textContent = p.kind;
+          li.appendChild(chip);
+        }
+        if (projectLabel(p) !== p.project) {
+          var raw = document.createElement("span");
+          raw.className = "proj-opt-id";
+          raw.textContent = p.project;
+          li.appendChild(raw);
+        }
+        return li;
+      },
+      onInput: clearValue,
+      onPick: function (p) {
+        hidden.value = p.project;
+        root.setAttribute("data-picked", "1");
+        root.classList.remove("proj-invalid");
+        input.value = projectLabel(p);
+        root.dispatchEvent(new CustomEvent("proj:picked", { bubbles: true, detail: p }));
       }
-      list.hidden = false;
-      input.setAttribute("aria-expanded", "true");
-    }
-
-    function highlight(idx) {
-      var lis = list.querySelectorAll(".proj-opt:not(.proj-opt-empty)");
-      lis.forEach(function (li, i) { li.classList.toggle("active", i === idx); });
-      active = idx;
-      if (idx >= 0 && lis[idx]) lis[idx].scrollIntoView({ block: "nearest" });
-    }
-
-    function pick(idx) {
-      var p = options[idx];
-      if (!p) return;
-      hidden.value = p.project;
-      root.setAttribute("data-picked", "1");
-      root.classList.remove("proj-invalid");
-      input.value = projectLabel(p);
-      close();
-      root.dispatchEvent(new CustomEvent("proj:picked", { bubbles: true, detail: p }));
-    }
-
-    function filter() {
-      var q = input.value.trim().toLowerCase();
-      loadProjects(endpoint).then(function (all) {
-        var items = all.filter(function (p) {
-          if (kindFilter && (p.kind || "") !== kindFilter) return false;
-          if (!q) return true;
-          return p.project.toLowerCase().indexOf(q) !== -1 ||
-            (p.display_name || "").toLowerCase().indexOf(q) !== -1;
-        });
-        render(items);
-      });
-    }
-
-    input.addEventListener("focus", function () { filter(); });
-    input.addEventListener("input", function () { clearValue(); filter(); });
-    input.addEventListener("keydown", function (e) {
-      if (list.hidden && (e.key === "ArrowDown" || e.key === "ArrowUp")) { filter(); return; }
-      if (e.key === "ArrowDown") { e.preventDefault(); highlight(Math.min(active + 1, options.length - 1)); }
-      else if (e.key === "ArrowUp") { e.preventDefault(); highlight(Math.max(active - 1, 0)); }
-      else if (e.key === "Enter") { if (active >= 0) { e.preventDefault(); pick(active); } }
-      else if (e.key === "Escape") { close(); }
     });
-    // Delay close so a mousedown pick on an option registers first.
-    input.addEventListener("blur", function () { setTimeout(close, 150); });
+  }
+
+  // ─── Searchable account selector (Command Center v2, Slice 3) ─────────────
+  //
+  // The Access page's account picker. Unlike the project selector, every
+  // operator-visible account is already rendered into THIS page (see
+  // accountSelector in admin_ui.templ) — so this filters that embedded list
+  // client-side instead of adding a fetch. Picking an account navigates to
+  // /admin/access?user={id}; it is not part of a [data-admin-form].
+  function acctSourceItems(root) {
+    if (root.__acctItems) return root.__acctItems;
+    var items = [];
+    root.querySelectorAll("[data-acct-source] li").forEach(function (li) {
+      items.push({
+        id: li.getAttribute("data-account-id") || "",
+        username: li.getAttribute("data-username") || "",
+        email: li.getAttribute("data-email") || ""
+      });
+    });
+    root.__acctItems = items;
+    return items;
+  }
+
+  function enhanceAcctSelector(root) {
+    if (root.__enhanced) return;
+    root.__enhanced = true;
+    if (!root.querySelector("[data-acct-input]")) return;
+
+    wireSearchSelect(root, {
+      inputSel: "[data-acct-input]",
+      listSel: "[data-acct-list]",
+      emptyText: "No matching accounts",
+      source: function (q) {
+        var query = q.toLowerCase();
+        var items = acctSourceItems(root).filter(function (item) {
+          if (!query) return true;
+          return item.username.toLowerCase().indexOf(query) !== -1 ||
+            item.email.toLowerCase().indexOf(query) !== -1;
+        });
+        return Promise.resolve(items);
+      },
+      renderItem: function (item) {
+        var li = document.createElement("li");
+        var name = document.createElement("span");
+        name.className = "proj-opt-name";
+        name.textContent = item.username;
+        li.appendChild(name);
+        if (item.email) {
+          var email = document.createElement("span");
+          email.className = "acct-opt-email";
+          email.textContent = item.email;
+          li.appendChild(email);
+        }
+        return li;
+      },
+      onPick: function (item) {
+        window.location.href = "/admin/access?user=" + encodeURIComponent(item.id);
+      }
+    });
   }
 
   // ─── Admin form submission ─────────────────────────────────────────────────
@@ -615,6 +710,7 @@
 
   function init(scope) {
     (scope || document).querySelectorAll("[data-proj-select]").forEach(enhanceSelector);
+    (scope || document).querySelectorAll("[data-acct-select]").forEach(enhanceAcctSelector);
     initAdminForms(scope);
     // The create/reset-password forms are (re)wired by resetCreateUserModal()
     // / openResetPasswordModal() on every open, since both replace their
