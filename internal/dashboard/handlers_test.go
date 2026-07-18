@@ -179,6 +179,109 @@ func TestHandleBrowse_ListsObservations(t *testing.T) {
 	}
 }
 
+// TestHandleBrowse_FragmentEndpoint_ReturnsPartialOnly verifies the htmx
+// partial-swap contract (Slice 4a): a request carrying the HX-Request header
+// gets ONLY the #browse-region fragment (filter panel + results), not the
+// full page shell (layout/nav). A plain GET (no header) still gets the full
+// page — the no-JS/full-page fallback.
+func TestHandleBrowse_FragmentEndpoint_ReturnsPartialOnly(t *testing.T) {
+	fe := newFakeEngram()
+	fe.add(sampleObs(300, "omnia"))
+
+	dashServer := newTestServerOnly(t, fe)
+
+	req, _ := http.NewRequest(http.MethodGet, dashServer.URL+"/browse?project=omnia", nil)
+	req.Header.Set("HX-Request", "true")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /browse (fragment): %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	// The fragment must still contain the filter panel + results.
+	if !strings.Contains(bodyStr, "feat: add feature 300") {
+		t.Error("expected obs title in fragment response")
+	}
+	if !strings.Contains(bodyStr, "Filters") {
+		t.Error("expected filter panel in fragment response")
+	}
+	// The fragment must NOT contain the page shell/nav.
+	if strings.Contains(bodyStr, "<!doctype html>") {
+		t.Error("fragment response should not include the full page shell (<!doctype html>)")
+	}
+	if strings.Contains(bodyStr, `class="cmd-nav"`) {
+		t.Error("fragment response should not include the nav shell")
+	}
+
+	// A plain GET (no HX-Request header) for the SAME params still renders
+	// the full page — the no-JS/full-page fallback.
+	fullResp, err := http.Get(dashServer.URL + "/browse?project=omnia")
+	if err != nil {
+		t.Fatalf("GET /browse (full page): %v", err)
+	}
+	defer fullResp.Body.Close()
+	fullBody, _ := io.ReadAll(fullResp.Body)
+	fullBodyStr := string(fullBody)
+	if !strings.Contains(fullBodyStr, "<!doctype html>") {
+		t.Error("plain GET should render the full page shell")
+	}
+	if !strings.Contains(fullBodyStr, "feat: add feature 300") {
+		t.Error("expected obs title in full-page response too")
+	}
+}
+
+// TestHandleBrowse_FragmentEndpoint_FilterRoundTrip verifies that a filter
+// applied through the fragment endpoint narrows results correctly and shows
+// the active-filter chip + updated count.
+func TestHandleBrowse_FragmentEndpoint_FilterRoundTrip(t *testing.T) {
+	fe := newFakeEngram()
+
+	arch := sampleObs(310, "omnia")
+	arch.Type = "architecture"
+	fe.add(arch)
+
+	dec := sampleObs(311, "omnia")
+	dec.Type = "decision"
+	fe.add(dec)
+
+	dashServer := newTestServerOnly(t, fe)
+
+	req, _ := http.NewRequest(http.MethodGet, dashServer.URL+"/browse?project=omnia&type=architecture", nil)
+	req.Header.Set("HX-Request", "true")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /browse?type=architecture (fragment): %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	if !strings.Contains(bodyStr, "feat: add feature 310") {
+		t.Error("expected architecture obs in filtered fragment")
+	}
+	if strings.Contains(bodyStr, "feat: add feature 311") {
+		t.Error("decision obs should be filtered out of the fragment")
+	}
+	if !strings.Contains(bodyStr, "1 results") {
+		t.Errorf("expected result count '1 results' in fragment, got body without it")
+	}
+	if !strings.Contains(bodyStr, "Type · architecture") {
+		t.Error("expected active-filter chip 'Type · architecture' in fragment")
+	}
+}
+
 func TestHandleDetail_RendersMetaPanel(t *testing.T) {
 	fe := newFakeEngram()
 	o := sampleObs(42, "omnia")
