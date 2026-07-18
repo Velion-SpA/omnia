@@ -118,14 +118,17 @@ func TestAdminTeamsPageAndDetail(t *testing.T) {
 	}
 }
 
-// TestAdminProjectsPageSplit verifies the Projects page splits known projects into
-// Personal / Work / Unclassified with a reclassify control per row.
-func TestAdminProjectsPageSplit(t *testing.T) {
+// TestAdminProjectsPageShowsCards verifies the Command Center v2, Slice 4b
+// Projects page: known projects render as cards (not the old Personal/Work/
+// Unclassified sections — superseded by this test, formerly
+// TestAdminProjectsPageSplit), each carrying its own classification badge
+// (kindBadge) and a reclassify control folded into its "•••" menu.
+func TestAdminProjectsPageShowsCards(t *testing.T) {
 	srv, store, authSvc := newTeamsAdminTestServer(t)
 	ctx := context.Background()
 	_ = store.UpsertProjectMeta(ctx, "homelab", "personal", "Home Lab")
 	_ = store.UpsertProjectMeta(ctx, "workly", "work", "")
-	store.grant("1", "unclass", 1, "member") // classified nowhere → Unclassified
+	store.grant("1", "unclass", 1, "member") // classified nowhere → "unclassified" badge
 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, htmlPageRequest(http.MethodGet, "/admin/projects", operatorCookie(t, authSvc)))
@@ -133,7 +136,10 @@ func TestAdminProjectsPageSplit(t *testing.T) {
 		t.Fatalf("operator GET /admin/projects (html): expected 200, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"Personal", "Work", "Unclassified", "homelab", "workly", "unclass", "/admin/projects/homelab/meta"} {
+	for _, want := range []string{
+		"projcard", "homelab", "workly", "unclass", "/admin/projects/homelab/meta",
+		">personal<", ">work<", ">unclassified<", // per-card kindBadge, not section headers
+	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Projects page missing %q, body=%q", want, body)
 		}

@@ -2,6 +2,7 @@ package cloudserver
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
@@ -147,13 +148,27 @@ type adminProjectRow struct {
 	PausedReason string // set only when SyncEnabled is false
 	PauseURL     string // POST /admin/projects/{project}/pause
 	ResumeURL    string // POST /admin/projects/{project}/resume
+
+	// Command Center v2, Slice 4b: card stats + reverse-access. Populated only
+	// when the store supports projectAdminStatsStore — zero values render as
+	// "—" in the card (see admin_teams_ui.templ), never a crash.
+	Slug         string // DOM-safe id fragment (accessRowSlug), for the kebab menu + access-expand element ids
+	MemoryCount  int    // total synced memories (SUM observations_count)
+	SourceCount  int    // distinct contributing sync clients (COUNT DISTINCT created_by)
+	AccessCount  int    // accounts with effective Read access (the "N con acceso" stat)
+	LastActivity string // humanized/relative (ui.RelativeTime); "" when unknown
+	AccessURL    string // GET /admin/projects/{project}/access (lazy reverse-access fragment)
 }
 
+// adminProjectsView is a single flat, alphabetically-ordered project grid
+// (Command Center v2, Slice 4b) — replacing the earlier Personal/Work/
+// Unclassified section split. Each card already carries its own kind badge
+// (see kindBadge), so the grouping added a redundant second dimension without
+// showing anything a per-card badge doesn't; the mockup (view ⑤) confirms a
+// single grid reads just as clearly at this project count.
 type adminProjectsView struct {
-	Props        ui.LayoutProps
-	Personal     []adminProjectRow
-	Work         []adminProjectRow
-	Unclassified []adminProjectRow
+	Props    ui.LayoutProps
+	Projects []adminProjectRow
 }
 
 // ─── Profiles page ───────────────────────────────────────────────────────────
@@ -328,8 +343,13 @@ func (s *CloudServer) handleAdminTeamDetailPage(w http.ResponseWriter, r *http.R
 
 // ─── Projects page ───────────────────────────────────────────────────────────
 
-// handleAdminProjectsPage renders the known projects split Personal / Work /
-// Unclassified, each reclassifiable in place.
+// handleAdminProjectsPage renders the known projects as cards (Command Center
+// v2, Slice 4b): identity + classification + sync status, folded config
+// actions behind a "•••" menu, and — when the store supports
+// projectAdminStatsStore — content stats (memories, distinct sources, last
+// activity) and the reverse "who has access" count. Stats degrade gracefully
+// to zero values when the capability is absent, exactly like SyncEnabled
+// already does for projectSyncControlAdminStore below.
 func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperator(w, r) {
 		return
@@ -345,6 +365,14 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 		return
 	}
 	pcs, hasSyncControls := s.projectSyncControlStore()
+	pas, hasStats := s.projectAdminStatsStore()
+
+	var chunkStats map[string]cloudstore.ProjectChunkStats
+	if hasStats {
+		if m, serr := pas.ListProjectChunkStats(r.Context()); serr == nil {
+			chunkStats = m
+		}
+	}
 
 	view := adminProjectsView{Props: s.adminLayoutProps("Admin · Projects", "admin")}
 	for _, k := range known {
@@ -357,6 +385,8 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 			SyncEnabled: true, // OBL-04 default: absent control row = enabled
 			PauseURL:    "/admin/projects/" + escProject + "/pause",
 			ResumeURL:   "/admin/projects/" + escProject + "/resume",
+			Slug:        accessRowSlug(k.Project),
+			AccessURL:   "/admin/projects/" + escProject + "/access",
 		}
 		if hasSyncControls {
 			if ctrl, cerr := pcs.GetProjectSyncControl(k.Project); cerr == nil && ctrl != nil {
@@ -366,14 +396,19 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 				}
 			}
 		}
-		switch k.Kind {
-		case "personal":
-			view.Personal = append(view.Personal, row)
-		case "work":
-			view.Work = append(view.Work, row)
-		default:
-			view.Unclassified = append(view.Unclassified, row)
+		if cs, csok := chunkStats[k.Project]; csok {
+			row.MemoryCount = cs.MemoryCount
+			row.SourceCount = cs.SourceCount
+			if !cs.LastActivity.IsZero() {
+				row.LastActivity = ui.RelativeTime(cs.LastActivity)
+			}
 		}
+		if hasStats {
+			if accessRows, aerr := pas.ListAccountAccessForProject(r.Context(), k.Project); aerr == nil {
+				row.AccessCount = projectAccessCountLabel(accessRows)
+			}
+		}
+		view.Projects = append(view.Projects, row)
 	}
 	if err := adminProjectsPage(view).Render(r.Context(), w); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
@@ -468,4 +503,42 @@ func (s *CloudServer) teamDerivedForAccount(ctx context.Context, ts teamsAdminSt
 		}
 	}
 	return personal, work, other
+}
+
+// ─── Projects page label helpers (Command Center v2, Slice 4b) ──────────────
+
+// projectCardTitle renders the Admin Projects card headline: the display
+// name when the operator set one, otherwise the raw project name. The card's
+// <small> subtitle always shows the raw project name regardless, so nothing
+// is lost either way.
+func projectCardTitle(row adminProjectRow) string {
+	if strings.TrimSpace(row.DisplayName) != "" {
+		return row.DisplayName
+	}
+	return row.Project
+}
+
+// projectLastActivityLabel renders the card's "Last" stat, falling back to an
+// em dash when the store has no stats capability or the project has no
+// synced chunks yet (LastActivity is only ever set when the store returned a
+// non-zero MAX(created_at) — see handleAdminProjectsPage).
+func projectLastActivityLabel(row adminProjectRow) string {
+	if row.LastActivity == "" {
+		return "—"
+	}
+	return row.LastActivity
+}
+
+// adminProjectsCountLabel renders the Projects card header count, e.g.
+// "9 projects · 132 memories" — mirrors the mockup's "9 · 132 memorias".
+func adminProjectsCountLabel(rows []adminProjectRow) string {
+	total := 0
+	for _, r := range rows {
+		total += r.MemoryCount
+	}
+	word := "projects"
+	if len(rows) == 1 {
+		word = "project"
+	}
+	return fmt.Sprintf("%d %s · %d memories", len(rows), word, total)
 }

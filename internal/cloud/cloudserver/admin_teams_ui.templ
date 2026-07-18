@@ -251,72 +251,136 @@ templ teamProfileSelect(profiles []cloudstore.Profile, current string) {
 	</select>
 }
 
-// ─── Projects page ─────────────────────────────────────────────────────────────
+// ─── Projects page (Command Center v2, Slice 4b) ───────────────────────────────
+//
+// Cards replace the old dense config rows: identity + kind/sync badges + four
+// content stats (memories, sources, last activity, who-has-access) up front,
+// with rename/classify/pause-resume folded behind a "•••" kebab menu — the
+// SAME routes/handlers as before (MetaURL/PauseURL/ResumeURL), just relocated
+// out of two full-width input rows. Reuses the Slice-2 kebab component
+// (.admin-kebab/.admin-menu/data-action="toggle-menu", admin.js) verbatim; no
+// new JS. Flat grid (no Personal/Work/Unclassified sections — see
+// adminProjectsView's doc comment).
 
 templ adminProjectsPage(view adminProjectsView) {
 	@ui.Layout(view.Props) {
-		@adminPageTitle("Admin", "Classify projects Personal / Work. Operator-only.")
+		@adminPageTitle("Admin", "Projects: content, classification, and sync. Operator-only.")
 		@adminNavTabs("projects")
-		@adminProjectGroup("Personal", view.Personal)
-		@adminProjectGroup("Work", view.Work)
-		if len(view.Unclassified) > 0 {
-			@adminProjectGroup("Unclassified", view.Unclassified)
-		}
-		if len(view.Personal) == 0 && len(view.Work) == 0 && len(view.Unclassified) == 0 {
-			<div class="card"><p style="color: var(--text-dim); font-size: 13px; margin: 0;">No projects known yet.</p></div>
-		}
+		<div class="card">
+			<div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.85rem;">
+				<span class="micro-label">PROJECTS</span>
+				<span class="micro-label" style="margin-left: auto; color: var(--text-dim);">{ adminProjectsCountLabel(view.Projects) }</span>
+			</div>
+			if len(view.Projects) == 0 {
+				<p style="color: var(--text-dim); font-size: 13px; margin: 0;">No projects known yet.</p>
+			} else {
+				<div class="projgrid">
+					for _, row := range view.Projects {
+						@adminProjectCard(row)
+					}
+				</div>
+			}
+		</div>
 		@adminAssets()
 	}
 }
 
-templ adminProjectGroup(label string, rows []adminProjectRow) {
-	<div class="card" style="margin-bottom: 1.25rem;">
-		<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">{ label }</span>
-		if len(rows) == 0 {
-			<p style="color: var(--text-dim); font-size: 13px; margin: 0;">None.</p>
-		} else {
-			<div style="display: flex; flex-direction: column; gap: 0.5rem;">
-				for _, row := range rows {
-					@adminProjectRowView(row)
-				}
+templ adminProjectCard(row adminProjectRow) {
+	<div class="projcard">
+		<div class="ph">
+			<div class="pn">
+				{ projectCardTitle(row) }
+				<small>{ row.Project }</small>
 			</div>
-		}
+			<div class="admin-menu-wrap">
+				<button type="button" class="admin-kebab" data-action="toggle-menu" data-menu={ "proj-menu-" + row.Slug } aria-haspopup="true" aria-expanded="false">•••</button>
+				<div class="admin-menu" id={ "proj-menu-" + row.Slug } hidden>
+					<span class="micro-label" style="display: block; padding: 0.4rem 0.6rem 0.2rem;">Rename / classify</span>
+					<form data-admin-form data-method="PUT" data-url-template={ row.MetaURL } data-body="json" class="admin-menu-form">
+						<input type="text" name="display_name" value={ row.DisplayName } placeholder="display name (optional)"/>
+						@adminKindSelect(row.Kind)
+						<button type="submit" class="shell-button" style="padding: 0.3rem 0.6rem; font-size: 12px;">Save</button>
+						<div class="admin-form-error" data-form-error hidden></div>
+					</form>
+					<div class="admin-menu-sep"></div>
+					@adminProjectSyncMenuAction(row)
+				</div>
+			</div>
+		</div>
+		<div class="pstats">
+			@adminProjectStat(strconv.Itoa(row.MemoryCount), "Memories")
+			<div class="pstat">
+				<button type="button" class="pstat-access" hx-get={ row.AccessURL } hx-target={ "#proj-access-" + row.Slug } hx-swap="innerHTML">
+					<div class="v">{ strconv.Itoa(row.AccessCount) }</div>
+				</button>
+				<div class="l">With access</div>
+			</div>
+			@adminProjectStat(strconv.Itoa(row.SourceCount), "Sources")
+			@adminProjectStat(projectLastActivityLabel(row), "Last")
+		</div>
+		<div id={ "proj-access-" + row.Slug }></div>
+		<div class="pfoot">
+			@kindBadge(row.Kind)
+			if row.SyncEnabled {
+				<span class="badge badge-ok">Sync</span>
+			} else {
+				<span class="badge badge-warn">⏸ Paused</span>
+			}
+		</div>
 	</div>
 }
 
-templ adminProjectRowView(row adminProjectRow) {
-	<div style="display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem 0.7rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.45rem;">
-		<form data-admin-form data-method="PUT" data-url-template={ row.MetaURL } data-body="json" style="display: grid; grid-template-columns: 1.4fr 1.4fr auto auto; gap: 0.6rem; align-items: center; margin: 0;">
-			<span style="font-family: var(--mono); font-size: 13px; color: var(--text);">{ row.Project }</span>
-			<input type="text" name="display_name" value={ row.DisplayName } placeholder="display name (optional)" style="padding: 0.35rem 0.5rem; font-size: 13px; background: var(--surface); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
-			@adminKindSelect(row.Kind)
-			<button type="submit" class="shell-button" style="padding: 0.3rem 0.8rem; font-size: 12px;">Save</button>
-			<div class="admin-form-error" data-form-error hidden style="grid-column: 1 / -1;"></div>
+templ adminProjectStat(value, label string) {
+	<div class="pstat">
+		<div class="v">{ value }</div>
+		<div class="l">{ label }</div>
+	</div>
+}
+
+// adminProjectSyncMenuAction is the kebab menu's pause/resume item — the same
+// OBL-04 control the old inline row exposed, just relocated. Pause carries an
+// optional reason (HTMX form-encodes it); Resume is a single hx-post like the
+// existing enable/disable-user buttons — no body needed.
+templ adminProjectSyncMenuAction(row adminProjectRow) {
+	if row.SyncEnabled {
+		<form data-admin-form data-method="POST" data-url-template={ row.PauseURL } data-body="form" class="admin-menu-form">
+			<input type="text" name="paused_reason" placeholder="pause reason (optional)"/>
+			<button type="submit" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.6rem; font-size: 12px;">⏸ Pause sync</button>
 		</form>
-		@adminProjectSyncControl(row)
-	</div>
-}
-
-// adminProjectSyncControl surfaces the OBL-04 pause/resume control state for one
-// project: a badge (enabled/paused + reason) plus the matching action. Pause
-// carries an optional reason (HTMX form-encodes it); Resume is a single hx-post
-// like the existing enable/disable-user buttons — no body needed.
-templ adminProjectSyncControl(row adminProjectRow) {
-	<div style="display: flex; align-items: center; gap: 0.6rem; padding-top: 0.45rem; border-top: 1px dashed var(--border);">
-		if row.SyncEnabled {
-			<span class="badge badge-ok" style="padding: 0.15rem 0.5rem;">sync enabled</span>
-			<span style="flex: 1;"></span>
-			<form data-admin-form data-method="POST" data-url-template={ row.PauseURL } data-body="form" style="display: flex; align-items: center; gap: 0.4rem; margin: 0;">
-				<input type="text" name="paused_reason" placeholder="reason (optional)" style="padding: 0.3rem 0.5rem; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text); width: 180px;"/>
-				<button type="submit" class="shell-button shell-button-ghost" style="padding: 0.25rem 0.65rem; font-size: 12px;">Pause</button>
-			</form>
-		} else {
-			<span class="badge badge-bad" style="padding: 0.15rem 0.5rem;">paused</span>
+	} else {
+		<div style="padding: 0 0.6rem 0.4rem;">
 			if row.PausedReason != "" {
 				<span style="font-size: 11px; color: var(--text-dim);">{ row.PausedReason }</span>
 			}
-			<span style="flex: 1;"></span>
-			<button type="button" class="shell-button shell-button-ghost" style="padding: 0.25rem 0.65rem; font-size: 12px;" hx-post={ row.ResumeURL } hx-swap="none">Resume</button>
+			<button type="button" hx-post={ row.ResumeURL } hx-swap="none">▶ Resume sync</button>
+		</div>
+	}
+}
+
+// adminProjectAccessFragment renders the reverse "who has access" view for
+// ONE project (Command Center v2, Slice 4b) — lazily loaded when the
+// "With access" stat is clicked (handleAdminProjectAccessFragment). Reuses
+// the Slice 3 effective-perm labels (Full/Partial/Read) and the same
+// override/team source vocabulary, in a compact list rather than the full
+// Access page's grid (this fragment lives inside a project card, not a
+// dedicated page).
+templ adminProjectAccessFragment(project string, rows []adminProjectAccessRow) {
+	<div class="proj-access-list">
+		<span class="micro-label" style="display: block; margin: 0.5rem 0;">WHO HAS ACCESS</span>
+		if len(rows) == 0 {
+			<p style="color: var(--text-dim); font-size: 12px; margin: 0;">No accounts have access yet.</p>
+		} else {
+			for _, r := range rows {
+				<div class="proj-access-row">
+					<span class="proj-access-user">{ r.Username }</span>
+					<span class="badge badge-ok">{ r.Label }</span>
+					if r.Source == "override" {
+						<span class="badge badge-warn">Override</span>
+					} else {
+						<span class="badge badge-team">Team</span>
+					}
+				</div>
+			}
 		}
 	</div>
 }
