@@ -91,6 +91,33 @@ func TestRouterResolveJira_EmptyProjectKeyFallsBackToDefault(t *testing.T) {
 	}
 }
 
+func TestRouterResolveConfluence_Default(t *testing.T) {
+	r := NewRouter(nil, "omnia")
+	got := r.ResolveConfluence("DOCS")
+	if got != "docs" {
+		t.Errorf("ResolveConfluence default: got %q, want %q", got, "docs")
+	}
+}
+
+func TestRouterResolveConfluence_Override(t *testing.T) {
+	routes := map[string]string{
+		"confluence/DOCS": "documentation",
+	}
+	r := NewRouter(routes, "omnia")
+	got := r.ResolveConfluence("DOCS")
+	if got != "documentation" {
+		t.Errorf("ResolveConfluence override: got %q, want %q", got, "documentation")
+	}
+}
+
+func TestRouterResolveConfluence_EmptySpaceKeyFallsBackToDefault(t *testing.T) {
+	r := NewRouter(nil, "omnia")
+	got := r.ResolveConfluence("")
+	if got != "omnia" {
+		t.Errorf("ResolveConfluence empty key: got %q, want %q", got, "omnia")
+	}
+}
+
 func TestConfigRoutesYAMLParse(t *testing.T) {
 	yaml := `
 engram:
