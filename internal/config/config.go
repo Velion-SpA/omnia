@@ -179,6 +179,20 @@ func (r *Router) ResolveJira(projectKey string) string {
 	return r.defaultProject
 }
 
+// ResolveConfluence returns the project for a Confluence space key.
+// Key tried: "confluence/{spaceKey}" → falls back to the (normalized) space
+// key itself → defaultProject. Mirrors ResolveJira's pattern.
+func (r *Router) ResolveConfluence(spaceKey string) string {
+	key := "confluence/" + spaceKey
+	if p, ok := r.routes[key]; ok {
+		return p
+	}
+	if spaceKey != "" {
+		return normalizeProject(spaceKey)
+	}
+	return r.defaultProject
+}
+
 func normalizeProject(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
