@@ -282,6 +282,13 @@ func (s *CloudServer) routes() {
 			// rest of the section; demote refuses the last remaining admin.
 			s.mux.HandleFunc("POST /admin/users/{id}/promote", s.handleAdminPromoteUser)
 			s.mux.HandleFunc("POST /admin/users/{id}/demote", s.handleAdminDemoteUser)
+			// Command Center v2, Slice 1: operator-facing user CRUD (backend
+			// only — no UI/templ yet, that is Slice 2). Same operator gate,
+			// same audit-every-mutation pattern as the rest of this block.
+			s.mux.HandleFunc("POST /admin/users", s.handleAdminCreateUser)
+			s.mux.HandleFunc("PUT /admin/users/{id}", s.handleAdminUpdateUser)
+			s.mux.HandleFunc("POST /admin/users/{id}/password", s.handleAdminResetUserPassword)
+			s.mux.HandleFunc("POST /admin/users/{id}/delete", s.handleAdminHardDeleteUser)
 		}
 		// Teams + profiles + project-classification operator endpoints (OBL-14).
 		// Operator-gated (requireOperator) and the data plane the OBL-15 UI consumes.

@@ -201,8 +201,43 @@ func (s *CloudServer) setUserDisabled(w http.ResponseWriter, r *http.Request, di
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "user id is required"})
 		return
 	}
-	if err := adminStore.SetUserDisabled(r.Context(), userID, disabled); err != nil {
-		if errors.Is(err, cloudstore.ErrManagedTokenUserNotFound) {
+	if !isNumericID(userID) {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "user id must be numeric"})
+		return
+	}
+	// Last-admin guard (Command Center v2, Slice 1): deactivating the only
+	// remaining admin would lock every account admin out of the Admin
+	// section, same risk the demote guard already refuses. This was
+	// previously MISSING on disable, then retrofitted with a non-atomic
+	// check-then-act helper, then found to be RACE-UNSAFE by security review
+	// (two concurrent deactivate/demote/hard-delete calls on different admin
+	// accounts could each pass the check before either write committed,
+	// leaving zero admins).
+	//
+	// Fix: when the concrete store supports the atomic guarded entry point
+	// (atomicDeactivateGuard, type-asserted below — real CloudStore and the
+	// admin-dashboard test fake both do), use it: it folds the check and the
+	// write into ONE transaction with row-level locking (see
+	// cloudstore.lockAdminIDsForUpdate). When the store does NOT support it
+	// (e.g. the older managed-token-only fake with no admin-flag concept at
+	// all), fall back to the plain, unconditional SetUserDisabled — the same
+	// graceful-degradation contract this endpoint has always had.
+	var err error
+	if disabled {
+		if guarded, ok := s.store.(atomicDeactivateGuard); ok {
+			err = guarded.DeactivateUserGuarded(r.Context(), userID)
+		} else {
+			err = adminStore.SetUserDisabled(r.Context(), userID, true)
+		}
+	} else {
+		err = adminStore.SetUserDisabled(r.Context(), userID, false)
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, cloudstore.ErrLastAdmin):
+			jsonResponse(w, http.StatusConflict, map[string]string{"error": "cannot deactivate the last remaining admin"})
+			return
+		case errors.Is(err, cloudstore.ErrManagedTokenUserNotFound):
 			jsonResponse(w, http.StatusNotFound, map[string]string{"error": "user not found"})
 			return
 		}

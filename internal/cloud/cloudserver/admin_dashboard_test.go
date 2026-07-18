@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,6 +23,12 @@ type fakeAdminDashboardStore struct {
 	revoked  []string
 	disabled map[string]bool
 	admins   map[string]bool // OBL-16: account id → is_admin
+
+	// Command Center v2, Slice 1: user CRUD fake state. passwordHashes never
+	// stores plaintext — handlers only ever pass a bcrypt hash down to the
+	// store, mirroring the real CloudStore.
+	passwordHashes map[string]string
+	nextUserID     int
 }
 
 func newFakeAdminDashboardStore() *fakeAdminDashboardStore {
@@ -30,7 +37,95 @@ func newFakeAdminDashboardStore() *fakeAdminDashboardStore {
 		tokens:              map[string][]cloudstore.ManagedTokenView{},
 		disabled:            map[string]bool{},
 		admins:              map[string]bool{},
+		passwordHashes:      map[string]string{},
 	}
+}
+
+// findFakeUserIndex returns the index of the user with the given id, or -1.
+func (s *fakeAdminDashboardStore) findFakeUserIndex(id string) int {
+	for i, u := range s.users {
+		if u.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// AdminCreateUser fakes the store-level uniqueness check (username OR email
+// already used by ANOTHER row) that the real CloudStore enforces via Postgres
+// UNIQUE constraints.
+func (s *fakeAdminDashboardStore) AdminCreateUser(_ context.Context, username, email, passwordHash string) (string, error) {
+	for _, u := range s.users {
+		if u.Username == username || (email != "" && u.Email == email) {
+			return "", cloudstore.ErrUserExists
+		}
+	}
+	s.nextUserID++
+	id := strconv.Itoa(s.nextUserID)
+	s.users = append(s.users, cloudstore.AdminUser{ID: id, Username: username, Email: email})
+	s.passwordHashes[id] = passwordHash
+	return id, nil
+}
+
+// AdminUpdateUser fakes the same uniqueness check against every OTHER row (a
+// self-rename to the current value never conflicts).
+func (s *fakeAdminDashboardStore) AdminUpdateUser(_ context.Context, id, username, email string) error {
+	idx := s.findFakeUserIndex(id)
+	if idx == -1 {
+		return cloudstore.ErrManagedTokenUserNotFound
+	}
+	for i, u := range s.users {
+		if i == idx {
+			continue
+		}
+		if u.Username == username || (email != "" && u.Email == email) {
+			return cloudstore.ErrUserExists
+		}
+	}
+	s.users[idx].Username = username
+	s.users[idx].Email = email
+	return nil
+}
+
+// AdminSetUserPassword fakes replacing the stored hash.
+func (s *fakeAdminDashboardStore) AdminSetUserPassword(_ context.Context, id, passwordHash string) error {
+	if s.findFakeUserIndex(id) == -1 {
+		return cloudstore.ErrManagedTokenUserNotFound
+	}
+	s.passwordHashes[id] = passwordHash
+	return nil
+}
+
+// AdminHardDeleteUser fakes the cascading delete: the user row, its
+// memberships, its admin flag, and its disabled flag.
+func (s *fakeAdminDashboardStore) AdminHardDeleteUser(_ context.Context, id string) error {
+	idx := s.findFakeUserIndex(id)
+	if idx == -1 {
+		return cloudstore.ErrManagedTokenUserNotFound
+	}
+	// Last-admin guard, fake-mirroring the real cloudstore.AdminHardDeleteUser's
+	// atomic in-transaction check (lockAdminIDsForUpdate).
+	if s.admins[id] {
+		n := 0
+		for _, v := range s.admins {
+			if v {
+				n++
+			}
+		}
+		if n <= 1 {
+			return cloudstore.ErrLastAdmin
+		}
+	}
+	s.users = append(s.users[:idx], s.users[idx+1:]...)
+	delete(s.passwordHashes, id)
+	delete(s.admins, id)
+	delete(s.disabled, id)
+	for k, m := range s.memberships {
+		if m.AccountID == id {
+			delete(s.memberships, k)
+		}
+	}
+	return nil
 }
 
 // IsUserAdmin backs both the operator-promotion lookup (OBL-16) and the last-admin
@@ -55,6 +150,44 @@ func (s *fakeAdminDashboardStore) CountAdmins(context.Context) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// DemoteUserAdminGuarded fakes the atomic guard: refuses with
+// cloudstore.ErrLastAdmin when accountID is the only remaining admin. The
+// fake has no concurrency to protect against (Go test goroutines aside, each
+// test call is sequential), so this simply replicates the SAME observable
+// check-then-act semantics the real cloudstore.DemoteUserAdminGuarded
+// guarantees atomically against a live Postgres.
+func (s *fakeAdminDashboardStore) DemoteUserAdminGuarded(ctx context.Context, accountID string) error {
+	if s.admins[accountID] {
+		n := 0
+		for _, v := range s.admins {
+			if v {
+				n++
+			}
+		}
+		if n <= 1 {
+			return cloudstore.ErrLastAdmin
+		}
+	}
+	return s.SetUserAdmin(ctx, accountID, false)
+}
+
+// DeactivateUserGuarded fakes the atomic deactivate guard, mirroring
+// DemoteUserAdminGuarded above.
+func (s *fakeAdminDashboardStore) DeactivateUserGuarded(ctx context.Context, userID string) error {
+	if s.admins[userID] {
+		n := 0
+		for _, v := range s.admins {
+			if v {
+				n++
+			}
+		}
+		if n <= 1 {
+			return cloudstore.ErrLastAdmin
+		}
+	}
+	return s.SetUserDisabled(ctx, userID, true)
 }
 
 func (s *fakeAdminDashboardStore) ListUsers(context.Context) ([]cloudstore.AdminUser, error) {
@@ -446,6 +579,26 @@ func TestDemoteLastAdminRefused(t *testing.T) {
 	}
 }
 
+// TestPromoteDemoteNonNumericID verifies a non-numeric {id} on promote/demote
+// is rejected with 400, not a raw store-error 500 (SHOULD-FIX 4, Slice 1
+// security review — applied consistently across every /admin/users/{id}/*
+// route, not just the new Slice 1 ones).
+func TestPromoteDemoteNonNumericID(t *testing.T) {
+	srv, _, authSvc := newAdminDashboardTestServer(t)
+
+	promoteRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(promoteRec, cookieRequest(http.MethodPost, "/admin/users/not-a-number/promote", operatorCookie(t, authSvc), ""))
+	if promoteRec.Code != http.StatusBadRequest {
+		t.Fatalf("promote: expected 400, got %d body=%q", promoteRec.Code, promoteRec.Body.String())
+	}
+
+	demoteRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(demoteRec, cookieRequest(http.MethodPost, "/admin/users/not-a-number/demote", operatorCookie(t, authSvc), ""))
+	if demoteRec.Code != http.StatusBadRequest {
+		t.Fatalf("demote: expected 400, got %d body=%q", demoteRec.Code, demoteRec.Body.String())
+	}
+}
+
 // TestAdminUpsertMembershipRoundTripsPerms verifies the operator can set a user's
 // permission on a project and that the perms bitfield round-trips (read-only →
 // read+write), with out-of-range bits masked.
@@ -586,6 +739,11 @@ func TestAdminEndpointsAllForbiddenForNonOperator(t *testing.T) {
 		{http.MethodPost, "/admin/users/1/disable", "", ""},
 		{http.MethodPost, "/admin/users/1/enable", "", ""},
 		{http.MethodPost, "/admin/tokens/9/revoke", "", ""},
+		// Command Center v2, Slice 1: operator-facing user CRUD.
+		{http.MethodPost, "/admin/users", `{"username":"x","email":"x@example.com"}`, "application/json"},
+		{http.MethodPut, "/admin/users/1", `{"username":"x","email":"x@example.com"}`, "application/json"},
+		{http.MethodPost, "/admin/users/1/password", `{}`, "application/json"},
+		{http.MethodPost, "/admin/users/1/delete?confirm=1", "", ""},
 	}
 	for _, c := range cases {
 		rec := httptest.NewRecorder()
