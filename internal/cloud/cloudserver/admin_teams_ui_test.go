@@ -140,9 +140,11 @@ func TestAdminProjectsPageSplit(t *testing.T) {
 	}
 }
 
-// TestAdminAccessPageTeamDerived verifies the Access page shows the per-project
-// OVERRIDES ABOVE the read-only "from teams" section, marks a project that is
-// overridden, and surfaces the contributing team + profile.
+// TestAdminAccessPageTeamDerived verifies the Command Center v2, Slice 3
+// unified Access page: an override on one project (workly) wins outright
+// over its team-derived perms, while a SECOND project reachable only through
+// the team (trackly) shows the team + profile that grants it — all in ONE
+// merged row per project, not two disconnected sections.
 func TestAdminAccessPageTeamDerived(t *testing.T) {
 	srv, store, authSvc := newTeamsAdminTestServer(t)
 	ctx := context.Background()
@@ -153,7 +155,8 @@ func TestAdminAccessPageTeamDerived(t *testing.T) {
 	_ = store.AddTeamMember(ctx, team.ID, "1", profileIDByName(t, store, "Moderator"))
 	_ = store.UpsertProjectMeta(ctx, "workly", "work", "")
 	_ = store.UpsertProjectMeta(ctx, "trackly", "work", "")
-	// An override on workly (read-only) must win and be flagged in the team view.
+	// An override on workly (read-only) must win outright over the team's
+	// Moderator (full) perms for that same project.
 	store.grant("1", "workly", int(cloudauth.PermRead), "member")
 
 	rec := httptest.NewRecorder()
@@ -162,14 +165,24 @@ func TestAdminAccessPageTeamDerived(t *testing.T) {
 		t.Fatalf("operator GET /admin/access (html): expected 200, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"PER-PROJECT OVERRIDES", "FROM TEAMS", "Migración", "Moderator", "trackly", "overridden above"} {
+
+	// workly: the override wins — Override source, read-only, its own role.
+	for _, want := range []string{`id="access-row-workly"`, "badge-warn", ">Override<", "member"} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("Access page missing %q, body=%q", want, body)
+			t.Fatalf("workly row missing %q, body=%q", want, body)
 		}
 	}
-	// Overrides must sit ABOVE the team-derived section.
-	if strings.Index(body, "PER-PROJECT OVERRIDES") >= strings.Index(body, "FROM TEAMS") {
-		t.Fatalf("overrides must render above the from-teams section")
+	// trackly: no override — the team-derived perms show through, naming the
+	// contributing team + profile explicitly.
+	for _, want := range []string{`id="access-row-trackly"`, "badge-team", "Migración", "Moderator"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("trackly row missing %q, body=%q", want, body)
+		}
+	}
+	// The unified table renders each project exactly once — no more
+	// disconnected "overrides" + "from teams" duplicate listing.
+	if strings.Count(body, `id="access-row-workly"`) != 1 {
+		t.Fatalf("expected workly to render exactly once, body=%q", body)
 	}
 }
 

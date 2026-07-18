@@ -134,33 +134,22 @@ type adminUsersView struct {
 type adminUserOption struct {
 	ID       string
 	Username string
+	Email    string
 	Selected bool
 }
 
-type adminMembershipRow struct {
-	Project   string
-	Read      bool
-	Insert    bool
-	Update    bool
-	Delete    bool
-	Role      string
-	Summary   string
-	DeleteURL string // pre-encoded DELETE /admin/memberships/{account_id}/{project}
-}
-
+// adminAccessView backs the Command Center v2, Slice 3 unified Access page:
+// ONE merged row per project (see mergeUnifiedAccessRows in
+// admin_access_unified.go) instead of the old two disconnected sections
+// (a per-project override list + a read-only "from teams" list below it).
 type adminAccessView struct {
-	Props        ui.LayoutProps
-	Users        []adminUserOption
-	SelectedID   string
-	SelectedName string
-	Memberships  []adminMembershipRow
-	Roles        []string
-	// Team-derived, read-only "from teams" section (OBL-15). Populated only when
-	// the store supports teams administration. Grouped by project classification.
-	HasTeams     bool
-	TeamPersonal []adminTeamPermRow
-	TeamWork     []adminTeamPermRow
-	TeamOther    []adminTeamPermRow
+	Props         ui.LayoutProps
+	Users         []adminUserOption
+	SelectedID    string
+	SelectedName  string
+	SelectedEmail string
+	Rows          []unifiedAccessRow
+	Roles         []string
 }
 
 // adminTeamPermRow is one project's team-derived effective perms for the selected
@@ -231,8 +220,9 @@ func (s *CloudServer) handleAdminUsersPage(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// handleAdminAccessPage renders GET /admin/access — the operator Access page for a
-// selected user's memberships.
+// handleAdminAccessPage renders GET /admin/access — the operator's unified
+// Access page for a selected account (Command Center v2, Slice 3): one merged
+// row per project instead of the old override list + read-only team section.
 func (s *CloudServer) handleAdminAccessPage(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperator(w, r) {
 		return
@@ -253,50 +243,120 @@ func (s *CloudServer) handleAdminAccessPage(w http.ResponseWriter, r *http.Reque
 	}
 
 	opts := make([]adminUserOption, 0, len(users))
-	selectedName := ""
+	selectedName, selectedEmail := "", ""
 	for _, u := range users {
 		isSel := u.ID == selected
 		if isSel {
 			selectedName = u.Username
+			selectedEmail = u.Email
 		}
-		opts = append(opts, adminUserOption{ID: u.ID, Username: u.Username, Selected: isSel})
+		opts = append(opts, adminUserOption{ID: u.ID, Username: u.Username, Email: u.Email, Selected: isSel})
 	}
 
-	var memRows []adminMembershipRow
-	overridden := map[string]bool{}
+	var rows []unifiedAccessRow
 	if selected != "" {
-		mems, merr := as.ListMembershipsForUser(r.Context(), selected)
-		if merr != nil {
-			http.Error(w, "could not list memberships", http.StatusInternalServerError)
+		rows, err = s.buildUnifiedAccessRows(r.Context(), as, selected)
+		if err != nil {
+			http.Error(w, "could not compute access", http.StatusInternalServerError)
 			return
-		}
-		memRows = make([]adminMembershipRow, 0, len(mems))
-		for _, m := range mems {
-			row := toAdminMembershipRow(m)
-			row.DeleteURL = adminMembershipDeletePath(selected, m.Project)
-			memRows = append(memRows, row)
-			overridden[m.Project] = true
 		}
 	}
 
 	view := adminAccessView{
-		Props:        s.adminLayoutProps("Admin · Access", "admin"),
-		Users:        opts,
-		SelectedID:   selected,
-		SelectedName: selectedName,
-		Memberships:  memRows,
-		Roles:        adminRoleOptions(),
-	}
-
-	// The read-only "from teams" section: the team-union perms per project for the
-	// selected account, shown BELOW the per-project overrides so the operator sees
-	// the full effective picture (override wins where present).
-	if ts, tok := s.teamsStore(); tok && selected != "" {
-		view.HasTeams = true
-		view.TeamPersonal, view.TeamWork, view.TeamOther = s.teamDerivedForAccount(r.Context(), ts, selected, overridden)
+		Props:         s.adminLayoutProps("Admin · Access", "admin"),
+		Users:         opts,
+		SelectedID:    selected,
+		SelectedName:  selectedName,
+		SelectedEmail: selectedEmail,
+		Rows:          rows,
+		Roles:         adminRoleOptions(),
 	}
 
 	if err := adminAccessPage(view).Render(r.Context(), w); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+	}
+}
+
+// ─── unified Access row fragments (Command Center v2, Slice 3) ──────────────
+//
+// Pure view wiring, no store mutation — the same convention as the Slice 2
+// hard-delete confirm/cancel round trip (handleAdminUserDeleteConfirm/
+// -Cancel): every fragment recomputes buildUnifiedAccessRows (the SAME
+// view-model the full page renders) so a row's edit / revoke-confirm state
+// can never drift from what GET /admin/access shows. The actual mutations
+// they trigger are the PRE-EXISTING, operator-gated PUT/DELETE
+// /admin/memberships routes — nothing new is added to the write path.
+
+// loadAccessRow resolves the (account_id, project) path pair, requires the
+// operator, and returns the merged row for that pair. It writes the HTTP
+// error itself and returns ok=false on any failure (missing store support,
+// missing path params, or an unknown project for that account).
+func (s *CloudServer) loadAccessRow(w http.ResponseWriter, r *http.Request) (unifiedAccessRow, bool) {
+	if !s.requireOperator(w, r) {
+		return unifiedAccessRow{}, false
+	}
+	as, ok := s.adminStore()
+	if !ok {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "admin unavailable"})
+		return unifiedAccessRow{}, false
+	}
+	accountID := strings.TrimSpace(r.PathValue("account_id"))
+	project := strings.TrimSpace(r.PathValue("project"))
+	if accountID == "" || project == "" {
+		http.Error(w, "account_id and project are required", http.StatusBadRequest)
+		return unifiedAccessRow{}, false
+	}
+	rows, err := s.buildUnifiedAccessRows(r.Context(), as, accountID)
+	if err != nil {
+		http.Error(w, "could not compute access", http.StatusInternalServerError)
+		return unifiedAccessRow{}, false
+	}
+	for _, row := range rows {
+		if row.Project == project {
+			return row, true
+		}
+	}
+	http.Error(w, "project not found", http.StatusNotFound)
+	return unifiedAccessRow{}, false
+}
+
+// handleAdminAccessRowView handles GET /admin/access/rows/{account_id}/{project}
+// — the default (non-editing) state of one row, also the Cancel target for
+// both the edit form and the revoke-confirm dialog below.
+func (s *CloudServer) handleAdminAccessRowView(w http.ResponseWriter, r *http.Request) {
+	row, ok := s.loadAccessRow(w, r)
+	if !ok {
+		return
+	}
+	if err := adminAccessRowView(row).Render(r.Context(), w); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+	}
+}
+
+// handleAdminAccessRowEdit handles GET .../{project}/edit — swaps the row
+// into an inline form (role + R/W/U/D checkboxes) that PUTs to the existing
+// /admin/memberships route. Serves all three triggers ("Edit" on an override,
+// "Override…" on a team row, "Grant…" on a None row) since they differ only
+// in the form's pre-filled defaults, computed from the SAME row.
+func (s *CloudServer) handleAdminAccessRowEdit(w http.ResponseWriter, r *http.Request) {
+	row, ok := s.loadAccessRow(w, r)
+	if !ok {
+		return
+	}
+	if err := adminAccessRowEdit(adminRoleOptions(), row).Render(r.Context(), w); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+	}
+}
+
+// handleAdminAccessRowRevokeConfirm handles GET .../{project}/revoke — swaps
+// the row into the reused ui.ConfirmDialog (Slice 0), wired to the existing
+// DELETE /admin/memberships/{account_id}/{project} route.
+func (s *CloudServer) handleAdminAccessRowRevokeConfirm(w http.ResponseWriter, r *http.Request) {
+	row, ok := s.loadAccessRow(w, r)
+	if !ok {
+		return
+	}
+	if err := adminAccessRowRevokeConfirm(row).Render(r.Context(), w); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 	}
 }
@@ -735,19 +795,6 @@ func toAdminUserRow(u cloudstore.AdminUser, tokens []cloudstore.ManagedTokenView
 		TokenCount:   u.TokenCount,
 		LastTokenUse: formatAdminTime(u.LastTokenUse),
 		Tokens:       rows,
-	}
-}
-
-func toAdminMembershipRow(m cloudstore.Membership) adminMembershipRow {
-	p := auth.Permission(m.Perms)
-	return adminMembershipRow{
-		Project: m.Project,
-		Read:    p.Has(auth.PermRead),
-		Insert:  p.Has(auth.PermInsert),
-		Update:  p.Has(auth.PermUpdate),
-		Delete:  p.Has(auth.PermDelete),
-		Role:    m.Role,
-		Summary: permSummary(m.Perms),
 	}
 }
 

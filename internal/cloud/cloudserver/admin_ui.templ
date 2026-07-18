@@ -361,126 +361,195 @@ templ adminTokenIssuedFragment(view adminTokenIssuedView) {
 	</div>
 }
 
-// ─── Access page ─────────────────────────────────────────────────────────────
+// ─── Access page (Command Center v2, Slice 3) ───────────────────────────────
+//
+// Replaces the old two disconnected lists (an editable per-project override
+// list, then a read-only "from teams" list below it) with ONE unified table:
+// one row per project, its effective permission label + R/W/U/D chips, and an
+// explicit source badge (Override / Team · X / None). Edited in place — each
+// row's Access/Source/Edit region swaps between a view state, an inline edit
+// form and (for Revoke) the reused ui.ConfirmDialog, all through the SAME
+// swap-in-place convention Slice 2 established for the hard-delete flow. The
+// account picker is a searchable combobox (accountSelector) rather than a
+// plain <select>.
 
 templ adminAccessPage(view adminAccessView) {
 	@ui.Layout(view.Props) {
-		@adminPageTitle("Admin", "Per-project overrides take precedence over team-derived perms. Operator-only.")
+		@adminPageTitle("Admin", "Effective access for one account. An override always wins over team-derived perms.")
 		@adminNavTabs("access")
+		<div id="admin-error-banner" class="admin-error-banner" hidden></div>
 		<div class="card" style="margin-bottom: 1.25rem;">
 			<span class="micro-label" style="display: block; margin-bottom: 0.6rem;">ACCOUNT</span>
 			if len(view.Users) == 0 {
 				<p style="color: var(--text-dim); font-size: 13px;">No accounts yet.</p>
 			} else {
-				<form method="get" action="/admin/access" style="margin: 0;">
-					<select name="user" onchange="this.form.submit()" style="padding: 0.45rem 0.6rem; font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text); min-width: 220px;">
-						for _, o := range view.Users {
-							<option value={ o.ID } selected?={ o.Selected }>{ o.Username }</option>
-						}
-					</select>
-					<noscript><button type="submit" class="shell-button shell-button-ghost" style="padding: 0.4rem 0.8rem; font-size: 12px; margin-left: 0.5rem;">Select</button></noscript>
-				</form>
+				@accountSelector(view)
 			}
 		</div>
 		if view.SelectedID != "" {
-			// ── Per-project OVERRIDES (top — take precedence) ──────────────────────
-			<div class="card" style="margin-bottom: 1rem; border-color: var(--border-accent);">
-				<span class="micro-label" style="display: block; margin-bottom: 0.3rem; color: var(--accent);">PER-PROJECT OVERRIDES · { view.SelectedName }</span>
-				<p style="font-size: 12px; color: var(--text-dim); margin: 0 0 0.85rem 0;">An override REPLACES the team-derived perms for that project — it wins outright (it can elevate or restrict, including to no access).</p>
-				if len(view.Memberships) == 0 {
-					<p style="color: var(--text-dim); font-size: 13px; margin-bottom: 1rem;">No overrides. This account's access comes entirely from its teams below.</p>
+			<div class="card" style="padding: 0;">
+				<div class="admin-toolbar" style="padding: 0.85rem 1rem 0; margin-bottom: 0;">
+					<span class="micro-label">EFFECTIVE ACCESS · { view.SelectedName }</span>
+					<span class="admin-count">{ accessProjectCountLabel(view.Rows) }</span>
+				</div>
+				<div class="access-head-row">
+					<span class="micro-label">Project</span>
+					<span class="micro-label">Access</span>
+					<span class="micro-label">Source</span>
+					<span class="micro-label" style="text-align: right;">Edit</span>
+				</div>
+				if len(view.Rows) == 0 {
+					<p style="color: var(--text-dim); font-size: 13px; padding: 0.9rem 1rem;">No known projects yet.</p>
 				} else {
-					<div style="display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 0.5rem;">
-						for _, m := range view.Memberships {
-							@adminMembershipRowView(view, m)
-						}
-					</div>
+					for _, row := range view.Rows {
+						@adminAccessRowSlot(row)
+					}
 				}
 			</div>
-			@adminAddOverrideCard(view)
-			// ── Team-derived perms (below — read-only) ─────────────────────────────
-			if view.HasTeams {
-				<div style="margin: 1.75rem 0 0.75rem 0;">
-					<span class="micro-label" style="display: block; color: var(--text-2);">FROM TEAMS · read-only</span>
-					<p style="font-size: 12px; color: var(--text-dim); margin: 0.3rem 0 0 0;">Effective perms granted by team membership. An override above supersedes the matching project here.</p>
-				</div>
-				@adminTeamPermGroup("Personal", view.TeamPersonal)
-				@adminTeamPermGroup("Work", view.TeamWork)
-				if len(view.TeamOther) > 0 {
-					@adminTeamPermGroup("Unclassified", view.TeamOther)
-				}
-				if len(view.TeamPersonal) == 0 && len(view.TeamWork) == 0 && len(view.TeamOther) == 0 {
-					<div class="card"><p style="color: var(--text-dim); font-size: 13px; margin: 0;">This account is not on any team, or its teams have no projects yet.</p></div>
-				}
-			}
 		}
 		@adminAssets()
 	}
 }
 
-// adminAddOverrideCard adds a per-project override via the searchable project
-// selector (no free-text) + R/W/U/D + role. Posts to the OBL-13 membership upsert.
-templ adminAddOverrideCard(view adminAccessView) {
-	<div class="card" style="margin-bottom: 0.5rem;">
-		<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">ADD / UPDATE OVERRIDE</span>
-		<form data-admin-form data-method="PUT" data-url-template="/admin/memberships" data-body="form" style="display: grid; grid-template-columns: 1.6fr 1.6fr 1fr auto; gap: 0.6rem; align-items: start; margin: 0;">
-			<input type="hidden" name="account_id" value={ view.SelectedID }/>
-			@projectSelector("Search projects…")
-			@adminPermChecks(true, false, false, false)
-			@adminRoleSelect(view.Roles, "member")
-			<button type="submit" class="shell-button" style="padding: 0.35rem 0.9rem; font-size: 12px;">Save</button>
-		</form>
-		<div class="admin-form-error" data-form-error hidden></div>
+// accountSelector is the Access page's searchable account combobox (Slice 3):
+// the first extra consumer of the combobox mechanics factored out of
+// projectSelector's admin.js (wireSearchSelect). It filters the account list
+// ALREADY rendered into this page — no new fetch/endpoint — and navigates to
+// /admin/access?user={id} when the operator picks one.
+templ accountSelector(view adminAccessView) {
+	<div class="acct-select" data-acct-select>
+		<input
+			type="text"
+			class="acct-select-input"
+			data-acct-input
+			value={ accountComboLabel(view.SelectedName, view.SelectedEmail) }
+			placeholder="Search accounts…"
+			autocomplete="off"
+			role="combobox"
+			aria-autocomplete="list"
+			aria-expanded="false"
+		/>
+		<ul class="proj-list" data-acct-list role="listbox" hidden></ul>
+		<ul hidden data-acct-source>
+			for _, u := range view.Users {
+				<li data-account-id={ u.ID } data-username={ u.Username } data-email={ u.Email }></li>
+			}
+		</ul>
 	</div>
 }
 
-// adminTeamPermGroup renders one classification bucket of the read-only team-derived
-// perms: each project with its effective (union) perms and the teams that grant them.
-templ adminTeamPermGroup(label string, rows []adminTeamPermRow) {
-	if len(rows) > 0 {
-		<div class="card" style="margin-bottom: 1rem;">
-			<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">{ label }</span>
-			<div style="display: flex; flex-direction: column; gap: 0.55rem;">
-				for _, row := range rows {
-					<div style="padding: 0.55rem 0.75rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem;">
-						<div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
-							<span style="font-family: var(--mono); font-size: 13px; color: var(--text);">{ row.Project }</span>
-							<span class="badge" style="padding: 0.15rem 0.5rem;">{ row.Summary }</span>
-							if row.Overridden {
-								<span class="badge badge-warn" style="padding: 0.15rem 0.5rem;">overridden above</span>
-							}
-						</div>
-						<div style="margin-top: 0.35rem; font-size: 11px; color: var(--text-dim);">
-							for i, src := range row.Sources {
-								if i > 0 {
-									<span> · </span>
-								}
-								<span>{ src.Team }</span>
-								if src.Profile != "" {
-									<span style="color: var(--text-faint);"> ({ src.Profile })</span>
-								}
-							}
-						</div>
-					</div>
-				}
-			</div>
-		</div>
+// adminAccessRowSlot renders the row's STABLE wrapper (#access-row-{slug}),
+// exactly once, around its initial view-state content. Every edit/revoke
+// trigger below targets this same id with hx-swap="innerHTML" — mirroring
+// Slice 2's adminUserDeleteSlot — so the fragment handlers only ever render
+// the INNER content (adminAccessRowView / adminAccessRowEdit /
+// adminAccessRowRevokeConfirm), never a duplicate wrapper.
+templ adminAccessRowSlot(row unifiedAccessRow) {
+	<div class="access-row" id={ "access-row-" + row.Slug }>
+		@adminAccessRowView(row)
+	</div>
+}
+
+// adminAccessRowView is a project row's default (non-editing) INNER content:
+// the project name, its effective label + R/W/U/D chips, its source badge,
+// and the edit-in-place trigger appropriate to that source. Rendered both by
+// adminAccessRowSlot (initial page load) and by handleAdminAccessRowView (the
+// Cancel target for the edit form and the revoke-confirm dialog).
+templ adminAccessRowView(row unifiedAccessRow) {
+	<div class="access-proj">{ row.Project }</div>
+	<div class="access-perm">
+		<span class={ "access-lvl", templ.KV("access-lvl-none", row.Label == "None") }>{ row.Label }</span>
+		<span class="access-chips">
+			<span class={ "access-chip", templ.KV("on", row.Read) }>R</span>
+			<span class={ "access-chip", templ.KV("on", row.Insert) }>W</span>
+			<span class={ "access-chip", templ.KV("on", row.Update) }>U</span>
+			<span class={ "access-chip", templ.KV("on", row.Delete) }>D</span>
+		</span>
+	</div>
+	<div class="access-src">
+		@accessSourceBadge(row)
+	</div>
+	<div class="access-edit">
+		if row.Source == "override" {
+			<button type="button" class="linkish" hx-get={ row.EditURL } hx-target={ "#access-row-" + row.Slug } hx-swap="innerHTML">Edit</button>
+			<span class="access-sep">·</span>
+			<button type="button" class="linkish access-danger" hx-get={ row.RevokeConfirmURL } hx-target={ "#access-row-" + row.Slug } hx-swap="innerHTML">Revoke</button>
+		} else if row.Source == "team" {
+			<button type="button" class="linkish" hx-get={ row.EditURL } hx-target={ "#access-row-" + row.Slug } hx-swap="innerHTML">Override…</button>
+		} else {
+			<button type="button" class="linkish" hx-get={ row.EditURL } hx-target={ "#access-row-" + row.Slug } hx-swap="innerHTML">Grant…</button>
+		}
+	</div>
+}
+
+// accessSourceBadge renders the row's source: Override (+ role), Team · name
+// (+ profile, when a single team contributes), or None.
+templ accessSourceBadge(row unifiedAccessRow) {
+	if row.Source == "override" {
+		<span class="badge badge-warn">Override</span>
+		if row.Role != "" {
+			<span class="access-src-detail"> · { row.Role }</span>
+		}
+	} else if row.Source == "team" {
+		<span class="badge badge-team">Team · { row.TeamSummary }</span>
+		if row.TeamProfile != "" {
+			<span class="access-src-detail"> · { row.TeamProfile }</span>
+		}
+	} else {
+		<span class="badge badge-muted">None</span>
 	}
 }
 
-templ adminMembershipRowView(view adminAccessView, m adminMembershipRow) {
-	<form hx-put="/admin/memberships" hx-swap="none" style="display: grid; grid-template-columns: 1.3fr 1.6fr 1fr auto auto; gap: 0.6rem; align-items: center; padding: 0.6rem 0.75rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem; margin: 0;">
-		<input type="hidden" name="account_id" value={ view.SelectedID }/>
-		<input type="hidden" name="project" value={ m.Project }/>
-		<div>
-			<span style="font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text);">{ m.Project }</span>
-			<span style="display: block; font-size: 11px; color: var(--text-faint);">{ m.Summary }</span>
+// adminAccessRowEdit is the row's INNER content while editing: role + R/W/U/D
+// checkboxes, PUTting to the pre-existing /admin/memberships route. Serves
+// all three triggers (Edit / Override… / Grant…) — they differ only in the
+// row's current perms/role, already folded into row by loadAccessRow. The
+// form uses display:contents so its children act as direct grid items of the
+// parent .access-row grid (set up by adminAccessRowSlot), keeping the
+// Project/Access/Source/Edit columns aligned in edit mode too.
+templ adminAccessRowEdit(roles []string, row unifiedAccessRow) {
+	<form hx-put="/admin/memberships" hx-swap="none" style="display: contents;">
+		<input type="hidden" name="account_id" value={ row.AccountID }/>
+		<input type="hidden" name="project" value={ row.Project }/>
+		<div class="access-proj">{ row.Project }</div>
+		<div class="access-perm">
+			if row.Source == "none" {
+				@adminPermChecks(true, false, false, false)
+			} else {
+				@adminPermChecks(row.Read, row.Insert, row.Update, row.Delete)
+			}
 		</div>
-		@adminPermChecks(m.Read, m.Insert, m.Update, m.Delete)
-		@adminRoleSelect(view.Roles, m.Role)
-		<button type="submit" class="shell-button" style="padding: 0.3rem 0.8rem; font-size: 12px;">Save</button>
-		<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.8rem; font-size: 12px;" hx-delete={ m.DeleteURL } hx-swap="none">Revoke</button>
+		<div class="access-src">
+			@adminRoleSelect(roles, accessRowFormRole(row))
+		</div>
+		<div class="access-edit">
+			<button type="submit" class="shell-button" style="padding: 0.3rem 0.8rem; font-size: 12px;">Save</button>
+			<button type="button" class="linkish" hx-get={ row.ViewURL } hx-target={ "#access-row-" + row.Slug } hx-swap="innerHTML">Cancel</button>
+		</div>
 	</form>
+}
+
+// adminAccessRowRevokeConfirm is the row's INNER content while confirming a
+// revoke: the reused Slice-0 ui.ConfirmDialog, wired to the existing DELETE
+// /admin/memberships route. `.access-row .card` (omnia.css) makes the card
+// span the full row width instead of being squeezed into one grid column.
+templ adminAccessRowRevokeConfirm(row unifiedAccessRow) {
+	@ui.ConfirmDialog(ui.ConfirmDialogProps{
+		Title:     "Revoke access to " + row.Project + "?",
+		Message:   row.Project,
+		Note:      "Removes this account's override. It falls back to team-derived access, if any, for this project.",
+		CancelURL: row.ViewURL,
+		Target:    "#access-row-" + row.Slug,
+		Actions: []ui.ConfirmAction{
+			{
+				Label:   "Revoke",
+				Method:  "delete",
+				URL:     adminMembershipDeletePath(row.AccountID, row.Project),
+				Danger:  true,
+				Confirm: "Revoke access to " + row.Project + " for this account?",
+			},
+		},
+	})
 }
 
 templ adminPermChecks(read, insert, update, del bool) {

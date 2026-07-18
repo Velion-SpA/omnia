@@ -2205,6 +2205,166 @@
 	border: 1px solid var(--border-strong);
 }
 
+/* ── Admin Access page v2 (Command Center v2, Slice 3) ─────────────────────
+   ONE unified table (project → effective access), replacing the old
+   disconnected override list + read-only "from teams" section. Each row is a
+   CSS-grid div (matching the approved mockup's markup, not a <table>), edited
+   in place via the SAME swap-in-place convention as Slice 2's user-delete
+   slot: a stable #access-row-{slug} wrapper whose innerHTML swaps between
+   view / edit-form / ConfirmDialog states. */
+
+.access-head-row,
+.access-row {
+	display: grid;
+	grid-template-columns: 1.3fr 1.3fr 1.4fr auto;
+	gap: 0.75rem;
+	align-items: center;
+	padding: 0.7rem 1rem;
+	border-bottom: 1px solid var(--border);
+}
+
+.access-head-row:last-child,
+.access-row:last-child {
+	border-bottom: none;
+}
+
+.access-row:hover {
+	background: rgba(255, 255, 255, 0.015);
+}
+
+/* The reused ui.ConfirmDialog (.card) swaps into a row's innerHTML for the
+   revoke step — span the full row instead of being squeezed into one column. */
+.access-row .card {
+	grid-column: 1 / -1;
+	margin: 0;
+}
+
+.access-proj {
+	font-family: var(--mono);
+	font-size: 13px;
+	color: var(--text);
+	font-weight: 500;
+}
+
+.access-perm {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+}
+
+.access-lvl {
+	font-size: 11.5px;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--text);
+}
+
+.access-lvl-none {
+	color: var(--text-faint);
+}
+
+.access-chips {
+	display: inline-flex;
+	gap: 3px;
+}
+
+.access-chip {
+	width: 20px;
+	height: 20px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 10px;
+	font-weight: 700;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--border-strong);
+	color: var(--text-faint);
+}
+
+.access-chip.on {
+	background: var(--accent-dim);
+	border-color: var(--border-accent);
+	color: var(--calypso);
+}
+
+.access-src-detail {
+	color: var(--text-faint);
+	font-size: 11.5px;
+}
+
+.access-edit {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	justify-content: flex-end;
+}
+
+.access-sep {
+	color: var(--text-faint);
+}
+
+.access-danger {
+	color: var(--bad);
+}
+
+.access-danger:hover {
+	color: var(--bad);
+	opacity: 0.8;
+}
+
+.badge-team {
+	background: rgba(129, 140, 248, 0.10);
+	color: var(--violet);
+	border: 1px solid rgba(129, 140, 248, 0.28);
+}
+
+/* A minimal text/icon-free link-styled control — used for the Access row's
+   Edit/Override…/Grant…/Revoke/Cancel triggers. Always a <button> (never a
+   bare <a href>) so an htmx GET trigger never risks a real navigation. */
+.linkish {
+	background: none;
+	border: none;
+	padding: 0;
+	color: var(--text-faint);
+	font-family: var(--mono);
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.linkish:hover {
+	color: var(--calypso);
+}
+
+/* ── Searchable account combobox (Command Center v2, Slice 3) ──────────────
+   Reuses .proj-list/.proj-opt (above) for the dropdown; only the input/host
+   need their own rules since the account picker isn't a form control. */
+
+.acct-select {
+	position: relative;
+	max-width: 380px;
+}
+
+.acct-select-input {
+	width: 100%;
+	padding: 0.5rem 0.65rem;
+	font-size: 13px;
+	background: var(--surface-2);
+	border: 1px solid var(--border);
+	border-radius: 0.4rem;
+	color: var(--text);
+}
+
+.acct-select-input:focus {
+	outline: none;
+	border-color: var(--accent);
+}
+
+.acct-opt-email {
+	margin-left: auto;
+	font-size: 11px;
+	color: var(--text-dim);
+}
+
 .admin-form-error {
 	color: var(--bad);
 	font-size: 12px;
