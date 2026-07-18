@@ -9,6 +9,7 @@
 package atlassian
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -66,6 +67,12 @@ func New(baseURL, email, token string) *Client {
 	}
 }
 
+// BaseURL returns the client's configured site base URL (no trailing slash),
+// e.g. for building human-facing browse links (adapters need the same site
+// URL the client authenticates against; exposing it here avoids threading a
+// second copy of the site URL through adapter constructors).
+func (c *Client) BaseURL() string { return c.baseURL }
+
 // linksEnvelope captures the subset of Atlassian REST v2 response shapes
 // needed to discover a "next page" link (Confluence's `_links.next`).
 type linksEnvelope struct {
@@ -87,11 +94,37 @@ type linksEnvelope struct {
 // both wall-clock time and outbound request volume against a server that
 // never stops answering 429, independent of ctx cancellation.
 func (c *Client) GetJSON(ctx context.Context, path string, out any) (string, error) {
+	return c.doJSON(ctx, http.MethodGet, path, nil, out)
+}
+
+// PostJSON performs an authenticated POST with a JSON-encoded body against
+// path, decodes the JSON response into out, and returns the "next page"
+// path/URL exactly like GetJSON (present for response shapes that carry
+// `_links.next`; Jira's search/jql response instead carries its
+// nextPageToken inside the decoded body, which callers read from out).
+//
+// Added for the Jira adapter: Jira's modern Cloud search endpoint
+// (POST /rest/api/3/search/jql) requires a JSON request body, which a
+// GET-only client cannot send. PostJSON shares GetJSON's auth, 401/403,
+// bounded 429 retry, and response-body-cap behavior via doJSON rather than
+// duplicating that loop per adapter.
+func (c *Client) PostJSON(ctx context.Context, path string, body any, out any) (string, error) {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("marshal request body: %w", err)
+	}
+	return c.doJSON(ctx, http.MethodPost, path, payload, out)
+}
+
+// doJSON is the shared retry/decode loop behind GetJSON and PostJSON. See
+// GetJSON's doc comment for the retry/auth/cap semantics; they are identical
+// regardless of method.
+func (c *Client) doJSON(ctx context.Context, method, path string, body []byte, out any) (string, error) {
 	url := c.resolveURL(path)
 
 	var lastStatus int
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		resp, err := c.doRequest(ctx, url)
+		resp, err := c.doRequest(ctx, method, url, body)
 		if err != nil {
 			return "", err
 		}
@@ -120,29 +153,38 @@ func (c *Client) GetJSON(ctx context.Context, path string, out any) (string, err
 
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			return "", fmt.Errorf("GET %s returned %d", url, resp.StatusCode)
+			return "", fmt.Errorf("%s %s returned %d", method, url, resp.StatusCode)
 		}
 
 		return c.decodeBody(resp, url, out)
 	}
 
-	return "", fmt.Errorf("GET %s: exceeded %d retries, last status %d", url, maxRetries, lastStatus)
+	return "", fmt.Errorf("%s %s: exceeded %d retries, last status %d", method, url, maxRetries, lastStatus)
 }
 
-// doRequest builds and issues one authenticated GET. A fresh *http.Request
-// is constructed per call (per net/http guidance, Request values should not
-// be reused/mutated across multiple client.Do calls).
-func (c *Client) doRequest(ctx context.Context, url string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// doRequest builds and issues one authenticated request. A fresh
+// *http.Request is constructed per call (per net/http guidance, Request
+// values should not be reused/mutated across multiple client.Do calls).
+// body is nil for GET; for POST it is sent as the request body with a JSON
+// Content-Type.
+func (c *Client) doRequest(ctx context.Context, method, url string, body []byte) (*http.Response, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
 		return nil, err
 	}
 	req.SetBasicAuth(c.email, c.token)
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", url, err)
+		return nil, fmt.Errorf("%s %s: %w", method, url, err)
 	}
 	return resp, nil
 }
