@@ -87,8 +87,8 @@ func AdminNavItem() ui.NavItem { return adminNavItem }
 // dashboard renders — Overview, Browse, Graph, Sync, Activity, Detail and Admin
 // — so the nav's user/logout block is consistent across the whole shell instead
 // of only appearing on the Admin pages.
-func layoutPropsForContext(ctx context.Context, title string) ui.LayoutProps {
-	props := localLayoutProps(title)
+func layoutPropsForContext(ctx context.Context, active, title string) ui.LayoutProps {
+	props := localLayoutProps(active, title)
 	if adminNavEnabled(ctx) {
 		props.Nav = append(props.Nav, adminNavItem)
 	}

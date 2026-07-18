@@ -9,7 +9,7 @@ import (
 
 // detailPage renders a single observation with its meta panel, edit form, and delete action.
 templ detailPage(v ObsView, backURL string, lastAudit *audit.Entry) {
-	@layout(v.Obs.Title) {
+	@layout("browse", v.Obs.Title) {
 		<!-- Breadcrumb -->
 		<div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1.25rem;">
 			<a href="/" class="micro-label" style="color: var(--text-dim);">Overview</a>

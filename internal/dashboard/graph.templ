@@ -8,7 +8,7 @@ import "fmt"
 // ~1k nodes. When the embeddings layer is unavailable it renders a clear
 // disabled state instead of faking data.
 templ graphPage(view GraphView) {
-	@layout("Graph") {
+	@layout("graph", "Graph") {
 		<style>
 			.graph-shell { display: flex; flex-direction: column; gap: 14px; }
 
