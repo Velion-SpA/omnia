@@ -35,10 +35,24 @@ type adminDashboardStore interface {
 	UpsertMembership(ctx context.Context, accountID, project string, perms int, role string) error
 	DeleteMembership(ctx context.Context, accountID, project string) error
 	ListManagedTokensForUser(ctx context.Context, userID string) ([]cloudstore.ManagedTokenView, error)
-	// OBL-16: account-level admin flag administration + the last-admin guard.
+	// OBL-16: account-level admin flag administration.
 	IsUserAdmin(ctx context.Context, accountID string) (bool, error)
 	SetUserAdmin(ctx context.Context, accountID string, admin bool) error
 	CountAdmins(ctx context.Context) (int, error)
+	// Security fix (Slice 1 review): DemoteUserAdminGuarded is the atomic,
+	// race-safe demote entry point (see cloudstore.lockAdminIDsForUpdate).
+	// Unlike SetUserAdmin (still used directly for promote, which never
+	// needs guarding), this folds the last-admin check and the write into
+	// one transaction.
+	DemoteUserAdminGuarded(ctx context.Context, accountID string) error
+	// Command Center v2, Slice 1: operator-facing user CRUD (create, edit,
+	// password reset, hard delete). Named with an Admin prefix on the store
+	// side (cloudstore.CloudStore) so they never collide with the plain
+	// CreateUser used by the self-service Signup path.
+	AdminCreateUser(ctx context.Context, username, email, passwordHash string) (string, error)
+	AdminUpdateUser(ctx context.Context, accountID, username, email string) error
+	AdminSetUserPassword(ctx context.Context, accountID, passwordHash string) error
+	AdminHardDeleteUser(ctx context.Context, accountID string) error
 }
 
 // Compile-time assertion: the concrete store must satisfy the admin seam.
@@ -473,34 +487,39 @@ func (s *CloudServer) setUserAdmin(w http.ResponseWriter, r *http.Request, admin
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "user id is required"})
 		return
 	}
+	if !isNumericID(userID) {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "user id must be numeric"})
+		return
+	}
 	// Last-admin guard: demoting the only remaining admin would lock every account
 	// admin out of the Admin section, so refuse it. The OMNIA_CLOUD_ADMIN recovery
 	// token still grants operator regardless — this only protects the account model
 	// from becoming unreachable through the UI.
-	if !admin {
-		isAdmin, err := as.IsUserAdmin(r.Context(), userID)
-		if err != nil {
-			jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not check admin status"})
-			return
-		}
-		if isAdmin {
-			count, err := as.CountAdmins(r.Context())
-			if err != nil {
-				jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not count admins"})
-				return
-			}
-			if count <= 1 {
-				jsonResponse(w, http.StatusConflict, map[string]string{"error": "cannot demote the last remaining admin"})
-				return
-			}
-		}
+	//
+	// SECURITY FIX (Slice 1 review): the guard used to be a separate
+	// IsUserAdmin + CountAdmins read followed by a SEPARATE SetUserAdmin
+	// write — a classic check-then-act TOCTOU where two concurrent demotes
+	// of DIFFERENT admins could each observe count > 1 before either write
+	// committed, leaving zero admins. DemoteUserAdminGuarded folds the check
+	// and the write into ONE transaction with row-level locking
+	// (lockAdminIDsForUpdate), making it race-safe. Promote never needs
+	// guarding (granting admin can't reduce the admin count), so it still
+	// calls the plain, unconditional SetUserAdmin.
+	var err error
+	if admin {
+		err = as.SetUserAdmin(r.Context(), userID, true)
+	} else {
+		err = as.DemoteUserAdminGuarded(r.Context(), userID)
 	}
-	if err := as.SetUserAdmin(r.Context(), userID, admin); err != nil {
-		if errors.Is(err, cloudstore.ErrManagedTokenUserNotFound) {
+	if err != nil {
+		switch {
+		case errors.Is(err, cloudstore.ErrLastAdmin):
+			jsonResponse(w, http.StatusConflict, map[string]string{"error": "cannot demote the last remaining admin"})
+		case errors.Is(err, cloudstore.ErrManagedTokenUserNotFound):
 			jsonResponse(w, http.StatusNotFound, map[string]string{"error": "user not found"})
-			return
+		default:
+			jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not update admin status"})
 		}
-		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not update admin status"})
 		return
 	}
 	status := "demoted"
