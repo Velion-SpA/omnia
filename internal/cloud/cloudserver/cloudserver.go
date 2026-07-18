@@ -343,6 +343,13 @@ func (s *CloudServer) routes() {
 			s.mux.HandleFunc("POST /admin/projects/{project}/pause", s.handleAdminPauseProject)
 			s.mux.HandleFunc("POST /admin/projects/{project}/resume", s.handleAdminResumeProject)
 		}
+		// Command Center v2, Slice 4b: the Admin Projects reverse-access
+		// fragment ("who has access", lazily loaded per card). Registered
+		// only when the store supports the new stats/reverse-access
+		// capability, mirroring projectSyncControlAdminStore above.
+		if _, ok := s.store.(projectAdminStatsStore); ok {
+			s.mux.HandleFunc("GET /admin/projects/{project}/access", s.handleAdminProjectAccessFragment)
+		}
 		// Operator-only, read-only Audit page (OBL-05): surfaces the expanded
 		// audit trail alongside the rest of the Admin section. Registered only
 		// when the store supports ListAuditEntriesPaginated — the same method

@@ -305,7 +305,11 @@ func TestAdminProjectsPageShowsPauseState(t *testing.T) {
 		t.Fatalf("GET /admin/projects: expected 200, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"proj-z", "sync enabled", "/admin/projects/proj-z/pause", "paused_reason"} {
+	// Command Center v2, Slice 4b: the enabled/paused badge text moved from
+	// "sync enabled"/"paused" to a compact "Sync"/"⏸ Paused" card footer badge,
+	// and the pause form moved from an inline row into the "•••" kebab menu
+	// (still present in the HTML, just behind a hidden .admin-menu wrapper).
+	for _, want := range []string{"proj-z", ">Sync<", "/admin/projects/proj-z/pause", "paused_reason"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Projects page (pre-pause) missing %q, body=%q", want, body)
 		}
@@ -324,7 +328,7 @@ func TestAdminProjectsPageShowsPauseState(t *testing.T) {
 		t.Fatalf("GET /admin/projects (paused): expected 200, got %d", rec.Code)
 	}
 	body = rec.Body.String()
-	for _, want := range []string{"proj-z", "paused", "spam", "/admin/projects/proj-z/resume"} {
+	for _, want := range []string{"proj-z", "Paused", "spam", "/admin/projects/proj-z/resume"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Projects page (paused) missing %q, body=%q", want, body)
 		}

@@ -8,8 +8,12 @@ import (
 // isFresh reports whether t is within the last 24 hours.
 func isFresh(t time.Time) bool { return time.Since(t) < 24*time.Hour }
 
-// relativeTime formats t as a human-readable relative duration.
-func relativeTime(t time.Time) string {
+// RelativeTime formats t as a human-readable relative duration (e.g. "5m
+// ago", "yesterday", falling back to an absolute date after 30 days).
+// Exported for cross-package reuse — Command Center v2, Slice 4b uses it for
+// the Admin Projects card's "last activity" stat (cloudserver is a separate
+// package from ui, so it needs a public name).
+func RelativeTime(t time.Time) string {
 	d := time.Since(t)
 	switch {
 	case d < time.Minute:
