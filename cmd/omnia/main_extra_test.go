@@ -1381,14 +1381,23 @@ func TestCloudUpgradeDocsMatchHelpAndLocalFirstSemantics(t *testing.T) {
 		}
 	}
 
-	localFirstTokens := []string{
-		"local SQLite",
-		"replication/shared access",
+	// README.md is the localized (Spanish) landing doc; DOCS.md is the English
+	// technical reference. Both must state the local-first semantics, but each in
+	// its own language — assert the equivalent tokens per document.
+	readmeLocalFirstTokens := []string{
+		"SQLite local",
+		"replicación/acceso",
 	}
-	for _, token := range localFirstTokens {
+	for _, token := range readmeLocalFirstTokens {
 		if !strings.Contains(strings.ToLower(readme), strings.ToLower(token)) {
 			t.Fatalf("README missing local-first token %q", token)
 		}
+	}
+	docsLocalFirstTokens := []string{
+		"local SQLite",
+		"replication/shared access",
+	}
+	for _, token := range docsLocalFirstTokens {
 		if !strings.Contains(strings.ToLower(docs), strings.ToLower(token)) {
 			t.Fatalf("DOCS missing local-first token %q", token)
 		}
