@@ -501,9 +501,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	if s.db != nil && params.Query == "" {
 		views, types, ok := s.browseFromDB(ctx, params)
 		if ok {
-			if err := browsePage(params, views, projectNames, types, groupNav).Render(ctx, w); err != nil {
-				s.logger.Error("render browse", "err", err)
-			}
+			s.renderBrowse(w, r, params, views, projectNames, types, groupNav)
 			return
 		}
 		s.logger.Warn("engramdb browse failed; falling back to HTTP/FTS")
@@ -597,6 +595,26 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		views = append(views, v)
 	}
 
+	s.renderBrowse(w, r, params, views, projectNames, types, groupNav)
+}
+
+// renderBrowse writes the browse response, branching on whether this is an
+// htmx-driven filter change or a plain navigation. Requests carrying the
+// HX-Request header (set automatically by htmx for every ajax call — see
+// browseRegion's hx-get attributes) get just the #browse-region fragment;
+// everything else — including a plain GET with query params typed/bookmarked
+// directly, or any client with JS/htmx unavailable — gets the full page. Both
+// render paths in handleBrowse (structural DB path and FTS/semantic
+// fallback) funnel through here so the fragment/full-page decision is made
+// in exactly one place.
+func (s *Server) renderBrowse(w http.ResponseWriter, r *http.Request, params BrowseParams, views []ObsView, projectNames []string, types []string, groupNav *GroupNav) {
+	ctx := r.Context()
+	if r.Header.Get("HX-Request") == "true" {
+		if err := browseRegion(params, views, projectNames, types, groupNav).Render(ctx, w); err != nil {
+			s.logger.Error("render browse fragment", "err", err)
+		}
+		return
+	}
 	if err := browsePage(params, views, projectNames, types, groupNav).Render(ctx, w); err != nil {
 		s.logger.Error("render browse", "err", err)
 	}
