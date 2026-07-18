@@ -3,7 +3,7 @@ package storage_test
 import (
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/source/atlassian/storage"
+	"github.com/velion/omnia/internal/source/atlassian/storage"
 )
 
 func TestToText(t *testing.T) {

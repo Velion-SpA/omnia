@@ -3,6 +3,7 @@ package atlassian_test
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/source/atlassian"
+	"github.com/velion/omnia/internal/source/atlassian"
 )
 
 func TestGetJSON_Success(t *testing.T) {
@@ -267,6 +268,138 @@ func TestGetJSON_RateLimitRetryCapTerminates(t *testing.T) {
 // unmarshal today for an unrelated reason (invalid JSON), which would make
 // this test pass even without a real size cap. A valid-but-huge payload
 // only errors once a cap is actually enforced.
+// --- PostJSON ---
+//
+// Jira's modern Cloud search endpoint (POST /rest/api/3/search/jql) requires a
+// JSON request body (the JQL query + nextPageToken), which GetJSON cannot send
+// (GET only). PostJSON mirrors GetJSON's auth/retry/body-cap behavior for a
+// POST request with a JSON body, so the jira adapter can reuse the same
+// shared transport rather than duplicating the retry loop.
+
+func TestPostJSON_SendsBodyAndDecodesResponse(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %q, want POST", r.Method)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("server: decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"issues":[{"key":"ENG-1"}],"isLast":true}`))
+	}))
+	defer srv.Close()
+
+	c := atlassian.New(srv.URL, "user@example.com", "tok")
+	body := map[string]any{"jql": `project = "ENG"`, "maxResults": 100}
+	var out struct {
+		Issues []struct {
+			Key string `json:"key"`
+		} `json:"issues"`
+		IsLast bool `json:"isLast"`
+	}
+	if _, err := c.PostJSON(context.Background(), "/rest/api/3/search/jql", body, &out); err != nil {
+		t.Fatalf("PostJSON failed: %v", err)
+	}
+	if gotBody["jql"] != `project = "ENG"` {
+		t.Errorf("server received jql = %v, want %q", gotBody["jql"], `project = "ENG"`)
+	}
+	if len(out.Issues) != 1 || out.Issues[0].Key != "ENG-1" {
+		t.Errorf("decoded out.Issues = %+v, want one issue ENG-1", out.Issues)
+	}
+	if !out.IsLast {
+		t.Error("expected IsLast = true")
+	}
+}
+
+func TestPostJSON_SetsJSONContentType(t *testing.T) {
+	var gotContentType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := atlassian.New(srv.URL, "user@example.com", "tok")
+	var out map[string]any
+	if _, err := c.PostJSON(context.Background(), "/anything", map[string]string{"a": "b"}, &out); err != nil {
+		t.Fatalf("PostJSON failed: %v", err)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotContentType)
+	}
+}
+
+func TestPostJSON_BasicAuthHeader(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := atlassian.New(srv.URL, "user@example.com", "secret-token")
+	var out map[string]any
+	if _, err := c.PostJSON(context.Background(), "/anything", map[string]string{}, &out); err != nil {
+		t.Fatalf("PostJSON failed: %v", err)
+	}
+
+	wantCreds := base64.StdEncoding.EncodeToString([]byte("user@example.com:secret-token"))
+	want := "Basic " + wantCreds
+	if gotAuth != want {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, want)
+	}
+}
+
+func TestPostJSON_Unauthorized401(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := atlassian.New(srv.URL, "user@example.com", "bad-token")
+	var out map[string]any
+	_, err := c.PostJSON(context.Background(), "/rest/api/3/search/jql", map[string]string{}, &out)
+	if err == nil {
+		t.Fatal("expected an error for 401 response")
+	}
+	if !errors.Is(err, atlassian.ErrAuthFailed) {
+		t.Errorf("err = %v, want wrapping atlassian.ErrAuthFailed", err)
+	}
+}
+
+func TestPostJSON_RateLimitRetriesAfterRetryAfterHeader(t *testing.T) {
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"issues":[],"isLast":true}`))
+	}))
+	defer srv.Close()
+
+	c := atlassian.New(srv.URL, "user@example.com", "tok")
+	var out struct {
+		Issues []any `json:"issues"`
+	}
+	start := time.Now()
+	_, err := c.PostJSON(context.Background(), "/rest/api/3/search/jql", map[string]string{"jql": "x"}, &out)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("PostJSON failed: %v", err)
+	}
+	if attempts != 2 {
+		t.Errorf("attempts = %d, want 2 (one 429 then one success)", attempts)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("retry took %v, want a fast retry given Retry-After: 0", elapsed)
+	}
+}
+
 func TestGetJSON_ResponseBodyExceedsSizeCapErrors(t *testing.T) {
 	const overCapBytes = 10*1024*1024 + 1024 // 1 KiB over a 10 MiB cap
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

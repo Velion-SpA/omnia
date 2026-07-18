@@ -91,6 +91,33 @@ func TestNormalizeProjectAgreesWithProjectnameLeaf(t *testing.T) {
 	}
 }
 
+func TestRouterResolveJira_Default(t *testing.T) {
+	r := NewRouter(nil, "omnia")
+	got := r.ResolveJira("ENG")
+	if got != "eng" {
+		t.Errorf("ResolveJira default: got %q, want %q", got, "eng")
+	}
+}
+
+func TestRouterResolveJira_Override(t *testing.T) {
+	routes := map[string]string{
+		"jira/ENG": "engineering",
+	}
+	r := NewRouter(routes, "omnia")
+	got := r.ResolveJira("ENG")
+	if got != "engineering" {
+		t.Errorf("ResolveJira override: got %q, want %q", got, "engineering")
+	}
+}
+
+func TestRouterResolveJira_EmptyProjectKeyFallsBackToDefault(t *testing.T) {
+	r := NewRouter(nil, "omnia")
+	got := r.ResolveJira("")
+	if got != "omnia" {
+		t.Errorf("ResolveJira empty key: got %q, want %q", got, "omnia")
+	}
+}
+
 func TestConfigRoutesYAMLParse(t *testing.T) {
 	yaml := `
 engram:
