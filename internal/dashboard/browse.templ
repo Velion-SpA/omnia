@@ -110,6 +110,13 @@ func clearFiltersURL(p BrowseParams) string {
 type activeFilterChip struct {
 	Label     string // rendered text, e.g. "socrates" or "Type · decision"
 	RemoveURL string
+	// IsProject and ProjectHref are set only for the project filter chip
+	// (Command Center v2, Slice 4c): its label becomes a landing link to
+	// /project/{name}, while RemoveURL still clears the filter exactly as
+	// before — the label and the "✕" remove action are no longer the same
+	// click target, but both behaviors are preserved.
+	IsProject   bool
+	ProjectHref string
 }
 
 // clearFieldURL returns a browse URL with exactly one filter field cleared,
@@ -138,7 +145,12 @@ func clearFieldURL(p BrowseParams, field string) string {
 func activeFilterChips(p BrowseParams) []activeFilterChip {
 	var chips []activeFilterChip
 	if p.Project != "" {
-		chips = append(chips, activeFilterChip{Label: p.Project, RemoveURL: clearFieldURL(p, "project")})
+		chips = append(chips, activeFilterChip{
+			Label:       p.Project,
+			RemoveURL:   clearFieldURL(p, "project"),
+			IsProject:   true,
+			ProjectHref: projectDetailURL(p.Project),
+		})
 	}
 	if p.Source != "" {
 		chips = append(chips, activeFilterChip{Label: "Source · " + p.Source, RemoveURL: clearFieldURL(p, "source")})
@@ -463,16 +475,32 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 		<div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.625rem; padding: 0 0.25rem; flex-wrap: wrap;">
 			<div style="display: flex; align-items: center; gap: 0.375rem; flex-wrap: wrap;">
 				for _, chip := range activeFilterChips(params) {
-					<a
-						href={ templ.SafeURL(chip.RemoveURL) }
-						hx-get={ chip.RemoveURL }
-						hx-target="#browse-region"
-						hx-swap="innerHTML"
-						hx-push-url="true"
-						hx-indicator="#browse-spinner"
-						class="filter-chip filter-chip-active"
-						title="Remove filter"
-					>{ chip.Label } <span class="chip-x">✕</span></a>
+					if chip.IsProject {
+						<span class="filter-chip filter-chip-active" style="display: inline-flex; align-items: center; gap: 2px;">
+							<a href={ templ.SafeURL(chip.ProjectHref) } style="color: inherit; text-decoration: none;">{ chip.Label }</a>
+							<a
+								href={ templ.SafeURL(chip.RemoveURL) }
+								hx-get={ chip.RemoveURL }
+								hx-target="#browse-region"
+								hx-swap="innerHTML"
+								hx-push-url="true"
+								hx-indicator="#browse-spinner"
+								class="chip-x"
+								title="Remove filter"
+							>✕</a>
+						</span>
+					} else {
+						<a
+							href={ templ.SafeURL(chip.RemoveURL) }
+							hx-get={ chip.RemoveURL }
+							hx-target="#browse-region"
+							hx-swap="innerHTML"
+							hx-push-url="true"
+							hx-indicator="#browse-spinner"
+							class="filter-chip filter-chip-active"
+							title="Remove filter"
+						>{ chip.Label } <span class="chip-x">✕</span></a>
+					}
 				}
 			</div>
 			<div style="display: flex; align-items: center; gap: 0.75rem;">
