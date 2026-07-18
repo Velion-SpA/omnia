@@ -303,6 +303,174 @@ func TestAdminUsersPageOperatorOnly(t *testing.T) {
 	}
 }
 
+// TestAdminUsersPageRendersToolbarAndMenu exercises the Command Center v2,
+// Slice 2 Users page markup: the search toolbar + count, the collapsed
+// per-row kebab menu (referencing every CRUD route from Slice 1), and the
+// three modals (create / edit / reset password).
+func TestAdminUsersPageRendersToolbarAndMenu(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.users = []cloudstore.AdminUser{{ID: "1", Username: "alice", Email: "alice@x.io", IsAdmin: true}}
+	store.admins["1"] = true
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, cookieRequest(http.MethodGet, "/admin", operatorCookie(t, authSvc), ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin: expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// Toolbar: search input + count + the "New user" trigger.
+	for _, want := range []string{
+		`id="admin-user-search"`,
+		`1 account · 1 admin`,
+		`data-modal="admin-create-user-modal"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Users page missing toolbar element %q, body=%q", want, body)
+		}
+	}
+
+	// Row: one primary Access link + the kebab menu referencing every
+	// Slice-1 route plus the pre-existing promote/disable/token actions.
+	for _, want := range []string{
+		`href="/admin/access?user=1"`,
+		`data-action="edit-user"`,
+		`data-action="reset-password"`,
+		`data-action="toggle-token-form"`,
+		`hx-post="/admin/users/1/demote"`, // alice is seeded as admin above
+		`hx-post="/admin/users/1/disable"`,
+		`hx-confirm="Disable this user?`,
+		`hx-get="/admin/users/1/delete-confirm"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Users row menu missing %q, body=%q", want, body)
+		}
+	}
+
+	// The three modals: create (JSON-composed create+promote), edit (generic
+	// data-admin-form JSON PUT), reset password.
+	for _, want := range []string{
+		`id="admin-create-user-modal"`,
+		`value="member" checked`,
+		`id="admin-edit-user-modal"`,
+		`data-url-template="/admin/users/{id}"`,
+		`id="admin-reset-password-modal"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Users page missing modal element %q, body=%q", want, body)
+		}
+	}
+
+	// The page-level error banner (fixes the previous hx-swap=none silent
+	// failure) and the admin.js script tag must both be present.
+	if !strings.Contains(body, `id="admin-error-banner"`) {
+		t.Fatalf("Users page missing the error banner, body=%q", body)
+	}
+	if !strings.Contains(body, `/static/admin.js`) {
+		t.Fatalf("Users page must load admin.js for the new modal/menu behavior, body=%q", body)
+	}
+}
+
+// TestAdminUserDeleteConfirmCancelRoundTrip exercises the swap-in-place
+// hard-delete confirm step: GET delete-confirm renders the reused
+// ui.ConfirmDialog (referencing the real Slice-1 delete route), and GET
+// delete-cancel restores the original trigger. Neither handler touches
+// anything but ListUsers (a read, for the username lookup) — no mutation.
+func TestAdminUserDeleteConfirmCancelRoundTrip(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.users = []cloudstore.AdminUser{{ID: "7", Username: "bob"}}
+
+	confirmRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(confirmRec, cookieRequest(http.MethodGet, "/admin/users/7/delete-confirm", operatorCookie(t, authSvc), ""))
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("GET delete-confirm: expected 200, got %d body=%q", confirmRec.Code, confirmRec.Body.String())
+	}
+	confirmBody := confirmRec.Body.String()
+	for _, want := range []string{
+		"bob",
+		`hx-post="/admin/users/7/delete?confirm=1"`,
+		`hx-get="/admin/users/7/delete-cancel"`,
+	} {
+		if !strings.Contains(confirmBody, want) {
+			t.Fatalf("delete-confirm fragment missing %q, body=%q", want, confirmBody)
+		}
+	}
+
+	cancelRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(cancelRec, cookieRequest(http.MethodGet, "/admin/users/7/delete-cancel", operatorCookie(t, authSvc), ""))
+	if cancelRec.Code != http.StatusOK {
+		t.Fatalf("GET delete-cancel: expected 200, got %d body=%q", cancelRec.Code, cancelRec.Body.String())
+	}
+	cancelBody := cancelRec.Body.String()
+	if !strings.Contains(cancelBody, `/admin/users/7/delete-confirm`) {
+		t.Fatalf("delete-cancel must restore the original trigger, body=%q", cancelBody)
+	}
+	if strings.Contains(cancelBody, "Delete permanently") {
+		t.Fatalf("delete-cancel must NOT still show the confirm dialog, body=%q", cancelBody)
+	}
+
+	// Non-numeric id is rejected before any render (defense in depth, same
+	// convention as every other /admin/users/{id}/* route).
+	badRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(badRec, cookieRequest(http.MethodGet, "/admin/users/abc/delete-confirm", operatorCookie(t, authSvc), ""))
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("GET delete-confirm non-numeric id: expected 400, got %d", badRec.Code)
+	}
+}
+
+// TestAdminUserDeleteConfirmIgnoresSpoofedUsername is the SECURITY FIX
+// regression guard (Slice 2 review, MUST-FIX 3): the confirm/cancel
+// fragments used to render whatever `?username=` said, letting a caller
+// spoof the displayed name independently of `id`. They must now ALWAYS show
+// the real username looked up from the store, and any `?username=` query
+// value — matching or not — must be silently ignored.
+func TestAdminUserDeleteConfirmIgnoresSpoofedUsername(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.users = []cloudstore.AdminUser{
+		{ID: "7", Username: "bob"},
+		{ID: "9", Username: "mallory"},
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, cookieRequest(http.MethodGet, "/admin/users/7/delete-confirm?username=mallory", operatorCookie(t, authSvc), ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET delete-confirm: expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "bob") {
+		t.Fatalf("delete-confirm must show the REAL username (bob) looked up by id, body=%q", body)
+	}
+	if strings.Contains(body, "mallory") {
+		t.Fatalf("delete-confirm must NOT trust the spoofed ?username= query value, body=%q", body)
+	}
+
+	// An id with no matching user (e.g. already deleted) is a clean 404, not
+	// a render with an empty/spoofed name.
+	missingRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(missingRec, cookieRequest(http.MethodGet, "/admin/users/404/delete-confirm?username=mallory", operatorCookie(t, authSvc), ""))
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("GET delete-confirm unknown id: expected 404, got %d body=%q", missingRec.Code, missingRec.Body.String())
+	}
+}
+
+// TestAdminUserDeleteConfirmRequiresOperator guards the two new fragment
+// routes with the SAME operator gate as the rest of the Admin section.
+func TestAdminUserDeleteConfirmRequiresOperator(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.users = []cloudstore.AdminUser{{ID: "1", Username: "alice"}}
+
+	for _, url := range []string{
+		"/admin/users/1/delete-confirm",
+		"/admin/users/1/delete-cancel",
+	} {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, cookieRequest(http.MethodGet, url, accountCookie(t, authSvc, "1", "alice"), ""))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("non-operator GET %s: expected 403, got %d", url, rec.Code)
+		}
+	}
+}
+
 // TestAdminAccessPageRendersForOperator exercises the Access page templ end to end
 // (user selector, the per-project override row with perm checkboxes + role select,
 // and the add-override form). Post OBL-15 the memberships section is relabeled as
@@ -744,6 +912,10 @@ func TestAdminEndpointsAllForbiddenForNonOperator(t *testing.T) {
 		{http.MethodPut, "/admin/users/1", `{"username":"x","email":"x@example.com"}`, "application/json"},
 		{http.MethodPost, "/admin/users/1/password", `{}`, "application/json"},
 		{http.MethodPost, "/admin/users/1/delete?confirm=1", "", ""},
+		// Command Center v2, Slice 2: the Users page delete-confirm/cancel
+		// swap-in-place fragments.
+		{http.MethodGet, "/admin/users/1/delete-confirm", "", ""},
+		{http.MethodGet, "/admin/users/1/delete-cancel", "", ""},
 	}
 	for _, c := range cases {
 		rec := httptest.NewRecorder()

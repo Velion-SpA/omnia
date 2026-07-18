@@ -289,6 +289,12 @@ func (s *CloudServer) routes() {
 			s.mux.HandleFunc("PUT /admin/users/{id}", s.handleAdminUpdateUser)
 			s.mux.HandleFunc("POST /admin/users/{id}/password", s.handleAdminResetUserPassword)
 			s.mux.HandleFunc("POST /admin/users/{id}/delete", s.handleAdminHardDeleteUser)
+			// Command Center v2, Slice 2: the Users page UI. These two GET routes
+			// are pure view wiring (no store call) — the swap-in-place hard-delete
+			// confirm/cancel round trip for the reused ui.ConfirmDialog, mirroring
+			// internal/dashboard/detail.templ's delete-confirm/delete-cancel.
+			s.mux.HandleFunc("GET /admin/users/{id}/delete-confirm", s.handleAdminUserDeleteConfirm)
+			s.mux.HandleFunc("GET /admin/users/{id}/delete-cancel", s.handleAdminUserDeleteCancel)
 		}
 		// Teams + profiles + project-classification operator endpoints (OBL-14).
 		// Operator-gated (requireOperator) and the data plane the OBL-15 UI consumes.

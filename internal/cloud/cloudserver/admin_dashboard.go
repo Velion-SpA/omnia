@@ -541,6 +541,95 @@ func (s *CloudServer) setUserAdmin(w http.ResponseWriter, r *http.Request, admin
 	s.writeOperatorMutationResult(w, r, http.StatusOK, map[string]string{"status": status, "user_id": userID})
 }
 
+// ─── hard-delete confirm/cancel fragments (Command Center v2, Slice 2) ──────
+//
+// These two handlers are pure view wiring: no store call, no business logic.
+// The username round-trips through the query string set by the trigger
+// button itself (adminUserDeleteConfirmPath/adminUserDeleteCancelPath), so
+// rendering the swap-in-place confirm step never needs a fresh ListUsers
+// lookup. They mirror internal/dashboard/detail.templ's
+// delete-confirm/delete-cancel round trip, just scoped to the Users row menu.
+
+// handleAdminUserDeleteConfirm handles GET /admin/users/{id}/delete-confirm —
+// swaps the row's "Delete…" trigger for the reused ui.ConfirmDialog.
+//
+// SECURITY FIX (Slice 2 review): this used to trust a `?username=` query
+// value verbatim, which any client could spoof independently of `id` — the
+// delete POST itself is safely bound to `id` alone, but the CONFIRM PROMPT
+// text could show an attacker-chosen name that didn't match the account
+// actually being deleted. The username is now always looked up from the
+// store by `id` and the query string is ignored entirely.
+func (s *CloudServer) handleAdminUserDeleteConfirm(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
+	as, ok := s.adminStore()
+	if !ok {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "admin unavailable"})
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" || !isNumericID(id) {
+		http.Error(w, "invalid user id", http.StatusBadRequest)
+		return
+	}
+	username, ok := s.lookupAdminUsername(r.Context(), as, id)
+	if !ok {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	u := adminUserRow{ID: id, Username: username}
+	if err := adminUserDeleteConfirmFragment(u).Render(r.Context(), w); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+	}
+}
+
+// handleAdminUserDeleteCancel handles GET /admin/users/{id}/delete-cancel —
+// restores the original "Delete…" trigger, undoing the confirm step above.
+// Same store lookup, same reason (see handleAdminUserDeleteConfirm).
+func (s *CloudServer) handleAdminUserDeleteCancel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
+	as, ok := s.adminStore()
+	if !ok {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "admin unavailable"})
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" || !isNumericID(id) {
+		http.Error(w, "invalid user id", http.StatusBadRequest)
+		return
+	}
+	username, ok := s.lookupAdminUsername(r.Context(), as, id)
+	if !ok {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	u := adminUserRow{ID: id, Username: username}
+	if err := adminUserDeleteTrigger(u).Render(r.Context(), w); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+	}
+}
+
+// lookupAdminUsername resolves the authoritative username for id straight
+// from the store (ListUsers — there is no single-record lookup on
+// adminDashboardStore), so the delete-confirm/cancel fragments can never
+// display a caller-supplied name that doesn't match the account being
+// deleted.
+func (s *CloudServer) lookupAdminUsername(ctx context.Context, as adminDashboardStore, id string) (string, bool) {
+	users, err := as.ListUsers(ctx)
+	if err != nil {
+		return "", false
+	}
+	for _, u := range users {
+		if u.ID == id {
+			return u.Username, true
+		}
+	}
+	return "", false
+}
+
 // ─── request parsing + response helpers ──────────────────────────────────────
 
 // parseMembershipInput reads a membership mutation from either a JSON body or an
@@ -694,6 +783,39 @@ func permSummary(perms int) string {
 // both segments so project names containing spaces or dots route correctly.
 func adminMembershipDeletePath(accountID, project string) string {
 	return "/admin/memberships/" + url.PathEscape(accountID) + "/" + url.PathEscape(project)
+}
+
+// adminUserCountLabel renders the Users toolbar's "N accounts · M admins"
+// summary (Command Center v2, Slice 2).
+func adminUserCountLabel(users []adminUserRow) string {
+	admins := 0
+	for _, u := range users {
+		if u.IsAdmin {
+			admins++
+		}
+	}
+	accountsWord := "accounts"
+	if len(users) == 1 {
+		accountsWord = "account"
+	}
+	adminsWord := "admins"
+	if admins == 1 {
+		adminsWord = "admin"
+	}
+	return fmt.Sprintf("%d %s · %d %s", len(users), accountsWord, admins, adminsWord)
+}
+
+// adminUserDeleteConfirmPath / adminUserDeleteCancelPath build the GET urls for
+// the inline hard-delete confirm swap (Slice 2). id is the only input — the
+// displayed username is looked up server-side from the store
+// (lookupAdminUsername), never trusted from the client, so no username needs
+// to round-trip through the URL at all.
+func adminUserDeleteConfirmPath(id string) string {
+	return "/admin/users/" + id + "/delete-confirm"
+}
+
+func adminUserDeleteCancelPath(id string) string {
+	return "/admin/users/" + id + "/delete-cancel"
 }
 
 func formatAdminTime(t *time.Time) string {
