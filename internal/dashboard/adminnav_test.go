@@ -12,7 +12,7 @@ import (
 // nav-meta block renders no user/logout UI (internal/ui/layout.templ checks
 // props.User != "").
 func TestLayoutPropsForContext_NoIdentity_UserEmpty(t *testing.T) {
-	props := layoutPropsForContext(context.Background(), "Overview")
+	props := layoutPropsForContext(context.Background(), "overview", "Overview")
 	if props.User != "" {
 		t.Fatalf("expected empty User with no identity in context, got %q", props.User)
 	}
@@ -31,7 +31,7 @@ func TestLayoutPropsForContext_NoIdentity_UserEmpty(t *testing.T) {
 // through to props on any page title, not just Admin pages.
 func TestLayoutPropsForContext_WithUserIdentity_PopulatesUserAndLogout(t *testing.T) {
 	ctx := WithUserIdentity(context.Background(), "alice", "/logout")
-	props := layoutPropsForContext(ctx, "Overview")
+	props := layoutPropsForContext(ctx, "overview", "Overview")
 	if props.User != "alice" {
 		t.Fatalf("expected User to be populated from context identity, got %q", props.User)
 	}
@@ -48,7 +48,7 @@ func TestLayoutPropsForContext_WithUserIdentity_PopulatesUserAndLogout(t *testin
 func TestLayoutPropsForContext_AdminNavAndUserIdentityComposeTogether(t *testing.T) {
 	ctx := WithAdminNav(context.Background())
 	ctx = WithUserIdentity(ctx, "operator-admin", "/logout")
-	props := layoutPropsForContext(ctx, "Overview")
+	props := layoutPropsForContext(ctx, "overview", "Overview")
 
 	if props.User != "operator-admin" {
 		t.Fatalf("expected User to be populated, got %q", props.User)
@@ -65,5 +65,18 @@ func TestLayoutPropsForContext_AdminNavAndUserIdentityComposeTogether(t *testing
 	}
 	if !found {
 		t.Fatalf("expected Admin nav entry to be present, got %+v", props.Nav)
+	}
+}
+
+// TestLayoutPropsForContext_PopulatesActive guards the aria-current fix:
+// LayoutProps.Active previously stayed empty for every shared-dashboard page
+// (Overview, Browse, Graph, Sync, Activity, Detail), so aria-current="page"
+// (internal/ui/layout.templ's navLink) never rendered on the active nav item
+// outside the cloud Admin pages (which already set Active via
+// adminLayoutProps). Now every call site passes its own nav ID through.
+func TestLayoutPropsForContext_PopulatesActive(t *testing.T) {
+	props := layoutPropsForContext(context.Background(), "browse", "Browse")
+	if props.Active != "browse" {
+		t.Fatalf("expected Active to be %q, got %q", "browse", props.Active)
 	}
 }

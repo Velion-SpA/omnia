@@ -1,6 +1,9 @@
 package cloudserver
 
-import "github.com/velion/omnia/internal/ui"
+import (
+	"github.com/velion/omnia/internal/dashboard"
+	"github.com/velion/omnia/internal/ui"
+)
 
 // Admin section templ pages (OBL-13). Operator-only, cloud-only. They render
 // inside the SHARED Omnia command-center shell (internal/ui) so the Admin section
@@ -10,13 +13,11 @@ import "github.com/velion/omnia/internal/ui"
 
 // ─── shared bits ─────────────────────────────────────────────────────────────
 
+// adminPageTitle now delegates to the shared dashboard.PageTitle helper
+// (internal/dashboard/layout.templ) instead of hand-rolling its own H1 — one
+// of the previously-unused pageTitle/emptyState helpers this slice put to use.
 templ adminPageTitle(text, sub string) {
-	<div style="margin-bottom: 1.5rem;">
-		<h1 style="font-family: var(--display); font-size: 24px; font-weight: 800; color: var(--text); letter-spacing: 0.04em; text-transform: uppercase; margin: 0;">{ text }</h1>
-		if sub != "" {
-			<p style="font-size: 13px; color: var(--text-dim); margin: 0.35rem 0 0 0;">{ sub }</p>
-		}
-	</div>
+	@dashboard.PageTitle(text, sub)
 }
 
 templ adminNavTabs(active string) {

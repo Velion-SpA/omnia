@@ -7,7 +7,7 @@ import (
 
 // activityPage renders the audit log newest-first.
 templ activityPage(entries []audit.Entry) {
-	@layout("Activity") {
+	@layout("activity", "Activity") {
 		<h1 style="font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;">Activity Log</h1>
 		if len(entries) == 0 {
 			@emptyState("No activity recorded yet. Edits and deletes will appear here.")

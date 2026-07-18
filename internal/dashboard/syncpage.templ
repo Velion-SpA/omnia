@@ -5,7 +5,7 @@ package dashboard
 // e.g. the cloud dashboard) — see OBL-12: a degraded/blocked target must be
 // visible here instead of silently absent.
 templ syncStatusPage(status SyncStatus, targets []SyncTargetView) {
-	@layout("Sync Status") {
+	@layout("sync", "Sync Status") {
 		<h1 style="font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;">Sync Status</h1>
 		<div style="display: flex; flex-direction: column; gap: 1.25rem;">
 			<!-- Sync targets card (per-cloud health) -->

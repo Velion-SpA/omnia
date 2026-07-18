@@ -4,7 +4,7 @@ import "fmt"
 
 // overviewPage renders the home "Command Center" overview.
 templ overviewPage(data OverviewData) {
-	@layout("Overview") {
+	@layout("overview", "Overview") {
 		<!-- Bento grid -->
 		<div style="display: grid; grid-template-columns: repeat(12, 1fr); grid-template-rows: auto auto 1fr; gap: 12px; min-height: calc(100vh - 120px);">
 
