@@ -253,6 +253,38 @@ func TestExtractErrorText_EmptyInputReturnsEmpty(t *testing.T) {
 	}
 }
 
+// ─── ExtractErrorText (exported wrapper, #1399 slice 2 — forced activation) ───
+//
+// Slice 2's `omnia recall-fix` CLI command (cmd/omnia) and the PostToolUse
+// hook need to run a fresh tool-error occurrence through the exact SAME
+// error-shaped-line extraction used at save time, before handing the result
+// to Store.Search's signature lane — otherwise a noisy raw stdout/stderr
+// blob (unrelated log lines, prompts, etc.) would pollute the query
+// signature. extractErrorText itself is unexported (an internal save-time
+// helper); ExtractErrorText is a thin exported delegate so callers outside
+// internal/store can reuse the identical logic instead of re-implementing
+// it (and risking drift between the save-time and query-time extraction).
+
+func TestExtractErrorText_ExportedWrapperDelegatesToInternalHelper(t *testing.T) {
+	content := "**Learned**: `panic: runtime error: index out of range [7] with length 2` happening in validateCartItems()."
+
+	want := extractErrorText(content)
+	got := ExtractErrorText(content)
+
+	if got != want {
+		t.Fatalf("ExtractErrorText(%q) = %q, want it to delegate to extractErrorText and return %q", content, got, want)
+	}
+	if got == "" {
+		t.Fatalf("expected a non-empty extraction for content containing a panic line")
+	}
+}
+
+func TestExtractErrorText_ExportedWrapperEmptyForPureProse(t *testing.T) {
+	if got := ExtractErrorText("**What**: Refactored the auth module.\n**Why**: Testability."); got != "" {
+		t.Fatalf("expected empty extraction for pure prose with no error-shaped line, got %q", got)
+	}
+}
+
 func TestExtractErrorText_RecognizesJSStackFrameLines(t *testing.T) {
 	content := "**What**: Investigated a checkout crash.\n" +
 		"**Learned**: TypeError: Cannot read properties of undefined (reading 'items')\n" +

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -92,6 +93,9 @@ var (
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 		return s.Search(query, opts)
 	}
+	// readStdin is injectable so tests can supply arbitrary "piped" input
+	// (e.g. for `omnia recall-fix`) without manipulating the real os.Stdin.
+	readStdin              = func() ([]byte, error) { return io.ReadAll(os.Stdin) }
 	storeAddObservation    = func(s *store.Store, p store.AddObservationParams) (int64, error) { return s.AddObservation(p) }
 	storeDeleteObservation = func(s *store.Store, id int64, hard bool) error { return s.DeleteObservation(id, hard) }
 	storeDeleteSession     = func(s *store.Store, id string) error { return s.DeleteSession(id) }
@@ -709,6 +713,8 @@ func main() {
 		cmdTUI(cfg)
 	case "search":
 		cmdSearch(cfg)
+	case "recall-fix":
+		cmdRecallFix(cfg)
 	case "save":
 		cmdSave(cfg)
 	case "delete":
@@ -763,6 +769,13 @@ func shouldCheckForUpdates(args []string) bool {
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
 	case "mcp", "serve":
+		return false
+	case "recall-fix":
+		// #1399 slice 2: invoked synchronously and frequently by the
+		// PostToolUse forced-activation hook on every tool call (after its
+		// own fast in-script error gate). The update check is a real
+		// network round-trip (up to checkTimeout); skip it here so the
+		// hook stays fast and never adds latency to the agent's loop.
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -2833,6 +2846,10 @@ Commands:
                                        Also accepted as OMNIA_PROJECT=NAME env var.
   tui                Launch interactive terminal UI
   search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
+  recall-fix <text>  Compact signature-lane-only recall for a fresh error (arg or stdin).
+                       Returns ONLY proven-fix hits (never loose text matches); empty
+                       output means no known fix. For hooks/automation.
+                       [--project PROJECT] [--limit N, capped at 3] [--json]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
   delete session <id>
