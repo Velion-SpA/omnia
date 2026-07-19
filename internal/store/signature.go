@@ -109,6 +109,18 @@ func lineLooksErrorShaped(line string) bool {
 // decision memory) — callers must NOT fall back to indexing the whole prose
 // as a signature; an empty signature simply means this memory never
 // participates in the signature lane, which is correct.
+// ExtractErrorText is the exported form of extractErrorText for callers
+// outside this package that need to derive the SAME error-shaped-line
+// extraction used at save time, before running the result through
+// NormalizeErrorSignature / Store.Search's signature lane — specifically
+// #1399 slice 2's `omnia recall-fix` CLI command and its PostToolUse hook.
+// Reusing this delegate (instead of re-implementing the keyword/stack-frame
+// heuristics client-side) guarantees the query-time and save-time
+// extraction never drift apart.
+func ExtractErrorText(content string) string {
+	return extractErrorText(content)
+}
+
 func extractErrorText(content string) string {
 	lines := strings.Split(content, "\n")
 	var matched []string

@@ -25,6 +25,18 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/post-tool-error-recall.sh\"",
+            "timeout": 5,
+            "statusMessage": "Checking omnia for a past fix..."
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
