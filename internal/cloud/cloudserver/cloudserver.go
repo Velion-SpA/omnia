@@ -350,6 +350,13 @@ func (s *CloudServer) routes() {
 		if _, ok := s.store.(projectAdminStatsStore); ok {
 			s.mux.HandleFunc("GET /admin/projects/{project}/access", s.handleAdminProjectAccessFragment)
 		}
+		// Command Center v2, Slice 5a: cloud sub-project linking (associate,
+		// never merge — see project_links_admin.go). Registered only when
+		// the store supports it, mirroring projectAdminStatsStore above.
+		if _, ok := s.store.(projectLinksAdminStore); ok {
+			s.mux.HandleFunc("POST /admin/projects/{project}/parent", s.handleAdminSetProjectParent)
+			s.mux.HandleFunc("POST /admin/projects/{project}/parent/clear", s.handleAdminClearProjectParent)
+		}
 		// Operator-only, read-only Audit page (OBL-05): surfaces the expanded
 		// audit trail alongside the rest of the Admin section. Registered only
 		// when the store supports ListAuditEntriesPaginated — the same method

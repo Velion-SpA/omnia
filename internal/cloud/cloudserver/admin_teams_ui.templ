@@ -266,6 +266,9 @@ templ adminProjectsPage(view adminProjectsView) {
 	@ui.Layout(view.Props) {
 		@adminPageTitle("Admin", "Projects: content, classification, and sync. Operator-only.")
 		@adminNavTabs("projects")
+		if len(view.Suggestions) > 0 {
+			@adminProjectSuggestions(view.Suggestions)
+		}
 		<div class="card">
 			<div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.85rem;">
 				<span class="micro-label">PROJECTS</span>
@@ -283,6 +286,33 @@ templ adminProjectsPage(view adminProjectsView) {
 		</div>
 		@adminAssets()
 	}
+}
+
+// adminProjectSuggestions renders the Slice 5a suggestion banner: unlinked
+// projects whose name looks like a sub-project of another known project
+// (cloudstore.SuggestProjectParents), each with a one-click Confirm (posts
+// the same LinkParentURL a manual link would, with the parent prefilled) and
+// a Dismiss that only hides the row client-side — suggestions are advisory
+// and recomputed from current data on every page load, so there is nothing
+// to persist when dismissed.
+templ adminProjectSuggestions(rows []adminProjectSuggestionRow) {
+	<div class="card" style="margin-bottom: 1.25rem;">
+		<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">SUGGESTED LINKS</span>
+		<div style="display: flex; flex-direction: column; gap: 0.5rem;">
+			for _, s := range rows {
+				<div class="suggestion-row" style="display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.7rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.45rem;">
+					<span style="font-size: 13px; color: var(--text);">Suggested: link <strong>{ s.Child }</strong> under <strong>{ s.Parent }</strong></span>
+					<span style="flex: 1;"></span>
+					<form data-admin-form data-method="POST" data-url-template={ s.ConfirmURL } data-body="form" style="margin: 0; display: flex; align-items: center; gap: 0.4rem;">
+						<input type="hidden" name="parent" value={ s.Parent }/>
+						<button type="submit" class="shell-button" style="padding: 0.3rem 0.7rem; font-size: 12px;">Confirm</button>
+						<div class="admin-form-error" data-form-error hidden></div>
+					</form>
+					<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px;" onclick="this.closest('.suggestion-row').remove()">Dismiss</button>
+				</div>
+			}
+		</div>
+	</div>
 }
 
 templ adminProjectCard(row adminProjectRow) {
@@ -304,6 +334,8 @@ templ adminProjectCard(row adminProjectRow) {
 					</form>
 					<div class="admin-menu-sep"></div>
 					@adminProjectSyncMenuAction(row)
+					<div class="admin-menu-sep"></div>
+					@adminProjectLinkMenuActions(row)
 				</div>
 			</div>
 		</div>
@@ -326,8 +358,44 @@ templ adminProjectCard(row adminProjectRow) {
 			} else {
 				<span class="badge badge-warn">⏸ Paused</span>
 			}
+			if row.ParentProject != "" {
+				<span class="badge">sub-project of { row.ParentProject }</span>
+			}
+			if row.SubProjectCount > 0 {
+				<span class="badge">{ subProjectCountLabel(row.SubProjectCount) }</span>
+			}
 		</div>
 	</div>
+}
+
+// adminProjectLinkMenuActions renders the Slice 5a kebab menu items:
+// "Unlink from {parent}" when this project is already a child, or "Link to
+// parent project…" (a <select> of valid candidates — never free text) when
+// it isn't. A project that is itself already a parent (SubProjectCount > 0)
+// gets neither control: offering to link it under something else would only
+// be rejected server-side (ErrProjectLinkChildIsParent, the 2-level model),
+// so the dead-end option is never shown rather than shown-then-rejected. A
+// project with no valid parent candidates (e.g. only one known project
+// total) also renders nothing here.
+templ adminProjectLinkMenuActions(row adminProjectRow) {
+	if row.ParentProject != "" {
+		<form data-admin-form data-method="POST" data-url-template={ row.ClearParentURL } data-body="none" class="admin-menu-form">
+			<button type="submit" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.6rem; font-size: 12px;">Unlink from { row.ParentProject }</button>
+			<div class="admin-form-error" data-form-error hidden></div>
+		</form>
+	} else if row.SubProjectCount == 0 && len(row.ParentCandidates) > 0 {
+		<form data-admin-form data-method="POST" data-url-template={ row.LinkParentURL } data-body="form" class="admin-menu-form">
+			<span class="micro-label" style="display: block;">Link to parent project…</span>
+			<select name="parent" required>
+				<option value="">Choose parent…</option>
+				for _, cand := range row.ParentCandidates {
+					<option value={ cand }>{ cand }</option>
+				}
+			</select>
+			<button type="submit" class="shell-button" style="padding: 0.3rem 0.6rem; font-size: 12px;">Link</button>
+			<div class="admin-form-error" data-form-error hidden></div>
+		</form>
+	}
 }
 
 templ adminProjectStat(value, label string) {

@@ -777,6 +777,13 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 			kind         TEXT NOT NULL DEFAULT 'work',
 			display_name TEXT
 		)`,
+		// Command Center v2, Slice 5a: cloud sub-project linking. A child
+		// project stays a real, independent project with its own chunks —
+		// this column ONLY records the parent relationship (associate, never
+		// merge). NULL means unlinked. See project_links.go for the
+		// validated 2-level accessors (SetProjectParent/ClearProjectParent/
+		// ListProjectParents).
+		`ALTER TABLE cloud_project_meta ADD COLUMN IF NOT EXISTS parent_project TEXT`,
 		// Hot-path resolver indexes (EffectivePerms joins members by account and
 		// projects by name). Deny-by-default keeps the resolver a couple of indexed
 		// lookups, per OBL-14 performance requirement.
