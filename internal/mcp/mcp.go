@@ -414,6 +414,12 @@ Examples:
 				mcp.WithBoolean("capture_prompt",
 					mcp.Description("Automatically capture the current user prompt when available (default: true). Set false for SDD artifacts or automated saves."),
 				),
+				mcp.WithString("error_signature",
+					mcp.Description("Optional raw error text (a stack trace, panic, or log line) to derive a normalized bug signature from. When omitted and type is bugfix-family (bug, bugfix, fix, incident, hotfix), the signature is auto-derived from content instead. Lets a recurring bug be reliably re-found later even when its title/content wording differs (design #1399)."),
+				),
+				mcp.WithString("outcome",
+					mcp.Description("Optional outcome for a bugfix-family save: worked | did_not_work | unknown (default). A fix marked worked ranks above unrecorded/unknown fixes in mem_search; did_not_work ranks below. Use mem_update to set this later once a fix has been verified."),
+				),
 			),
 			queuedWriteHandler(writeQueue, handleSave(s, cfg, activity)),
 		)
@@ -448,6 +454,9 @@ Examples:
 				),
 				mcp.WithString("topic_key",
 					mcp.Description("New topic key (normalized internally)"),
+				),
+				mcp.WithString("outcome",
+					mcp.Description("Mark a bugfix's outcome after the fact: worked | did_not_work | unknown. Use this once a fix has been verified in practice — mem_search ranks worked fixes above unknown ones for the same match."),
 				),
 			),
 			queuedWriteHandler(writeQueue, handleUpdate(s)),
@@ -1152,6 +1161,15 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			if r.ReviewAfter != nil {
 				entry["review_after"] = *r.ReviewAfter
 			}
+			// Recall reliability #1399, slice 1: surface outcome feedback and
+			// whether this hit came from the error-signature lane (a proven
+			// prior fix) rather than a loose lexical/BM25 match.
+			if r.Outcome != nil {
+				entry["outcome"] = *r.Outcome
+			}
+			if r.SignatureMatch {
+				entry["signature_match"] = true
+			}
 			structuredResults = append(structuredResults, entry)
 
 			// Append relation annotations. Skip orphaned (filtered by store).
@@ -1353,6 +1371,8 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 		topicKey, _ := req.GetArguments()["topic_key"].(string)
+		errorSignature, _ := req.GetArguments()["error_signature"].(string)
+		outcome, _ := req.GetArguments()["outcome"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
 		_, explicitProjectProvided := req.GetArguments()["project"]
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
@@ -1416,13 +1436,15 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		truncated := len(content) > s.MaxObservationLength()
 
 		savedID, err := s.AddObservation(store.AddObservationParams{
-			SessionID: sessionID,
-			Type:      typ,
-			Title:     title,
-			Content:   content,
-			Project:   project,
-			Scope:     scope,
-			TopicKey:  topicKey,
+			SessionID:      sessionID,
+			Type:           typ,
+			Title:          title,
+			Content:        content,
+			Project:        project,
+			Scope:          scope,
+			TopicKey:       topicKey,
+			ErrorSignature: errorSignature,
+			Outcome:        outcome,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
@@ -1498,6 +1520,12 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			extra["state"] = obs.State()
 			if obs.ReviewAfter != nil {
 				extra["review_after"] = *obs.ReviewAfter
+			}
+			if obs.ErrorSignature != nil {
+				extra["error_signature"] = *obs.ErrorSignature
+			}
+			if obs.Outcome != nil {
+				extra["outcome"] = *obs.Outcome
 			}
 		}
 
@@ -1576,8 +1604,11 @@ func handleUpdate(s *store.Store) server.ToolHandlerFunc {
 		if v, ok := req.GetArguments()["topic_key"].(string); ok {
 			update.TopicKey = &v
 		}
+		if v, ok := req.GetArguments()["outcome"].(string); ok {
+			update.Outcome = &v
+		}
 
-		if update.Title == nil && update.Content == nil && update.Type == nil && update.Project == nil && update.Scope == nil && update.TopicKey == nil {
+		if update.Title == nil && update.Content == nil && update.Type == nil && update.Project == nil && update.Scope == nil && update.TopicKey == nil && update.Outcome == nil {
 			return mcp.NewToolResultError("provide at least one field to update"), nil
 		}
 

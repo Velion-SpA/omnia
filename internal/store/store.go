@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -108,6 +109,12 @@ type Observation struct {
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
 	DeletedAt      *string `json:"deleted_at,omitempty"`
+	// ErrorSignature and Outcome support recall reliability (#1399, slice 1):
+	// deterministic bug-signature matching + outcome feedback in Search.
+	// Both nullable/additive — existing rows have NULL for both and behave
+	// exactly as before this slice.
+	ErrorSignature *string `json:"error_signature,omitempty"`
+	Outcome        *string `json:"outcome,omitempty"`
 }
 
 const (
@@ -133,6 +140,11 @@ func (o Observation) State() string {
 type SearchResult struct {
 	Observation
 	Rank float64 `json:"rank"`
+	// SignatureMatch is true when this result was surfaced by the
+	// error-signature lane (design obs #1498, slice 1) rather than the
+	// topic_key sentinel or plain FTS5/BM25 — i.e. this is a proven prior
+	// fix for the same normalized error, not a loose text hit.
+	SignatureMatch bool `json:"signature_match,omitempty"`
 }
 
 type SessionSummary struct {
@@ -194,6 +206,16 @@ type AddObservationParams struct {
 	Project   string `json:"project,omitempty"`
 	Scope     string `json:"scope,omitempty"`
 	TopicKey  string `json:"topic_key,omitempty"`
+	// ErrorSignature is optional raw error text (or an already-normalized
+	// signature — NormalizeErrorSignature is idempotent-ish for this purpose)
+	// to derive the stored signature from. When empty and Type is
+	// bugfix-family (see isBugfixFamilyType), the signature is auto-derived
+	// from Content instead. An explicit value here always wins, regardless
+	// of Type (design obs #1498, slice 1).
+	ErrorSignature string `json:"error_signature,omitempty"`
+	// Outcome is one of "worked", "did_not_work", "unknown", or empty
+	// (default). Invalid values are rejected.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 type UpdateObservationParams struct {
@@ -203,6 +225,9 @@ type UpdateObservationParams struct {
 	Project  *string `json:"project,omitempty"`
 	Scope    *string `json:"scope,omitempty"`
 	TopicKey *string `json:"topic_key,omitempty"`
+	// Outcome lets a fix be marked "worked"/"did_not_work" after the fact
+	// (design obs #1498, slice 1). Invalid values are rejected.
+	Outcome *string `json:"outcome,omitempty"`
 }
 
 type Prompt struct {
@@ -265,7 +290,8 @@ var decayReviewAfterMonths = map[string]int{
 }
 
 const observationSelectColumns = `id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at`
+	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at,
+	       error_signature, outcome`
 
 type SyncState struct {
 	TargetKey           string  `json:"target_key"`
@@ -1130,6 +1156,32 @@ func (s *Store) migrate() error {
 	if _, err := s.execHook(s.db, `
 		CREATE INDEX IF NOT EXISTS idx_memrel_status_created
 			ON memory_relations(judgment_status, created_at DESC);
+	`); err != nil {
+		return err
+	}
+
+	// ── Recall reliability #1399, slice 1 (design obs #1498 / audit #1497) ──
+	// Additive nullable columns on observations for bug error-signature
+	// matching (B) and outcome feedback (C). Applied via addColumnIfNotExists
+	// so running migrate() on a fresh DB (where these columns are never part
+	// of the base CREATE TABLE, matching the memory-conflict-surfacing
+	// convention above) is a no-op on subsequent runs. Local store only —
+	// this lane is deliberately independent of recall.enabled/semantic recall
+	// and does not touch internal/cloud/cloudstore or the sync payload.
+	recallReliabilityObsCols := []struct {
+		name       string
+		definition string
+	}{
+		{name: "error_signature", definition: "TEXT"},
+		{name: "outcome", definition: "TEXT"},
+	}
+	for _, c := range recallReliabilityObsCols {
+		if err := s.addColumnIfNotExists("observations", c.name, c.definition); err != nil {
+			return err
+		}
+	}
+	if _, err := s.execHook(s.db, `
+		CREATE INDEX IF NOT EXISTS idx_obs_error_signature ON observations(error_signature);
 	`); err != nil {
 		return err
 	}
@@ -2305,8 +2357,33 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 	normHash := hashNormalized(content)
 	topicKey := normalizeTopicKey(p.TopicKey)
 
+	// ── Recall reliability #1399, slice 1 (design obs #1498 / audit #1497) ──
+	// error_signature: an explicit value always wins (regardless of Type);
+	// otherwise it's auto-derived from the ERROR-SHAPED LINES within Content
+	// via extractErrorText — NOT the whole content — and only for
+	// bugfix-family types so non-bug saves never get a spurious signature.
+	//
+	// Using the full content here (an earlier version of this code did) is a
+	// defect: content is structured prose (What/Why/Where/Learned) that just
+	// QUOTES an error, and normalizing all of it bakes in prose words a
+	// future bare error occurrence never mentions, so the stored signature
+	// would almost never match a fresh occurrence of the same bug again.
+	// extractErrorText narrows to just the error-shaped line(s) so the
+	// stored signature stays close in shape to what Search's containment
+	// check (see below) needs to line up against.
+	outcome, err := normalizeOutcome(p.Outcome)
+	if err != nil {
+		return 0, err
+	}
+	var errSig string
+	if strings.TrimSpace(p.ErrorSignature) != "" {
+		errSig = NormalizeErrorSignature(p.ErrorSignature)
+	} else if isBugfixFamilyType(p.Type) {
+		errSig = NormalizeErrorSignature(extractErrorText(content))
+	}
+
 	var observationID int64
-	err := s.withTx(func(tx *sql.Tx) error {
+	err = s.withTx(func(tx *sql.Tx) error {
 		var obs *Observation
 		if topicKey != "" {
 			var existingID int64
@@ -2321,6 +2398,10 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 				topicKey, nullableString(p.Project), scope,
 			).Scan(&existingID)
 			if err == nil {
+				// error_signature/outcome use COALESCE(NULLIF(?, ''), col) so a
+				// revision save that doesn't provide a new value PRESERVES the
+				// previously stored one instead of clearing it (e.g. an outcome
+				// marked "worked" survives later content-only revisions).
 				if _, err := s.execHook(tx,
 					`UPDATE observations
 					 SET type = ?,
@@ -2329,6 +2410,8 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					     tool_name = ?,
 					     topic_key = ?,
 					     normalized_hash = ?,
+					     error_signature = COALESCE(NULLIF(?, ''), error_signature),
+					     outcome = COALESCE(NULLIF(?, ''), outcome),
 					     revision_count = revision_count + 1,
 					     last_seen_at = datetime('now'),
 					     updated_at = datetime('now')
@@ -2339,6 +2422,8 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					nullableString(p.ToolName),
 					nullableString(topicKey),
 					normHash,
+					errSig,
+					outcome,
 					existingID,
 				); err != nil {
 					return err
@@ -2394,10 +2479,11 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 
 		syncID := newSyncID("obs")
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at, error_signature, outcome)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'), ?, ?)`,
 			syncID, p.SessionID, p.Type, title, content,
 			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
+			nullableString(errSig), nullableString(outcome),
 		)
 		if err != nil {
 			return err
@@ -2917,6 +3003,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 		project := derefString(obs.Project)
 		scope := obs.Scope
 		topicKey := derefString(obs.TopicKey)
+		outcome := derefString(obs.Outcome)
 
 		if p.Type != nil {
 			typ = *p.Type
@@ -2939,6 +3026,13 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 		if p.TopicKey != nil {
 			topicKey = normalizeTopicKey(*p.TopicKey)
 		}
+		if p.Outcome != nil {
+			normalized, nerr := normalizeOutcome(*p.Outcome)
+			if nerr != nil {
+				return nerr
+			}
+			outcome = normalized
+		}
 
 		if _, err := s.execHook(tx,
 			`UPDATE observations
@@ -2949,6 +3043,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			     scope = ?,
 			     topic_key = ?,
 			     normalized_hash = ?,
+			     outcome = ?,
 			     revision_count = revision_count + 1,
 			     updated_at = datetime('now')
 			 WHERE id = ? AND deleted_at IS NULL`,
@@ -2959,6 +3054,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			scope,
 			nullableString(topicKey),
 			hashNormalized(content),
+			nullableString(outcome),
 			id,
 		); err != nil {
 			return err
@@ -3141,6 +3237,37 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 
 // ─── Search (FTS5) ───────────────────────────────────────────────────────────
 
+// Recall reliability #1399, slice 1 (design obs #1498 / audit #1497) rank
+// tiers. topicKeySentinelRank (-1000) is a cross-package contract — see
+// internal/mcp/recall_adapter.go's `r.Rank == -1000` check and
+// internal/recall's LexicalHit.Exact — so it MUST stay exactly -1000 and the
+// outcome adjustment below MUST NOT be applied to it. signatureMatchRank
+// sits well below the topic_key sentinel but well above typical BM25 ranks
+// (which for FTS5's bm25() are usually small negative numbers for a handful
+// of matched terms), so it pre-empts plain lexical hits without ever being
+// mistaken for an explicit topic_key match.
+const (
+	topicKeySentinelRank = -1000.0
+	signatureMatchRank   = -500.0
+
+	// Outcome ranking adjustment: additive, small relative to the gap between
+	// tiers above, so "worked"/"did_not_work" nudges results within a tier
+	// without ever promoting a plain BM25 hit above a signature match or a
+	// signature match above an explicit topic_key hit.
+	outcomeWorkedRankBoost       = 50.0
+	outcomeDidNotWorkRankPenalty = 50.0
+
+	// minSignatureLength/minSignatureTokens gate the signature lane's
+	// containment match (both the query signature AND the stored
+	// error_signature, see Search()) so a trivial short signature like
+	// "failed" can't turn into a substring that matches almost anything.
+	// 12 chars / 2 tokens comfortably excludes single generic words
+	// ("failed", "undefined", "timeout") while still admitting short-but-
+	// specific real error phrases ("connection refused", "nil pointer").
+	minSignatureLength = 12
+	minSignatureTokens = 2
+)
+
 func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error) {
 	// Normalize project filter so "Engram" finds records stored as "engram"
 	opts.Project, _ = NormalizeProject(opts.Project)
@@ -3180,19 +3307,104 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 
 		tkRows, err := s.queryItHook(s.db, tkSQL, tkArgs...)
 		if err == nil {
-			defer tkRows.Close()
 			for tkRows.Next() {
 				var sr SearchResult
-				if err := tkRows.Scan(
-					&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
-					&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
-					&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
-				); err != nil {
+				if err := scanObservationRow(tkRows, &sr.Observation); err != nil {
 					break
 				}
-				sr.Rank = -1000
+				sr.Rank = topicKeySentinelRank
 				directResults = append(directResults, sr)
 			}
+			// Close explicitly here rather than via defer: the store's
+			// MaxOpenConns is 1, so the connection MUST be released before
+			// the signature-lane and FTS queries below can acquire one.
+			// Relying solely on a deferred Close() at function return would
+			// deadlock whenever the loop above exits early (e.g. on a scan
+			// error) without having fully drained tkRows.
+			_ = tkRows.Close()
+		}
+	}
+
+	seen := make(map[int64]bool)
+	for _, dr := range directResults {
+		seen[dr.ID] = true
+	}
+
+	// ── Signature lane (design obs #1498 / audit #1497, slice 1) ────────────
+	// Mirrors the topic_key sentinel above but keys off a normalized error
+	// signature instead of an exact topic_key. Runs unconditionally (not
+	// gated on "/" in the query) since pasted stack traces/log lines rarely
+	// look like topic keys, and this lane must work standalone — it has no
+	// dependency on recall.enabled/semantic recall, which defaults to false.
+	//
+	// Containment, not equality: a stored signature is derived from a
+	// specific occurrence's error-shaped LINE(S) (extractErrorText), which
+	// may carry a little extra leading/trailing context (e.g. "**Learned**:
+	// <error> happening in fooItems()"), while a query is often the BARE
+	// error text alone. Requiring exact equality here would mean the
+	// signature lane almost never fires for the actual recurring-bug use
+	// case. Instead we check two-way containment: the stored signature
+	// contains the query's signature (query is the bare error, stored has
+	// extra context), OR the query contains the stored signature (query has
+	// extra context, stored is the bare error). LIKE '%...%' can't use
+	// idx_obs_error_signature (this is a full scan of non-null signatures),
+	// which is acceptable for a personal/team memory store's data volumes.
+	//
+	// minSignatureLength/minSignatureTokens guard BOTH sides against trivial
+	// short signatures (e.g. a lone "failed") turning into a substring that
+	// matches almost anything: the literal design only specified a guard on
+	// the query side, but a short STORED signature is just as capable of
+	// producing false positives via the reverse containment direction, so
+	// the length guard applies to error_signature in SQL too (see
+	// TestSearch_SignatureLaneIgnoresTooShortStoredSignature).
+	var signatureResults []SearchResult
+	querySig := NormalizeErrorSignature(query)
+	if len(querySig) >= minSignatureLength && len(strings.Fields(querySig)) >= minSignatureTokens {
+		sigSQL := `
+			SELECT ` + observationSelectColumns + `
+			FROM observations
+			WHERE error_signature IS NOT NULL
+			  AND error_signature != ''
+			  AND LENGTH(error_signature) >= ?
+			  AND deleted_at IS NULL
+			  AND ( error_signature LIKE '%' || ? || '%'
+			        OR ? LIKE '%' || error_signature || '%' )
+		`
+		sigArgs := []any{minSignatureLength, querySig, querySig}
+
+		if opts.Type != "" {
+			sigSQL += " AND type = ?"
+			sigArgs = append(sigArgs, opts.Type)
+		}
+		if opts.Project != "" {
+			sigSQL += " AND LOWER(project) = ?"
+			sigArgs = append(sigArgs, opts.Project)
+		}
+		if opts.Scope != "" {
+			sigSQL += " AND scope = ?"
+			sigArgs = append(sigArgs, normalizeScope(opts.Scope))
+		}
+
+		sigSQL += " ORDER BY updated_at DESC LIMIT ?"
+		sigArgs = append(sigArgs, limit)
+
+		sigRows, err := s.queryItHook(s.db, sigSQL, sigArgs...)
+		if err == nil {
+			for sigRows.Next() {
+				var sr SearchResult
+				if err := scanObservationRow(sigRows, &sr.Observation); err != nil {
+					break
+				}
+				if !seen[sr.ID] {
+					sr.Rank = signatureMatchRank
+					sr.SignatureMatch = true
+					signatureResults = append(signatureResults, sr)
+					seen[sr.ID] = true
+				}
+			}
+			// Same reasoning as tkRows above: close explicitly before the
+			// FTS query needs the (single) connection.
+			_ = sigRows.Close()
 		}
 	}
 
@@ -3202,6 +3414,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	sqlQ := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
 		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
+		       o.error_signature, o.outcome,
 		       fts.rank
 		FROM observations_fts fts
 		JOIN observations o ON o.id = fts.rowid
@@ -3233,30 +3446,49 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	}
 	defer rows.Close()
 
-	seen := make(map[int64]bool)
-	for _, dr := range directResults {
-		seen[dr.ID] = true
-	}
-
 	var results []SearchResult
 	results = append(results, directResults...)
+	results = append(results, signatureResults...)
 	for rows.Next() {
 		var sr SearchResult
 		if err := rows.Scan(
 			&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
 			&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
 			&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
+			&sr.ErrorSignature, &sr.Outcome,
 			&sr.Rank,
 		); err != nil {
 			return nil, err
 		}
 		if !seen[sr.ID] {
 			results = append(results, sr)
+			seen[sr.ID] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+
+	// ── Outcome ranking (design obs #1498 / audit #1497, slice 1) ───────────
+	// Additive nudge: a proven fix (outcome=worked) ranks above one with no
+	// recorded outcome for the same match tier; a fix known NOT to have
+	// worked ranks below. Existing rows have outcome=NULL (no adjustment),
+	// so this is a no-op for all pre-existing data. Explicit topic_key
+	// sentinel results (Rank == topicKeySentinelRank) are excluded so the
+	// external -1000 "Exact" contract (recall_adapter.go, internal/recall)
+	// stays intact even when the semantic/RRF path is enabled.
+	for i := range results {
+		if results[i].Rank == topicKeySentinelRank || results[i].Outcome == nil {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(*results[i].Outcome)) {
+		case OutcomeWorked:
+			results[i].Rank -= outcomeWorkedRankBoost
+		case OutcomeDidNotWork:
+			results[i].Rank += outcomeDidNotWorkRankPenalty
+		}
+	}
+	sort.SliceStable(results, func(i, j int) bool { return results[i].Rank < results[j].Rank })
 
 	if len(results) > limit {
 		results = results[:limit]
@@ -6360,6 +6592,7 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
 		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
+		&o.ErrorSignature, &o.Outcome,
 	)
 }
 
