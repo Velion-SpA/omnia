@@ -177,7 +177,7 @@ func (c cloudSemanticIndex) Search(ctx context.Context, vec []float32, k int) ([
 // non-error return, even zero nodes. A silent (nil, nil, nil) would render
 // the cloud graph page as a false "0 memories" state instead of the honest
 // "graph unsupported over cloud semantic" banner.
-func (c cloudSemanticIndex) Graph(k int, minScore float32) ([]embed.GraphNode, []embed.GraphEdge, error) {
+func (c cloudSemanticIndex) Graph(projects []string, k int, minScore float32) ([]embed.GraphNode, []embed.GraphEdge, error) {
 	return nil, nil, errors.New("clouddash: knowledge graph is not supported over cloud semantic search (design D5 scopes cloud parity to search only)")
 }
 

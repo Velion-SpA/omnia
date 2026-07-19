@@ -82,11 +82,39 @@ func TestSearcher_Graph_DelegatesToStore(t *testing.T) {
 	mustUpsert(t, store, unitRow("B", 2, []float32{0.9999, 0.014, 0}))
 
 	s := NewSearcher(store, &searcherFakeEmbedder{})
-	nodes, _, err := s.Graph(5, 0.5)
+	nodes, _, err := s.Graph(nil, 5, 0.5)
 	if err != nil {
 		t.Fatalf("Graph: %v", err)
 	}
 	if len(nodes) != 2 {
 		t.Fatalf("Graph nodes: got %d, want 2", len(nodes))
+	}
+}
+
+// TestSearcher_Graph_ForwardsProjectsToGraphScoped proves LocalSearcher.Graph
+// threads its projects argument all the way to Store.GraphScoped's SQL
+// WHERE...IN clause (H3 perf fix) rather than silently ignoring it and
+// scanning the whole store regardless of caller intent.
+func TestSearcher_Graph_ForwardsProjectsToGraphScoped(t *testing.T) {
+	store, err := OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	a := unitRow("a", 1, []float32{1, 0, 0})
+	a.Project = "projA"
+	mustUpsert(t, store, a)
+	b := unitRow("b", 2, []float32{0, 1, 0})
+	b.Project = "projB"
+	mustUpsert(t, store, b)
+
+	s := NewSearcher(store, &searcherFakeEmbedder{})
+	nodes, _, err := s.Graph([]string{"projA"}, 5, 0.5)
+	if err != nil {
+		t.Fatalf("Graph: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].Project != "projA" {
+		t.Fatalf("Graph([projA]): got %+v, want exactly one projA node", nodes)
 	}
 }

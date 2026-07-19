@@ -67,10 +67,11 @@ func (s *LocalSearcher) SearchScoped(ctx context.Context, vec []float32, k int, 
 	return s.store.SearchScoped(ctx, vec, k, project)
 }
 
-// Graph delegates to the configured Store's k-NN similarity graph builder.
-// Not part of the Searcher interface, but kept so LocalSearcher continues to
-// satisfy dashboard.SemanticIndex (which also needs Graph) without a second
-// adapter type.
-func (s *LocalSearcher) Graph(k int, minScore float32) ([]GraphNode, []GraphEdge, error) {
-	return s.store.Graph(k, minScore)
+// Graph delegates to the configured Store's k-NN similarity graph builder,
+// scoped to projects (nil/empty = whole store, see Store.GraphScoped — H3
+// perf fix). Not part of the Searcher interface, but kept so LocalSearcher
+// continues to satisfy dashboard.SemanticIndex (which also needs Graph)
+// without a second adapter type.
+func (s *LocalSearcher) Graph(projects []string, k int, minScore float32) ([]GraphNode, []GraphEdge, error) {
+	return s.store.GraphScoped(projects, k, minScore)
 }
