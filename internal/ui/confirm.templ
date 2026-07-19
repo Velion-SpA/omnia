@@ -47,7 +47,7 @@ templ ConfirmDialog(p ConfirmDialogProps) {
 				hx-get={ p.CancelURL }
 				hx-target={ p.Target }
 				hx-swap="innerHTML"
-			>Cancel</button>
+			>{ T(ctx, "common.cancel") }</button>
 			for _, a := range p.Actions {
 				@confirmActionButton(a, p.Target)
 			}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // maxProjectDetailMemories caps the project-detail memory grid at the newest
@@ -166,7 +167,7 @@ func (s *Server) buildProjectDetailData(ctx context.Context, rawName string) Pro
 	data.Stats = computeProjectStats(name, views)
 	data.SourceCount = distinctSourceCount(data.Stats)
 	if t, ok := parseEngramTimestamp(data.Stats.LatestUpdateAt); ok {
-		data.LastActivity = ui.RelativeTime(t)
+		data.LastActivity = ui.RelativeTimeLang(t, i18n.LangFrom(ctx))
 	}
 
 	if len(views) > maxProjectDetailMemories {
@@ -202,8 +203,7 @@ func distinctSourceCount(stats ProjectStats) int {
 // mirrors the parsing already done ad hoc in isFresh (data.go) and formatAge
 // (engram.go); kept as its own small helper rather than a third inline copy
 // since this is the one call site that needs an actual time.Time (to hand to
-// ui.RelativeTime, per the task's explicit instruction) instead of a
-// pre-formatted string.
+// ui.RelativeTimeLang) instead of a pre-formatted string.
 func parseEngramTimestamp(ts string) (time.Time, bool) {
 	if ts == "" {
 		return time.Time{}, false

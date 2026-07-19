@@ -8,6 +8,7 @@ import (
 
 	"github.com/velion/omnia/internal/engramdb"
 	"github.com/velion/omnia/internal/meta"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // ObsView is a single observation enriched with parsed meta for UI display.
@@ -45,14 +46,16 @@ type ProjectStats struct {
 	Clouds []CloudPlacement
 }
 
-// enrichObs parses the omnia-meta block from an observation and returns an ObsView.
-func enrichObs(obs Observation) ObsView {
+// enrichObs parses the omnia-meta block from an observation and returns an
+// ObsView. lang selects Age's display language (i18n Slice 2); every caller
+// derives it from the request's context via i18n.LangFrom(ctx).
+func enrichObs(obs Observation, lang i18n.Lang) ObsView {
 	m, ok := meta.Parse(obs.Content)
 	return ObsView{
 		Obs:     obs,
 		Meta:    m,
 		HasMeta: ok,
-		Age:     formatAge(obs.UpdatedAt),
+		Age:     formatAge(obs.UpdatedAt, lang),
 	}
 }
 
@@ -148,9 +151,10 @@ func loadProjectObs(ctx context.Context, client RecordReader, project string, li
 		return all[i].UpdatedAt > all[j].UpdatedAt
 	})
 
+	lang := i18n.LangFrom(ctx)
 	views := make([]ObsView, len(all))
 	for i, o := range all {
-		views[i] = enrichObs(o)
+		views[i] = enrichObs(o, lang)
 	}
 	return views, nil
 }

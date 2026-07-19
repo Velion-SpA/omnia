@@ -199,7 +199,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	engUp := s.src.Health(ctx) == nil
-	syncStatus := loadSyncStatus()
+	syncStatus := loadSyncStatus(i18n.LangFrom(ctx))
 
 	// Load project stats (existing logic preserved).
 	var stats []ProjectStats
@@ -274,6 +274,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 // buildOverviewData assembles the OverviewData struct from already-loaded stats,
 // plus live feed and type breakdown from the DB (when available).
 func (s *Server) buildOverviewData(ctx context.Context, stats []ProjectStats, syncStatus SyncStatus, engUp bool, canonicalize func(string) string) OverviewData {
+	lang := i18n.LangFrom(ctx)
 	// Total memories = sum of project totals (group parents include children).
 	var totalMem int
 	for _, p := range stats {
@@ -344,7 +345,7 @@ func (s *Server) buildOverviewData(ctx context.Context, stats []ProjectStats, sy
 					Title:   title,
 					Type:    o.Type,
 					Project: canonicalize(o.Project),
-					Age:     formatAge(o.UpdatedAt),
+					Age:     formatAge(o.UpdatedAt, lang),
 				})
 			}
 		}
@@ -384,6 +385,7 @@ func (s *Server) buildOverviewData(ctx context.Context, stats []ProjectStats, sy
 // LOWER(TRIM(project)) = ?, which would miss structurally different raw names
 // like "01.- velion".
 func (s *Server) overviewStatsFromDB(ctx context.Context, syncStatus SyncStatus) []ProjectStats {
+	lang := i18n.LangFrom(ctx)
 	canonicalize := canonicalizerFunc(s.cfg.ProjectAliases)
 	hidden := hiddenSet(s.cfg.ProjectHidden, s.cfg.ProjectAliases)
 
@@ -451,7 +453,7 @@ func (s *Server) overviewStatsFromDB(ctx context.Context, syncStatus SyncStatus)
 		}
 		views := make([]ObsView, len(dbObs))
 		for i, o := range dbObs {
-			views[i] = enrichObs(obsFromDB(o))
+			views[i] = enrichObs(obsFromDB(o), lang)
 		}
 		if s.groups.IsParent(proj) {
 			stats = append(stats, computeGroupProjectStats(proj, views, s.groups, s.cfg.ProjectAliases))
@@ -464,6 +466,7 @@ func (s *Server) overviewStatsFromDB(ctx context.Context, syncStatus SyncStatus)
 
 func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	lang := i18n.LangFrom(ctx)
 	q := r.URL.Query()
 
 	params := BrowseParams{
@@ -475,7 +478,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		Query:   q.Get("q"),
 	}
 
-	syncStatus := loadSyncStatus()
+	syncStatus := loadSyncStatus(lang)
 	// Sidebar project list: union of DB projects + config projects.
 	projectNames := s.effectiveProjectNames(ctx, syncStatus)
 
@@ -485,13 +488,13 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		items := []GroupNavItem{
 			{
 				Sub:      "",
-				Label:    "All",
+				Label:    i18n.T(lang, "browse.all"),
 				URL:      "/browse?project=" + params.Project,
 				IsActive: params.Sub == "",
 			},
 			{
 				Sub:      "core",
-				Label:    params.Project + " (core)",
+				Label:    i18n.Tf(lang, "browse.subNavCore", params.Project),
 				URL:      "/browse?project=" + params.Project + "&sub=core",
 				IsActive: params.Sub == "core",
 			},
@@ -538,7 +541,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 				s.logger.Warn("browse search failed", "err", err)
 			}
 			for _, o := range raw {
-				allViews = append(allViews, enrichObs(o))
+				allViews = append(allViews, enrichObs(o, lang))
 			}
 		}
 	case params.Project != "":
@@ -589,7 +592,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("browse search failed", "err", err)
 		}
 		for _, o := range raw {
-			allViews = append(allViews, enrichObs(o))
+			allViews = append(allViews, enrichObs(o, lang))
 		}
 	}
 
@@ -660,6 +663,7 @@ func (s *Server) semanticSearch(ctx context.Context, params BrowseParams) ([]Obs
 	if s.sem == nil || s.db == nil {
 		return nil, false
 	}
+	lang := i18n.LangFrom(ctx)
 
 	// Bound the interactive query embedding so a slow/down Ollama can't hang the
 	// browse request for the client's full 60s timeout before FTS takes over.
@@ -706,7 +710,7 @@ func (s *Server) semanticSearch(ctx context.Context, params BrowseParams) ([]Obs
 	}
 	byID := make(map[int]ObsView, len(rows))
 	for _, o := range rows {
-		byID[o.ID] = enrichObs(obsFromDB(o))
+		byID[o.ID] = enrichObs(obsFromDB(o), lang)
 	}
 
 	// Optional project scoping (canonical match; group parents include children).
@@ -798,6 +802,7 @@ func (s *Server) expandCanonical(ctx context.Context, canonical string) ([]strin
 // aliased canonicals like "velion" retrieve "01.- velion" and "01.- Velion" rows
 // that CanonicalProject's LOWER(TRIM) = ? would miss.
 func (s *Server) browseFromDB(ctx context.Context, params BrowseParams) ([]ObsView, []string, bool) {
+	lang := i18n.LangFrom(ctx)
 	f := engramdb.Filter{
 		Type:  params.Type,
 		Limit: 1000,
@@ -866,7 +871,7 @@ func (s *Server) browseFromDB(ctx context.Context, params BrowseParams) ([]ObsVi
 	// Enrich and apply meta-only filters (Source, Kind) client-side.
 	views := make([]ObsView, 0, len(dbObs))
 	for _, o := range dbObs {
-		v := enrichObs(obsFromDB(o))
+		v := enrichObs(obsFromDB(o), lang)
 		if params.Source != "" && v.Meta.Source != params.Source {
 			continue
 		}
@@ -907,7 +912,7 @@ func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	v := enrichObs(*obs)
+	v := enrichObs(*obs, i18n.LangFrom(ctx))
 	backURL := r.Header.Get("Referer")
 	if backURL == "" {
 		backURL = "/browse"
@@ -925,7 +930,7 @@ func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	status := loadSyncStatus()
+	status := loadSyncStatus(i18n.LangFrom(ctx))
 	targets := s.syncTargetViews(ctx)
 	if err := syncStatusPage(status, targets).Render(ctx, w); err != nil {
 		s.logger.Error("render sync status", "err", err)
@@ -949,7 +954,7 @@ func (s *Server) handleEditForm(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "observation not found", http.StatusNotFound)
 		return
 	}
-	v := enrichObs(*obs)
+	v := enrichObs(*obs, i18n.LangFrom(ctx))
 	if err := editForm(v).Render(ctx, w); err != nil {
 		s.logger.Error("render edit form", "err", err)
 	}
@@ -1163,7 +1168,7 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 // children); ?k= and ?min= tune the kNN neighbor cap and similarity threshold.
 func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	syncStatus := loadSyncStatus()
+	syncStatus := loadSyncStatus(i18n.LangFrom(ctx))
 	projects := s.effectiveProjectNames(ctx, syncStatus)
 
 	q := r.URL.Query()

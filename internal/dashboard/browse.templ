@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // BrowseParams holds the filter state for the browse page.
@@ -141,8 +142,11 @@ func clearFieldURL(p BrowseParams, field string) string {
 
 // activeFilterChips builds the removable-chip list for the currently active
 // filters (mockup ④: "socrates ✕ · Type · decision ✕ · …"). Project is shown
-// bare; other dimensions are label-prefixed.
-func activeFilterChips(p BrowseParams) []activeFilterChip {
+// bare; other dimensions are label-prefixed. lang selects the prefix's
+// display language (i18n Slice 2) — the raw filter value itself (p.Source,
+// p.Kind, p.Type) is data (a source/kind/category slug) and is NEVER
+// translated, matching browseRegion's own chip-value rendering.
+func activeFilterChips(p BrowseParams, lang i18n.Lang) []activeFilterChip {
 	var chips []activeFilterChip
 	if p.Project != "" {
 		chips = append(chips, activeFilterChip{
@@ -153,13 +157,13 @@ func activeFilterChips(p BrowseParams) []activeFilterChip {
 		})
 	}
 	if p.Source != "" {
-		chips = append(chips, activeFilterChip{Label: "Source · " + p.Source, RemoveURL: clearFieldURL(p, "source")})
+		chips = append(chips, activeFilterChip{Label: i18n.Tf(lang, "browse.filterChipSource", p.Source), RemoveURL: clearFieldURL(p, "source")})
 	}
 	if p.Kind != "" {
-		chips = append(chips, activeFilterChip{Label: "Kind · " + p.Kind, RemoveURL: clearFieldURL(p, "kind")})
+		chips = append(chips, activeFilterChip{Label: i18n.Tf(lang, "browse.filterChipKind", p.Kind), RemoveURL: clearFieldURL(p, "kind")})
 	}
 	if p.Type != "" {
-		chips = append(chips, activeFilterChip{Label: "Type · " + p.Type, RemoveURL: clearFieldURL(p, "type")})
+		chips = append(chips, activeFilterChip{Label: i18n.Tf(lang, "browse.filterChipType", p.Type), RemoveURL: clearFieldURL(p, "type")})
 	}
 	if p.Query != "" {
 		chips = append(chips, activeFilterChip{Label: fmt.Sprintf("%q", p.Query), RemoveURL: clearFieldURL(p, "query")})
@@ -276,11 +280,11 @@ func truncateTitle(s string) string {
 // nav via layout()). Used for plain GET requests — including no-JS clients —
 // so a bookmarked/shared /browse?... URL always renders the complete page.
 templ browsePage(params BrowseParams, views []ObsView, projects []string, types []string, groupNav *GroupNav) {
-	@layout("browse", "Browse") {
+	@layout("browse", ui.T(ctx, "browse.pageTitle")) {
 		<!-- Page header -->
 		<div style="display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 1.5rem;">
-			<h1 style="font-size: 20px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; margin: 0;">Browse</h1>
-			<span class="micro-label" style="color: var(--text-faint);">knowledge base</span>
+			<h1 style="font-size: 20px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; margin: 0;">{ ui.T(ctx, "browse.pageTitle") }</h1>
+			<span class="micro-label" style="color: var(--text-faint);">{ ui.T(ctx, "browse.eyebrow") }</span>
 		</div>
 		<div id="browse-region">
 			@browseRegion(params, views, projects, types, groupNav)
@@ -301,14 +305,14 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 	<!-- Filter panel -->
 	<div class="card" style="margin-bottom: 1.25rem; padding: 1.25rem;">
 		<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
-			<span class="micro-label">Filters</span>
+			<span class="micro-label">{ ui.T(ctx, "browse.filters") }</span>
 			<span id="browse-spinner" class="htmx-indicator spinner" aria-hidden="true"></span>
 		</div>
 		<!-- Primary row: Project select · Source chips · Kind chips -->
 		<div class="browse-filter-grid">
 			<!-- Project (styled select — many values) -->
 			<div class="filter-section">
-				<label class="micro-label filter-label" for="proj-select">Project</label>
+				<label class="micro-label filter-label" for="proj-select">{ ui.T(ctx, "browse.project") }</label>
 				<form method="GET" action="/browse">
 					<input type="hidden" name="source" value={ params.Source }/>
 					<input type="hidden" name="kind" value={ params.Kind }/>
@@ -318,7 +322,7 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 						id="proj-select"
 						name="project"
 						class="filter-select"
-						aria-label="Filter by project"
+						aria-label={ ui.T(ctx, "browse.projectAria") }
 						hx-get="/browse"
 						hx-include="closest form"
 						hx-target="#browse-region"
@@ -326,7 +330,7 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 						hx-push-url="true"
 						hx-indicator="#browse-spinner"
 					>
-						<option value="">All projects</option>
+						<option value="">{ ui.T(ctx, "browse.allProjects") }</option>
 						for _, p := range projects {
 							if p == params.Project {
 								<option value={ p } selected>{ p }</option>
@@ -339,14 +343,14 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 					     it has no native "auto-submit on change" without JS (same
 					     limitation the previous onchange-trick implementation had). -->
 					<noscript>
-						<button type="submit" class="pill-btn pill-btn-secondary" style="margin-top: 0.5rem;">Go</button>
+						<button type="submit" class="pill-btn pill-btn-secondary" style="margin-top: 0.5rem;">{ ui.T(ctx, "browse.go") }</button>
 					</noscript>
 				</form>
 			</div>
 			<!-- Source chips (few values — toggle pills) -->
 			<div class="filter-section">
-				<span class="micro-label filter-label">Source</span>
-				<div class="chip-row" role="group" aria-label="Filter by source">
+				<span class="micro-label filter-label">{ ui.T(ctx, "browse.source") }</span>
+				<div class="chip-row" role="group" aria-label={ ui.T(ctx, "browse.sourceAria") }>
 					<a
 						href={ templ.SafeURL(chipToggleURL(params, "source", "")) }
 						hx-get={ chipToggleURL(params, "source", "") }
@@ -356,7 +360,7 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 						hx-indicator="#browse-spinner"
 						class={ "filter-chip", templ.KV("filter-chip-active", params.Source == "") }
 						aria-pressed={ fmt.Sprintf("%v", params.Source == "") }
-					>All</a>
+					>{ ui.T(ctx, "browse.all") }</a>
 					for _, s := range []string{"github", "discord", "jira", "whatsapp"} {
 						<a
 							href={ templ.SafeURL(chipToggleURL(params, "source", s)) }
@@ -373,8 +377,8 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 			</div>
 			<!-- Kind chips (few values — toggle pills) -->
 			<div class="filter-section">
-				<span class="micro-label filter-label">Kind</span>
-				<div class="chip-row" role="group" aria-label="Filter by kind">
+				<span class="micro-label filter-label">{ ui.T(ctx, "browse.kind") }</span>
+				<div class="chip-row" role="group" aria-label={ ui.T(ctx, "browse.kindAria") }>
 					<a
 						href={ templ.SafeURL(chipToggleURL(params, "kind", "")) }
 						hx-get={ chipToggleURL(params, "kind", "") }
@@ -384,7 +388,7 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 						hx-indicator="#browse-spinner"
 						class={ "filter-chip", templ.KV("filter-chip-active", params.Kind == "") }
 						aria-pressed={ fmt.Sprintf("%v", params.Kind == "") }
-					>All</a>
+					>{ ui.T(ctx, "browse.all") }</a>
 					for _, k := range []string{"pull_request", "issue", "commit_digest", "message_digest"} {
 						<a
 							href={ templ.SafeURL(chipToggleURL(params, "kind", k)) }
@@ -405,8 +409,8 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 			if len(types) > 0 {
 				<!-- Category chips (dynamic from DB — toggle pills) -->
 				<div class="filter-section" style="flex: 1; min-width: 0;">
-					<span class="micro-label filter-label">Category</span>
-					<div class="chip-row" style="flex-wrap: wrap;" role="group" aria-label="Filter by category">
+					<span class="micro-label filter-label">{ ui.T(ctx, "browse.category") }</span>
+					<div class="chip-row" style="flex-wrap: wrap;" role="group" aria-label={ ui.T(ctx, "browse.categoryAria") }>
 						<a
 							href={ templ.SafeURL(chipToggleURL(params, "type", "")) }
 							hx-get={ chipToggleURL(params, "type", "") }
@@ -416,7 +420,7 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 							hx-indicator="#browse-spinner"
 							class={ "filter-chip", templ.KV("filter-chip-active", params.Type == "") }
 							aria-pressed={ fmt.Sprintf("%v", params.Type == "") }
-						>All</a>
+						>{ ui.T(ctx, "browse.all") }</a>
 						for _, t := range types {
 							<a
 								href={ templ.SafeURL(chipToggleURL(params, "type", t)) }
@@ -434,7 +438,7 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 			}
 			<!-- Free-text search -->
 			<div class="filter-section" style="flex-shrink: 0;">
-				<label class="micro-label filter-label" for="browse-search">Search</label>
+				<label class="micro-label filter-label" for="browse-search">{ ui.T(ctx, "browse.search") }</label>
 				<form
 					method="GET"
 					action="/browse"
@@ -455,12 +459,12 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 						type="search"
 						name="q"
 						value={ params.Query }
-						placeholder="Search observations..."
+						placeholder={ ui.T(ctx, "browse.searchPlaceholder") }
 						style="width: 260px;"
 					/>
 					<button type="submit" class="pill-btn pill-btn-primary">
 						<span class="htmx-indicator spinner"></span>
-						Search
+						{ ui.T(ctx, "browse.search") }
 					</button>
 				</form>
 			</div>
@@ -474,7 +478,7 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 	<div id="obs-list">
 		<div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.625rem; padding: 0 0.25rem; flex-wrap: wrap;">
 			<div style="display: flex; align-items: center; gap: 0.375rem; flex-wrap: wrap;">
-				for _, chip := range activeFilterChips(params) {
+				for _, chip := range activeFilterChips(params, i18n.LangFrom(ctx)) {
 					if chip.IsProject {
 						<span class="filter-chip filter-chip-active" style="display: inline-flex; align-items: center; gap: 2px;">
 							<a href={ templ.SafeURL(chip.ProjectHref) } style="color: inherit; text-decoration: none;">{ chip.Label }</a>
@@ -486,7 +490,7 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 								hx-push-url="true"
 								hx-indicator="#browse-spinner"
 								class="chip-x"
-								title="Remove filter"
+								title={ ui.T(ctx, "browse.removeFilter") }
 							>✕</a>
 						</span>
 					} else {
@@ -498,13 +502,13 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 							hx-push-url="true"
 							hx-indicator="#browse-spinner"
 							class="filter-chip filter-chip-active"
-							title="Remove filter"
+							title={ ui.T(ctx, "browse.removeFilter") }
 						>{ chip.Label } <span class="chip-x">✕</span></a>
 					}
 				}
 			</div>
 			<div style="display: flex; align-items: center; gap: 0.75rem;">
-				<span class="micro-label">{ fmt.Sprintf("%d results", len(views)) }</span>
+				<span class="micro-label">{ ui.Tf(ctx, "browse.resultsCount", len(views)) }</span>
 				if hasActiveFilters(params) {
 					<a
 						href={ templ.SafeURL(clearFiltersURL(params)) }
@@ -515,7 +519,7 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 						hx-indicator="#browse-spinner"
 						class="micro-label"
 						style="color: var(--calypso); text-transform: none; text-decoration: none; letter-spacing: 0.08em;"
-					>clear all ×</a>
+					>{ ui.T(ctx, "browse.clearAll") }</a>
 				}
 			</div>
 		</div>
@@ -529,7 +533,7 @@ templ browseRegion(params BrowseParams, views []ObsView, projects []string, type
 // #browse-region swap target, so they must stay instant too.
 templ groupNavBar(nav GroupNav) {
 	<div class="subproject-nav">
-		<span class="micro-label subproject-nav-label">Sub-Projects</span>
+		<span class="micro-label subproject-nav-label">{ ui.T(ctx, "browse.subProjects") }</span>
 		for _, item := range nav.Items {
 			if item.IsActive {
 				<span class="subproject-tab subproject-tab-active">{ item.Label }</span>

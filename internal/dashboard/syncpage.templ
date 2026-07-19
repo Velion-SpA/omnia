@@ -1,23 +1,28 @@
 package dashboard
 
+import (
+	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
+)
+
 // syncStatusPage is the dedicated /sync route with full detail. targets is the
 // per-cloud sync health table (nil on a backend that cannot read sync_state,
 // e.g. the cloud dashboard) — see OBL-12: a degraded/blocked target must be
 // visible here instead of silently absent.
 templ syncStatusPage(status SyncStatus, targets []SyncTargetView) {
-	@layout("sync", "Sync Status") {
-		<h1 style="font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;">Sync Status</h1>
+	@layout("sync", ui.T(ctx, "sync.pageTitle")) {
+		<h1 style="font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;">{ ui.T(ctx, "sync.pageTitle") }</h1>
 		<div style="display: flex; flex-direction: column; gap: 1.25rem;">
 			<!-- Sync targets card (per-cloud health) -->
 			<div class="card">
-				<span class="micro-label" style="display: block; margin-bottom: 0.25rem;">SYNC TARGETS</span>
+				<span class="micro-label" style="display: block; margin-bottom: 0.25rem;">{ ui.T(ctx, "sync.targets") }</span>
 				if len(targets) == 0 {
-					<p style="color: var(--text-dim); font-size: 13px;">No cloud sync targets recorded yet. Run <code style="font-family: 'JetBrains Mono', monospace;">omnia cloud enroll &lt;project&gt;</code> to start replicating one.</p>
+					<p style="color: var(--text-dim); font-size: 13px;">{ ui.T(ctx, "sync.noTargetsPrefix") }<code style="font-family: 'JetBrains Mono', monospace;">omnia cloud enroll &lt;project&gt;</code>{ ui.T(ctx, "sync.noTargetsSuffix") }</p>
 				} else {
 					<div style="display: flex; flex-direction: column; gap: 4px;">
 						for _, t := range targets {
 							<div style="display: grid; grid-template-columns: 90px 1fr 1.5fr 90px; align-items: center; gap: 0.75rem; padding: 0.625rem 0.875rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem;">
-								<span class={ "badge", templ.KV("badge-ok", t.Lifecycle == "healthy"), templ.KV("badge-warn", t.Lifecycle == "pending" || t.Lifecycle == "running"), templ.KV("badge-bad", t.Lifecycle == "degraded") }>{ healthChipLabel(t.Lifecycle) }</span>
+								<span class={ "badge", templ.KV("badge-ok", t.Lifecycle == "healthy"), templ.KV("badge-warn", t.Lifecycle == "pending" || t.Lifecycle == "running"), templ.KV("badge-bad", t.Lifecycle == "degraded") }>{ healthChipLabel(t.Lifecycle, i18n.LangFrom(ctx)) }</span>
 								<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text);">
 									{ t.Cloud }
 									if t.Project != "" {
@@ -37,14 +42,14 @@ templ syncStatusPage(status SyncStatus, targets []SyncTargetView) {
 			</div>
 			<!-- Cursors card -->
 			<div class="card">
-				<span class="micro-label" style="display: block; margin-bottom: 0.25rem;">SYNC CURSORS</span>
+				<span class="micro-label" style="display: block; margin-bottom: 0.25rem;">{ ui.T(ctx, "sync.cursors") }</span>
 				<p style="font-size: 11px; color: var(--text-faint); margin: 0 0 1rem 0; font-family: 'JetBrains Mono', monospace;">{ status.StateFile }</p>
 				if status.Missing {
 					<div style="padding: 0.75rem 1rem; background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.2); border-radius: 0.5rem; color: var(--warn); font-size: 13px;">
-						State file not found. Run <code style="font-family: 'JetBrains Mono', monospace;">omnia sync</code> to create it.
+						{ ui.T(ctx, "sync.stateMissingPrefix") }<code style="font-family: 'JetBrains Mono', monospace;">omnia sync</code>{ ui.T(ctx, "sync.stateMissingSuffix") }
 					</div>
 				} else if len(status.Cursors) == 0 {
-					<p style="color: var(--text-dim); font-size: 13px;">No cursors recorded yet.</p>
+					<p style="color: var(--text-dim); font-size: 13px;">{ ui.T(ctx, "sync.noCursorsYet") }</p>
 				} else {
 					<div style="display: flex; flex-direction: column; gap: 4px;">
 						for _, c := range status.Cursors {
@@ -60,11 +65,11 @@ templ syncStatusPage(status SyncStatus, targets []SyncTargetView) {
 			</div>
 			<!-- Log card -->
 			<div class="card">
-				<span class="micro-label" style="display: block; margin-bottom: 0.25rem;">SYNC LOG</span>
+				<span class="micro-label" style="display: block; margin-bottom: 0.25rem;">{ ui.T(ctx, "sync.log") }</span>
 				<p style="font-size: 11px; color: var(--text-faint); margin: 0 0 1rem 0; font-family: 'JetBrains Mono', monospace;">{ status.LogFile }</p>
 				if len(status.LogLines) == 0 {
 					<div style="padding: 0.75rem 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem; color: var(--text-dim); font-size: 13px;">
-						No log file found. Omnia logs to stderr only (no file logger configured in v1).
+						{ ui.T(ctx, "sync.noLogFile") }
 					</div>
 				} else {
 					<div class="content-prose" style="max-height: 400px;">

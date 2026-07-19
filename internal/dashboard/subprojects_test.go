@@ -129,7 +129,8 @@ func TestHandleProjectDetail_ParentProject_RendersChildrenSection(t *testing.T) 
 	body, _ := io.ReadAll(resp.Body)
 	bodyStr := string(body)
 
-	if !strings.Contains(bodyStr, "Sub-projects") {
+	// Spanish is the default language (see projectDetail.subProjects).
+	if !strings.Contains(bodyStr, "Sub-proyectos") {
 		t.Error("expected a Sub-projects section for a parent project")
 	}
 	if !strings.Contains(bodyStr, `href="/project/workly-marketing"`) {
@@ -168,7 +169,7 @@ func TestHandleProjectDetail_ChildProject_RendersParentBreadcrumb(t *testing.T) 
 	if !strings.Contains(bodyStr, `href="/project/workly"`) {
 		t.Error("expected the breadcrumb to link to the parent's detail page")
 	}
-	if strings.Contains(bodyStr, "Sub-projects") {
+	if strings.Contains(bodyStr, "Sub-proyectos") {
 		t.Error("a child project (no linked children) must not render a Sub-projects section")
 	}
 }
@@ -189,7 +190,7 @@ func TestHandleProjectDetail_NilResolver_RendersNeitherSectionNorPanics(t *testi
 	body, _ := io.ReadAll(resp.Body)
 	bodyStr := string(body)
 
-	if strings.Contains(bodyStr, "Sub-projects") {
+	if strings.Contains(bodyStr, "Sub-proyectos") {
 		t.Error("expected no Sub-projects section when no resolver is configured")
 	}
 	if strings.Contains(bodyStr, "project-parent-link") {
