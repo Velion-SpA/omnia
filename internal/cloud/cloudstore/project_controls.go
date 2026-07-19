@@ -82,7 +82,9 @@ func (cs *CloudStore) SetProjectSyncEnabled(project string, enabled bool, update
 	}
 	// W4: invalidate the dashboard read model cache so SystemHealth / paused_projects
 	// reflect the change immediately without waiting for the next chunk write.
-	cs.invalidateDashboardReadModel()
+	// H2: scoped to this one project — this control record doesn't touch any
+	// other project's cached chunk/mutation data.
+	cs.invalidateDashboardReadModelForProjects(map[string]struct{}{project: {}})
 	return nil
 }
 

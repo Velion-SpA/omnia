@@ -27,6 +27,39 @@ type CloudStore struct {
 	dashboardReadModel     dashboardReadModel
 	dashboardReadModelOK   bool
 	dashboardReadModelLoad func() (dashboardReadModel, error)
+
+	// H2 (perf/correctness): projects invalidated since the read model was last
+	// assembled. When non-empty, the cache is still "OK" overall but must reload
+	// ONLY these projects (via dashboardProjectReadModelLoad / the project-scoped
+	// loadChunkRows/loadMutationRows path) before serving the next read, instead
+	// of re-scanning cloud_chunks/cloud_mutations for every tenant on every write.
+	dashboardDirtyProjects map[string]struct{}
+	// dashboardProjectReadModelLoad overrides the project-scoped rebuild (tests only).
+	dashboardProjectReadModelLoad func(project string) (dashboardReadModel, error)
+
+	// dashboardColdRebuildInFlight, when non-nil, is a channel that closes once
+	// an in-flight cold (full) dashboard read-model rebuild completes.
+	//
+	// H2 follow-up fix (obs #1490 — lock-held-across-DB-IO regression): a slow
+	// full or per-project rebuild must never hold dashboardReadModelMu while
+	// running its (unbounded) DB queries, because WriteChunk/
+	// InsertMutationBatch/BackfillMutationChunks/SetProjectSyncEnabled all take
+	// the SAME lock (via invalidateDashboardReadModel[ForProjects]) right after
+	// their tx commits — holding it across DB I/O would stall the live sync
+	// write path server-wide. This field serves two purposes for the cold path:
+	//  1. Thundering-herd guard: concurrent callers that also observe a cold
+	//     cache wait on this channel instead of each launching their own
+	//     full-table rebuild.
+	//  2. Dirty-tracking gate: invalidateDashboardReadModelForProjects treats
+	//     "cold rebuild in flight" the same as "warm" for dirty-set purposes —
+	//     a write landing during the unlocked rebuild window is recorded into
+	//     dashboardDirtyProjects instead of being silently dropped, so it is
+	//     never lost even if the rebuild's SELECT already ran before the
+	//     write's commit became visible. The warm (per-project) path needs no
+	//     equivalent flag: it never sets dashboardReadModelOK to false, so
+	//     invalidateDashboardReadModelForProjects already tracks writes that
+	//     land during a warm reload unconditionally.
+	dashboardColdRebuildInFlight chan struct{}
 }
 
 var ErrChunkNotFound = errors.New("cloudstore: chunk not found")
@@ -292,7 +325,7 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 			return fmt.Errorf("%w: existing chunk %q has different payload", ErrChunkConflict, chunkID)
 		}
 		_ = cs.indexChunkSessions(ctx, project, payload)
-		cs.invalidateDashboardReadModel()
+		cs.invalidateDashboardReadModelForChunkPayload(project, payload)
 		return nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -329,7 +362,7 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 			if conflictErr != nil {
 				return conflictErr
 			}
-			cs.invalidateDashboardReadModel()
+			cs.invalidateDashboardReadModelForChunk(project, chunk)
 			return nil
 		}
 		return fmt.Errorf("cloudstore: write chunk: %w", err)
@@ -344,10 +377,19 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 		return fmt.Errorf("cloudstore: commit write chunk: %w", err)
 	}
 	tx = nil
-	cs.invalidateDashboardReadModel()
+	cs.invalidateDashboardReadModelForChunk(project, chunk)
 	return nil
 }
 
+// invalidateDashboardReadModel fully drops the cached dashboard read model.
+// Reserved for changes that can affect ANY project's visibility (e.g.
+// SetDashboardAllowedProjects changing the allowlist) or for writes whose
+// affected-project set cannot be safely narrowed (see
+// invalidateDashboardReadModelForChunk's cross-project fallback). Prefer
+// invalidateDashboardReadModelForProjects for anything scoped to known
+// projects — H2 fix: a full invalidation forces the next read to re-scan
+// cloud_chunks/cloud_mutations for EVERY tenant, which is the exact
+// pathology this fix removes from the hot write path.
 func (cs *CloudStore) invalidateDashboardReadModel() {
 	if cs == nil {
 		return
@@ -356,6 +398,101 @@ func (cs *CloudStore) invalidateDashboardReadModel() {
 	defer cs.dashboardReadModelMu.Unlock()
 	cs.dashboardReadModel = dashboardReadModel{}
 	cs.dashboardReadModelOK = false
+	cs.dashboardDirtyProjects = nil
+}
+
+// invalidateDashboardReadModelForProjects marks specific projects as needing a
+// reload without dropping the rest of the cached read model. H2 fix: this is
+// what WriteChunk/InsertMutationBatch/etc. call on the hot write path instead
+// of invalidateDashboardReadModel, so a write to one tenant's project no
+// longer forces every other tenant's cached dashboard data to be rebuilt from
+// a full-table scan on the next read.
+func (cs *CloudStore) invalidateDashboardReadModelForProjects(projects map[string]struct{}) {
+	if cs == nil || len(projects) == 0 {
+		return
+	}
+	cs.dashboardReadModelMu.Lock()
+	defer cs.dashboardReadModelMu.Unlock()
+	if !cs.dashboardReadModelOK && cs.dashboardColdRebuildInFlight == nil {
+		// Cache is fully cold with no rebuild in flight — the next load will be
+		// a full rebuild that already reflects every project's current state,
+		// so there's nothing to mark dirty yet.
+		//
+		// If a cold rebuild IS in flight, fall through and mark dirty anyway:
+		// that in-flight rebuild's SELECT may already have run before this
+		// write's commit became visible, so we cannot assume it will be
+		// reflected — see dashboardColdRebuildInFlight's doc comment.
+		return
+	}
+	if cs.dashboardDirtyProjects == nil {
+		cs.dashboardDirtyProjects = make(map[string]struct{}, len(projects))
+	}
+	for project := range projects {
+		project = strings.TrimSpace(project)
+		if project == "" {
+			continue
+		}
+		cs.dashboardDirtyProjects[project] = struct{}{}
+	}
+}
+
+// invalidateDashboardReadModelForChunk narrows invalidation to the project(s)
+// actually affected by a just-written chunk. Sync chunks are overwhelmingly
+// single-project (chunk.project == every entity's own project), which is the
+// fast path this optimizes. A handful of entities can carry an explicit
+// different logical project (e.g. store.Observation.Project — mem_save
+// supports saving to an explicit project other than the current one), and in
+// that case we cannot safely prove which OTHER projects need a refresh (that
+// project's complete data may span chunk rows physically stored under yet
+// other projects), so we conservatively fall back to a full invalidation —
+// exactly the pre-fix, always-correct behavior — rather than risk serving
+// stale data for a project we didn't know to mark dirty.
+func (cs *CloudStore) invalidateDashboardReadModelForChunk(project string, chunk engramsync.ChunkData) {
+	project = strings.TrimSpace(project)
+	if dashboardWriteTouchesOnlyOwnProject(project, chunk) {
+		cs.invalidateDashboardReadModelForProjects(map[string]struct{}{project: {}})
+		return
+	}
+	cs.invalidateDashboardReadModel()
+}
+
+// invalidateDashboardReadModelForChunkPayload is invalidateDashboardReadModelForChunk
+// for callers that only have the raw payload bytes (not yet parsed). If the
+// payload fails to parse, we cannot determine the affected-project set at all,
+// so fail safe with a full invalidation.
+func (cs *CloudStore) invalidateDashboardReadModelForChunkPayload(project string, payload []byte) {
+	chunk, err := parseChunkData(payload)
+	if err != nil {
+		cs.invalidateDashboardReadModel()
+		return
+	}
+	cs.invalidateDashboardReadModelForChunk(project, chunk)
+}
+
+// invalidateDashboardReadModelForMutationBatch narrows invalidation for
+// InsertMutationBatch to the projects declared by each entry, unless a mutation
+// payload's own embedded project override disagrees with its entry-level
+// project (the same cross-project edge case handled in
+// invalidateDashboardReadModelForChunk), in which case it falls back to a full
+// invalidation for safety.
+func (cs *CloudStore) invalidateDashboardReadModelForMutationBatch(batch []MutationEntry) {
+	affected := make(map[string]struct{}, len(batch))
+	for _, entry := range batch {
+		project := strings.TrimSpace(entry.Project)
+		if project == "" {
+			continue
+		}
+		resolved := dashboardResolvedProjectForMutationPayload(entry.Entity, project, entry.Payload)
+		if resolved != project {
+			cs.invalidateDashboardReadModel()
+			return
+		}
+		affected[project] = struct{}{}
+	}
+	if len(affected) == 0 {
+		return
+	}
+	cs.invalidateDashboardReadModelForProjects(affected)
 }
 
 func (cs *CloudStore) KnownSessionIDs(ctx context.Context, project string) (map[string]struct{}, error) {
@@ -995,7 +1132,7 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 	}
 	tx = nil // mark committed so deferred Rollback is a no-op
 	if len(chunks) > 0 {
-		cs.invalidateDashboardReadModel()
+		cs.invalidateDashboardReadModelForMutationBatch(batch)
 	}
 	return seqs, nil
 }
@@ -1223,7 +1360,10 @@ func (cs *CloudStore) BackfillMutationChunks(ctx context.Context, project string
 	}
 	tx = nil
 	if report.ChunksInserted > 0 {
-		cs.invalidateDashboardReadModel()
+		// H2: these backfilled rows are re-materializations of mutations already
+		// scoped to `project` at the DB row level (see the query above), so reuse
+		// the same batch-aware, cross-project-safe invalidation as InsertMutationBatch.
+		cs.invalidateDashboardReadModelForMutationBatch(missing)
 	}
 	return report, nil
 }
