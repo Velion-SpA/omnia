@@ -7,16 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/velion/omnia/internal/cloud"
 	"github.com/velion/omnia/internal/cloud/chunkcodec"
 	"github.com/velion/omnia/internal/store"
 	engramsync "github.com/velion/omnia/internal/sync"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestNewRequiresDSN(t *testing.T) {
@@ -1094,5 +1096,503 @@ func TestSetDashboardAllowedProjectsInvalidatesCachedReadModel(t *testing.T) {
 	}
 	if loadCalls != 2 {
 		t.Fatalf("expected allowlist update to invalidate read-model cache, got load count %d", loadCalls)
+	}
+}
+
+// ─── H2: Partitioned dashboard read-model invalidation ────────────────────────
+//
+// Before this fix, EVERY write (WriteChunk/InsertMutationBatch/etc., from ANY
+// project) invalidated the ENTIRE cached dashboardReadModel, forcing the next
+// dashboard read to re-scan and unmarshal every row of cloud_chunks AND
+// cloud_mutations across ALL tenants even though only one project's data
+// actually changed. These tests pin the fix: a write to project A must only
+// cause project A's slice of the cache to be reloaded (using the pre-existing,
+// previously-dead project-scoped loadChunkRows/loadMutationRows path);
+// project B's cached data must survive completely untouched, and the
+// recomputed cross-project aggregates (projects list, contributors, admin
+// overview, system health) must still be correct.
+
+func TestH2WriteToOneProjectDoesNotReloadAnotherProjectsCachedData(t *testing.T) {
+	cs := &CloudStore{}
+	fullLoads := 0
+	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
+		fullLoads++
+		return dashboardReadModel{
+			projectDetails: map[string]DashboardProjectDetail{
+				"proj-a": {Project: "proj-a", Stats: DashboardProjectRow{Project: "proj-a", Chunks: 1}},
+				"proj-b": {Project: "proj-b", Stats: DashboardProjectRow{Project: "proj-b", Chunks: 1}},
+			},
+		}, nil
+	}
+	projectLoads := map[string]int{}
+	cs.dashboardProjectReadModelLoad = func(project string) (dashboardReadModel, error) {
+		projectLoads[project]++
+		return dashboardReadModel{
+			projectDetails: map[string]DashboardProjectDetail{
+				project: {Project: project, Stats: DashboardProjectRow{Project: project, Chunks: 9}},
+			},
+		}, nil
+	}
+
+	if _, err := cs.ListProjects(""); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	if fullLoads != 1 {
+		t.Fatalf("expected exactly one full-table load to warm the cache, got %d", fullLoads)
+	}
+
+	// Simulate a write landing on proj-a only — this is what WriteChunk /
+	// InsertMutationBatch now do instead of a blanket invalidateDashboardReadModel().
+	cs.invalidateDashboardReadModelForProjects(map[string]struct{}{"proj-a": {}})
+
+	if _, err := cs.ListProjects(""); err != nil {
+		t.Fatalf("post-invalidation load: %v", err)
+	}
+
+	if fullLoads != 1 {
+		t.Fatalf("a single-project invalidation must NOT trigger another full-table (all-tenant) load, got %d full loads", fullLoads)
+	}
+	if projectLoads["proj-a"] != 1 {
+		t.Fatalf("expected proj-a to be reloaded exactly once after its invalidation, got %d", projectLoads["proj-a"])
+	}
+	if n, ok := projectLoads["proj-b"]; ok {
+		t.Fatalf("expected proj-b to NOT be reloaded when only proj-a was written to, got %d reload(s)", n)
+	}
+}
+
+func TestH2InvalidatedProjectReadsFreshDataAfterReload(t *testing.T) {
+	cs := &CloudStore{}
+	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
+		return dashboardReadModel{
+			projectDetails: map[string]DashboardProjectDetail{
+				"proj-a": {Project: "proj-a", Stats: DashboardProjectRow{Project: "proj-a", Chunks: 1}},
+				"proj-b": {Project: "proj-b", Stats: DashboardProjectRow{Project: "proj-b", Chunks: 1}},
+			},
+		}, nil
+	}
+	cs.dashboardProjectReadModelLoad = func(project string) (dashboardReadModel, error) {
+		if project != "proj-a" {
+			t.Fatalf("expected only proj-a to be reloaded, got a reload request for %q", project)
+		}
+		return dashboardReadModel{
+			projectDetails: map[string]DashboardProjectDetail{
+				"proj-a": {Project: "proj-a", Stats: DashboardProjectRow{Project: "proj-a", Chunks: 5}},
+			},
+		}, nil
+	}
+
+	if _, err := cs.ListProjects(""); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	cs.invalidateDashboardReadModelForProjects(map[string]struct{}{"proj-a": {}})
+
+	detailA, err := cs.ProjectDetail("proj-a")
+	if err != nil {
+		t.Fatalf("ProjectDetail(proj-a): %v", err)
+	}
+	if detailA.Stats.Chunks != 5 {
+		t.Fatalf("expected proj-a to reflect the fresh reload (chunks=5), got %d", detailA.Stats.Chunks)
+	}
+
+	detailB, err := cs.ProjectDetail("proj-b")
+	if err != nil {
+		t.Fatalf("ProjectDetail(proj-b): %v", err)
+	}
+	if detailB.Stats.Chunks != 1 {
+		t.Fatalf("expected proj-b's cached data to be unaffected (chunks=1), got %d", detailB.Stats.Chunks)
+	}
+}
+
+func TestH2PartitionedRefreshPreservesCrossProjectAggregateCorrectness(t *testing.T) {
+	// alan contributes to BOTH proj-a and proj-b — this is exactly the case that
+	// breaks a naive per-project cache patch: the global contributor total for
+	// alan must equal the sum of alan's per-project contributions, and must stay
+	// correct even after only proj-a's partition is reloaded.
+	chunksA := []dashboardChunkRow{
+		{
+			project:   "proj-a",
+			createdBy: "alan@example.com",
+			createdAt: time.Date(2026, 4, 21, 8, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"s-1","project":"proj-a","started_at":"2026-04-21T08:00:00Z"}],
+				"observations":[{"sync_id":"obs-1","session_id":"s-1","project":"proj-a","type":"decision","title":"Decision A","created_at":"2026-04-21T08:10:00Z"}]
+			}`)),
+		},
+	}
+	chunksB := []dashboardChunkRow{
+		{
+			project:   "proj-b",
+			createdBy: "alan@example.com",
+			createdAt: time.Date(2026, 4, 22, 8, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"s-2","project":"proj-b","started_at":"2026-04-22T08:00:00Z"}],
+				"observations":[{"sync_id":"obs-2","session_id":"s-2","project":"proj-b","type":"note","title":"Note B","created_at":"2026-04-22T08:10:00Z"}]
+			}`)),
+		},
+		{
+			project:   "proj-b",
+			createdBy: "sofia@example.com",
+			createdAt: time.Date(2026, 4, 23, 8, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"s-3","project":"proj-b","started_at":"2026-04-23T08:00:00Z"}],
+				"observations":[{"sync_id":"obs-3","session_id":"s-3","project":"proj-b","type":"decision","title":"Decision C","created_at":"2026-04-23T08:10:00Z"}]
+			}`)),
+		},
+	}
+	allChunks := append(append([]dashboardChunkRow(nil), chunksA...), chunksB...)
+
+	reference, err := buildDashboardReadModel(allChunks)
+	if err != nil {
+		t.Fatalf("build reference model: %v", err)
+	}
+	if len(reference.projectDetails) != 2 {
+		t.Fatalf("expected reference model to cover 2 projects, got %d", len(reference.projectDetails))
+	}
+
+	cs := &CloudStore{}
+	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
+		return buildDashboardReadModel(allChunks)
+	}
+	cs.dashboardProjectReadModelLoad = func(project string) (dashboardReadModel, error) {
+		switch project {
+		case "proj-a":
+			return buildDashboardReadModel(chunksA)
+		case "proj-b":
+			return buildDashboardReadModel(chunksB)
+		default:
+			t.Fatalf("unexpected project reload request: %q", project)
+			return dashboardReadModel{}, nil
+		}
+	}
+
+	// Warm the cache with the full reference, then simulate a write to proj-a
+	// only — this must NOT corrupt proj-b's data or the global aggregates.
+	if _, err := cs.ListProjects(""); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	cs.invalidateDashboardReadModelForProjects(map[string]struct{}{"proj-a": {}})
+
+	gotProjects, err := cs.ListProjects("")
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if !reflect.DeepEqual(gotProjects, reference.projects) {
+		t.Fatalf("projects mismatch after partitioned refresh:\n got=%+v\nwant=%+v", gotProjects, reference.projects)
+	}
+
+	gotContributors, err := cs.ListContributors("")
+	if err != nil {
+		t.Fatalf("ListContributors: %v", err)
+	}
+	if !reflect.DeepEqual(gotContributors, reference.listContributors("")) {
+		t.Fatalf("contributors mismatch after partitioned refresh:\n got=%+v\nwant=%+v", gotContributors, reference.listContributors(""))
+	}
+
+	gotOverview, err := cs.AdminOverview()
+	if err != nil {
+		t.Fatalf("AdminOverview: %v", err)
+	}
+	if gotOverview != reference.admin {
+		t.Fatalf("admin overview mismatch after partitioned refresh: got=%+v want=%+v", gotOverview, reference.admin)
+	}
+
+	gotHealth, err := cs.SystemHealth()
+	if err != nil {
+		t.Fatalf("SystemHealth: %v", err)
+	}
+	wantSessions, wantObservations, wantPrompts := 0, 0, 0
+	for _, detail := range reference.projectDetails {
+		wantSessions += len(detail.Sessions)
+		wantObservations += len(detail.Observations)
+		wantPrompts += len(detail.Prompts)
+	}
+	if gotHealth.Projects != reference.admin.Projects || gotHealth.Contributors != reference.admin.Contributors ||
+		gotHealth.Sessions != wantSessions || gotHealth.Observations != wantObservations || gotHealth.Prompts != wantPrompts ||
+		gotHealth.Chunks != reference.admin.Chunks {
+		t.Fatalf("system health mismatch after partitioned refresh: got=%+v", gotHealth)
+	}
+
+	detailA, err := cs.ProjectDetail("proj-a")
+	if err != nil {
+		t.Fatalf("ProjectDetail(proj-a): %v", err)
+	}
+	if !reflect.DeepEqual(detailA, reference.projectDetails["proj-a"]) {
+		t.Fatalf("proj-a detail mismatch after partitioned refresh:\n got=%+v\nwant=%+v", detailA, reference.projectDetails["proj-a"])
+	}
+
+	detailB, err := cs.ProjectDetail("proj-b")
+	if err != nil {
+		t.Fatalf("ProjectDetail(proj-b): %v", err)
+	}
+	if !reflect.DeepEqual(detailB, reference.projectDetails["proj-b"]) {
+		t.Fatalf("proj-b detail mismatch after partitioned refresh (must be untouched):\n got=%+v\nwant=%+v", detailB, reference.projectDetails["proj-b"])
+	}
+}
+
+func TestH2CrossProjectObservationOverrideFallsBackToFullInvalidation(t *testing.T) {
+	// An observation explicitly tagged with a DIFFERENT project than the chunk
+	// it was written under is a real, supported Omnia feature (see
+	// store.Observation.Project). Partition-scoped reload-by-physical-project
+	// cannot safely capture this case (the other project's data may live in
+	// chunk rows physically stored under yet other projects), so this must fall
+	// back to a full invalidation rather than silently under-invalidate.
+	cs := &CloudStore{}
+	fullLoads := 0
+	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
+		fullLoads++
+		return dashboardReadModel{}, nil
+	}
+	cs.dashboardProjectReadModelLoad = func(project string) (dashboardReadModel, error) {
+		t.Fatalf("expected no project-scoped reload for a cross-project write, got reload for %q", project)
+		return dashboardReadModel{}, nil
+	}
+
+	if _, err := cs.ListProjects(""); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	if fullLoads != 1 {
+		t.Fatalf("expected 1 initial full load, got %d", fullLoads)
+	}
+
+	chunk := parseMustChunk(t, []byte(`{
+		"observations":[{"sync_id":"obs-1","session_id":"s-1","project":"proj-b","type":"decision","title":"Cross-project","created_at":"2026-04-21T08:10:00Z"}]
+	}`))
+	cs.invalidateDashboardReadModelForChunk("proj-a", chunk)
+
+	if _, err := cs.ListProjects(""); err != nil {
+		t.Fatalf("post-invalidation load: %v", err)
+	}
+	if fullLoads != 2 {
+		t.Fatalf("expected the cross-project write to trigger a full fallback invalidation (2 full loads total), got %d", fullLoads)
+	}
+}
+
+// ─── H2 follow-up: lock must never be held across DB I/O (obs #1490) ─────────
+//
+// Adversarial review of the H2 partitioning fix confirmed a merge-blocking
+// regression: loadDashboardReadModel held cs.dashboardReadModelMu.Lock() across
+// the ENTIRE cold and warm-per-project rebuild, both of which run unbounded DB
+// SQL. Because WriteChunk/InsertMutationBatch/BackfillMutationChunks/
+// SetProjectSyncEnabled call invalidateDashboardReadModelForProjects (which
+// takes the SAME lock) AFTER their tx commits, a single slow dashboard rebuild
+// stalled the live sync WRITE path server-wide. These tests pin the fix: (a) a
+// write's invalidation call must return promptly even while a slow rebuild is
+// in flight, and (b) the write that landed during the slow rebuild must not be
+// lost — a later read must reflect it.
+
+func TestH2WarmReloadDoesNotBlockConcurrentWriteAndNoLostUpdate(t *testing.T) {
+	cs := &CloudStore{}
+	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
+		return dashboardReadModel{
+			projectDetails: map[string]DashboardProjectDetail{
+				"proj-a": {Project: "proj-a", Stats: DashboardProjectRow{Project: "proj-a", Chunks: 1}},
+			},
+		}, nil
+	}
+
+	reloadStarted := make(chan struct{})
+	releaseReload := make(chan struct{})
+	var reloadCalls atomic.Int32
+	cs.dashboardProjectReadModelLoad = func(project string) (dashboardReadModel, error) {
+		call := reloadCalls.Add(1)
+		if call == 1 {
+			close(reloadStarted)
+			<-releaseReload // simulate an unbounded, slow per-project DB scan
+			return dashboardReadModel{
+				projectDetails: map[string]DashboardProjectDetail{
+					"proj-a": {Project: "proj-a", Stats: DashboardProjectRow{Project: "proj-a", Chunks: 2}},
+				},
+			}, nil
+		}
+		// The follow-up (post-reload) call reflects the write that landed
+		// during the slow reload above — proving it was not lost.
+		return dashboardReadModel{
+			projectDetails: map[string]DashboardProjectDetail{
+				"proj-a": {Project: "proj-a", Stats: DashboardProjectRow{Project: "proj-a", Chunks: 3}},
+			},
+		}, nil
+	}
+
+	// Warm the cache.
+	if _, err := cs.ListProjects(""); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	// Mark proj-a dirty and kick off a slow reload in the background — this
+	// simulates a dashboard read racing an in-flight rebuild.
+	cs.invalidateDashboardReadModelForProjects(map[string]struct{}{"proj-a": {}})
+
+	loadDone := make(chan error, 1)
+	go func() {
+		_, err := cs.ListProjects("")
+		loadDone <- err
+	}()
+
+	select {
+	case <-reloadStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the background reload to start")
+	}
+
+	// THE REGRESSION TEST: a write's invalidation call for proj-a — exactly
+	// what WriteChunk/InsertMutationBatch/etc. call right after their tx
+	// commits — must return promptly. It must NOT block behind the slow
+	// in-flight reload.
+	writeDone := make(chan struct{})
+	go func() {
+		cs.invalidateDashboardReadModelForProjects(map[string]struct{}{"proj-a": {}})
+		close(writeDone)
+	}()
+
+	select {
+	case <-writeDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("invalidateDashboardReadModelForProjects blocked behind an in-flight dashboard rebuild — the write path must never wait on DB I/O")
+	}
+
+	// Let the slow reload finish.
+	close(releaseReload)
+
+	if err := <-loadDone; err != nil {
+		t.Fatalf("background load: %v", err)
+	}
+
+	// NO LOST UPDATE: the write that landed during the slow reload must have
+	// re-dirtied proj-a, so a later read triggers a follow-up reload and
+	// reflects it — not just the (now stale) result the slow reload returned.
+	detail, err := cs.ProjectDetail("proj-a")
+	if err != nil {
+		t.Fatalf("ProjectDetail: %v", err)
+	}
+	if detail.Stats.Chunks != 3 {
+		t.Fatalf("expected the write that landed during the slow reload to trigger a follow-up reload (chunks=3), got %d — the write was lost", detail.Stats.Chunks)
+	}
+}
+
+func TestH2ColdRebuildDoesNotBlockConcurrentWriteAndNoLostUpdate(t *testing.T) {
+	cs := &CloudStore{}
+
+	rebuildStarted := make(chan struct{})
+	releaseRebuild := make(chan struct{})
+	var fullLoadCalls atomic.Int32
+	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
+		fullLoadCalls.Add(1)
+		close(rebuildStarted)
+		<-releaseRebuild // simulate an unbounded, slow full-table scan
+		return dashboardReadModel{
+			projectDetails: map[string]DashboardProjectDetail{
+				"proj-a": {Project: "proj-a", Stats: DashboardProjectRow{Project: "proj-a", Chunks: 1}},
+			},
+		}, nil
+	}
+	cs.dashboardProjectReadModelLoad = func(project string) (dashboardReadModel, error) {
+		return dashboardReadModel{
+			projectDetails: map[string]DashboardProjectDetail{
+				project: {Project: project, Stats: DashboardProjectRow{Project: project, Chunks: 2}},
+			},
+		}, nil
+	}
+
+	loadDone := make(chan error, 1)
+	go func() {
+		_, err := cs.ListProjects("")
+		loadDone <- err
+	}()
+
+	select {
+	case <-rebuildStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the background cold rebuild to start")
+	}
+
+	// THE REGRESSION TEST: a write landing on proj-a while the cold rebuild is
+	// still in flight must not block on it.
+	writeDone := make(chan struct{})
+	go func() {
+		cs.invalidateDashboardReadModelForProjects(map[string]struct{}{"proj-a": {}})
+		close(writeDone)
+	}()
+
+	select {
+	case <-writeDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("invalidateDashboardReadModelForProjects blocked behind an in-flight cold dashboard rebuild — the write path must never wait on DB I/O")
+	}
+
+	close(releaseRebuild)
+
+	if err := <-loadDone; err != nil {
+		t.Fatalf("background load: %v", err)
+	}
+	if fullLoadCalls.Load() != 1 {
+		t.Fatalf("expected exactly one full-table rebuild, got %d", fullLoadCalls.Load())
+	}
+
+	// NO LOST UPDATE: the write that landed during the in-flight cold rebuild
+	// must still trigger a follow-up per-project reload reflecting it.
+	detail, err := cs.ProjectDetail("proj-a")
+	if err != nil {
+		t.Fatalf("ProjectDetail: %v", err)
+	}
+	if detail.Stats.Chunks != 2 {
+		t.Fatalf("expected the write that landed during the cold rebuild to trigger a follow-up per-project reload (chunks=2), got %d — the write was lost", detail.Stats.Chunks)
+	}
+}
+
+func TestH2ConcurrentColdLoadsShareOneRebuild(t *testing.T) {
+	// Thundering-herd guard: N concurrent readers hitting a cold cache should
+	// trigger exactly ONE full-table rebuild, not N of them.
+	cs := &CloudStore{}
+	rebuildStarted := make(chan struct{})
+	releaseRebuild := make(chan struct{})
+	var fullLoadCalls atomic.Int32
+	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
+		fullLoadCalls.Add(1)
+		close(rebuildStarted)
+		<-releaseRebuild
+		return dashboardReadModel{
+			projectDetails: map[string]DashboardProjectDetail{
+				"proj-a": {Project: "proj-a", Stats: DashboardProjectRow{Project: "proj-a", Chunks: 7}},
+			},
+		}, nil
+	}
+
+	const readers = 5
+	results := make(chan dashboardReadModel, readers)
+	errs := make(chan error, readers)
+	for i := 0; i < readers; i++ {
+		go func() {
+			model, err := cs.loadDashboardReadModel()
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- model
+		}()
+	}
+
+	select {
+	case <-rebuildStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the shared rebuild to start")
+	}
+	close(releaseRebuild)
+
+	for i := 0; i < readers; i++ {
+		select {
+		case err := <-errs:
+			t.Fatalf("reader failed: %v", err)
+		case model := <-results:
+			if model.projectDetails["proj-a"].Stats.Chunks != 7 {
+				t.Fatalf("expected every reader to observe the rebuilt model, got %+v", model.projectDetails["proj-a"])
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for a reader to complete")
+		}
+	}
+
+	if got := fullLoadCalls.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 full-table rebuild shared across %d concurrent readers, got %d", readers, got)
 	}
 }
