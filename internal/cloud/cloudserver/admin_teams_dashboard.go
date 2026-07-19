@@ -158,6 +158,30 @@ type adminProjectRow struct {
 	AccessCount  int    // accounts with effective Read access (the "N con acceso" stat)
 	LastActivity string // humanized/relative (ui.RelativeTime); "" when unknown
 	AccessURL    string // GET /admin/projects/{project}/access (lazy reverse-access fragment)
+
+	// Command Center v2, Slice 5a: cloud sub-project linking. Populated only
+	// when the store supports projectLinksAdminStore — a store without it
+	// simply never sets ParentProject/SubProjectCount, so the card renders
+	// exactly like before (no badge, no chip, no link/unlink menu items).
+	// Children stay real, separate projects; this is metadata only, never a
+	// chunk merge — see cloudstore.SetProjectParent.
+	ParentProject    string   // "" when unlinked; the parent's project name otherwise
+	SubProjectCount  int      // how many OTHER projects are linked under this one as parent
+	LinkParentURL    string   // POST /admin/projects/{project}/parent (form field "parent")
+	ClearParentURL   string   // POST /admin/projects/{project}/parent/clear
+	ParentCandidates []string // valid parent choices for the "Link to parent project…" select, excluding self
+}
+
+// adminProjectSuggestionRow is one entry in the Admin Projects page's
+// suggestion banner (Command Center v2, Slice 5a): "Suggested: link {Child}
+// under {Parent}", with a one-click confirm (posts ConfirmURL with the
+// parent prefilled) and a client-side-only dismiss (the suggestion is
+// recomputed from current data on every page load — there is no persisted
+// "dismissed" state to track).
+type adminProjectSuggestionRow struct {
+	Child      string
+	Parent     string
+	ConfirmURL string // POST /admin/projects/{child}/parent (form field "parent", prefilled)
 }
 
 // adminProjectsView is a single flat, alphabetically-ordered project grid
@@ -167,8 +191,9 @@ type adminProjectRow struct {
 // showing anything a per-card badge doesn't; the mockup (view ⑤) confirms a
 // single grid reads just as clearly at this project count.
 type adminProjectsView struct {
-	Props    ui.LayoutProps
-	Projects []adminProjectRow
+	Props       ui.LayoutProps
+	Projects    []adminProjectRow
+	Suggestions []adminProjectSuggestionRow // Slice 5a: unlinked-but-look-related projects
 }
 
 // ─── Profiles page ───────────────────────────────────────────────────────────
@@ -366,6 +391,7 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 	}
 	pcs, hasSyncControls := s.projectSyncControlStore()
 	pas, hasStats := s.projectAdminStatsStore()
+	pls, hasLinks := s.projectLinksStore()
 
 	var chunkStats map[string]cloudstore.ProjectChunkStats
 	if hasStats {
@@ -374,19 +400,45 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// Slice 5a: parent/child links + the reverse sub-count + the name-prefix
+	// suggestion engine. All three degrade to zero values when the store
+	// doesn't support linking — see projectLinksStore's doc comment.
+	var parents map[string]string // child -> parent
+	subCounts := map[string]int{} // parent -> count of linked children
+	var suggestions map[string]string
+	if hasLinks {
+		if m, lerr := pls.ListProjectParents(r.Context()); lerr == nil {
+			parents = m
+			for _, parent := range parents {
+				subCounts[parent]++
+			}
+			names := make([]string, 0, len(known))
+			for _, k := range known {
+				names = append(names, k.Project)
+			}
+			suggestions = cloudstore.SuggestProjectParents(names, parents)
+		}
+	}
+	childSet := make(map[string]struct{}, len(parents))
+	for child := range parents {
+		childSet[child] = struct{}{}
+	}
+
 	view := adminProjectsView{Props: s.adminLayoutProps("Admin · Projects", "admin")}
 	for _, k := range known {
 		escProject := url.PathEscape(k.Project)
 		row := adminProjectRow{
-			Project:     k.Project,
-			DisplayName: k.DisplayName,
-			Kind:        k.Kind,
-			MetaURL:     "/admin/projects/" + escProject + "/meta",
-			SyncEnabled: true, // OBL-04 default: absent control row = enabled
-			PauseURL:    "/admin/projects/" + escProject + "/pause",
-			ResumeURL:   "/admin/projects/" + escProject + "/resume",
-			Slug:        accessRowSlug(k.Project),
-			AccessURL:   "/admin/projects/" + escProject + "/access",
+			Project:        k.Project,
+			DisplayName:    k.DisplayName,
+			Kind:           k.Kind,
+			MetaURL:        "/admin/projects/" + escProject + "/meta",
+			SyncEnabled:    true, // OBL-04 default: absent control row = enabled
+			PauseURL:       "/admin/projects/" + escProject + "/pause",
+			ResumeURL:      "/admin/projects/" + escProject + "/resume",
+			Slug:           accessRowSlug(k.Project),
+			AccessURL:      "/admin/projects/" + escProject + "/access",
+			LinkParentURL:  "/admin/projects/" + escProject + "/parent",
+			ClearParentURL: "/admin/projects/" + escProject + "/parent/clear",
 		}
 		if hasSyncControls {
 			if ctrl, cerr := pcs.GetProjectSyncControl(k.Project); cerr == nil && ctrl != nil {
@@ -408,11 +460,55 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 				row.AccessCount = projectAccessCountLabel(accessRows)
 			}
 		}
+		if hasLinks {
+			row.ParentProject = parents[k.Project]
+			row.SubProjectCount = subCounts[k.Project]
+			row.ParentCandidates = validParentCandidates(known, childSet, k.Project)
+		}
 		view.Projects = append(view.Projects, row)
+	}
+	if hasLinks {
+		view.Suggestions = adminProjectSuggestionRows(suggestions)
 	}
 	if err := adminProjectsPage(view).Render(r.Context(), w); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 	}
+}
+
+// validParentCandidates lists the known projects that are valid parent
+// choices for the "Link to parent project…" kebab action: any known project
+// that is not itself already a child (mirrors SetProjectParent's
+// parent-is-child rejection), excluding the project itself (self-ref).
+// Sorted for a stable, predictable <select> order.
+func validParentCandidates(known []cloudstore.KnownProject, childSet map[string]struct{}, self string) []string {
+	out := make([]string, 0, len(known))
+	for _, k := range known {
+		if k.Project == self {
+			continue
+		}
+		if _, isChild := childSet[k.Project]; isChild {
+			continue
+		}
+		out = append(out, k.Project)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// adminProjectSuggestionRows converts the pure SuggestProjectParents result
+// into a stably-ordered view slice (map iteration order is not stable), each
+// carrying the confirm URL the banner's one-click button posts to.
+func adminProjectSuggestionRows(suggestions map[string]string) []adminProjectSuggestionRow {
+	out := make([]adminProjectSuggestionRow, 0, len(suggestions))
+	for child, parent := range suggestions {
+		out = append(out, adminProjectSuggestionRow{
+			Child:      child,
+			Parent:     parent,
+			ConfirmURL: "/admin/projects/" + url.PathEscape(child) + "/parent",
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Child < out[j].Child })
+	return out
 }
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
@@ -527,6 +623,17 @@ func projectLastActivityLabel(row adminProjectRow) string {
 		return "—"
 	}
 	return row.LastActivity
+}
+
+// subProjectCountLabel renders the Admin Projects card's sub-project count
+// chip (Command Center v2, Slice 5a), e.g. "2 sub-projects" / "1
+// sub-project".
+func subProjectCountLabel(n int) string {
+	word := "sub-projects"
+	if n == 1 {
+		word = "sub-project"
+	}
+	return fmt.Sprintf("%d %s", n, word)
 }
 
 // adminProjectsCountLabel renders the Projects card header count, e.g.
