@@ -69,7 +69,13 @@ type StructuralReader interface {
 type SemanticIndex interface {
 	EmbedQuery(ctx context.Context, text string) ([]float32, error)
 	Search(ctx context.Context, vec []float32, k int) ([]embed.Hit, error)
-	Graph(k int, minScore float32) ([]embed.GraphNode, []embed.GraphEdge, error)
+	// Graph returns the k-NN similarity graph, scoped to projects (nil/empty
+	// = whole store). Implementations MUST push this scoping into the
+	// underlying query (e.g. a SQL WHERE...IN) BEFORE the O(N^2) pairwise
+	// scan — never compute the whole-store graph and filter afterward (audit
+	// finding H3: handleGraph used to ignore its ?project filter entirely and
+	// scan every project's embeddings on every /graph view).
+	Graph(projects []string, k int, minScore float32) ([]embed.GraphNode, []embed.GraphEdge, error)
 }
 
 // MutationWriter is the write surface. *engramClient satisfies this directly.

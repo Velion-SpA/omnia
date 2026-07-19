@@ -316,6 +316,143 @@ func TestStore_Search_KZeroReturnsAll(t *testing.T) {
 	}
 }
 
+// TestStore_GraphScoped_FiltersByProject reproduces audit finding H3
+// (engram obs #1484/#1488): Store.Graph runs its O(N^2) pairwise cosine scan
+// over EVERY stored vector regardless of caller intent, so viewing one small
+// project's graph pays the cost of the whole shared store. This seeds two
+// projects whose vectors are mutually near-identical (so an UNSCOPED scan
+// would link every node into one big cross-project component), then asserts
+// GraphScoped(["projA"], ...) only returns projA's own nodes and NEVER an
+// edge that reaches into projB — proving the WHERE clause narrows the scan
+// itself, not just a post-hoc filter over an already-computed whole-store
+// graph.
+func TestStore_GraphScoped_FiltersByProject(t *testing.T) {
+	store, err := OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	// projA: two near-identical vectors (a real intra-project edge).
+	a1 := unitRow("a1", 1, []float32{1, 0, 0})
+	a1.Project = "projA"
+	mustUpsert(t, store, a1)
+	a2 := unitRow("a2", 2, []float32{0.999, 0.045, 0})
+	a2.Project = "projA"
+	mustUpsert(t, store, a2)
+
+	// projB: also near-identical to projA's vectors, so an unscoped scan
+	// would draw edges from projB straight into projA.
+	b1 := unitRow("b1", 3, []float32{0.998, 0.06, 0})
+	b1.Project = "projB"
+	mustUpsert(t, store, b1)
+	b2 := unitRow("b2", 4, []float32{0.997, 0.07, 0})
+	b2.Project = "projB"
+	mustUpsert(t, store, b2)
+
+	// Sanity: prove cross-project edges WOULD exist in the whole-store scan —
+	// otherwise this test would pass trivially regardless of scoping.
+	allNodes, allEdges, err := store.Graph(5, 0.9)
+	if err != nil {
+		t.Fatalf("Graph (sanity): %v", err)
+	}
+	if len(allNodes) != 4 {
+		t.Fatalf("sanity: whole-store Graph should return all 4 nodes, got %d", len(allNodes))
+	}
+	bySync := map[int]string{1: "a1", 2: "a2", 3: "b1", 4: "b2"}
+	isA := func(id int) bool { return bySync[id] == "a1" || bySync[id] == "a2" }
+	crossFound := false
+	for _, e := range allEdges {
+		if isA(e.Source) != isA(e.Target) {
+			crossFound = true
+		}
+	}
+	if !crossFound {
+		t.Fatal("test setup invalid: expected at least one cross-project edge in the unscoped whole-store graph")
+	}
+
+	// The fix: GraphScoped(["projA"], ...) must scan ONLY projA's rows, so
+	// every returned node is in projA and no edge reaches projB.
+	nodes, edges, err := store.GraphScoped([]string{"projA"}, 5, 0.9)
+	if err != nil {
+		t.Fatalf("GraphScoped: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("GraphScoped(projA) nodes: got %d, want 2 (a1, a2 only)", len(nodes))
+	}
+	for _, n := range nodes {
+		if n.Project != "projA" {
+			t.Errorf("GraphScoped(projA) returned a node from project %q: %+v", n.Project, n)
+		}
+	}
+	for _, e := range edges {
+		if bySync[e.Source] == "b1" || bySync[e.Source] == "b2" || bySync[e.Target] == "b1" || bySync[e.Target] == "b2" {
+			t.Errorf("GraphScoped(projA) must never surface a projB endpoint, got edge %+v", e)
+		}
+	}
+}
+
+// TestStore_GraphScoped_MultipleProjectsUnion proves GraphScoped accepts a
+// SET of projects (not just one) and computes the pairwise scan over their
+// UNION in a single query — this is what preserves group-parent graph views
+// (parent + children) after H3's SQL scoping, instead of losing cross-child
+// edges to N separate single-project scans.
+func TestStore_GraphScoped_MultipleProjectsUnion(t *testing.T) {
+	store, err := OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	a := unitRow("a", 1, []float32{1, 0, 0})
+	a.Project = "parent"
+	mustUpsert(t, store, a)
+	b := unitRow("b", 2, []float32{0.999, 0.045, 0})
+	b.Project = "child"
+	mustUpsert(t, store, b)
+	c := unitRow("c", 3, []float32{0, 1, 0})
+	c.Project = "unrelated"
+	mustUpsert(t, store, c)
+
+	nodes, edges, err := store.GraphScoped([]string{"parent", "child"}, 5, 0.9)
+	if err != nil {
+		t.Fatalf("GraphScoped: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("GraphScoped([parent,child]) nodes: got %d, want 2 (unrelated excluded)", len(nodes))
+	}
+	if len(edges) != 1 {
+		t.Fatalf("GraphScoped([parent,child]) edges: got %d, want 1 (the parent<->child edge)", len(edges))
+	}
+}
+
+// TestStore_GraphScoped_EmptyProjectsMatchesWholeStoreGraph proves
+// GraphScoped(nil, ...) is byte-for-byte equivalent to Graph — existing
+// whole-store callers are unaffected by this addition.
+func TestStore_GraphScoped_EmptyProjectsMatchesWholeStoreGraph(t *testing.T) {
+	store, err := OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	mustUpsert(t, store, unitRow("a", 1, []float32{1, 0, 0}))
+	mustUpsert(t, store, unitRow("b", 2, []float32{0.9999, 0.014, 0}))
+
+	wantNodes, wantEdges, err := store.Graph(5, 0.5)
+	if err != nil {
+		t.Fatalf("Graph: %v", err)
+	}
+	gotNodes, gotEdges, err := store.GraphScoped(nil, 5, 0.5)
+	if err != nil {
+		t.Fatalf("GraphScoped(nil): %v", err)
+	}
+	if len(gotNodes) != len(wantNodes) || len(gotEdges) != len(wantEdges) {
+		t.Fatalf("GraphScoped(nil) = (%d nodes, %d edges), want same as Graph() = (%d nodes, %d edges)",
+			len(gotNodes), len(gotEdges), len(wantNodes), len(wantEdges))
+	}
+}
+
 func mustUpsert(t *testing.T, store *Store, r Row) {
 	t.Helper()
 	if err := store.Upsert(context.Background(), r); err != nil {

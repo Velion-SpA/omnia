@@ -418,7 +418,7 @@ func TestCloudGraphReportsUnavailableNotEmpty(t *testing.T) {
 		t.Fatal("setup: Semantic() must be available when cloud_semantic.enabled")
 	}
 
-	nodes, edges, err := sem.Graph(10, 0.5)
+	nodes, edges, err := sem.Graph(nil, 10, 0.5)
 	if err == nil {
 		t.Fatal("Graph() must return a non-nil error over cloud semantic — a silent (nil, nil, nil) makes internal/dashboard's handleGraph render a false \"0 memories\" state instead of the honest unavailable banner")
 	}

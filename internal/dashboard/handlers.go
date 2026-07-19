@@ -1185,7 +1185,14 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nodes, edges, err := s.sem.Graph(k, float32(minScore))
+	// H3 perf fix (audit obs #1484/#1488): scope the O(N^2) similarity scan to
+	// the selected project (+ group children, + alias raw names) in SQL,
+	// instead of scanning every project's embeddings on every /graph view
+	// regardless of the ?project filter. buildGraphView's own canon/allowed
+	// filtering below is left unchanged as a correctness safety net.
+	rawProjects := s.graphRawProjects(ctx, project)
+
+	nodes, edges, err := s.sem.Graph(rawProjects, k, float32(minScore))
 	if err != nil {
 		s.logger.Error("build semantic graph", "err", err)
 		view := GraphView{Available: false, Projects: projects, Project: project, K: k, Min: minScore}
@@ -1199,6 +1206,49 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 	if err := graphPage(view).Render(ctx, w); err != nil {
 		s.logger.Error("render graph", "err", err)
 	}
+}
+
+// graphRawProjects resolves the ?project= graph filter to the raw DB project
+// name variants the O(N^2) similarity scan should be scoped to: the project
+// itself (plus its group children when it is a group parent), expanded
+// through the project_groups + alias config exactly like browseFromDB does
+// for the structural DB (rawProjectsForCanonical / GroupIndex.groupRawNames)
+// — so the SQL scope change (H3) is a pure performance narrowing and never
+// silently drops a row the previous whole-store scan used to include.
+//
+// project == "" returns nil (whole-store, unscoped — unchanged behavior).
+// When raw-name resolution is unavailable (no structural DB) or yields
+// nothing, this degrades to the literal canonical name(s) so the SQL filter
+// still narrows the common (unaliased) case instead of failing closed.
+func (s *Server) graphRawProjects(ctx context.Context, project string) []string {
+	if project == "" {
+		return nil
+	}
+	fallback := []string{project}
+	if s.groups.IsParent(project) {
+		fallback = append(fallback, s.groups.Children(project)...)
+	}
+	if s.db == nil {
+		return fallback
+	}
+	rawAll, err := s.db.Projects(ctx)
+	if err != nil {
+		return fallback
+	}
+	rawAllNames := make([]string, len(rawAll))
+	for i, pc := range rawAll {
+		rawAllNames[i] = pc.Name
+	}
+	var rawNames []string
+	if s.groups.IsParent(project) {
+		rawNames = s.groups.groupRawNames(project, rawAllNames, s.cfg.ProjectAliases)
+	} else {
+		rawNames = rawProjectsForCanonical(project, rawAllNames, s.cfg.ProjectAliases)
+	}
+	if len(rawNames) == 0 {
+		return fallback
+	}
+	return rawNames
 }
 
 // resolveActor returns the provisional identity for an HTTP request.
