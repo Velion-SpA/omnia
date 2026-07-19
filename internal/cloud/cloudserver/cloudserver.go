@@ -19,6 +19,7 @@ import (
 	engramproject "github.com/velion/omnia/internal/project"
 	"github.com/velion/omnia/internal/store"
 	engramsync "github.com/velion/omnia/internal/sync"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 type Option func(*CloudServer)
@@ -203,11 +204,25 @@ func (s *CloudServer) Start() error {
 	return s.listenAndServe(addr, s.Handler())
 }
 
+// Handler returns the cloud server's top-level HTTP handler, wrapped in
+// i18n.Middleware (i18n Slice 3) so EVERY route — not just the ones the
+// shared internal/dashboard mux already wraps via mountDashboard/Handler() —
+// carries the caller's resolved display language and current path on its
+// context. This matters specifically for the Admin section and the login
+// page: their handlers are registered directly on s.mux (see routes()'s
+// "GET pages fall through the dashboard's GET / catch-all unless registered
+// here explicitly" comment) and therefore never reach the shared dashboard's
+// own i18n.Middleware wrap. Without this outer wrap, i18n.LangFrom(ctx) would
+// always resolve to DefaultLang inside admin_*.templ and the login page,
+// making the ES|EN header toggle a no-op there. Double-wrapping the routes
+// that DO already pass through the shared dashboard's Handler() is harmless
+// — i18n.Middleware only recomputes WithLang/WithPath from the same request,
+// never anything stateful.
 func (s *CloudServer) Handler() http.Handler {
 	if s.mux == nil {
 		s.routes()
 	}
-	return s.mux
+	return i18n.Middleware(s.mux)
 }
 
 func (s *CloudServer) pushBodyLimit() int64 {

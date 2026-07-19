@@ -97,17 +97,25 @@ func layoutPropsForContext(ctx context.Context, active, title string) ui.LayoutP
 		props.User = identity.Username
 		props.LogoutURL = identity.LogoutURL
 	}
-	translateShellProps(ctx, &props)
+	TranslateShellProps(ctx, &props)
 	return props
 }
 
-// translateShellProps localizes the shell chrome that localLayoutProps sets
+// TranslateShellProps localizes the shell chrome that localLayoutProps sets
 // as English literals: the nav item labels (keyed by NavItem.ID via
 // "nav.<id>" catalog entries — BaseNavItems/AdminNavItem stay English
 // identifiers, only the rendered Label changes), the wordmark subtitle, and
 // the status chip text. Applied last in layoutPropsForContext so it covers
 // every nav item, including the operator-only Admin entry appended above.
-func translateShellProps(ctx context.Context, props *ui.LayoutProps) {
+//
+// Exported (i18n Slice 3) so internal/cloud/cloudserver's adminLayoutProps
+// can reuse it too — the Admin pages build ui.LayoutProps directly rather
+// than through layoutPropsForContext (they need the operator-only Nav/User
+// shape, not the account-session one), so without this export the Admin
+// section's nav labels, brand subtitle and status text would stay
+// hardcoded English forever. Mirrors the same cross-package reuse PageTitle
+// already established (internal/dashboard/layout.templ).
+func TranslateShellProps(ctx context.Context, props *ui.LayoutProps) {
 	lang := i18n.LangFrom(ctx)
 	for i, item := range props.Nav {
 		props.Nav[i].Label = i18n.T(lang, "nav."+item.ID)

@@ -99,10 +99,12 @@ func TestHandleAdminProjectAccessFragment_RendersAccessRows(t *testing.T) {
 	if !strings.Contains(body, "alice") || !strings.Contains(body, "bob") {
 		t.Fatalf("fragment missing usernames: %s", body)
 	}
-	if !strings.Contains(body, "Full") || !strings.Contains(body, "Read") {
+	// i18n Slice 3: Spanish default ("Full"→"Total", "Read"→"Lectura",
+	// "Team"→"Equipo"; "Override" is the same word in both languages).
+	if !strings.Contains(body, "Total") || !strings.Contains(body, "Lectura") {
 		t.Fatalf("fragment missing effective-perm labels: %s", body)
 	}
-	if !strings.Contains(body, "Override") || !strings.Contains(body, "Team") {
+	if !strings.Contains(body, "Override") || !strings.Contains(body, "Equipo") {
 		t.Fatalf("fragment missing source badges: %s", body)
 	}
 }
@@ -115,7 +117,8 @@ func TestHandleAdminProjectAccessFragment_EmptyProjectShowsNoAccounts(t *testing
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for a project with no access rows, got %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "No accounts") {
+	// i18n Slice 3: Spanish default empty-state copy.
+	if !strings.Contains(rec.Body.String(), "Ninguna cuenta tiene acceso") {
 		t.Fatalf("expected an empty-state message, got: %s", rec.Body.String())
 	}
 }

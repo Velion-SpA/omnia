@@ -44,8 +44,10 @@ func TestAdminProfilesPageRendersAndGated(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator GET /admin/profiles (html): expected 200, got %d", rec.Code)
 	}
+	// i18n Slice 3: Spanish default ("PERFILES"/"NUEVO PERFIL"); "Moderator"
+	// is seeded profile DATA, not UI copy, so it stays unchanged.
 	body := rec.Body.String()
-	for _, want := range []string{"PROFILES", "Moderator", "NEW PROFILE", `data-perm-bit="1"`, `data-perms-into="perms"`} {
+	for _, want := range []string{"PERFILES", "Moderator", "NUEVO PERFIL", `data-perm-bit="1"`, `data-perms-into="perms"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Profiles page missing %q, body=%q", want, body)
 		}
@@ -90,8 +92,10 @@ func TestAdminTeamsPageAndDetail(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator GET /admin/teams (html): expected 200, got %d", rec.Code)
 	}
+	// i18n Slice 3: Spanish default; "Migración" is a seeded team NAME (data),
+	// not UI copy, so it stays unchanged.
 	body := rec.Body.String()
-	for _, want := range []string{"Work teams", "Personal teams", "Migración", "NEW TEAM", "/admin/teams/" + team.ID} {
+	for _, want := range []string{"Equipos de trabajo", "Equipos personales", "Migración", "NUEVO EQUIPO", "/admin/teams/" + team.ID} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Teams page missing %q, body=%q", want, body)
 		}
@@ -103,9 +107,11 @@ func TestAdminTeamsPageAndDetail(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator GET /admin/teams/%s (html): expected 200, got %d", team.ID, rec.Code)
 	}
+	// i18n Slice 3: Spanish default. "workly"/"alice"/"Moderator" are seeded
+	// project/username/profile DATA, not UI copy, so they stay unchanged.
 	body = rec.Body.String()
 	for _, want := range []string{
-		"PROJECTS", "MEMBERS", "workly", "Add project", "Add member",
+		"Proyectos", "MIEMBROS", "workly", "Agregar proyecto", "Agregar miembro",
 		"data-proj-select", // searchable selector present
 		"alice",            // member username resolved
 		"Moderator",        // profile option
@@ -135,10 +141,12 @@ func TestAdminProjectsPageShowsCards(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator GET /admin/projects (html): expected 200, got %d", rec.Code)
 	}
+	// i18n Slice 3: kindBadge renders translated text now (">personal<" is
+	// unchanged, same word in both langs; "work"/"unclassified" differ).
 	body := rec.Body.String()
 	for _, want := range []string{
 		"projcard", "homelab", "workly", "unclass", "/admin/projects/homelab/meta",
-		">personal<", ">work<", ">unclassified<", // per-card kindBadge, not section headers
+		">personal<", ">laboral<", ">sin clasificar<", // per-card kindBadge, not section headers
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Projects page missing %q, body=%q", want, body)

@@ -320,9 +320,11 @@ func TestAdminUsersPageRendersToolbarAndMenu(t *testing.T) {
 	body := rec.Body.String()
 
 	// Toolbar: search input + count + the "New user" trigger.
+	// i18n Slice 3: Spanish default, so the count summary is "1 cuenta · 1
+	// admin" now, not the English literal.
 	for _, want := range []string{
 		`id="admin-user-search"`,
-		`1 account · 1 admin`,
+		`1 cuenta · 1 admin`,
 		`data-modal="admin-create-user-modal"`,
 	} {
 		if !strings.Contains(body, want) {
@@ -339,7 +341,7 @@ func TestAdminUsersPageRendersToolbarAndMenu(t *testing.T) {
 		`data-action="toggle-token-form"`,
 		`hx-post="/admin/users/1/demote"`, // alice is seeded as admin above
 		`hx-post="/admin/users/1/disable"`,
-		`hx-confirm="Disable this user?`,
+		`hx-confirm="¿Deshabilitar este usuario?`, // i18n Slice 3: Spanish default
 		`hx-get="/admin/users/1/delete-confirm"`,
 	} {
 		if !strings.Contains(body, want) {
@@ -493,7 +495,7 @@ func TestAdminAccessPageRendersForOperator(t *testing.T) {
 		"lab",
 		"badge-warn",
 		">Override<",
-		"Partial", // read+insert, no update/delete
+		"Parcial", // i18n Slice 3: Spanish default for read+insert, no update/delete
 		`data-acct-select`,
 		`hx-get="/admin/access/rows/1/lab/edit"`,
 		`hx-get="/admin/access/rows/1/lab/revoke"`,

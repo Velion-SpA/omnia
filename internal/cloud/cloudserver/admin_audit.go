@@ -2,7 +2,6 @@ package cloudserver
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/velion/omnia/internal/cloud/cloudstore"
 	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // Operator-only, read-only Audit page (OBL-05). Surfaces the expanded audit
@@ -95,7 +95,7 @@ func (s *CloudServer) handleAdminAuditPage(w http.ResponseWriter, r *http.Reques
 		pageCount = 1
 	}
 	view := adminAuditView{
-		Props:       s.adminLayoutProps("Admin · Audit", "audit"),
+		Props:       s.adminLayoutProps(r.Context(), "Admin · Audit", "audit"),
 		Rows:        toAdminAuditRows(rows),
 		Total:       total,
 		Page:        page,
@@ -145,11 +145,13 @@ func adminAuditPagePath(view adminAuditView, page int) string {
 	return "/admin/audit?" + q.Encode()
 }
 
-func formatAuditTotal(n int) string {
+// i18n Slice 3: takes lang — called from admin_audit_ui.templ
+// (adminAuditPage), so ctx is implicit there.
+func formatAuditTotal(lang i18n.Lang, n int) string {
 	if n == 1 {
-		return "1 entry"
+		return i18n.Tf(lang, "admin.audit.entrySingular", n)
 	}
-	return fmt.Sprintf("%d entries", n)
+	return i18n.Tf(lang, "admin.audit.entryPlural", n)
 }
 
 func formatAuditPage(n int) string {

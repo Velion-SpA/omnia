@@ -210,11 +210,12 @@ func TestHandleAdminProjectsPage_RendersParentBadgeAndSubCount(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
+	// i18n Slice 3: Spanish default ("sub-project of %s" → "sub-proyecto de %s").
 	body := rec.Body.String()
-	if !strings.Contains(body, "sub-project of workly") {
+	if !strings.Contains(body, "sub-proyecto de workly") {
 		t.Fatalf("expected a child badge referencing its parent, got: %s", body)
 	}
-	if !strings.Contains(body, "sub-project") || !strings.Contains(body, "workly") {
+	if !strings.Contains(body, "sub-proyecto") || !strings.Contains(body, "workly") {
 		t.Fatalf("expected the parent card to show a sub-project count, got: %s", body)
 	}
 }
@@ -230,8 +231,9 @@ func TestHandleAdminProjectsPage_RendersSuggestionBanner(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
+	// i18n Slice 3: Spanish default ("Suggested: link" → "Sugerido: enlazar").
 	body := rec.Body.String()
-	if !strings.Contains(body, "Suggested") {
+	if !strings.Contains(body, "Sugerido") {
 		t.Fatalf("expected a suggestion banner, got: %s", body)
 	}
 	if !strings.Contains(body, "workly-marketing") || !strings.Contains(body, "workly") {

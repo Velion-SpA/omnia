@@ -8,6 +8,7 @@ import (
 
 	"github.com/velion/omnia/internal/cloud/auth"
 	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // Command Center v2, Slice 4b: the Admin Projects reverse-access fragment.
@@ -104,6 +105,7 @@ func (s *CloudServer) handleAdminProjectAccessFragment(w http.ResponseWriter, r 
 		}
 	}
 
+	lang := i18n.LangFrom(r.Context())
 	view := make([]adminProjectAccessRow, 0, len(rows))
 	for _, row := range rows {
 		name := usernames[row.AccountID]
@@ -113,7 +115,7 @@ func (s *CloudServer) handleAdminProjectAccessFragment(w http.ResponseWriter, r 
 		view = append(view, adminProjectAccessRow{
 			AccountID: row.AccountID,
 			Username:  name,
-			Label:     accessEffectiveLabel(row.Perms),
+			Label:     accessEffectiveLabel(lang, row.Perms),
 			Source:    row.Source,
 		})
 	}

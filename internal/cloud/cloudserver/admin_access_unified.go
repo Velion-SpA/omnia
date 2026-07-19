@@ -9,6 +9,7 @@ import (
 
 	"github.com/velion/omnia/internal/cloud/auth"
 	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // Command Center v2, Slice 3: the unified Access page view-model. The old page
@@ -65,18 +66,22 @@ type unifiedAccessRow struct {
 	RevokeConfirmURL string
 }
 
-// accessEffectiveLabel renders the human label for a perms bitfield.
-func accessEffectiveLabel(perms int) string {
+// accessEffectiveLabel renders the human label for a perms bitfield. i18n
+// Slice 3: takes lang — its two call sites (mergeUnifiedAccessRows below and
+// handleAdminProjectAccessFragment, project_admin_stats.go) are both Go
+// handler/helper code, not templ, so lang is resolved from ctx/r.Context()
+// by the caller rather than being implicit.
+func accessEffectiveLabel(lang i18n.Lang, perms int) string {
 	p := auth.Permission(perms)
 	switch {
 	case perms == 0:
-		return "None"
+		return i18n.T(lang, "admin.access.none")
 	case p.Has(auth.PermAll):
-		return "Full"
+		return i18n.T(lang, "admin.access.full")
 	case perms == int(auth.PermRead):
-		return "Read"
+		return i18n.T(lang, "admin.access.read")
 	default:
-		return "Partial"
+		return i18n.T(lang, "admin.access.partial")
 	}
 }
 
@@ -135,7 +140,7 @@ func teamSourceDetail(sources []adminTeamPermSource) (teamSummary, profile strin
 // cloudstore.EffectivePerms enforces at the auth layer. known may include
 // projects present in neither overrides nor teamRows; those render as a
 // zero-access "None" row.
-func mergeUnifiedAccessRows(accountID string, overrides []cloudstore.Membership, teamRows []adminTeamPermRow, known []string) []unifiedAccessRow {
+func mergeUnifiedAccessRows(lang i18n.Lang, accountID string, overrides []cloudstore.Membership, teamRows []adminTeamPermRow, known []string) []unifiedAccessRow {
 	byProject := map[string]*unifiedAccessRow{}
 	var order []string
 
@@ -182,7 +187,7 @@ func mergeUnifiedAccessRows(accountID string, overrides []cloudstore.Membership,
 		row.Insert = p.Has(auth.PermInsert)
 		row.Update = p.Has(auth.PermUpdate)
 		row.Delete = p.Has(auth.PermDelete)
-		row.Label = accessEffectiveLabel(row.Perms)
+		row.Label = accessEffectiveLabel(lang, row.Perms)
 		if row.Source == "" {
 			row.Source = "none"
 		}
@@ -211,6 +216,7 @@ func (s *CloudServer) buildUnifiedAccessRows(ctx context.Context, as adminDashbo
 	if err != nil {
 		return nil, fmt.Errorf("list memberships for account: %w", err)
 	}
+	lang := i18n.LangFrom(ctx)
 
 	var teamRows []adminTeamPermRow
 	var known []string
@@ -227,7 +233,7 @@ func (s *CloudServer) buildUnifiedAccessRows(ctx context.Context, as adminDashbo
 		}
 	}
 
-	return mergeUnifiedAccessRows(accountID, overrides, teamRows, known), nil
+	return mergeUnifiedAccessRows(lang, accountID, overrides, teamRows, known), nil
 }
 
 // accessRowFormRole is the edit-form's default role select value: the
@@ -241,11 +247,12 @@ func accessRowFormRole(row unifiedAccessRow) string {
 }
 
 // accessProjectCountLabel renders the "N projects" summary in the Access
-// table header.
-func accessProjectCountLabel(rows []unifiedAccessRow) string {
-	word := "projects"
+// table header. i18n Slice 3: takes lang — called from admin_ui.templ
+// (adminAccessPage), so ctx is implicit there.
+func accessProjectCountLabel(lang i18n.Lang, rows []unifiedAccessRow) string {
+	word := i18n.T(lang, "admin.projects.countPlural")
 	if len(rows) == 1 {
-		word = "project"
+		word = i18n.T(lang, "admin.projects.countSingular")
 	}
 	return fmt.Sprintf("%d %s", len(rows), word)
 }
