@@ -821,3 +821,102 @@ func TestMigrate_AddsIdxMemrelStatusCreated(t *testing.T) {
 		t.Errorf("pending relations count = %d, want 2 (seeded rows with judgment_status='pending')", pendingCount)
 	}
 }
+
+// ─── Recall reliability #1399, slice 1 (design obs #1498 / audit #1497) ────
+//
+// TestMigrate_AddsErrorSignatureAndOutcomeColumns_Idempotent asserts that
+// running migrate() against a pre-existing (legacy) database:
+//  1. adds the new nullable `error_signature` and `outcome` columns to
+//     observations,
+//  2. is idempotent — running it a second time against the SAME database
+//     (closing and re-opening via New()) does not error and does not lose
+//     any pre-existing rows.
+//
+// RED: fails until migrate() adds error_signature/outcome via
+// addColumnIfNotExists.
+func TestMigrate_AddsErrorSignatureAndOutcomeColumns_Idempotent(t *testing.T) {
+	fixtures := migrationFixtureRows()
+	s := newTestStoreWithLegacySchema(t, fixtures)
+	dir := s.cfg.DataDir
+
+	// 1. New columns must exist and be queryable after the first migrate().
+	//    MaxOpenConns is 1 for the SQLite store — the returned *sql.Rows MUST
+	//    be closed immediately or every subsequent query on s.db deadlocks
+	//    waiting for a free connection.
+	probeRows, err := s.db.Query(`SELECT error_signature, outcome FROM observations LIMIT 1`)
+	if err != nil {
+		t.Fatalf("error_signature/outcome columns missing after first migrate: %v (expected red)", err)
+	}
+	if err := probeRows.Close(); err != nil {
+		t.Fatalf("close probe rows: %v", err)
+	}
+
+	// 2. Column metadata: both must be nullable TEXT (notnull=0), not part of
+	//    a NOT NULL constraint, so existing rows are unaffected.
+	rows, err := s.db.Query(`PRAGMA table_info(observations)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(observations): %v", err)
+	}
+	seen := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var defaultVal any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultVal, &pk); err != nil {
+			rows.Close()
+			t.Fatalf("scan observations column: %v", err)
+		}
+		if name == "error_signature" || name == "outcome" {
+			seen[name] = true
+			if notNull != 0 {
+				t.Errorf("column %q must be nullable (notnull=0), got notnull=%d", name, notNull)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("rows.Err: %v", err)
+	}
+	rows.Close()
+	if !seen["error_signature"] || !seen["outcome"] {
+		t.Fatalf("expected both error_signature and outcome columns, got %v", seen)
+	}
+
+	// 3. Existing fixture rows must be untouched (still readable, still the
+	//    same count) — new columns must default to NULL, not break anything.
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE session_id = 'ses-migration-test'`).Scan(&count); err != nil {
+		t.Fatalf("count fixture rows after first migrate: %v", err)
+	}
+	if count != len(fixtures) {
+		t.Fatalf("after first migrate: expected %d rows, got %d", len(fixtures), count)
+	}
+
+	// 4. Close and re-open (migrate() runs a SECOND time against the same,
+	//    now-migrated database) — must not error (idempotent ALTER TABLE guard).
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store before second migration: %v", err)
+	}
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = dir
+	s2, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() second run failed: %v — migrate() is not idempotent for error_signature/outcome", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	probeRows2, err := s2.db.Query(`SELECT error_signature, outcome FROM observations LIMIT 1`)
+	if err != nil {
+		t.Fatalf("error_signature/outcome columns missing after second migrate: %v", err)
+	}
+	if err := probeRows2.Close(); err != nil {
+		t.Fatalf("close probe rows (second migrate): %v", err)
+	}
+	var count2 int
+	if err := s2.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE session_id = 'ses-migration-test'`).Scan(&count2); err != nil {
+		t.Fatalf("count fixture rows after second migrate: %v", err)
+	}
+	if count2 != len(fixtures) {
+		t.Errorf("after second migrate: expected %d rows, got %d", len(fixtures), count2)
+	}
+}
