@@ -26,6 +26,7 @@ const (
 	dashboardLoginPath       = "/login"
 	dashboardLogoutPath      = "/logout"
 	dashboardStaticPrefix    = "/static/"
+	dashboardLangPrefix      = "/lang/"
 )
 
 // dashboardCloudStore returns the clouddash data source for the configured store.
@@ -97,6 +98,12 @@ func (s *CloudServer) dashboardGate(dashHandler http.Handler) http.Handler {
 			return
 		case strings.HasPrefix(r.URL.Path, dashboardStaticPrefix):
 			// Shared design-system assets must load on the (unauthenticated) login page.
+			dashHandler.ServeHTTP(w, r)
+			return
+		case strings.HasPrefix(r.URL.Path, dashboardLangPrefix):
+			// The language switch (internal/ui/i18n.SwitchHandler, registered by
+			// dashboard.Server.registerRoutes) is PUBLIC so the header ES|EN
+			// toggle also works from the unauthenticated login page.
 			dashHandler.ServeHTTP(w, r)
 			return
 		}

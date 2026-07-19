@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // adminNavKey marks a request context whose session is the cloud operator, so the
@@ -96,5 +97,25 @@ func layoutPropsForContext(ctx context.Context, active, title string) ui.LayoutP
 		props.User = identity.Username
 		props.LogoutURL = identity.LogoutURL
 	}
+	translateShellProps(ctx, &props)
 	return props
+}
+
+// translateShellProps localizes the shell chrome that localLayoutProps sets
+// as English literals: the nav item labels (keyed by NavItem.ID via
+// "nav.<id>" catalog entries — BaseNavItems/AdminNavItem stay English
+// identifiers, only the rendered Label changes), the wordmark subtitle, and
+// the status chip text. Applied last in layoutPropsForContext so it covers
+// every nav item, including the operator-only Admin entry appended above.
+func translateShellProps(ctx context.Context, props *ui.LayoutProps) {
+	lang := i18n.LangFrom(ctx)
+	for i, item := range props.Nav {
+		props.Nav[i].Label = i18n.T(lang, "nav."+item.ID)
+	}
+	if props.BrandSub == "Unified Knowledge" {
+		props.BrandSub = i18n.T(lang, "shell.brand.sub")
+	}
+	if props.StatusText == "Online" {
+		props.StatusText = i18n.T(lang, "shell.status.online")
+	}
 }
