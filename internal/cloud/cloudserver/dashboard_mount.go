@@ -38,6 +38,20 @@ func (s *CloudServer) dashboardSource() *clouddash.Source {
 	return clouddash.New(emptyCloudStore{})
 }
 
+// subProjectResolver returns a dashboard.SubProjectResolver backed by the
+// configured store's sub-project links (Command Center v2, Slice 5b), or nil
+// when the store doesn't support ListProjectParents (Slice 5a) — mirroring
+// dashboardSource's own optional-capability degrade: a store without the
+// capability simply means the shared dashboard's Server.subProjects stays
+// nil, and the project-detail page renders neither a Sub-projects section
+// nor a parent breadcrumb, exactly as before this slice.
+func (s *CloudServer) subProjectResolver() dashboard.SubProjectResolver {
+	if store, ok := s.store.(clouddash.CloudProjectLinks); ok {
+		return clouddash.NewSubProjectResolver(store)
+	}
+	return nil
+}
+
 // mountDashboard registers the unified dashboard at the root of the cloud mux,
 // behind the cloud's login/session middleware. It is the cloud's replacement for
 // the deleted internal/cloud/dashboard package.
@@ -49,7 +63,7 @@ func (s *CloudServer) dashboardSource() *clouddash.Source {
 // only non-GET routes (login/logout submits and the patch/delete mutations) are
 // registered explicitly.
 func (s *CloudServer) mountDashboard(mux *http.ServeMux) {
-	dashSrv := dashboard.NewServerWithDataSource(dashboard.Config{}, s.dashboardSource(), slog.Default())
+	dashSrv := dashboard.NewServerWithDataSource(dashboard.Config{}, s.dashboardSource(), slog.Default(), dashboard.WithSubProjectResolver(s.subProjectResolver()))
 	gate := s.dashboardGate(dashSrv.Handler())
 	mux.Handle("GET /", gate)
 	mux.Handle("POST /login", gate)

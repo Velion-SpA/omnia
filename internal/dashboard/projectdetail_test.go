@@ -15,7 +15,7 @@ import (
 // unit-level tests that need to call Server methods directly (e.g.
 // buildProjectDetailData) rather than going through a real HTTP round trip.
 // Mirrors newTestServerOnly's construction exactly, minus the mux/listener.
-func newTestServerInstance(t *testing.T, fe *fakeEngram) *Server {
+func newTestServerInstance(t *testing.T, fe *fakeEngram, opts ...Option) *Server {
 	t.Helper()
 	engServer := fe.server()
 	t.Cleanup(engServer.Close)
@@ -28,7 +28,7 @@ func newTestServerInstance(t *testing.T, fe *fakeEngram) *Server {
 		// exercise the FTS/curated fallback path, same as every other
 		// handler test in this package.
 		EngramDataDir: t.TempDir(),
-	}, logger)
+	}, logger, opts...)
 }
 
 func TestHandleProjectDetail_RendersFullPage(t *testing.T) {

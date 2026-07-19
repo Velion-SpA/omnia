@@ -9,14 +9,21 @@ import (
 // projectDetailPage renders the project-detail landing page (Command Center
 // v2, Slice 4c — mockup view ⑥ "Entrar a un proyecto"/"Project detail").
 // Reuses the shared page shell (layout) and the Slice 4a memory-card grid
-// (ui.MemoryFeed/ui.Card) verbatim. Deliberately does NOT render a "who has
-// access" panel (cloud-RBAC-only, already covered by the Slice 4b Admin
-// Projects page) nor any sub-project rollup (Slice 5) — both are explicitly
-// out of scope for this slice.
+// (ui.MemoryFeed/ui.Card) verbatim. Slice 5b adds an OPTIONAL parent
+// breadcrumb and a "Sub-projects" children section, both driven entirely by
+// data.ParentProject/data.Children (nil/empty on the local dashboard, which
+// has no SubProjectResolver — see Server.subProjects). Deliberately does NOT
+// render a "who has access" panel (cloud-RBAC-only, already covered by the
+// Slice 4b Admin Projects page) nor any memory-grid rollup for a parent's
+// children (that stays admin-only, see Slice 5b's cloudserver changes) —
+// both are explicitly out of scope for this page.
 templ projectDetailPage(data ProjectDetailData) {
 	@layout("browse", projectDetailTitle(data)) {
-		<div style="margin-bottom: 1rem;">
+		<div style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.85rem; flex-wrap: wrap;">
 			<a href={ templ.SafeURL("/") } style="color: var(--text-faint); font-size: 11px; text-decoration: none; letter-spacing: 0.04em;">← Overview</a>
+			if data.ParentProject != "" {
+				<a href={ templ.SafeURL(data.ParentProjectURL) } class="project-parent-link" style="color: var(--text-faint); font-size: 11px; text-decoration: none; letter-spacing: 0.04em;">← { data.ParentProject }</a>
+			}
 		</div>
 		if !data.Found {
 			@emptyState("No project selected. Pick a project from Overview or Browse.")
@@ -29,6 +36,9 @@ templ projectDetailPage(data ProjectDetailData) {
 					@projectDetailStat("Last activity", projectLastActivityLabel(data))
 				</div>
 			</div>
+			if len(data.Children) > 0 {
+				@projectDetailChildren(data.Children)
+			}
 			<div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
 				<span class="micro-label">{ fmt.Sprintf("%d recent", len(data.Memories)) }</span>
 				<a href={ templ.SafeURL(data.BrowseURL) } class="pill-btn pill-btn-primary">View all in Browse</a>
@@ -36,6 +46,22 @@ templ projectDetailPage(data ProjectDetailData) {
 			@ui.MemoryFeed(toUICards(data.Memories))
 		}
 	}
+}
+
+// projectDetailChildren renders the "Sub-projects" section (Command Center
+// v2, Slice 5b): a project that is itself a parent lists its direct linked
+// children as simple navigational chips to their own detail pages. Display
+// only — this is identity/navigation, never a memory-grid rollup (that stays
+// out of scope, see ProjectDetailData's doc comment).
+templ projectDetailChildren(children []ProjectDetailChildLink) {
+	<div class="project-children-section" style="margin-bottom: 1.5rem;">
+		<span class="micro-label" style="display: block; margin-bottom: 0.5rem;">Sub-projects</span>
+		<div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+			for _, child := range children {
+				<a href={ templ.SafeURL(child.URL) } class="badge badge-source">{ child.Name }</a>
+			}
+		</div>
+	</div>
 }
 
 // projectDetailStat renders one header metric (value + label), matching the
