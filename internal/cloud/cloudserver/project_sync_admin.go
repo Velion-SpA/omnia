@@ -26,6 +26,12 @@ import (
 type projectSyncControlAdminStore interface {
 	SetProjectSyncEnabled(project string, enabled bool, updatedBy, reason string) error
 	GetProjectSyncControl(project string) (*cloudstore.ProjectSyncControl, error)
+	// ListProjectSyncControlsMap is the batched equivalent of calling
+	// GetProjectSyncControl once per known project — the Admin Projects page
+	// (handleAdminProjectsPage) previously did exactly that inside its per-row
+	// loop, an N+1 flagged by the 2026-07-19 performance audit. See
+	// cloudstore.CloudStore.ListProjectSyncControlsMap.
+	ListProjectSyncControlsMap(ctx context.Context) (map[string]cloudstore.ProjectSyncControl, error)
 }
 
 // Compile-time assertion: the concrete store must satisfy the seam.
