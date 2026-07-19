@@ -155,7 +155,9 @@ func (s *CloudServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 			token, _, err := dls.LoginForDevice(req.Username, req.Password, req.Device)
 			if err != nil {
 				s.auditLoginResult(r, req.Username, false, map[string]any{"device": req.Device})
-				if errors.Is(err, auth.ErrInvalidCredentials) {
+				// C1: a disabled account maps to the SAME 401 + generic message as bad
+				// credentials, so a caller cannot distinguish disabled from wrong-password.
+				if errors.Is(err, auth.ErrInvalidCredentials) || errors.Is(err, auth.ErrAccountDisabled) {
 					jsonResponse(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 					return
 				}
@@ -171,7 +173,8 @@ func (s *CloudServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	token, _, err := s.account.Login(req.Username, req.Password)
 	if err != nil {
 		s.auditLoginResult(r, req.Username, false, nil)
-		if errors.Is(err, auth.ErrInvalidCredentials) {
+		// C1: disabled account -> same 401 + generic message as bad credentials (no leak).
+		if errors.Is(err, auth.ErrInvalidCredentials) || errors.Is(err, auth.ErrAccountDisabled) {
 			jsonResponse(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 			return
 		}

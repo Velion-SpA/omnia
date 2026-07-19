@@ -20,10 +20,11 @@ import (
 // fakeMembershipStore is an in-memory membership store for RBAC tests.
 type fakeMembershipStore struct {
 	fakeStore
-	memberships    map[string]*cloudstore.Membership // key: accountID+"/"+project
-	syncEnabledMap map[string]bool
-	mutations      []MutationEntry
-	devices        map[string]*cloudstore.Device // key: device ID
+	memberships      map[string]*cloudstore.Membership // key: accountID+"/"+project
+	syncEnabledMap   map[string]bool
+	disabledAccounts map[string]bool // C1: accounts marked disabled for the data-plane gate
+	mutations        []MutationEntry
+	devices          map[string]*cloudstore.Device // key: device ID
 	// auditEntries captures InsertAuditEntry calls (OBL-05): membership
 	// grant/revoke, device create/revoke, login/signup, token revoke, user
 	// disable/enable, and admin promote/demote all route through this on any
@@ -70,11 +71,24 @@ func (s *fakeMembershipStore) ListMembershipsForAccount(accountID string) ([]clo
 	return out, nil
 }
 
-func (s *fakeMembershipStore) IsProjectSyncEnabled(project string) (bool, error) {
+func (s *fakeMembershipStore) IsProjectSyncEnabled(_ context.Context, project string) (bool, error) {
 	if enabled, ok := s.syncEnabledMap[project]; ok {
 		return enabled, nil
 	}
 	return true, nil
+}
+
+// disableAccount marks an account disabled for the C1 sync data-plane gate tests.
+func (s *fakeMembershipStore) disableAccount(accountID string) {
+	if s.disabledAccounts == nil {
+		s.disabledAccounts = make(map[string]bool)
+	}
+	s.disabledAccounts[accountID] = true
+}
+
+// IsAccountDisabled satisfies the C1 accountDisabledChecker seam.
+func (s *fakeMembershipStore) IsAccountDisabled(_ context.Context, accountID string) (bool, error) {
+	return s.disabledAccounts[accountID], nil
 }
 
 func (s *fakeMembershipStore) InsertMutationBatch(_ context.Context, batch []MutationEntry) ([]int64, error) {

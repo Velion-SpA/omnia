@@ -20,7 +20,11 @@ type ProjectSyncControl struct {
 
 // IsProjectSyncEnabled returns whether sync is enabled for the project.
 // An absent row defaults to enabled=true (safe default).
-func (cs *CloudStore) IsProjectSyncEnabled(project string) (bool, error) {
+//
+// H1: takes the request ctx so this per-request auth-adjacent DB call is
+// cancellable — a slow/stuck query is aborted when the client disconnects instead
+// of pinning a pooled connection (pool-exhaustion risk under DB slowness).
+func (cs *CloudStore) IsProjectSyncEnabled(ctx context.Context, project string) (bool, error) {
 	if cs == nil || cs.db == nil {
 		return true, nil
 	}
@@ -30,7 +34,7 @@ func (cs *CloudStore) IsProjectSyncEnabled(project string) (bool, error) {
 	}
 	var enabled bool
 	err := cs.db.QueryRowContext(
-		context.Background(),
+		ctx,
 		`SELECT sync_enabled FROM cloud_project_controls WHERE project = $1`,
 		project,
 	).Scan(&enabled)

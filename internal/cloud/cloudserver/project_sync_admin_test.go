@@ -101,7 +101,7 @@ func TestAdminPauseResumeRoutesOperatorOnly(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("non-operator pause: expected 403, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if enabled, err := store.IsProjectSyncEnabled("proj-x"); err != nil || !enabled {
+	if enabled, err := store.IsProjectSyncEnabled(context.Background(), "proj-x"); err != nil || !enabled {
 		t.Fatalf("non-operator pause must not change sync state: enabled=%v err=%v", enabled, err)
 	}
 	if len(store.auditCalls) != 0 {
@@ -114,7 +114,7 @@ func TestAdminPauseResumeRoutesOperatorOnly(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator pause: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if enabled, err := store.IsProjectSyncEnabled("proj-x"); err != nil || enabled {
+	if enabled, err := store.IsProjectSyncEnabled(context.Background(), "proj-x"); err != nil || enabled {
 		t.Fatalf("operator pause must disable sync: enabled=%v err=%v", enabled, err)
 	}
 
@@ -124,7 +124,7 @@ func TestAdminPauseResumeRoutesOperatorOnly(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator resume: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if enabled, err := store.IsProjectSyncEnabled("proj-x"); err != nil || !enabled {
+	if enabled, err := store.IsProjectSyncEnabled(context.Background(), "proj-x"); err != nil || !enabled {
 		t.Fatalf("operator resume must re-enable sync: enabled=%v err=%v", enabled, err)
 	}
 
@@ -151,7 +151,7 @@ func TestAdminPauseResumeRoutesViaAdminBearer(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin-bearer pause: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if enabled, _ := store.IsProjectSyncEnabled("proj-cli"); enabled {
+	if enabled, _ := store.IsProjectSyncEnabled(context.Background(), "proj-cli"); enabled {
 		t.Fatal("admin-bearer pause must disable sync")
 	}
 
@@ -163,7 +163,7 @@ func TestAdminPauseResumeRoutesViaAdminBearer(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("sync-token resume: expected 403, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if enabled, _ := store.IsProjectSyncEnabled("proj-cli"); enabled {
+	if enabled, _ := store.IsProjectSyncEnabled(context.Background(), "proj-cli"); enabled {
 		t.Fatal("rejected resume attempt must not change sync state")
 	}
 
@@ -174,7 +174,7 @@ func TestAdminPauseResumeRoutesViaAdminBearer(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin-bearer resume: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if enabled, _ := store.IsProjectSyncEnabled("proj-cli"); !enabled {
+	if enabled, _ := store.IsProjectSyncEnabled(context.Background(), "proj-cli"); !enabled {
 		t.Fatal("admin-bearer resume must re-enable sync")
 	}
 }
