@@ -1,9 +1,11 @@
 package dashboard
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // projectDetailPage renders the project-detail landing page (Command Center
@@ -18,30 +20,30 @@ import (
 // children (that stays admin-only, see Slice 5b's cloudserver changes) —
 // both are explicitly out of scope for this page.
 templ projectDetailPage(data ProjectDetailData) {
-	@layout("browse", projectDetailTitle(data)) {
+	@layout("browse", projectDetailTitle(ctx, data)) {
 		<div style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.85rem; flex-wrap: wrap;">
-			<a href={ templ.SafeURL("/") } style="color: var(--text-faint); font-size: 11px; text-decoration: none; letter-spacing: 0.04em;">← Overview</a>
+			<a href={ templ.SafeURL("/") } style="color: var(--text-faint); font-size: 11px; text-decoration: none; letter-spacing: 0.04em;">← { ui.T(ctx, "nav.overview") }</a>
 			if data.ParentProject != "" {
 				<a href={ templ.SafeURL(data.ParentProjectURL) } class="project-parent-link" style="color: var(--text-faint); font-size: 11px; text-decoration: none; letter-spacing: 0.04em;">← { data.ParentProject }</a>
 			}
 		</div>
 		if !data.Found {
-			@emptyState("No project selected. Pick a project from Overview or Browse.")
+			@emptyState(i18n.Tf(i18n.LangFrom(ctx), "projectDetail.notFound", ui.T(ctx, "nav.overview"), ui.T(ctx, "nav.browse")))
 		} else {
 			<div style="margin-bottom: 1.5rem;">
 				<h1 style="font-size: 20px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; margin: 0 0 0.75rem 0;">{ data.Name }</h1>
 				<div style="display: flex; gap: 2.5rem; flex-wrap: wrap;">
-					@projectDetailStat("Memories", fmt.Sprintf("%d", data.Stats.Total))
-					@projectDetailStat("Sources", fmt.Sprintf("%d", data.SourceCount))
-					@projectDetailStat("Last activity", projectLastActivityLabel(data))
+					@projectDetailStat(ui.T(ctx, "projectDetail.memories"), fmt.Sprintf("%d", data.Stats.Total))
+					@projectDetailStat(ui.T(ctx, "overview.sources"), fmt.Sprintf("%d", data.SourceCount))
+					@projectDetailStat(ui.T(ctx, "projectDetail.lastActivity"), projectLastActivityLabel(data))
 				</div>
 			</div>
 			if len(data.Children) > 0 {
 				@projectDetailChildren(data.Children)
 			}
 			<div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
-				<span class="micro-label">{ fmt.Sprintf("%d recent", len(data.Memories)) }</span>
-				<a href={ templ.SafeURL(data.BrowseURL) } class="pill-btn pill-btn-primary">View all in Browse</a>
+				<span class="micro-label">{ ui.Tf(ctx, "projectDetail.recentCount", len(data.Memories)) }</span>
+				<a href={ templ.SafeURL(data.BrowseURL) } class="pill-btn pill-btn-primary">{ ui.T(ctx, "projectDetail.viewAllBrowse") }</a>
 			</div>
 			@ui.MemoryFeed(toUICards(data.Memories))
 		}
@@ -55,7 +57,7 @@ templ projectDetailPage(data ProjectDetailData) {
 // out of scope, see ProjectDetailData's doc comment).
 templ projectDetailChildren(children []ProjectDetailChildLink) {
 	<div class="project-children-section" style="margin-bottom: 1.5rem;">
-		<span class="micro-label" style="display: block; margin-bottom: 0.5rem;">Sub-projects</span>
+		<span class="micro-label" style="display: block; margin-bottom: 0.5rem;">{ ui.T(ctx, "projectDetail.subProjects") }</span>
 		<div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
 			for _, child := range children {
 				<a href={ templ.SafeURL(child.URL) } class="badge badge-source">{ child.Name }</a>
@@ -77,9 +79,9 @@ templ projectDetailStat(label, value string) {
 
 // projectDetailTitle returns the page title: the project name when
 // resolved, or a neutral fallback for the empty-state path.
-func projectDetailTitle(data ProjectDetailData) string {
+func projectDetailTitle(ctx context.Context, data ProjectDetailData) string {
 	if !data.Found {
-		return "Project"
+		return ui.T(ctx, "projectDetail.fallbackTitle")
 	}
 	return data.Name
 }

@@ -1,6 +1,34 @@
 package dashboard
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
+)
+
+// graphI18n bundles the small set of client-side (JS) strings the D3 tooltip
+// and legend logic needs — a <script> block can't call ui.T at render time,
+// so these are passed through as a JSON payload (@templ.JSONScript
+// "graph-i18n", mirroring this same file's existing "graph-data" payload)
+// and read once at init.
+type graphI18n struct {
+	ConnectionSingular string `json:"connectionSingular"`
+	ConnectionPlural   string `json:"connectionPlural"`
+	ConnectsTo         string `json:"connectsTo"`
+	NoLinksAtThreshold string `json:"noLinksAtThreshold"`
+	MoreProjectsFmt    string `json:"moreProjectsFmt"`
+}
+
+func buildGraphI18n(lang i18n.Lang) graphI18n {
+	return graphI18n{
+		ConnectionSingular: i18n.T(lang, "graph.js.connectionSingular"),
+		ConnectionPlural:   i18n.T(lang, "graph.js.connectionPlural"),
+		ConnectsTo:         i18n.T(lang, "graph.js.connectsTo"),
+		NoLinksAtThreshold: i18n.T(lang, "graph.js.noLinksAtThreshold"),
+		MoreProjectsFmt:    i18n.T(lang, "graph.js.moreProjectsFmt"),
+	}
+}
 
 // graphPage renders the semantic knowledge graph. Edges are REAL cosine
 // similarities between memories from Omnia's own embeddings store — never
@@ -8,7 +36,7 @@ import "fmt"
 // ~1k nodes. When the embeddings layer is unavailable it renders a clear
 // disabled state instead of faking data.
 templ graphPage(view GraphView) {
-	@layout("graph", "Graph") {
+	@layout("graph", ui.T(ctx, "nav.graph")) {
 		<style>
 			.graph-shell { display: flex; flex-direction: column; gap: 14px; }
 
@@ -272,23 +300,20 @@ templ graphPage(view GraphView) {
 					<circle cx="18" cy="18" r="11.5" stroke="rgba(34,211,238,0.25)" stroke-width="0.75" stroke-dasharray="3 2.5"></circle>
 					<circle cx="18" cy="18" r="5" fill="rgba(34,211,238,0.4)"></circle>
 				</svg>
-				<div class="gu-title">Semantic Graph Unavailable</div>
+				<div class="gu-title">{ ui.T(ctx, "graph.unavailableTitle") }</div>
 				<div class="gu-sub">
-					This view is built from REAL semantic similarity between memories, which
-					requires Omnia's local embeddings layer. Enable <code>embeddings</code> in
-					your config and run <code>omnia embed</code> to populate the vector store,
-					then reload this page.
+					{ ui.T(ctx, "graph.unavailablePart1") }<code>embeddings</code>{ ui.T(ctx, "graph.unavailablePart2") }<code>omnia embed</code>{ ui.T(ctx, "graph.unavailablePart3") }
 				</div>
-				<a href="/" class="nav-link" style="margin-top: 8px;">← Back to Overview</a>
+				<a href="/" class="nav-link" style="margin-top: 8px;">{ ui.T(ctx, "graph.backToOverview") }</a>
 			</div>
 		} else {
 			<div class="graph-shell">
 				<!-- Controls: project scope + kNN tuning. Submits GET /graph. -->
 				<form method="GET" action="/graph" class="graph-controls">
 					<div class="gc-group">
-						<label class="gc-label" for="g-project">Project</label>
-						<select id="g-project" name="project" class="gc-select" onchange="this.form.submit()" aria-label="Scope graph to project">
-							<option value="">All projects</option>
+						<label class="gc-label" for="g-project">{ ui.T(ctx, "field.project") }</label>
+						<select id="g-project" name="project" class="gc-select" onchange="this.form.submit()" aria-label={ ui.T(ctx, "graph.scopeAria") }>
+							<option value="">{ ui.T(ctx, "browse.allProjects") }</option>
 							for _, p := range view.Projects {
 								if p == view.Project {
 									<option value={ p } selected>{ p }</option>
@@ -299,43 +324,43 @@ templ graphPage(view GraphView) {
 						</select>
 					</div>
 					<div class="gc-group">
-						<label class="gc-label" for="g-k">Neighbors (k)</label>
+						<label class="gc-label" for="g-k">{ ui.T(ctx, "graph.neighborsK") }</label>
 						<input id="g-k" name="k" type="number" min="1" max="24" value={ fmt.Sprintf("%d", view.K) } class="gc-num"/>
 					</div>
 					<div class="gc-group">
-						<label class="gc-label" for="g-min">Min similarity</label>
+						<label class="gc-label" for="g-min">{ ui.T(ctx, "graph.minSimilarity") }</label>
 						<input id="g-min" name="min" type="number" min="0" max="0.99" step="0.01" value={ fmt.Sprintf("%.2f", view.Min) } class="gc-num"/>
 					</div>
-					<button type="submit" class="gc-apply">Apply</button>
-					<span class="gc-hint">Lower the threshold or raise k for a denser graph; raise the threshold for tighter, higher-confidence clusters.</span>
+					<button type="submit" class="gc-apply">{ ui.T(ctx, "graph.apply") }</button>
+					<span class="gc-hint">{ ui.T(ctx, "graph.hint") }</span>
 				</form>
 				<!-- Canvas + overlays -->
 				<div class="graph-area" id="graph-area">
 					<canvas id="graph-canvas"></canvas>
 					<div class="graph-overlay">
-						<div class="ov-eyebrow">Knowledge Graph</div>
+						<div class="ov-eyebrow">{ ui.T(ctx, "graph.overlayEyebrow") }</div>
 						<div class="ov-counts">
 							<div class="ov-c">
 								<div class="ov-c-v">{ fmt.Sprintf("%d", view.Connected) }</div>
-								<div class="ov-c-l">connected</div>
+								<div class="ov-c-l">{ ui.T(ctx, "graph.connected") }</div>
 							</div>
 							<div class="ov-c">
 								<div class="ov-c-v">{ fmt.Sprintf("%d", view.EdgeCount) }</div>
-								<div class="ov-c-l">links</div>
+								<div class="ov-c-l">{ ui.T(ctx, "graph.links") }</div>
 							</div>
 							<div class="ov-c">
 								<div class="ov-c-v">{ fmt.Sprintf("%d", view.Total) }</div>
-								<div class="ov-c-l">memories</div>
+								<div class="ov-c-l">{ ui.T(ctx, "graph.memories") }</div>
 							</div>
 						</div>
 						<div class="ov-divider"></div>
 						<div id="graph-legend"></div>
 						<div class="ov-note">
-							Edges = cosine similarity ≥ <strong>{ fmt.Sprintf("%.2f", view.Min) }</strong> from local embeddings · top-{ fmt.Sprintf("%d", view.K) } neighbors. <strong>{ fmt.Sprintf("%d", view.Total-view.Connected) }</strong> memories have no link at this threshold.
+							{ ui.T(ctx, "graph.noteSeg1") }<strong>{ fmt.Sprintf("%.2f", view.Min) }</strong>{ ui.Tf(ctx, "graph.noteSeg2", view.K) }<strong>{ fmt.Sprintf("%d", view.Total-view.Connected) }</strong>{ ui.T(ctx, "graph.noteSeg3") }
 						</div>
 					</div>
 					<div class="graph-toolbar">
-						<button class="tb-btn" id="g-fit" title="Reset / fit view" type="button" aria-label="Fit view">
+						<button class="tb-btn" id="g-fit" title={ ui.T(ctx, "graph.fitView") } type="button" aria-label={ ui.T(ctx, "graph.fitViewAria") }>
 							<svg width="13" height="13" viewBox="0 0 13 13" fill="none">
 								<rect x="1" y="1" width="4" height="4" rx="0.5" stroke="currentColor" stroke-width="1.2"></rect>
 								<rect x="8" y="1" width="4" height="4" rx="0.5" stroke="currentColor" stroke-width="1.2"></rect>
@@ -343,19 +368,20 @@ templ graphPage(view GraphView) {
 								<rect x="8" y="8" width="4" height="4" rx="0.5" stroke="currentColor" stroke-width="1.2"></rect>
 							</svg>
 						</button>
-						<button class="tb-btn active" id="g-labels" title="Toggle hub labels" type="button" aria-label="Toggle labels">
+						<button class="tb-btn active" id="g-labels" title={ ui.T(ctx, "graph.toggleLabels") } type="button" aria-label={ ui.T(ctx, "graph.toggleLabelsAria") }>
 							<svg width="13" height="13" viewBox="0 0 13 13" fill="none">
 								<path d="M2 4h9M2 6.5h6M2 9h7.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"></path>
 							</svg>
 						</button>
 					</div>
 					<div class="graph-empty" id="graph-empty" hidden>
-						<div class="ge-title">No semantic links</div>
-						<div class="ge-sub">No pair of memories meets the current similarity threshold in this scope. Lower the <em>Min similarity</em> or widen the project filter, then Apply.</div>
+						<div class="ge-title">{ ui.T(ctx, "graph.noLinksTitle") }</div>
+						<div class="ge-sub">{ ui.T(ctx, "graph.noLinksPrefix") }<em>{ ui.T(ctx, "graph.minSimilarity") }</em>{ ui.T(ctx, "graph.noLinksSuffix") }</div>
 					</div>
 				</div>
 			</div>
 			@templ.JSONScript("graph-data", view.Payload)
+			@templ.JSONScript("graph-i18n", buildGraphI18n(i18n.LangFrom(ctx)))
 			<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 			<script>
 			(function () {
@@ -376,6 +402,17 @@ templ graphPage(view GraphView) {
 					try { data = JSON.parse(dataEl.textContent); } catch (e) {}
 					var nodes = (data.nodes || []).map(function (d) { return Object.assign({}, d); });
 					var links = (data.edges || []).map(function (d) { return { source: d.source, target: d.target, weight: d.weight }; });
+
+					// i18n Slice 2: locale strings for the tooltip/legend below, rendered
+					// server-side into a JSON payload (see @templ.JSONScript "graph-i18n")
+					// since this <script> block can't call ui.T at render time.
+					var i18nEl = document.getElementById('graph-i18n');
+					var gi18n = {
+						connectionSingular: 'connection', connectionPlural: 'connections',
+						connectsTo: 'Connects to', noLinksAtThreshold: 'No links at this threshold',
+						moreProjectsFmt: '+ {n} more projects'
+					};
+					try { gi18n = JSON.parse(i18nEl.textContent); } catch (e) {}
 
 					var area = document.getElementById('graph-area');
 					var canvas = document.getElementById('graph-canvas');
@@ -678,7 +715,7 @@ templ graphPage(view GraphView) {
 							ttProject.textContent = hit.project + ' · ' + hit.type;
 							ttProject.style.color = projColor(hit.project);
 							ttTitle.textContent = hit.title;
-							ttMeta.textContent = hit.degree + (hit.degree === 1 ? ' connection' : ' connections') + ' · mem #' + hit.id;
+							ttMeta.textContent = hit.degree + ' ' + (hit.degree === 1 ? gi18n.connectionSingular : gi18n.connectionPlural) + ' · mem #' + hit.id;
 							// "Connects to" — group this node's neighbours by project so you
 							// can see at a glance which projects the memory bridges into.
 							var pc = {};
@@ -687,10 +724,10 @@ templ graphPage(view GraphView) {
 							});
 							var pl = Object.keys(pc).sort(function (a, b) { return pc[b] - pc[a]; });
 							ttConn.innerHTML = pl.length
-								? '<span class="tt-conn-label">Connects to</span> ' + pl.slice(0, 6).map(function (p) {
+								? '<span class="tt-conn-label">' + gi18n.connectsTo + '</span> ' + pl.slice(0, 6).map(function (p) {
 										return '<b style="color:' + projColor(p) + '">' + p + '</b>&#8202;' + pc[p];
 									}).join('   ')
-								: '<span class="tt-conn-label">No links at this threshold</span>';
+								: '<span class="tt-conn-label">' + gi18n.noLinksAtThreshold + '</span>';
 							tooltip.classList.add('visible');
 							var tw = tooltip.offsetWidth, tx = ev.clientX + 15, ty = ev.clientY - 10;
 							if (tx + tw > window.innerWidth - 10) tx = ev.clientX - tw - 15;
@@ -753,7 +790,7 @@ templ graphPage(view GraphView) {
 					});
 					if (projects.length > shown.length) {
 						var more = document.createElement('div'); more.className = 'lg-more';
-						more.textContent = '+ ' + (projects.length - shown.length) + ' more projects';
+						more.textContent = gi18n.moreProjectsFmt.replace('{n}', String(projects.length - shown.length));
 						legend.appendChild(more);
 					}
 

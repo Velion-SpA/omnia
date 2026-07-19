@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // Observation is the Engram observation as returned by the HTTP API.
@@ -181,10 +183,12 @@ func (c *engramClient) DeleteObservation(ctx context.Context, id int, hard bool)
 
 // formatAge returns a human-readable age string from an Engram timestamp string
 // (format: "2006-01-02 15:04:05"). Engram stores timestamps in UTC without a
-// timezone suffix, so we parse them as UTC explicitly.
-func formatAge(ts string) string {
+// timezone suffix, so we parse them as UTC explicitly. lang selects the
+// display language (i18n Slice 2) — every call site derives it from the
+// request's context via i18n.LangFrom(ctx).
+func formatAge(ts string, lang i18n.Lang) string {
 	if ts == "" {
-		return "unknown"
+		return i18n.T(lang, "age.unknown")
 	}
 	t, err := time.ParseInLocation("2006-01-02 15:04:05", ts, time.UTC)
 	if err != nil {
@@ -193,14 +197,14 @@ func formatAge(ts string) string {
 	d := time.Since(t)
 	switch {
 	case d < time.Minute:
-		return "just now"
+		return i18n.T(lang, "age.justNow")
 	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+		return i18n.Tf(lang, "age.minutesAgo", int(d.Minutes()))
 	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
+		return i18n.Tf(lang, "age.hoursAgo", int(d.Hours()))
 	case d < 7*24*time.Hour:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+		return i18n.Tf(lang, "age.daysAgo", int(d.Hours()/24))
 	default:
-		return t.Format("Jan 2, 2006")
+		return i18n.FormatDate(t, lang)
 	}
 }

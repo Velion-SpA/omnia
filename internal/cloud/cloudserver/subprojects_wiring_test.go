@@ -74,7 +74,10 @@ func TestMountDashboard_ProjectLinksStore_RendersSubProjectsSection(t *testing.T
 		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "Sub-projects") {
+	// Spanish is the default language for the shared dashboard (i18n Slice 2
+	// — internal/dashboard/projectdetail.templ's projectDetail.subProjects
+	// key), which this mount reuses verbatim.
+	if !strings.Contains(body, "Sub-proyectos") {
 		t.Fatalf("expected the Sub-projects section for a parent project, got: %s", body)
 	}
 	if !strings.Contains(body, `href="/project/workly-marketing"`) || !strings.Contains(body, `href="/project/workly-videos"`) {
@@ -102,7 +105,7 @@ func TestMountDashboard_StoreWithoutProjectLinks_DegradesGracefully(t *testing.T
 		t.Fatalf("expected 200 (no panic without project-links capability), got %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, "Sub-projects") {
+	if strings.Contains(body, "Sub-proyectos") {
 		t.Error("expected no Sub-projects section without a project-links-capable store")
 	}
 	if strings.Contains(body, "project-parent-link") {

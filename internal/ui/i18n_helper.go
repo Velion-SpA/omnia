@@ -13,3 +13,11 @@ import (
 func T(ctx context.Context, key string) string {
 	return i18n.T(i18n.LangFrom(ctx), key)
 }
+
+// Tf is the interpolated-copy counterpart to T — a templ-friendly wrapper
+// around i18n.Tf for catalog entries that embed a dynamic value (e.g. a
+// count or a formatted name). Added in Slice 2 alongside the pages that
+// need it (browse's "%d results", project detail's "%d recent", etc.).
+func Tf(ctx context.Context, key string, a ...any) string {
+	return i18n.Tf(i18n.LangFrom(ctx), key, a...)
+}

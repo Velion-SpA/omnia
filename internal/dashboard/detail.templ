@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/velion/omnia/internal/audit"
+	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // detailPage renders a single observation with its meta panel, edit form, and delete action.
@@ -12,7 +14,7 @@ templ detailPage(v ObsView, backURL string, lastAudit *audit.Entry) {
 	@layout("browse", v.Obs.Title) {
 		<!-- Breadcrumb -->
 		<div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1.25rem;">
-			<a href="/" class="micro-label" style="color: var(--text-dim);">Overview</a>
+			<a href="/" class="micro-label" style="color: var(--text-dim);">{ ui.T(ctx, "nav.overview") }</a>
 			<span style="color: var(--text-faint);">›</span>
 			<a href={ templ.SafeURL("/browse?project=" + v.Obs.Project) } class="micro-label" style="color: var(--text-dim);">{ v.Obs.Project }</a>
 			<span style="color: var(--text-faint);">›</span>
@@ -25,7 +27,7 @@ templ detailPage(v ObsView, backURL string, lastAudit *audit.Entry) {
 				<div id="obs-title-section">
 					<div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; flex-wrap: wrap;">
 						if v.HasMeta {
-							<span class="badge badge-ingested">ingested</span>
+							<span class="badge badge-ingested">{ ui.T(ctx, "detail.badgeIngested") }</span>
 							if v.Meta.Source != "" {
 								<span class="badge badge-source">{ v.Meta.Source }</span>
 							}
@@ -36,7 +38,7 @@ templ detailPage(v ObsView, backURL string, lastAudit *audit.Entry) {
 								@statusBadge(v.Meta.Status)
 							}
 						} else {
-							<span class="badge badge-curated">curated</span>
+							<span class="badge badge-curated">{ ui.T(ctx, "detail.badgeCurated") }</span>
 						}
 						if v.Obs.Type != "" {
 							<span class="badge badge-type">{ v.Obs.Type }</span>
@@ -46,7 +48,7 @@ templ detailPage(v ObsView, backURL string, lastAudit *audit.Entry) {
 				</div>
 				<!-- Content card -->
 				<div class="card">
-					<span class="micro-label" style="display: block; margin-bottom: 0.875rem;">Content</span>
+					<span class="micro-label" style="display: block; margin-bottom: 0.875rem;">{ ui.T(ctx, "detail.content") }</span>
 					<div class="prose" id="obs-content-text">
 						@templ.Raw(renderMarkdownSafe(stripMetaBlock(v.Obs.Content)))
 					</div>
@@ -65,36 +67,36 @@ templ detailPage(v ObsView, backURL string, lastAudit *audit.Entry) {
 				@metaPanel(v)
 				<!-- Record card -->
 				<div class="card">
-					<span class="micro-label" style="display: block; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--calypso-dim);">RECORD</span>
+					<span class="micro-label" style="display: block; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--calypso-dim);">{ ui.T(ctx, "detail.record") }</span>
 					<div class="kv-row">
 						<span class="kv-key">ID</span>
 						<span class="kv-val" style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">{ fmt.Sprintf("%d", v.Obs.ID) }</span>
 					</div>
 					<div class="kv-row">
-						<span class="kv-key">Project</span>
+						<span class="kv-key">{ ui.T(ctx, "field.project") }</span>
 						<span class="kv-val">{ v.Obs.Project }</span>
 					</div>
 					if v.Obs.TopicKey != "" {
 						<div class="kv-row">
-							<span class="kv-key">Topic</span>
+							<span class="kv-key">{ ui.T(ctx, "detail.topic") }</span>
 							<span class="kv-val" style="font-family: 'JetBrains Mono', monospace; font-size: 11px; word-break: break-all;">{ v.Obs.TopicKey }</span>
 						</div>
 					}
 					<div class="kv-row">
-						<span class="kv-key">Revisions</span>
+						<span class="kv-key">{ ui.T(ctx, "detail.revisions") }</span>
 						<span class="kv-val">{ fmt.Sprintf("%d", v.Obs.RevisionCount) }</span>
 					</div>
 					<div class="kv-row">
-						<span class="kv-key">Created</span>
-						<span class="kv-val" style="font-size: 12px;">{ formatAge(v.Obs.CreatedAt) }</span>
+						<span class="kv-key">{ ui.T(ctx, "detail.created") }</span>
+						<span class="kv-val" style="font-size: 12px;">{ formatAge(v.Obs.CreatedAt, i18n.LangFrom(ctx)) }</span>
 					</div>
 					<div class="kv-row">
-						<span class="kv-key">Updated</span>
+						<span class="kv-key">{ ui.T(ctx, "detail.updated") }</span>
 						<span class="kv-val" style="font-size: 12px;">{ v.Age }</span>
 					</div>
 					if lastAudit != nil {
 						<div class="kv-row">
-							<span class="kv-key">Last edit</span>
+							<span class="kv-key">{ ui.T(ctx, "detail.lastEdit") }</span>
 							<span class="kv-val" style="font-size: 12px; color: var(--text-dim);">{ lastAudit.Actor } · { lastAudit.Ts }</span>
 						</div>
 					}
@@ -121,7 +123,7 @@ templ statusBadge(status string) {
 templ metaPanel(v ObsView) {
 	if v.HasMeta {
 		<div class="card">
-			<span class="micro-label" style="display: block; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--calypso-dim);">Omnia Meta</span>
+			<span class="micro-label" style="display: block; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--calypso-dim);">{ ui.T(ctx, "detail.omniaMeta") }</span>
 			if v.Meta.Repo != "" {
 				<div class="kv-row">
 					<span class="kv-key">Repo</span>
@@ -130,13 +132,13 @@ templ metaPanel(v ObsView) {
 			}
 			if v.Meta.Author != "" {
 				<div class="kv-row">
-					<span class="kv-key">Author</span>
+					<span class="kv-key">{ ui.T(ctx, "detail.author") }</span>
 					<span class="kv-val">{ v.Meta.Author }</span>
 				</div>
 			}
 			if len(v.Meta.Participants) > 0 {
 				<div class="kv-row">
-					<span class="kv-key">Participants</span>
+					<span class="kv-key">{ ui.T(ctx, "detail.participants") }</span>
 					<div class="kv-val" style="display: flex; flex-wrap: wrap; gap: 4px;">
 						for _, p := range v.Meta.Participants {
 							<span class="badge badge-source" style="font-size: 10px;">{ p }</span>
@@ -154,31 +156,31 @@ templ metaPanel(v ObsView) {
 			}
 			if v.Meta.SourceID != "" {
 				<div class="kv-row">
-					<span class="kv-key">Source ID</span>
+					<span class="kv-key">{ ui.T(ctx, "detail.sourceID") }</span>
 					<span class="kv-val" style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">{ v.Meta.SourceID }</span>
 				</div>
 			}
 			if !v.Meta.CreatedAt.IsZero() {
 				<div class="kv-row">
-					<span class="kv-key">Created</span>
-					<span class="kv-val" style="font-size: 12px;">{ v.Meta.CreatedAt.Format("Jan 2, 2006") }</span>
+					<span class="kv-key">{ ui.T(ctx, "detail.created") }</span>
+					<span class="kv-val" style="font-size: 12px;">{ i18n.FormatDate(v.Meta.CreatedAt, i18n.LangFrom(ctx)) }</span>
 				</div>
 			}
 			if !v.Meta.UpdatedAt.IsZero() {
 				<div class="kv-row">
-					<span class="kv-key">Updated</span>
-					<span class="kv-val" style="font-size: 12px;">{ v.Meta.UpdatedAt.Format("Jan 2, 2006") }</span>
+					<span class="kv-key">{ ui.T(ctx, "detail.updated") }</span>
+					<span class="kv-val" style="font-size: 12px;">{ i18n.FormatDate(v.Meta.UpdatedAt, i18n.LangFrom(ctx)) }</span>
 				</div>
 			}
 			if !v.Meta.IngestedAt.IsZero() {
 				<div class="kv-row">
-					<span class="kv-key">Ingested</span>
-					<span class="kv-val" style="font-size: 12px;">{ v.Meta.IngestedAt.Format("Jan 2, 2006") }</span>
+					<span class="kv-key">{ ui.T(ctx, "detail.ingestedAt") }</span>
+					<span class="kv-val" style="font-size: 12px;">{ i18n.FormatDate(v.Meta.IngestedAt, i18n.LangFrom(ctx)) }</span>
 				</div>
 			}
 			if v.Meta.ChunkCurrent > 0 {
 				<div class="kv-row">
-					<span class="kv-key">Chunk</span>
+					<span class="kv-key">{ ui.T(ctx, "detail.chunk") }</span>
 					<span class="kv-val" style="font-family: 'JetBrains Mono', monospace;">{ fmt.Sprintf("%d / %d", v.Meta.ChunkCurrent, v.Meta.ChunkTotal) }</span>
 				</div>
 			}
@@ -198,14 +200,14 @@ templ editToggleButton(id int) {
 			<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
 			<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
 		</svg>
-		Edit
+		{ ui.T(ctx, "detail.edit") }
 	</button>
 }
 
 // editForm is the inline edit form (returned by GET /api/obs/{id}/edit-form).
 templ editForm(v ObsView) {
 	<div class="card" style="border-color: var(--calypso-dim);">
-		<span class="micro-label" style="display: block; margin-bottom: 1rem;">Edit Observation</span>
+		<span class="micro-label" style="display: block; margin-bottom: 1rem;">{ ui.T(ctx, "detail.editObservation") }</span>
 		<form
 			hx-patch={ fmt.Sprintf("/api/obs/%d", v.Obs.ID) }
 			hx-target="#edit-section"
@@ -213,11 +215,11 @@ templ editForm(v ObsView) {
 			style="display: flex; flex-direction: column; gap: 0.75rem;"
 		>
 			<div>
-				<label class="micro-label" style="display: block; margin-bottom: 0.25rem;">Title</label>
+				<label class="micro-label" style="display: block; margin-bottom: 0.25rem;">{ ui.T(ctx, "detail.titleLabel") }</label>
 				<input type="text" name="title" value={ v.Obs.Title } style="width: 100%;"/>
 			</div>
 			<div>
-				<label class="micro-label" style="display: block; margin-bottom: 0.25rem;">Type</label>
+				<label class="micro-label" style="display: block; margin-bottom: 0.25rem;">{ ui.T(ctx, "detail.typeLabel") }</label>
 				<select name="type" style="width: 100%;">
 					for _, t := range []string{"decision", "architecture", "bugfix", "pattern", "config", "discovery", "learning", "manual"} {
 						if t == v.Obs.Type {
@@ -229,7 +231,7 @@ templ editForm(v ObsView) {
 				</select>
 			</div>
 			<div>
-				<label class="micro-label" style="display: block; margin-bottom: 0.25rem;">Content</label>
+				<label class="micro-label" style="display: block; margin-bottom: 0.25rem;">{ ui.T(ctx, "detail.content") }</label>
 				<textarea name="content" rows="12" style="width: 100%; font-family: 'JetBrains Mono', monospace; font-size: 12px; resize: vertical;">{ v.Obs.Content }</textarea>
 			</div>
 			<div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
@@ -239,10 +241,10 @@ templ editForm(v ObsView) {
 					hx-get={ fmt.Sprintf("/api/obs/%d/edit-cancel", v.Obs.ID) }
 					hx-target="#edit-section"
 					hx-swap="innerHTML"
-				>Cancel</button>
+				>{ ui.T(ctx, "common.cancel") }</button>
 				<button type="submit" class="pill-btn pill-btn-primary">
 					<span class="htmx-indicator spinner"></span>
-					Save
+					{ ui.T(ctx, "detail.save") }
 				</button>
 			</div>
 		</form>
@@ -255,14 +257,14 @@ templ editSuccess(id int) {
 		<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
 			<polyline points="20 6 9 17 4 12"/>
 		</svg>
-		Saved successfully.
+		{ ui.T(ctx, "detail.savedSuccessfully") }
 		<button
 			class="pill-btn pill-btn-secondary"
 			style="margin-left: auto; padding: 2px 0.75rem; font-size: 12px;"
 			hx-get={ fmt.Sprintf("/api/obs/%d/edit-cancel", id) }
 			hx-target="#edit-section"
 			hx-swap="innerHTML"
-		>Edit again</button>
+		>{ ui.T(ctx, "detail.editAgain") }</button>
 	</div>
 }
 
@@ -280,19 +282,19 @@ templ deleteButton(id int, title string) {
 			<path d="M10 11v6M14 11v6"/>
 			<path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
 		</svg>
-		Delete
+		{ ui.T(ctx, "detail.delete") }
 	</button>
 }
 
 // deleteConfirm is the modal-style confirm step for deletion.
 templ deleteConfirm(id int, title string) {
 	<div class="card" style="border-color: rgba(251,113,133,0.3);">
-		<h3 style="font-size: 13px; font-weight: 600; color: var(--bad); margin: 0 0 0.625rem 0;">Delete observation?</h3>
+		<h3 style="font-size: 13px; font-weight: 600; color: var(--bad); margin: 0 0 0.625rem 0;">{ ui.T(ctx, "detail.deleteQuestion") }</h3>
 		<p style="font-size: 13px; color: var(--text-dim); margin: 0 0 1rem 0;">
 			<strong style="color: var(--text);">{ truncateTitle(title) }</strong>
 		</p>
 		<p style="font-size: 12px; color: var(--text-faint); margin: 0 0 1rem 0;">
-			Soft delete marks it hidden. Hard delete is permanent and cannot be undone.
+			{ ui.T(ctx, "detail.deleteExplain") }
 		</p>
 		<div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
 			<button
@@ -300,21 +302,21 @@ templ deleteConfirm(id int, title string) {
 				hx-get={ fmt.Sprintf("/api/obs/%d/delete-cancel", id) }
 				hx-target="#delete-section"
 				hx-swap="innerHTML"
-			>Cancel</button>
+			>{ ui.T(ctx, "common.cancel") }</button>
 			<button
 				class="pill-btn pill-btn-danger"
 				hx-delete={ fmt.Sprintf("/api/obs/%d?hard=false", id) }
 				hx-target="#delete-section"
 				hx-swap="innerHTML"
-			>Soft delete</button>
+			>{ ui.T(ctx, "detail.softDelete") }</button>
 			<button
 				class="pill-btn pill-btn-danger"
 				style="background: rgba(251,113,133,0.12);"
 				hx-delete={ fmt.Sprintf("/api/obs/%d?hard=true", id) }
 				hx-target="#delete-section"
 				hx-swap="innerHTML"
-				hx-confirm="Permanently delete this observation? This cannot be undone."
-			>Hard delete (permanent)</button>
+				hx-confirm={ ui.T(ctx, "detail.hardDeleteConfirm") }
+			>{ ui.T(ctx, "detail.hardDeletePermanent") }</button>
 		</div>
 	</div>
 }
@@ -326,11 +328,11 @@ templ deleteSuccess(hard bool) {
 			<polyline points="20 6 9 17 4 12"/>
 		</svg>
 		if hard {
-			Permanently deleted.
+			{ ui.T(ctx, "detail.deletedPermanently") }
 		} else {
-			Soft deleted (hidden from results).
+			{ ui.T(ctx, "detail.deletedSoft") }
 		}
-		<a href="/browse" style="margin-left: auto; font-size: 12px; color: var(--calypso);">Back to browse →</a>
+		<a href="/browse" style="margin-left: auto; font-size: 12px; color: var(--calypso);">{ ui.T(ctx, "detail.backToBrowse") }</a>
 	</div>
 }
 

@@ -56,14 +56,17 @@ func TestHandleProjectDetail_RendersFullPage(t *testing.T) {
 	if !strings.Contains(bodyStr, "feat: add feature 500") {
 		t.Error("expected at least one memory card (ingested obs title) in response")
 	}
-	if !strings.Contains(bodyStr, "Memories") {
-		t.Error("expected 'Memories' stat label in response")
+	// Spanish is the default language (newTestServerOnly bypasses the i18n
+	// middleware, so LangFrom(ctx) falls back to DefaultLang = es) — see
+	// projectDetail.memories / overview.sources / projectDetail.lastActivity.
+	if !strings.Contains(bodyStr, "Memorias") {
+		t.Error("expected 'Memorias' stat label in response")
 	}
-	if !strings.Contains(bodyStr, "Sources") {
-		t.Error("expected 'Sources' stat label in response")
+	if !strings.Contains(bodyStr, "Fuentes") {
+		t.Error("expected 'Fuentes' stat label in response")
 	}
-	if !strings.Contains(bodyStr, "Last activity") {
-		t.Error("expected 'Last activity' stat label in response")
+	if !strings.Contains(bodyStr, "Última actividad") {
+		t.Error("expected 'Última actividad' stat label in response")
 	}
 	if !strings.Contains(bodyStr, "/browse?project=socrates") {
 		t.Error("expected a 'View all in Browse' link scoped to the project")
@@ -94,7 +97,8 @@ func TestHandleProjectDetail_UnknownProject_GracefulEmptyState(t *testing.T) {
 	if !strings.Contains(bodyStr, "does-not-exist") {
 		t.Error("expected the (unknown) project name to still render in the header")
 	}
-	if !strings.Contains(bodyStr, "No results") {
+	// Spanish default (see cards.noResults).
+	if !strings.Contains(bodyStr, "Sin resultados") {
 		t.Error("expected the shared empty-state message for zero memories")
 	}
 }
@@ -209,7 +213,8 @@ func TestHandleBrowse_ActiveProjectChip_LinksToProjectDetail(t *testing.T) {
 	if !strings.Contains(bodyStr, `href="/project/omnia"`) {
 		t.Error("expected the active project filter chip's label to link to /project/omnia")
 	}
-	if !strings.Contains(bodyStr, `title="Remove filter"`) {
+	// Spanish default (see browse.removeFilter).
+	if !strings.Contains(bodyStr, `title="Quitar filtro"`) {
 		t.Error("expected the existing remove-filter control to still be present")
 	}
 }
