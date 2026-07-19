@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/velion/omnia/internal/projectname"
 	_ "modernc.org/sqlite"
 )
 
@@ -6254,6 +6255,31 @@ func TestNormalizeProjectFunction(t *testing.T) {
 			}
 			if !tc.wantWarning && warning != "" {
 				t.Errorf("NormalizeProject(%q) expected no warning, got %q", tc.input, warning)
+			}
+		})
+	}
+}
+
+// TestNormalizeProjectAgreesWithProjectnameLeaf pins the H6 audit fix:
+// store.NormalizeProject must delegate to (and therefore always agree with)
+// the shared internal/projectname leaf package, so this canonical path and
+// the config/project copies can never diverge again.
+func TestNormalizeProjectAgreesWithProjectnameLeaf(t *testing.T) {
+	inputs := []string{
+		"engram",
+		"Engram",
+		"  engram  ",
+		"my--project",
+		"my__project",
+		"my---project__name",
+		"",
+	}
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			got, _ := NormalizeProject(in)
+			want := projectname.Normalize(in)
+			if got != want {
+				t.Errorf("NormalizeProject(%q) = %q, want %q (from projectname.Normalize)", in, got, want)
 			}
 		})
 	}

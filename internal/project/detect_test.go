@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/velion/omnia/internal/projectname"
 )
 
 // ─── extractRepoName unit tests ──────────────────────────────────────────────
@@ -156,6 +158,33 @@ func TestDetectProject_EmptyDir_NoPanic(t *testing.T) {
 	// Just verify it returns something non-empty (the exact value depends on OS)
 	if got == "" {
 		t.Error("DetectProject(\"\") returned empty string")
+	}
+}
+
+// TestNormalizeAgreesWithProjectnameLeaf pins the H6 audit fix: project's
+// unexported normalize() must delegate to the shared internal/projectname
+// leaf package so it can never diverge from the store/config copies again.
+// Before the fix, normalize did NOT collapse repeated separators (unlike
+// store.NormalizeProject) — this now intentionally changes to match, while
+// preserving normalize's empty->"unknown" fallback via NormalizeOrUnknown.
+func TestNormalizeAgreesWithProjectnameLeaf(t *testing.T) {
+	inputs := []string{
+		"engram",
+		"Engram",
+		"  engram  ",
+		"my--project",
+		"my__project",
+		"",
+		"   ",
+	}
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			got := normalize(in)
+			want := projectname.NormalizeOrUnknown(in)
+			if got != want {
+				t.Errorf("normalize(%q) = %q, want %q (from projectname.NormalizeOrUnknown)", in, got, want)
+			}
+		})
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/velion/omnia/internal/projectname"
 	"gopkg.in/yaml.v3"
 )
 
@@ -154,8 +155,12 @@ func (r *Router) ResolveDiscord(channelID string, guildSlug string) string {
 	return r.defaultProject
 }
 
+// normalizeProject delegates to the canonical internal/projectname leaf
+// package so config-sourced project names normalize identically to the
+// store and project-detection paths (see internal/store.NormalizeProject
+// and internal/project's normalize).
 func normalizeProject(s string) string {
-	return strings.ToLower(strings.TrimSpace(s))
+	return projectname.Normalize(s)
 }
 
 // DefaultPath returns the default config file path.
