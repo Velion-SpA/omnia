@@ -5,6 +5,7 @@ import (
 
 	cloudauth "github.com/velion/omnia/internal/cloud/auth"
 	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // ─── accessEffectiveLabel ─────────────────────────────────────────────────────
@@ -23,7 +24,7 @@ func TestAccessEffectiveLabel(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := accessEffectiveLabel(c.perms); got != c.want {
+			if got := accessEffectiveLabel(i18n.LangEN, c.perms); got != c.want {
 				t.Fatalf("accessEffectiveLabel(%d) = %q, want %q", c.perms, got, c.want)
 			}
 		})
@@ -48,7 +49,7 @@ func TestMergeUnifiedAccessRows_OverrideWinsOverTeam(t *testing.T) {
 		{AccountID: "1", Project: "trackly", Perms: int(cloudauth.PermAll), Role: "owner"},
 	}
 
-	rows := mergeUnifiedAccessRows("1", overrides, teamRows, nil)
+	rows := mergeUnifiedAccessRows(i18n.LangEN, "1", overrides, teamRows, nil)
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row, got %d: %+v", len(rows), rows)
 	}
@@ -84,7 +85,7 @@ func TestMergeUnifiedAccessRows_OverrideCanRestrictToZero(t *testing.T) {
 		{AccountID: "1", Project: "trackly", Perms: 0, Role: "member"},
 	}
 
-	rows := mergeUnifiedAccessRows("1", overrides, teamRows, nil)
+	rows := mergeUnifiedAccessRows(i18n.LangEN, "1", overrides, teamRows, nil)
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(rows))
 	}
@@ -112,7 +113,7 @@ func TestMergeUnifiedAccessRows_TeamOnly(t *testing.T) {
 		},
 	}
 
-	rows := mergeUnifiedAccessRows("1", nil, teamRows, nil)
+	rows := mergeUnifiedAccessRows(i18n.LangEN, "1", nil, teamRows, nil)
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(rows))
 	}
@@ -147,7 +148,7 @@ func TestMergeUnifiedAccessRows_TeamUnionMultipleSources(t *testing.T) {
 		},
 	}
 
-	rows := mergeUnifiedAccessRows("1", nil, teamRows, nil)
+	rows := mergeUnifiedAccessRows(i18n.LangEN, "1", nil, teamRows, nil)
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(rows))
 	}
@@ -165,7 +166,7 @@ func TestMergeUnifiedAccessRows_TeamUnionMultipleSources(t *testing.T) {
 // known-project universe) with source=none and zero perms — this is what lets
 // the operator see "no access yet" for a project and grant it in place.
 func TestMergeUnifiedAccessRows_NoneRow(t *testing.T) {
-	rows := mergeUnifiedAccessRows("1", nil, nil, []string{"workly"})
+	rows := mergeUnifiedAccessRows(i18n.LangEN, "1", nil, nil, []string{"workly"})
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row, got %d: %+v", len(rows), rows)
 	}
@@ -196,7 +197,7 @@ func TestMergeUnifiedAccessRows_SourceAttribution(t *testing.T) {
 	}
 	known := []string{"workly", "intervus", "trackly"}
 
-	rows := mergeUnifiedAccessRows("1", overrides, teamRows, known)
+	rows := mergeUnifiedAccessRows(i18n.LangEN, "1", overrides, teamRows, known)
 	if len(rows) != 3 {
 		t.Fatalf("expected 3 rows, got %d: %+v", len(rows), rows)
 	}

@@ -248,8 +248,11 @@ func TestHandlerDashboardLoginFlowSetsCookieForBrowserUse(t *testing.T) {
 	if badLogin.Code != http.StatusOK {
 		t.Fatalf("expected invalid login attempt to re-render form with 200, got %d", badLogin.Code)
 	}
-	if !strings.Contains(badLogin.Body.String(), "invalid token") {
-		t.Fatalf("expected invalid token message, body=%q", badLogin.Body.String())
+	// i18n Slice 3: the login page renders Spanish by default now (no lang
+	// cookie on this request), so the error message is the Spanish catalog
+	// entry for "invalid token", not the English literal.
+	if !strings.Contains(badLogin.Body.String(), "token inválido") {
+		t.Fatalf("expected invalid token message (Spanish default), body=%q", badLogin.Body.String())
 	}
 
 	login := httptest.NewRecorder()
@@ -294,8 +297,9 @@ func TestHandlerDashboardLoginRejectsTokenFromQueryString(t *testing.T) {
 	if login.Code != http.StatusOK {
 		t.Fatalf("expected login form re-render when token is query-sourced, got %d", login.Code)
 	}
-	if !strings.Contains(login.Body.String(), "enter your account credentials or an operator token") {
-		t.Fatalf("expected token required error, got body=%q", login.Body.String())
+	// i18n Slice 3: Spanish default (no lang cookie on this request).
+	if !strings.Contains(login.Body.String(), "ingresá las credenciales de tu cuenta o un token de operador") {
+		t.Fatalf("expected token required error (Spanish default), got body=%q", login.Body.String())
 	}
 	for _, cookie := range login.Result().Cookies() {
 		if cookie.Name == dashboardSessionCookieName {

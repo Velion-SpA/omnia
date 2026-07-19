@@ -1,39 +1,42 @@
 package cloudserver
 
-import "github.com/velion/omnia/internal/ui"
+import (
+	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
+)
 
 // Admin Audit page (OBL-05). Operator-only, cloud-only, read-only. Renders
 // inside the shared Omnia command-center shell exactly like the rest of the
 // Admin section (admin_ui.templ).
 templ adminAuditPage(view adminAuditView) {
 	@ui.Layout(view.Props) {
-		@adminPageTitle("Admin", "Read-only security audit trail. Operator-only.")
+		@adminPageTitle(ui.T(ctx, "admin.title"), ui.T(ctx, "admin.audit.subtitle"))
 		@adminNavTabs("audit")
 		<div class="card" style="margin-bottom: 1.25rem;">
-			<span class="micro-label" style="display: block; margin-bottom: 0.6rem;">FILTER</span>
+			<span class="micro-label" style="display: block; margin-bottom: 0.6rem;">{ ui.T(ctx, "admin.audit.filter") }</span>
 			<form method="get" action="/admin/audit" style="display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; margin: 0;">
-				<input type="text" name="contributor" placeholder="contributor" value={ view.Contributor } style="padding: 0.4rem 0.6rem; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
-				<input type="text" name="project" placeholder="project" value={ view.Project } style="padding: 0.4rem 0.6rem; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
-				<input type="text" name="outcome" placeholder="outcome" value={ view.Outcome } style="padding: 0.4rem 0.6rem; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
-				<button type="submit" class="shell-button" style="padding: 0.35rem 0.9rem; font-size: 12px;">Filter</button>
-				<a href="/admin/audit" class="shell-button shell-button-ghost" style="padding: 0.35rem 0.9rem; font-size: 12px; text-decoration: none;">Clear</a>
+				<input type="text" name="contributor" placeholder={ ui.T(ctx, "admin.audit.contributor") } value={ view.Contributor } style="padding: 0.4rem 0.6rem; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
+				<input type="text" name="project" placeholder={ ui.T(ctx, "admin.access.colProject") } value={ view.Project } style="padding: 0.4rem 0.6rem; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
+				<input type="text" name="outcome" placeholder={ ui.T(ctx, "admin.audit.outcome") } value={ view.Outcome } style="padding: 0.4rem 0.6rem; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text);"/>
+				<button type="submit" class="shell-button" style="padding: 0.35rem 0.9rem; font-size: 12px;">{ ui.T(ctx, "admin.audit.filterAction") }</button>
+				<a href="/admin/audit" class="shell-button shell-button-ghost" style="padding: 0.35rem 0.9rem; font-size: 12px; text-decoration: none;">{ ui.T(ctx, "admin.audit.clear") }</a>
 			</form>
 		</div>
 		<div class="card">
-			<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">AUDIT LOG · { formatAuditTotal(view.Total) }</span>
+			<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">{ ui.T(ctx, "admin.audit.log") } · { formatAuditTotal(i18n.LangFrom(ctx), view.Total) }</span>
 			if len(view.Rows) == 0 {
-				<p style="color: var(--text-dim); font-size: 13px;">No audit entries match this filter.</p>
+				<p style="color: var(--text-dim); font-size: 13px;">{ ui.T(ctx, "admin.audit.noEntries") }</p>
 			} else {
 				<div style="overflow-x: auto;">
 					<table style="width: 100%; border-collapse: collapse; font-size: 13px;">
 						<thead>
 							<tr style="text-align: left; color: var(--text-faint);">
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Occurred</th>
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Contributor</th>
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Project</th>
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Action</th>
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Outcome</th>
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Reason</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.audit.colOccurred") }</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.audit.colContributor") }</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.access.colProject") }</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.audit.colAction") }</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.audit.colOutcome") }</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.audit.colReason") }</th>
 							</tr>
 						</thead>
 						<tbody>
@@ -46,12 +49,12 @@ templ adminAuditPage(view adminAuditView) {
 			}
 			if view.PageCount > 1 {
 				<div style="display: flex; gap: 0.5rem; margin-top: 1rem; align-items: center; font-size: 12px; color: var(--text-dim);">
-					<span>Page { formatAuditPage(view.Page) } of { formatAuditPage(view.PageCount) }</span>
+					<span>{ ui.Tf(ctx, "admin.audit.pageOf", formatAuditPage(view.Page), formatAuditPage(view.PageCount)) }</span>
 					if view.Page > 1 {
-						<a href={ templ.SafeURL(adminAuditPagePath(view, view.Page-1)) } class="shell-button shell-button-ghost" style="padding: 0.25rem 0.6rem; font-size: 12px; text-decoration: none;">Prev</a>
+						<a href={ templ.SafeURL(adminAuditPagePath(view, view.Page-1)) } class="shell-button shell-button-ghost" style="padding: 0.25rem 0.6rem; font-size: 12px; text-decoration: none;">{ ui.T(ctx, "admin.audit.prev") }</a>
 					}
 					if view.Page < view.PageCount {
-						<a href={ templ.SafeURL(adminAuditPagePath(view, view.Page+1)) } class="shell-button shell-button-ghost" style="padding: 0.25rem 0.6rem; font-size: 12px; text-decoration: none;">Next</a>
+						<a href={ templ.SafeURL(adminAuditPagePath(view, view.Page+1)) } class="shell-button shell-button-ghost" style="padding: 0.25rem 0.6rem; font-size: 12px; text-decoration: none;">{ ui.T(ctx, "admin.audit.next") }</a>
 					}
 				</div>
 			}

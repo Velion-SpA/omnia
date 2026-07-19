@@ -15,6 +15,7 @@ import (
 	"github.com/velion/omnia/internal/cloud/cloudstore"
 	"github.com/velion/omnia/internal/dashboard"
 	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // Operator-only dashboard Admin section (OBL-13). These handlers render the Admin
@@ -88,9 +89,19 @@ func (s *CloudServer) requireOperator(w http.ResponseWriter, r *http.Request) bo
 // adminLayoutProps builds the shared shell props for an Admin page: the standard
 // dashboard nav plus the operator-only Admin entry, the operator identity and a
 // logout action.
-func (s *CloudServer) adminLayoutProps(title, active string) ui.LayoutProps {
+//
+// i18n Slice 3: takes ctx (every caller already has r.Context() on hand) so
+// it can run the SAME dashboard.TranslateShellProps pass the shared
+// dashboard's own layoutPropsForContext applies — translating the Nav item
+// labels (nav.<id> catalog keys), BrandSub and StatusText — which this
+// function never went through before (Admin pages build LayoutProps
+// directly, not via layoutPropsForContext). The "operator" identity itself
+// is translated separately since it isn't part of TranslateShellProps' scope
+// (it's Admin-specific hardcoded identity, not the account-session username
+// layoutPropsForContext handles).
+func (s *CloudServer) adminLayoutProps(ctx context.Context, title, active string) ui.LayoutProps {
 	nav := append(dashboard.BaseNavItems(), dashboard.AdminNavItem())
-	return ui.LayoutProps{
+	props := ui.LayoutProps{
 		Title:      title,
 		BrandTitle: "Omnia",
 		BrandSub:   "Unified Knowledge",
@@ -98,10 +109,12 @@ func (s *CloudServer) adminLayoutProps(title, active string) ui.LayoutProps {
 		Nav:        nav,
 		Active:     active,
 		StatusText: "Online",
-		User:       "operator",
+		User:       ui.T(ctx, "admin.operatorLabel"),
 		LogoutURL:  dashboardLogoutPath,
 		AssetBase:  "/static",
 	}
+	dashboard.TranslateShellProps(ctx, &props)
+	return props
 }
 
 // ─── view models ─────────────────────────────────────────────────────────────
@@ -214,7 +227,7 @@ func (s *CloudServer) handleAdminUsersPage(w http.ResponseWriter, r *http.Reques
 		}
 		rows = append(rows, toAdminUserRow(u, tokens))
 	}
-	view := adminUsersView{Props: s.adminLayoutProps("Admin · Users", "admin"), Users: rows}
+	view := adminUsersView{Props: s.adminLayoutProps(r.Context(), "Admin · Users", "admin"), Users: rows}
 	if err := adminUsersPage(view).Render(r.Context(), w); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 	}
@@ -263,7 +276,7 @@ func (s *CloudServer) handleAdminAccessPage(w http.ResponseWriter, r *http.Reque
 	}
 
 	view := adminAccessView{
-		Props:         s.adminLayoutProps("Admin · Access", "admin"),
+		Props:         s.adminLayoutProps(r.Context(), "Admin · Access", "admin"),
 		Users:         opts,
 		SelectedID:    selected,
 		SelectedName:  selectedName,
@@ -799,29 +812,36 @@ func toAdminUserRow(u cloudstore.AdminUser, tokens []cloudstore.ManagedTokenView
 }
 
 // permSummary renders a human-readable label for a perms bitfield.
-func permSummary(perms int) string {
+//
+// i18n Slice 3: takes lang so its ONE actual render call site
+// (handleAdminTeamDetailPage's memberRows loop, admin_teams_dashboard.go —
+// rendered as m.Summary in adminTeamMemberRowView) can localize it. Callers
+// resolve lang from r.Context() (a Go handler, not a templ file, so ctx
+// isn't implicit there).
+func permSummary(lang i18n.Lang, perms int) string {
 	p := auth.Permission(perms)
 	if perms == 0 {
-		return "no access"
+		return i18n.T(lang, "admin.perm.noAccess")
 	}
 	if p.Has(auth.PermAll) {
-		return "full (read+write+update+delete)"
+		return i18n.T(lang, "admin.perm.full")
 	}
+	readWord := i18n.T(lang, "admin.perm.read")
 	parts := make([]string, 0, 4)
 	if p.Has(auth.PermRead) {
-		parts = append(parts, "read")
+		parts = append(parts, readWord)
 	}
 	if p.Has(auth.PermInsert) {
-		parts = append(parts, "write")
+		parts = append(parts, i18n.T(lang, "admin.perm.write"))
 	}
 	if p.Has(auth.PermUpdate) {
-		parts = append(parts, "update")
+		parts = append(parts, i18n.T(lang, "admin.perm.update"))
 	}
 	if p.Has(auth.PermDelete) {
-		parts = append(parts, "delete")
+		parts = append(parts, i18n.T(lang, "admin.perm.delete"))
 	}
-	if len(parts) == 1 && parts[0] == "read" {
-		return "read-only"
+	if len(parts) == 1 && parts[0] == readWord {
+		return i18n.T(lang, "admin.perm.readOnly")
 	}
 	return strings.Join(parts, "+")
 }
@@ -833,21 +853,22 @@ func adminMembershipDeletePath(accountID, project string) string {
 }
 
 // adminUserCountLabel renders the Users toolbar's "N accounts · M admins"
-// summary (Command Center v2, Slice 2).
-func adminUserCountLabel(users []adminUserRow) string {
+// summary (Command Center v2, Slice 2). i18n Slice 3: takes lang — called
+// from admin_ui.templ (adminUsersPage), so ctx is implicit there.
+func adminUserCountLabel(lang i18n.Lang, users []adminUserRow) string {
 	admins := 0
 	for _, u := range users {
 		if u.IsAdmin {
 			admins++
 		}
 	}
-	accountsWord := "accounts"
+	accountsWord := i18n.T(lang, "admin.users.countAccountPlural")
 	if len(users) == 1 {
-		accountsWord = "account"
+		accountsWord = i18n.T(lang, "admin.users.countAccountSingular")
 	}
-	adminsWord := "admins"
+	adminsWord := i18n.T(lang, "admin.users.countAdminPlural")
 	if admins == 1 {
-		adminsWord = "admin"
+		adminsWord = i18n.T(lang, "admin.users.countAdminSingular")
 	}
 	return fmt.Sprintf("%d %s · %d %s", len(users), accountsWord, admins, adminsWord)
 }
@@ -881,6 +902,9 @@ func rfc3339Ptr(t *time.Time) *string {
 }
 
 // tokenCountLabel renders the token-count summary shown in the Users table.
+// NOT translated (i18n Slice 3): "token"/"tokens" is the same word in both
+// supported languages (a standard tech loanword in professional Spanish), so
+// there is no copy difference to resolve through the catalog here.
 func tokenCountLabel(n int) string {
 	if n == 1 {
 		return "1 token"
@@ -888,11 +912,12 @@ func tokenCountLabel(n int) string {
 	return fmt.Sprintf("%d tokens", n)
 }
 
-// tokenLabel renders a token's label, defaulting to a placeholder for unlabeled
-// tokens.
-func tokenLabel(label string) string {
+// tokenLabel renders a token's label, defaulting to a placeholder for
+// unlabeled tokens. i18n Slice 3: takes lang — called from admin_ui.templ
+// (adminTokenList), so ctx is implicit there.
+func tokenLabel(lang i18n.Lang, label string) string {
 	if strings.TrimSpace(label) == "" {
-		return "(no label)"
+		return i18n.T(lang, "admin.users.noLabel")
 	}
 	return label
 }

@@ -327,8 +327,9 @@ func TestAdminProjectsPageShowsPauseState(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /admin/projects (paused): expected 200, got %d", rec.Code)
 	}
+	// i18n Slice 3: Spanish default ("Paused" → "Pausado").
 	body = rec.Body.String()
-	for _, want := range []string{"proj-z", "Paused", "spam", "/admin/projects/proj-z/resume"} {
+	for _, want := range []string{"proj-z", "Pausado", "spam", "/admin/projects/proj-z/resume"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Projects page (paused) missing %q, body=%q", want, body)
 		}

@@ -11,6 +11,7 @@ import (
 	"github.com/velion/omnia/internal/cloud/auth"
 	"github.com/velion/omnia/internal/cloud/cloudstore"
 	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // Operator Admin section pages for Teams, Profiles and Projects (OBL-15). These
@@ -156,7 +157,7 @@ type adminProjectRow struct {
 	MemoryCount  int    // total synced memories (SUM observations_count)
 	SourceCount  int    // distinct contributing sync clients (COUNT DISTINCT created_by)
 	AccessCount  int    // accounts with effective Read access (the "N con acceso" stat)
-	LastActivity string // humanized/relative (ui.RelativeTime); "" when unknown
+	LastActivity string // humanized/relative (ui.RelativeTimeLang); "" when unknown
 	AccessURL    string // GET /admin/projects/{project}/access (lazy reverse-access fragment)
 
 	// Command Center v2, Slice 5a: cloud sub-project linking. Populated only
@@ -242,17 +243,18 @@ func (s *CloudServer) handleAdminProfilesPage(w http.ResponseWriter, r *http.Req
 		http.Error(w, "could not list profiles", http.StatusInternalServerError)
 		return
 	}
+	lang := i18n.LangFrom(r.Context())
 	rows := make([]adminProfileRow, 0, len(profiles))
 	for _, p := range profiles {
-		rows = append(rows, toAdminProfileRow(p))
+		rows = append(rows, toAdminProfileRow(lang, p))
 	}
-	view := adminProfilesView{Props: s.adminLayoutProps("Admin · Profiles", "admin"), Profiles: rows}
+	view := adminProfilesView{Props: s.adminLayoutProps(r.Context(), "Admin · Profiles", "admin"), Profiles: rows}
 	if err := adminProfilesPage(view).Render(r.Context(), w); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 	}
 }
 
-func toAdminProfileRow(p cloudstore.Profile) adminProfileRow {
+func toAdminProfileRow(lang i18n.Lang, p cloudstore.Profile) adminProfileRow {
 	perm := auth.Permission(p.Perms)
 	id := url.PathEscape(p.ID)
 	return adminProfileRow{
@@ -262,7 +264,7 @@ func toAdminProfileRow(p cloudstore.Profile) adminProfileRow {
 		Insert:    perm.Has(auth.PermInsert),
 		Update:    perm.Has(auth.PermUpdate),
 		Delete:    perm.Has(auth.PermDelete),
-		Summary:   permSummary(p.Perms),
+		Summary:   permSummary(lang, p.Perms),
 		UpdateURL: "/admin/profiles/" + id,
 		DeleteURL: "/admin/profiles/" + id,
 	}
@@ -286,7 +288,7 @@ func (s *CloudServer) handleAdminTeamsPage(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "could not list teams", http.StatusInternalServerError)
 		return
 	}
-	view := adminTeamsView{Props: s.adminLayoutProps("Admin · Teams", "admin")}
+	view := adminTeamsView{Props: s.adminLayoutProps(r.Context(), "Admin · Teams", "admin")}
 	for _, t := range teams {
 		row := adminTeamListRow{ID: t.ID, Name: t.Name, Kind: t.Kind, DetailURL: "/admin/teams/" + url.PathEscape(t.ID)}
 		if projects, perr := ts.ListProjectsForTeam(r.Context(), t.ID); perr == nil {
@@ -356,6 +358,7 @@ func (s *CloudServer) handleAdminTeamDetailPage(w http.ResponseWriter, r *http.R
 	}
 
 	members, _ := ts.ListMembersOfTeam(r.Context(), id)
+	memberLang := i18n.LangFrom(r.Context())
 	memberRows := make([]adminTeamMemberRow, 0, len(members))
 	for _, m := range members {
 		name := usernames[m.AccountID]
@@ -367,7 +370,7 @@ func (s *CloudServer) handleAdminTeamDetailPage(w http.ResponseWriter, r *http.R
 			Username:  name,
 			ProfileID: m.ProfileID,
 			Profile:   m.ProfileName,
-			Summary:   permSummary(m.Perms),
+			Summary:   permSummary(memberLang, m.Perms),
 			UpdateURL: "/admin/teams/" + escID + "/members/" + url.PathEscape(m.AccountID),
 			RemoveURL: "/admin/teams/" + escID + "/members/" + url.PathEscape(m.AccountID),
 		})
@@ -376,7 +379,7 @@ func (s *CloudServer) handleAdminTeamDetailPage(w http.ResponseWriter, r *http.R
 	profiles, _ := ts.ListProfiles(r.Context())
 
 	view := adminTeamDetailView{
-		Props:              s.adminLayoutProps("Admin · "+team.Name, "admin"),
+		Props:              s.adminLayoutProps(r.Context(), "Admin · "+team.Name, "admin"),
 		ID:                 team.ID,
 		Name:               team.Name,
 		Kind:               team.Kind,
@@ -407,6 +410,7 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 	if !s.requireOperator(w, r) {
 		return
 	}
+	lang := i18n.LangFrom(r.Context())
 	ts, ok := s.teamsStore()
 	if !ok {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "teams admin unavailable"})
@@ -457,7 +461,7 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 		childSet[child] = struct{}{}
 	}
 
-	view := adminProjectsView{Props: s.adminLayoutProps("Admin · Projects", "admin")}
+	view := adminProjectsView{Props: s.adminLayoutProps(r.Context(), "Admin · Projects", "admin")}
 	for _, k := range known {
 		escProject := url.PathEscape(k.Project)
 		row := adminProjectRow{
@@ -486,7 +490,7 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 			row.MemoryCount = cs.MemoryCount
 			row.SourceCount = cs.SourceCount
 			if !cs.LastActivity.IsZero() {
-				row.LastActivity = ui.RelativeTime(cs.LastActivity)
+				row.LastActivity = ui.RelativeTimeLang(cs.LastActivity, lang)
 			}
 		}
 		if hasStats {
@@ -514,7 +518,7 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 		row.RollupMemoryCount = rollup.MemoryCount
 		row.RollupSourceCount = rollup.SourceCount
 		if !rollup.LastActivity.IsZero() {
-			row.RollupLastActivity = ui.RelativeTime(rollup.LastActivity)
+			row.RollupLastActivity = ui.RelativeTimeLang(rollup.LastActivity, lang)
 		}
 
 		view.Projects = append(view.Projects, row)
@@ -650,6 +654,7 @@ func (s *CloudServer) teamDerivedForAccount(ctx context.Context, ts teamsAdminSt
 		return nil, nil, nil
 	}
 	kindByProject := s.projectKindMap(ctx, ts)
+	lang := i18n.LangFrom(ctx)
 
 	agg := map[string]*adminTeamPermRow{}
 	var order []string
@@ -683,7 +688,7 @@ func (s *CloudServer) teamDerivedForAccount(ctx context.Context, ts teamsAdminSt
 			row.Sources = append(row.Sources, adminTeamPermSource{
 				Team:    t.Name,
 				Profile: mine.ProfileName,
-				Summary: permSummary(mine.Perms),
+				Summary: permSummary(lang, mine.Perms),
 			})
 		}
 	}
@@ -695,7 +700,7 @@ func (s *CloudServer) teamDerivedForAccount(ctx context.Context, ts teamsAdminSt
 		row.Insert = p.Has(auth.PermInsert)
 		row.Update = p.Has(auth.PermUpdate)
 		row.Delete = p.Has(auth.PermDelete)
-		row.Summary = permSummary(row.Perms)
+		row.Summary = permSummary(lang, row.Perms)
 		switch row.Kind {
 		case "personal":
 			personal = append(personal, *row)
@@ -735,25 +740,28 @@ func rollupLastActivityLabel(row adminProjectRow) string {
 
 // subProjectCountLabel renders the Admin Projects card's sub-project count
 // chip (Command Center v2, Slice 5a), e.g. "2 sub-projects" / "1
-// sub-project".
-func subProjectCountLabel(n int) string {
-	word := "sub-projects"
+// sub-project". i18n Slice 3: takes lang — called from admin_teams_ui.templ
+// (adminProjectCard), so ctx is implicit there.
+func subProjectCountLabel(lang i18n.Lang, n int) string {
+	word := i18n.T(lang, "admin.projects.subProjectPlural")
 	if n == 1 {
-		word = "sub-project"
+		word = i18n.T(lang, "admin.projects.subProjectSingular")
 	}
 	return fmt.Sprintf("%d %s", n, word)
 }
 
 // adminProjectsCountLabel renders the Projects card header count, e.g.
 // "9 projects · 132 memories" — mirrors the mockup's "9 · 132 memorias".
-func adminProjectsCountLabel(rows []adminProjectRow) string {
+// i18n Slice 3: takes lang — called from admin_teams_ui.templ
+// (adminProjectsPage), so ctx is implicit there.
+func adminProjectsCountLabel(lang i18n.Lang, rows []adminProjectRow) string {
 	total := 0
 	for _, r := range rows {
 		total += r.MemoryCount
 	}
-	word := "projects"
+	word := i18n.T(lang, "admin.projects.countPlural")
 	if len(rows) == 1 {
-		word = "project"
+		word = i18n.T(lang, "admin.projects.countSingular")
 	}
-	return fmt.Sprintf("%d %s · %d memories", len(rows), word, total)
+	return fmt.Sprintf("%d %s · %d %s", len(rows), word, total, i18n.T(lang, "admin.projects.memories"))
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/velion/omnia/internal/cloud/clouddash"
 	"github.com/velion/omnia/internal/cloud/cloudstore"
 	"github.com/velion/omnia/internal/dashboard"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // The cloud dashboard is the SAME unified dashboard.Server the local dashboard
@@ -154,13 +155,20 @@ func (s *CloudServer) dashboardGate(dashHandler http.Handler) http.Handler {
 // Ported from the deleted internal/cloud/dashboard login handlers, adapted to the
 // root-mounted dashboard.
 func (s *CloudServer) handleDashboardLogin(w http.ResponseWriter, r *http.Request) {
+	// i18n Slice 3: resolved once via ctx (populated by the top-level
+	// i18n.Middleware wrap in cloudserver.go's Handler()) and threaded into
+	// every renderDashboardLoginPage call below so the login page — public,
+	// pre-authentication, so it never reaches the shared dashboard's OWN
+	// i18n.Middleware wrap via dashHandler — still honors the lang cookie and
+	// the header ES|EN toggle.
+	lang := i18n.LangFrom(r.Context())
 	if r.Method == http.MethodGet {
 		next := sanitizeDashboardNext(r.URL.Query().Get("next"))
 		if s.authorizeDashboardRequest(r) == nil {
 			http.Redirect(w, r, dashboardPostLoginPath(next), http.StatusSeeOther)
 			return
 		}
-		renderDashboardLoginPage(w, http.StatusOK, "", next)
+		renderDashboardLoginPage(w, http.StatusOK, lang, "", next)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -207,16 +215,16 @@ func (s *CloudServer) handleDashboardLogin(w http.ResponseWriter, r *http.Reques
 	case username != "" && password != "" && s.account != nil:
 		accountToken, err := s.dashboardLoginWithCredentials(username, password)
 		if err != nil {
-			renderDashboardLoginPage(w, http.StatusOK, "invalid username or password", next)
+			renderDashboardLoginPage(w, http.StatusOK, lang, i18n.T(lang, "auth.login.errorInvalidCredentials"), next)
 			return
 		}
 		token = accountToken
 	case token == "":
-		renderDashboardLoginPage(w, http.StatusOK, "enter your account credentials or an operator token", next)
+		renderDashboardLoginPage(w, http.StatusOK, lang, i18n.T(lang, "auth.login.errorMissingCredentials"), next)
 		return
 	default:
 		if err := s.validateDashboardLoginToken(token); err != nil {
-			renderDashboardLoginPage(w, http.StatusOK, "invalid token", next)
+			renderDashboardLoginPage(w, http.StatusOK, lang, i18n.T(lang, "auth.login.errorInvalidToken"), next)
 			return
 		}
 	}
@@ -358,7 +366,12 @@ func dashboardPostLoginPath(next string) string {
 // design-system stylesheet. It preserves the field names and copy the previous
 // templ login page exposed (account credentials + operator token), so existing
 // auth flows are unchanged.
-func renderDashboardLoginPage(w http.ResponseWriter, status int, errorMsg, next string) {
+//
+// i18n Slice 3: takes lang (resolved by handleDashboardLogin from ctx) since
+// this function builds raw HTML directly with fmt/html.EscapeString rather
+// than through a templ component — there is no implicit ctx here, so every
+// caller must resolve and pass lang explicitly.
+func renderDashboardLoginPage(w http.ResponseWriter, status int, lang i18n.Lang, errorMsg, next string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 
@@ -372,11 +385,11 @@ func renderDashboardLoginPage(w http.ResponseWriter, status int, errorMsg, next 
 	}
 
 	fmt.Fprintf(w, `<!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="%s" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sign In — Omnia Cloud</title>
+<title>%s — Omnia Cloud</title>
 <link rel="stylesheet" href="/static/pico.min.css">
 <link rel="stylesheet" href="/static/omnia.css">
 </head>
@@ -385,39 +398,58 @@ func renderDashboardLoginPage(w http.ResponseWriter, status int, errorMsg, next 
 <main class="login-shell">
 <section class="login-sidepanel">
 <div style="margin-bottom:18px;"><svg width="48" height="48" viewBox="0 0 36 36" fill="none" aria-label="Omnia" style="flex-shrink:0;"><defs><radialGradient id="omnia-core" cx="50%%" cy="50%%" r="50%%"><stop offset="0%%" stop-color="#22d3ee"></stop><stop offset="100%%" stop-color="#0e9ab5"></stop></radialGradient></defs><circle cx="18" cy="18" r="16.5" stroke="rgba(34,211,238,0.22)" stroke-width="0.75"></circle><circle cx="18" cy="18" r="11.5" stroke="rgba(34,211,238,0.40)" stroke-width="0.75" stroke-dasharray="3 2.5"></circle><circle cx="18" cy="18" r="5" fill="url(#omnia-core)"></circle><circle cx="18" cy="18" r="2.2" fill="#080a10" opacity="0.5"></circle><line x1="18" y1="1.5" x2="18" y2="6.5" stroke="#22d3ee" stroke-width="1.4" stroke-linecap="round"></line><line x1="34.5" y1="18" x2="29.5" y2="18" stroke="#22d3ee" stroke-width="1.4" stroke-linecap="round"></line><line x1="18" y1="34.5" x2="18" y2="29.5" stroke="#22d3ee" stroke-width="1.4" stroke-linecap="round"></line><line x1="1.5" y1="18" x2="6.5" y2="18" stroke="#22d3ee" stroke-width="1.4" stroke-linecap="round"></line></svg></div>
-<p class="section-kicker">CLOUD ACTIVE</p>
+<p class="section-kicker">%s</p>
 <h1>Omnia Cloud</h1>
-<p class="login-lead">Your shared memory, scoped to your account. Sign in to see the projects you belong to — and nothing else.</p>
+<p class="login-lead">%s</p>
 <div class="hero-console login-console">
-<p><span class="console-key">identity</span> per-account access</p>
-<p><span class="console-key">scope</span> projects by membership</p>
-<p><span class="console-key">model</span> local-first / cloud policy aware</p>
+<p><span class="console-key">%s</span> %s</p>
+<p><span class="console-key">%s</span> %s</p>
+<p><span class="console-key">%s</span> %s</p>
 </div>
 </section>
 <section class="login-container">
-<p class="section-kicker">SIGN IN</p>
-<h2>Sign In</h2>
-<p class="login-copy">Use your account credentials to open a signed dashboard session.</p>
+<p class="section-kicker">%s</p>
+<h2>%s</h2>
+<p class="login-copy">%s</p>
 %s
 <form method="post" action="%s" class="login-form">
 %s
-<label>Username <input type="text" name="username" placeholder="username" autocomplete="username"></label>
-<label>Password <input type="password" name="password" placeholder="password" autocomplete="current-password"></label>
-<button type="submit" class="shell-button">Sign In</button>
+<label>%s <input type="text" name="username" placeholder="%s" autocomplete="username"></label>
+<label>%s <input type="password" name="password" placeholder="%s" autocomplete="current-password"></label>
+<button type="submit" class="shell-button">%s</button>
 </form>
 <details class="login-operator">
-<summary>Sign in as server operator</summary>
+<summary>%s</summary>
 <form method="post" action="%s" class="login-form">
 %s
-<label>Operator token <input type="password" name="token" placeholder="cloud operator token" autocomplete="off"></label>
-<button type="submit" class="shell-button shell-button-ghost">Sign In as Operator</button>
+<label>%s <input type="password" name="token" placeholder="%s" autocomplete="off"></label>
+<button type="submit" class="shell-button shell-button-ghost">%s</button>
 </form>
 </details>
 </section>
 </main>
 </div>
 </body>
-</html>`, errorBlock, dashboardLoginPath, nextField, dashboardLoginPath, nextField)
+</html>`,
+		string(lang),
+		i18n.T(lang, "auth.login.title"),
+		i18n.T(lang, "auth.login.kickerActive"),
+		i18n.T(lang, "auth.login.lead"),
+		i18n.T(lang, "auth.login.consoleIdentityKey"), i18n.T(lang, "auth.login.consoleIdentityValue"),
+		i18n.T(lang, "auth.login.consoleScopeKey"), i18n.T(lang, "auth.login.consoleScopeValue"),
+		i18n.T(lang, "auth.login.consoleModelKey"), i18n.T(lang, "auth.login.consoleModelValue"),
+		i18n.T(lang, "auth.login.kickerSignIn"),
+		i18n.T(lang, "auth.login.heading"),
+		i18n.T(lang, "auth.login.copy"),
+		errorBlock, dashboardLoginPath, nextField,
+		i18n.T(lang, "auth.login.usernameLabel"), i18n.T(lang, "auth.login.usernamePlaceholder"),
+		i18n.T(lang, "auth.login.passwordLabel"), i18n.T(lang, "auth.login.passwordPlaceholder"),
+		i18n.T(lang, "auth.login.submit"),
+		i18n.T(lang, "auth.login.operatorSummary"),
+		dashboardLoginPath, nextField,
+		i18n.T(lang, "auth.login.operatorTokenLabel"), i18n.T(lang, "auth.login.operatorTokenPlaceholder"),
+		i18n.T(lang, "auth.login.operatorSubmit"),
+	)
 }
 
 // emptyCloudStore is a no-op clouddash.CloudStore for deployments whose backing
