@@ -2719,6 +2719,36 @@
 	}
 }
 
+/* Command Center v2, Slice 5b: parent/child grouping. A group spans every
+   grid column (grid-column: 1 / -1) so its children can render indented
+   directly beneath the parent card, instead of scattered at their own
+   alphabetical position in the flat .projgrid. */
+.projgroup {
+	grid-column: 1 / -1;
+}
+
+.projgroup-children {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 12px;
+	margin-top: 12px;
+	margin-left: 24px;
+	padding-left: 16px;
+	border-left: 2px solid var(--border-accent);
+}
+
+@media (min-width: 720px) {
+	.projgroup-children {
+		grid-template-columns: 1fr 1fr;
+	}
+}
+
+@media (min-width: 1040px) {
+	.projgroup-children {
+		grid-template-columns: 1fr 1fr 1fr;
+	}
+}
+
 .projcard {
 	background: var(--surface);
 	border: 1px solid var(--border);

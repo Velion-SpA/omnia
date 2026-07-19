@@ -170,6 +170,28 @@ type adminProjectRow struct {
 	LinkParentURL    string   // POST /admin/projects/{project}/parent (form field "parent")
 	ClearParentURL   string   // POST /admin/projects/{project}/parent/clear
 	ParentCandidates []string // valid parent choices for the "Link to parent project…" select, excluding self
+
+	// Command Center v2, Slice 5b: parent roll-up. RollupMemoryCount/
+	// RollupSourceCount/RollupLastActivity are what the card actually
+	// DISPLAYS — for a project with no linked children they equal the own
+	// MemoryCount/SourceCount/LastActivity above unchanged; for a parent they
+	// are own + the sum/max of its DIRECT children's own stats (see
+	// projectRollupStats). Display-only aggregation — never mutates the
+	// underlying data, and MemoryCount/SourceCount above stay the project's
+	// OWN figures so the page header total (adminProjectsCountLabel) is never
+	// double-counted by a parent's rolled-up display value.
+	RollupMemoryCount  int
+	RollupSourceCount  int
+	RollupLastActivity string
+}
+
+// adminProjectGroupEntry is one top-level entry in the Admin Projects grid
+// (Command Center v2, Slice 5b): either a standalone project (Children is
+// empty) or a parent together with its direct linked children, rendered
+// nested beneath it — see buildProjectGroups.
+type adminProjectGroupEntry struct {
+	Row      adminProjectRow
+	Children []adminProjectRow
 }
 
 // adminProjectSuggestionRow is one entry in the Admin Projects page's
@@ -194,6 +216,12 @@ type adminProjectsView struct {
 	Props       ui.LayoutProps
 	Projects    []adminProjectRow
 	Suggestions []adminProjectSuggestionRow // Slice 5a: unlinked-but-look-related projects
+	// Groups is what the template actually renders (Command Center v2, Slice
+	// 5b): Projects grouped so a parent's direct children render nested
+	// beneath it instead of scattered at their own alphabetical position.
+	// Projects itself is kept flat (used by adminProjectsCountLabel's header
+	// total, which must sum each project's OWN count exactly once).
+	Groups []adminProjectGroupEntry
 }
 
 // ─── Profiles page ───────────────────────────────────────────────────────────
@@ -403,14 +431,19 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 	// Slice 5a: parent/child links + the reverse sub-count + the name-prefix
 	// suggestion engine. All three degrade to zero values when the store
 	// doesn't support linking — see projectLinksStore's doc comment.
-	var parents map[string]string // child -> parent
-	subCounts := map[string]int{} // parent -> count of linked children
+	var parents map[string]string       // child -> parent
+	subCounts := map[string]int{}       // parent -> count of linked children
+	childrenOf := map[string][]string{} // parent -> sorted []child (Slice 5b: roll-up + grouping)
 	var suggestions map[string]string
 	if hasLinks {
 		if m, lerr := pls.ListProjectParents(r.Context()); lerr == nil {
 			parents = m
-			for _, parent := range parents {
+			for child, parent := range parents {
 				subCounts[parent]++
+				childrenOf[parent] = append(childrenOf[parent], child)
+			}
+			for parent := range childrenOf {
+				sort.Strings(childrenOf[parent])
 			}
 			names := make([]string, 0, len(known))
 			for _, k := range known {
@@ -448,7 +481,8 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 				}
 			}
 		}
-		if cs, csok := chunkStats[k.Project]; csok {
+		cs, csok := chunkStats[k.Project]
+		if csok {
 			row.MemoryCount = cs.MemoryCount
 			row.SourceCount = cs.SourceCount
 			if !cs.LastActivity.IsZero() {
@@ -465,14 +499,87 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 			row.SubProjectCount = subCounts[k.Project]
 			row.ParentCandidates = validParentCandidates(known, childSet, k.Project)
 		}
+
+		// Slice 5b: roll-up. Composes the SAME chunkStats map already fetched
+		// above with the SAME childrenOf map built from ListProjectParents —
+		// no new store query. A project with no children gets Rollup*==own
+		// unchanged (projectRollupStats(cs, nil) is a no-op).
+		var childStats []cloudstore.ProjectChunkStats
+		for _, child := range childrenOf[k.Project] {
+			if s, ok := chunkStats[child]; ok {
+				childStats = append(childStats, s)
+			}
+		}
+		rollup := projectRollupStats(cs, childStats)
+		row.RollupMemoryCount = rollup.MemoryCount
+		row.RollupSourceCount = rollup.SourceCount
+		if !rollup.LastActivity.IsZero() {
+			row.RollupLastActivity = ui.RelativeTime(rollup.LastActivity)
+		}
+
 		view.Projects = append(view.Projects, row)
 	}
 	if hasLinks {
 		view.Suggestions = adminProjectSuggestionRows(suggestions)
 	}
+	view.Groups = buildProjectGroups(view.Projects, childrenOf)
 	if err := adminProjectsPage(view).Render(r.Context(), w); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 	}
+}
+
+// projectRollupStats computes the ROLLED-UP (own + direct children) stats a
+// parent's Admin Projects card displays (Command Center v2, Slice 5b): only
+// ONE level of children is ever summed — the underlying 2-level hierarchy
+// model (cloudstore.SetProjectParent) guarantees a child is never itself a
+// parent, so there is nothing to recurse into. A project with no children
+// (children is nil/empty) gets back its own stats completely unchanged.
+// Memory/source counts are a plain sum (no dedup — a synced chunk always
+// belongs to exactly one project); LastActivity is the max across own and
+// every child.
+func projectRollupStats(own cloudstore.ProjectChunkStats, children []cloudstore.ProjectChunkStats) cloudstore.ProjectChunkStats {
+	out := own
+	for _, c := range children {
+		out.MemoryCount += c.MemoryCount
+		out.SourceCount += c.SourceCount
+		if c.LastActivity.After(out.LastActivity) {
+			out.LastActivity = c.LastActivity
+		}
+	}
+	return out
+}
+
+// buildProjectGroups arranges rows (already alphabetically ordered by
+// handleAdminProjectsPage's KnownProjects call) into the top-level entries
+// the Projects grid actually renders (Command Center v2, Slice 5b): a row
+// whose ParentProject is itself a KNOWN row is nested under that parent's
+// entry instead of appearing as its own top-level entry — visually grouping
+// children directly beneath their parent rather than scattered at their own
+// alphabetical position in the flat grid. A row whose recorded parent is NOT
+// among rows (e.g. the parent has no cloud_project_meta of its own — an edge
+// case the 2-level model doesn't otherwise prevent) still renders standalone
+// rather than being silently dropped.
+func buildProjectGroups(rows []adminProjectRow, childrenOf map[string][]string) []adminProjectGroupEntry {
+	byProject := make(map[string]adminProjectRow, len(rows))
+	for _, row := range rows {
+		byProject[row.Project] = row
+	}
+	groups := make([]adminProjectGroupEntry, 0, len(rows))
+	for _, row := range rows {
+		if row.ParentProject != "" {
+			if _, parentKnown := byProject[row.ParentProject]; parentKnown {
+				continue // rendered nested under its parent's entry below
+			}
+		}
+		entry := adminProjectGroupEntry{Row: row}
+		for _, child := range childrenOf[row.Project] {
+			if childRow, ok := byProject[child]; ok {
+				entry.Children = append(entry.Children, childRow)
+			}
+		}
+		groups = append(groups, entry)
+	}
+	return groups
 }
 
 // validParentCandidates lists the known projects that are valid parent
@@ -614,15 +721,16 @@ func projectCardTitle(row adminProjectRow) string {
 	return row.Project
 }
 
-// projectLastActivityLabel renders the card's "Last" stat, falling back to an
-// em dash when the store has no stats capability or the project has no
-// synced chunks yet (LastActivity is only ever set when the store returned a
-// non-zero MAX(created_at) — see handleAdminProjectsPage).
-func projectLastActivityLabel(row adminProjectRow) string {
-	if row.LastActivity == "" {
+// rollupLastActivityLabel renders the card's "Last" stat from the ROLLED-UP
+// value (Command Center v2, Slice 5b) — own last activity for a project with
+// no children, or the max across own+children for a parent. Falls back to an
+// em dash when there is no activity at all (own or rolled-up), exactly like
+// the pre-Slice-5b card did for the (now display-superseded) own LastActivity.
+func rollupLastActivityLabel(row adminProjectRow) string {
+	if row.RollupLastActivity == "" {
 		return "—"
 	}
-	return row.LastActivity
+	return row.RollupLastActivity
 }
 
 // subProjectCountLabel renders the Admin Projects card's sub-project count

@@ -278,8 +278,12 @@ templ adminProjectsPage(view adminProjectsView) {
 				<p style="color: var(--text-dim); font-size: 13px; margin: 0;">No projects known yet.</p>
 			} else {
 				<div class="projgrid">
-					for _, row := range view.Projects {
-						@adminProjectCard(row)
+					for _, entry := range view.Groups {
+						if len(entry.Children) > 0 {
+							@adminProjectGroup(entry)
+						} else {
+							@adminProjectCard(entry.Row)
+						}
 					}
 				</div>
 			}
@@ -315,6 +319,24 @@ templ adminProjectSuggestions(rows []adminProjectSuggestionRow) {
 	</div>
 }
 
+// adminProjectGroup renders a parent project card together with its direct
+// linked children (Command Center v2, Slice 5b): the group spans the full
+// grid width so children can render indented directly beneath their parent,
+// instead of scattered at their own alphabetical position in the flat grid.
+// The parent card itself already shows ROLLED-UP stats — own + direct
+// children — see handleAdminProjectsPage/projectRollupStats; each child
+// card still shows its own individual (unrolled) stats, unchanged.
+templ adminProjectGroup(entry adminProjectGroupEntry) {
+	<div class="projgroup">
+		@adminProjectCard(entry.Row)
+		<div class="projgroup-children">
+			for _, child := range entry.Children {
+				@adminProjectCard(child)
+			}
+		</div>
+	</div>
+}
+
 templ adminProjectCard(row adminProjectRow) {
 	<div class="projcard">
 		<div class="ph">
@@ -340,15 +362,15 @@ templ adminProjectCard(row adminProjectRow) {
 			</div>
 		</div>
 		<div class="pstats">
-			@adminProjectStat(strconv.Itoa(row.MemoryCount), "Memories")
+			@adminProjectStat(strconv.Itoa(row.RollupMemoryCount), "Memories")
 			<div class="pstat">
 				<button type="button" class="pstat-access" hx-get={ row.AccessURL } hx-target={ "#proj-access-" + row.Slug } hx-swap="innerHTML">
 					<div class="v">{ strconv.Itoa(row.AccessCount) }</div>
 				</button>
 				<div class="l">With access</div>
 			</div>
-			@adminProjectStat(strconv.Itoa(row.SourceCount), "Sources")
-			@adminProjectStat(projectLastActivityLabel(row), "Last")
+			@adminProjectStat(strconv.Itoa(row.RollupSourceCount), "Sources")
+			@adminProjectStat(rollupLastActivityLabel(row), "Last")
 		</div>
 		<div id={ "proj-access-" + row.Slug }></div>
 		<div class="pfoot">

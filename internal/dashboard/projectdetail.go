@@ -17,6 +17,14 @@ import (
 // second copy of Browse.
 const maxProjectDetailMemories = 12
 
+// ProjectDetailChildLink is one entry in the project-detail page's
+// "Sub-projects" section (Command Center v2, Slice 5b): a direct child
+// project name plus its own precomputed detail-page URL.
+type ProjectDetailChildLink struct {
+	Name string
+	URL  string
+}
+
 // ProjectDetailData bundles everything the project-detail landing page needs
 // to render: project identity, aggregate stats, and a capped newest-first
 // slice of the project's own memories for the shared card grid.
@@ -26,7 +34,9 @@ const maxProjectDetailMemories = 12
 //     Slice 4b Admin Projects page (internal/cloud/cloudserver). Plumbing
 //     cloud RBAC into the shared internal/dashboard package would break the
 //     local (no-accounts) dashboard that also mounts this same Server.
-//   - sub-project linking/rollup (Slice 5).
+//   - sub-project MERGE/rollup of the memory grid itself (Slice 5b scopes
+//     this page to identity only: a children list + a parent breadcrumb —
+//     see Children/ParentProject below).
 type ProjectDetailData struct {
 	// Name is the canonicalized project name (lowercase+trim, alias-
 	// resolved), matching the display convention Overview/Browse already
@@ -57,6 +67,18 @@ type ProjectDetailData struct {
 	Memories []ObsView
 	// BrowseURL is the "View all in Browse" link, scoped to this project.
 	BrowseURL string
+	// Children lists this project's direct sub-projects (Command Center v2,
+	// Slice 5b). Populated only when the Server has a SubProjectResolver AND
+	// this project has at least one linked child; nil otherwise (local
+	// dashboard, or a project with no children) — the template then renders
+	// no "Sub-projects" section at all.
+	Children []ProjectDetailChildLink
+	// ParentProject is this project's own parent (Command Center v2, Slice
+	// 5b), "" when unlinked or when no SubProjectResolver is configured.
+	// When set, the page renders a "← {ParentProject}" breadcrumb linking to
+	// ParentProjectURL.
+	ParentProject    string
+	ParentProjectURL string
 }
 
 // handleProjectDetail renders the project-detail landing page (Command
@@ -107,6 +129,24 @@ func (s *Server) buildProjectDetailData(ctx context.Context, rawName string) Pro
 	name = canonicalize(name)
 	data.Name = name
 	data.BrowseURL = buildBrowseURL(BrowseParams{Project: name})
+
+	// Command Center v2, Slice 5b: sub-project identity (children list +
+	// parent breadcrumb). Only populated when a resolver is wired (cloud
+	// dashboard only, see WithSubProjectResolver) — the local dashboard's
+	// s.subProjects stays nil and this whole block is a no-op, exactly as
+	// before this slice.
+	if s.subProjects != nil {
+		if children := s.subProjects.ChildrenOf(ctx, name); len(children) > 0 {
+			data.Children = make([]ProjectDetailChildLink, 0, len(children))
+			for _, child := range children {
+				data.Children = append(data.Children, ProjectDetailChildLink{Name: child, URL: projectDetailURL(child)})
+			}
+		}
+		if parent := s.subProjects.ParentOf(ctx, name); parent != "" {
+			data.ParentProject = parent
+			data.ParentProjectURL = projectDetailURL(parent)
+		}
+	}
 
 	var views []ObsView
 	if s.db != nil {

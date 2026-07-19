@@ -75,20 +75,25 @@ type Server struct {
 	mut     MutationWriter   // nil → dashboard is read-only
 	logger  *slog.Logger
 	groups  *GroupIndex
+
+	// subProjects is the OPTIONAL sub-project resolver (Command Center v2,
+	// Slice 5b) — nil unless a caller supplies WithSubProjectResolver (only
+	// the cloud dashboard does). See SubProjectResolver's doc comment.
+	subProjects SubProjectResolver
 }
 
 // NewServer creates a new dashboard Server backed by the LOCAL Engram stack.
 // It attempts to open the Engram SQLite DB for structural queries and the
 // optional embeddings store; failures are logged and the dashboard continues with
 // reduced capabilities (HTTP/FTS, no graph). cmd/omnia uses this unchanged.
-func NewServer(cfg Config, logger *slog.Logger) *Server {
-	return NewServerWithDataSource(cfg, newLocalDataSource(cfg, logger), logger)
+func NewServer(cfg Config, logger *slog.Logger, opts ...Option) *Server {
+	return NewServerWithDataSource(cfg, newLocalDataSource(cfg, logger), logger, opts...)
 }
 
 // NewServerWithDataSource builds a Server over an arbitrary DataSource. The cloud
 // wires its replicated-store DataSource here; everything else (routing, handlers,
 // templ pages) is identical to the local dashboard.
-func NewServerWithDataSource(cfg Config, src DataSource, logger *slog.Logger) *Server {
+func NewServerWithDataSource(cfg Config, src DataSource, logger *slog.Logger, opts ...Option) *Server {
 	s := &Server{
 		cfg:    cfg,
 		src:    src,
@@ -104,6 +109,9 @@ func NewServerWithDataSource(cfg Config, src DataSource, logger *slog.Logger) *S
 	}
 	if mw, ok := src.Mutations(); ok {
 		s.mut = mw
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	return s
 }
