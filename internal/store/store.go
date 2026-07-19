@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/velion/omnia/internal/datadir"
+	"github.com/velion/omnia/internal/projectname"
 	"github.com/velion/omnia/internal/timeutil"
 	sqlite "modernc.org/sqlite"
 )
@@ -6680,19 +6681,16 @@ func NormalizeScope(scope string) string {
 // Returns the normalized name and a warning message if the name was changed
 // (empty string if no change was needed).
 // Exported so MCP and CLI handlers can surface the warning to users.
+//
+// This is the canonical implementation; the actual normalization rule
+// lives in the leaf package internal/projectname so that internal/config
+// and internal/project can delegate to the exact same rule instead of
+// reimplementing (and diverging from) it.
 func NormalizeProject(project string) (normalized string, warning string) {
 	if project == "" {
 		return "", ""
 	}
-	n := strings.TrimSpace(strings.ToLower(project))
-	// Collapse multiple consecutive hyphens
-	for strings.Contains(n, "--") {
-		n = strings.ReplaceAll(n, "--", "-")
-	}
-	// Collapse multiple consecutive underscores
-	for strings.Contains(n, "__") {
-		n = strings.ReplaceAll(n, "__", "_")
-	}
+	n := projectname.Normalize(project)
 	if n == project {
 		return n, ""
 	}
