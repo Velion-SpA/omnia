@@ -181,6 +181,12 @@ func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *Clo
 		if resolver, ok := store.(effectivePermsResolver); ok {
 			ra.resolver = resolver
 		}
+		// C1: wire the disabled-account gate when the store provides it, so a
+		// disabled account is denied on the sync data plane BEFORE perms resolve
+		// (mirrors the managed-token UserDisabled runtime rejection).
+		if dc, ok := store.(accountDisabledChecker); ok {
+			ra.disabled = dc
+		}
 		s.accountProjectAuth = ra
 	}
 	// Detect device scope store for Phase 4 enforcement.
@@ -767,9 +773,9 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	// Uses a structural interface assertion so the ChunkStore interface is NOT extended.
 	// Satisfies REQ-109 / Design Decision 5.
 	if storeForControls, ok := s.store.(interface {
-		IsProjectSyncEnabled(project string) (bool, error)
+		IsProjectSyncEnabled(ctx context.Context, project string) (bool, error)
 	}); ok {
-		enabled, err := storeForControls.IsProjectSyncEnabled(project)
+		enabled, err := storeForControls.IsProjectSyncEnabled(r.Context(), project)
 		if err != nil {
 			writeActionableError(w, http.StatusInternalServerError,
 				constants.UpgradeErrorClassBlocked,
@@ -884,7 +890,7 @@ func projectFromRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
 func (s *CloudServer) authorizeProjectOp(w http.ResponseWriter, r *http.Request, project string, required auth.Permission) bool {
 	if s.accountProjectAuth != nil {
 		claims, _ := auth.AccountFromContext(r.Context())
-		err := s.accountProjectAuth.AuthorizeAccountProject(claims, project, required)
+		err := s.accountProjectAuth.AuthorizeAccountProject(r.Context(), claims, project, required)
 		if err != nil {
 			if errors.Is(err, auth.ErrPermissionDenied) {
 				writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: project access denied")

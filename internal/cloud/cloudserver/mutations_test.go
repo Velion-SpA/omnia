@@ -45,7 +45,7 @@ func newFakeMutationStore() *fakeMutationStore {
 	}
 }
 
-func (s *fakeMutationStore) IsProjectSyncEnabled(project string) (bool, error) {
+func (s *fakeMutationStore) IsProjectSyncEnabled(_ context.Context, project string) (bool, error) {
 	if enabled, ok := s.syncEnabledMap[project]; ok {
 		return enabled, nil
 	}

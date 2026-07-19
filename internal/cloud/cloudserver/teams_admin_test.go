@@ -401,7 +401,7 @@ func TestRBACAuthorizerUsesEffectivePermsResolver(t *testing.T) {
 	ra := &rbacAuthorizer{store: ms, resolver: res}
 	claims := &cloudauth.AccountClaims{AccountID: "acct"}
 
-	if err := ra.AuthorizeAccountProject(claims, "proj", cloudauth.PermInsert); err != nil {
+	if err := ra.AuthorizeAccountProject(context.Background(), claims, "proj", cloudauth.PermInsert); err != nil {
 		t.Fatalf("resolver grants insert but authorize denied: %v", err)
 	}
 	if !res.called {
@@ -411,7 +411,7 @@ func TestRBACAuthorizerUsesEffectivePermsResolver(t *testing.T) {
 	// Resolver denies (0) → deny even though a flat membership grants read.
 	res2 := &stubResolver{perms: 0}
 	ra2 := &rbacAuthorizer{store: ms, resolver: res2}
-	if err := ra2.AuthorizeAccountProject(claims, "proj", cloudauth.PermRead); err == nil {
+	if err := ra2.AuthorizeAccountProject(context.Background(), claims, "proj", cloudauth.PermRead); err == nil {
 		t.Fatal("resolver denies but authorize allowed — deny-by-default broken")
 	}
 }
@@ -425,13 +425,13 @@ func TestRBACAuthorizerFallsBackToMembership(t *testing.T) {
 	ra := &rbacAuthorizer{store: ms} // resolver nil
 	claims := &cloudauth.AccountClaims{AccountID: "acct"}
 
-	if err := ra.AuthorizeAccountProject(claims, "proj", cloudauth.PermRead); err != nil {
+	if err := ra.AuthorizeAccountProject(context.Background(), claims, "proj", cloudauth.PermRead); err != nil {
 		t.Fatalf("membership grants read but denied: %v", err)
 	}
-	if err := ra.AuthorizeAccountProject(claims, "proj", cloudauth.PermInsert); err == nil {
+	if err := ra.AuthorizeAccountProject(context.Background(), claims, "proj", cloudauth.PermInsert); err == nil {
 		t.Fatal("membership is read-only but insert allowed")
 	}
-	if err := ra.AuthorizeAccountProject(claims, "other", cloudauth.PermRead); err == nil {
+	if err := ra.AuthorizeAccountProject(context.Background(), claims, "other", cloudauth.PermRead); err == nil {
 		t.Fatal("no membership on 'other' but read allowed — deny-by-default broken")
 	}
 }

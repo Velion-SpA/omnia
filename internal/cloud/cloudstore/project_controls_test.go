@@ -38,7 +38,7 @@ func TestProjectSyncControlPersists(t *testing.T) {
 	const project = "test-project-controls"
 
 	// Default: enabled (no row).
-	enabled, err := cs.IsProjectSyncEnabled(project)
+	enabled, err := cs.IsProjectSyncEnabled(context.Background(), project)
 	if err != nil {
 		t.Fatalf("IsProjectSyncEnabled: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestProjectSyncControlPersists(t *testing.T) {
 		t.Fatalf("SetProjectSyncEnabled(false): %v", err)
 	}
 
-	enabled, err = cs.IsProjectSyncEnabled(project)
+	enabled, err = cs.IsProjectSyncEnabled(context.Background(), project)
 	if err != nil {
 		t.Fatalf("IsProjectSyncEnabled after disable: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestProjectSyncControlPersists(t *testing.T) {
 	if err := cs.SetProjectSyncEnabled(project, true, "operator", ""); err != nil {
 		t.Fatalf("SetProjectSyncEnabled(true): %v", err)
 	}
-	enabled, err = cs.IsProjectSyncEnabled(project)
+	enabled, err = cs.IsProjectSyncEnabled(context.Background(), project)
 	if err != nil {
 		t.Fatalf("IsProjectSyncEnabled after re-enable: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestProjectSyncControlPersists(t *testing.T) {
 func TestProjectSyncControlUnknownProjectDefaultsEnabled(t *testing.T) {
 	cs := openTestCloudStore(t)
 
-	enabled, err := cs.IsProjectSyncEnabled("no-such-project-xyz-" + t.Name())
+	enabled, err := cs.IsProjectSyncEnabled(context.Background(), "no-such-project-xyz-"+t.Name())
 	if err != nil {
 		t.Fatalf("IsProjectSyncEnabled: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestIsProjectSyncEnabledReturnsFalseOnDBError(t *testing.T) {
 	}
 	cs := &CloudStore{db: db}
 
-	enabled, err := cs.IsProjectSyncEnabled("some-project")
+	enabled, err := cs.IsProjectSyncEnabled(context.Background(), "some-project")
 	if err == nil {
 		t.Fatal("expected error from DB failure, got nil")
 	}

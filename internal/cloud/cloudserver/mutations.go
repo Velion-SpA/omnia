@@ -44,7 +44,7 @@ type StoredMutation = cloudstore.StoredMutation
 type MutationStore interface {
 	InsertMutationBatch(ctx context.Context, batch []cloudstore.MutationEntry) ([]int64, error)
 	ListMutationsSince(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string) ([]cloudstore.StoredMutation, bool, int64, error)
-	IsProjectSyncEnabled(project string) (bool, error)
+	IsProjectSyncEnabled(ctx context.Context, project string) (bool, error)
 }
 
 // Compile-time assertion: *cloudstore.CloudStore must satisfy MutationStore.
@@ -182,7 +182,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	// Check sync pause per project (REQ-203 + BW9: use writeActionableError for 409).
 	for _, entry := range req.Entries {
 		proj := strings.TrimSpace(entry.Project)
-		enabled, err := ms.IsProjectSyncEnabled(proj)
+		enabled, err := ms.IsProjectSyncEnabled(r.Context(), proj)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("check project sync: %v", err), http.StatusInternalServerError)
 			return
@@ -304,17 +304,31 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 			// *rbacAuthorizer — never leave allowedProjects nil ("allow all").
 			allowedProjects = []string{}
 			if ms, ok := s.accountProjectAuth.(*rbacAuthorizer); ok {
-				memberships, err := ms.store.ListMembershipsForAccount(claims.AccountID)
-				if err != nil {
-					http.Error(w, fmt.Sprintf("list memberships: %v", err), http.StatusInternalServerError)
-					return
+				// C1: a disabled account pulls nothing. This path does NOT go through
+				// authorizeProjectOp/AuthorizeAccountProject, so the disabled gate must
+				// be applied here too (deny-by-default: allowedProjects stays empty).
+				accountDisabled := false
+				if ms.disabled != nil {
+					disabled, err := ms.disabled.IsAccountDisabled(r.Context(), claims.AccountID)
+					if err != nil {
+						http.Error(w, fmt.Sprintf("check account status: %v", err), http.StatusInternalServerError)
+						return
+					}
+					accountDisabled = disabled
 				}
-				allowedProjects = enrolledProjectsFromMemberships(memberships)
-				// Phase 4: a device-bound token additionally narrows the
-				// readable set to the device's scope, so e.g. a personal
-				// laptop never pulls work projects via mutation pull.
-				if claims.DeviceID != "" && s.deviceStore != nil {
-					allowedProjects = s.intersectDeviceScope(claims.DeviceID, allowedProjects)
+				if !accountDisabled {
+					memberships, err := ms.store.ListMembershipsForAccount(claims.AccountID)
+					if err != nil {
+						http.Error(w, fmt.Sprintf("list memberships: %v", err), http.StatusInternalServerError)
+						return
+					}
+					allowedProjects = enrolledProjectsFromMemberships(memberships)
+					// Phase 4: a device-bound token additionally narrows the
+					// readable set to the device's scope, so e.g. a personal
+					// laptop never pulls work projects via mutation pull.
+					if claims.DeviceID != "" && s.deviceStore != nil {
+						allowedProjects = s.intersectDeviceScope(claims.DeviceID, allowedProjects)
+					}
 				}
 			} else {
 				log.Printf("[cloudserver] WARNING: accountProjectAuth (%T) is not *rbacAuthorizer; mutation pull returns empty to prevent cross-tenant leak", s.accountProjectAuth)

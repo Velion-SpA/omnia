@@ -95,6 +95,17 @@ type User struct {
 	Username     string
 	Email        string
 	PasswordHash string
+	// DisabledAt is the lifecycle marker mirrored from cloud_users.disabled_at
+	// (OBL-01). A valid (non-NULL) value means the account is deactivated and its
+	// access must be rejected at every capability-resolution point — exactly as the
+	// managed-token path already does via ManagedTokenResolution.UserDisabled.
+	DisabledAt sql.NullTime
+}
+
+// Disabled reports whether the account is deactivated. It is nil-safe so callers
+// on the auth hot path can check it without a separate presence guard.
+func (u *User) Disabled() bool {
+	return u != nil && u.DisabledAt.Valid
 }
 
 func (cs *CloudStore) CreateUser(username, email, passwordHash string) (*User, error) {
@@ -136,9 +147,12 @@ func (cs *CloudStore) GetUserByUsername(username string) (*User, error) {
 	if cs == nil || cs.db == nil {
 		return nil, fmt.Errorf("cloudstore: not initialized")
 	}
-	const q = `SELECT id::text, username, email, password_hash FROM cloud_users WHERE username = $1`
+	// SELECT disabled_at (OBL-01): the account auth flows (Login/LoginForDevice/
+	// Refresh) enforce it, mirroring the managed-token disabled check. Omitting it
+	// here was the C1 gap — the query physically could not surface a disabled account.
+	const q = `SELECT id::text, username, email, password_hash, disabled_at FROM cloud_users WHERE username = $1`
 	var u User
-	err := cs.db.QueryRowContext(context.Background(), q, strings.TrimSpace(username)).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash)
+	err := cs.db.QueryRowContext(context.Background(), q, strings.TrimSpace(username)).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisabledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -152,9 +166,10 @@ func (cs *CloudStore) GetUserByEmail(email string) (*User, error) {
 	if cs == nil || cs.db == nil {
 		return nil, fmt.Errorf("cloudstore: not initialized")
 	}
-	const q = `SELECT id::text, username, email, password_hash FROM cloud_users WHERE email = $1`
+	// SELECT disabled_at (OBL-01), same rationale as GetUserByUsername above.
+	const q = `SELECT id::text, username, email, password_hash, disabled_at FROM cloud_users WHERE email = $1`
 	var u User
-	err := cs.db.QueryRowContext(context.Background(), q, strings.TrimSpace(email)).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash)
+	err := cs.db.QueryRowContext(context.Background(), q, strings.TrimSpace(email)).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisabledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

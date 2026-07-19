@@ -1158,7 +1158,7 @@ type fakeStoreWithPauseControl struct {
 	syncEnabled bool
 }
 
-func (s *fakeStoreWithPauseControl) IsProjectSyncEnabled(_ string) (bool, error) {
+func (s *fakeStoreWithPauseControl) IsProjectSyncEnabled(_ context.Context, _ string) (bool, error) {
 	return s.syncEnabled, nil
 }
 
@@ -1171,7 +1171,7 @@ type fakeStoreWithAudit struct {
 	errAuditInsert error
 }
 
-func (s *fakeStoreWithAudit) IsProjectSyncEnabled(_ string) (bool, error) {
+func (s *fakeStoreWithAudit) IsProjectSyncEnabled(_ context.Context, _ string) (bool, error) {
 	return s.syncEnabled, nil
 }
 
@@ -1359,7 +1359,7 @@ type fakeAuditableStoreForE2E struct {
 	auditRows      []cloudstore.DashboardAuditRow
 }
 
-func (s *fakeAuditableStoreForE2E) IsProjectSyncEnabled(project string) (bool, error) {
+func (s *fakeAuditableStoreForE2E) IsProjectSyncEnabled(_ context.Context, project string) (bool, error) {
 	if enabled, ok := s.syncEnabledMap[project]; ok {
 		return enabled, nil
 	}
