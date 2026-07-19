@@ -715,6 +715,8 @@ func main() {
 		cmdSearch(cfg)
 	case "recall-fix":
 		cmdRecallFix(cfg)
+	case "recall-backfill":
+		cmdRecallBackfill(cfg)
 	case "save":
 		cmdSave(cfg)
 	case "delete":
@@ -2850,6 +2852,10 @@ Commands:
                        Returns ONLY proven-fix hits (never loose text matches); empty
                        output means no known fix. For hooks/automation.
                        [--project PROJECT] [--limit N, capped at 3] [--json]
+  recall-backfill    One-shot backfill: derive error_signature for EXISTING bugfix
+                       memories saved before that feature existed, so past fixes
+                       become findable via the signature lane too. Idempotent.
+                       [--project PROJECT] [--dry-run]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
   delete session <id>
