@@ -185,6 +185,45 @@ func (s *fakeTeamsStore) ListMembersOfTeam(_ context.Context, teamID string) ([]
 	return out, nil
 }
 
+// ListTeamDerivedGrantsForAccount is the fake's account-keyed equivalent of
+// scanning s.teamMembers for every team, mirroring the real batched SQL join
+// (WHERE tm.account_id = $1) ordered the same way (project ASC, team ASC) so
+// tests asserting on Sources order match the production query.
+func (s *fakeTeamsStore) ListTeamDerivedGrantsForAccount(_ context.Context, accountID string) ([]cloudstore.TeamDerivedGrant, error) {
+	var out []cloudstore.TeamDerivedGrant
+	for teamID, members := range s.teamMembers {
+		profileID, isMember := members[accountID]
+		if !isMember {
+			continue
+		}
+		team, ok := s.teams[teamID]
+		if !ok {
+			continue
+		}
+		var perms int
+		var profileName string
+		if p, ok := s.profiles[profileID]; ok {
+			perms = p.Perms
+			profileName = p.Name
+		}
+		for project := range s.teamProjects[teamID] {
+			out = append(out, cloudstore.TeamDerivedGrant{
+				Team:    team.Name,
+				Project: project,
+				Profile: profileName,
+				Perms:   perms,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Project != out[j].Project {
+			return out[i].Project < out[j].Project
+		}
+		return out[i].Team < out[j].Team
+	})
+	return out, nil
+}
+
 func (s *fakeTeamsStore) UpsertProjectMeta(_ context.Context, project, kind, displayName string) error {
 	s.projectMeta[project] = &cloudstore.ProjectMeta{Project: project, Kind: normalizeKind(kind), DisplayName: displayName}
 	return nil

@@ -68,6 +68,26 @@ func (s *fakeProjectSyncAdminStore) GetProjectSyncControl(project string) (*clou
 	return ctrl, nil
 }
 
+// ListProjectSyncControlsMap is the fake's batched equivalent of calling
+// GetProjectSyncControl per project: it builds the SAME map shape from the
+// SAME syncEnabledMap/pausedReason/updatedBy state, in one pass.
+func (s *fakeProjectSyncAdminStore) ListProjectSyncControlsMap(context.Context) (map[string]cloudstore.ProjectSyncControl, error) {
+	out := make(map[string]cloudstore.ProjectSyncControl, len(s.syncEnabledMap))
+	for project, enabled := range s.syncEnabledMap {
+		ctrl := cloudstore.ProjectSyncControl{Project: project, SyncEnabled: enabled}
+		if r, ok := s.pausedReason[project]; ok && r != "" {
+			rr := r
+			ctrl.PausedReason = &rr
+		}
+		if u, ok := s.updatedBy[project]; ok && u != "" {
+			uu := u
+			ctrl.UpdatedBy = &uu
+		}
+		out[project] = ctrl
+	}
+	return out, nil
+}
+
 func (s *fakeProjectSyncAdminStore) InsertAuditEntry(_ context.Context, entry cloudstore.AuditEntry) error {
 	s.auditCalls = append(s.auditCalls, entry)
 	return nil

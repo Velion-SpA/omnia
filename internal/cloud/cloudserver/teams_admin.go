@@ -43,6 +43,12 @@ type teamsAdminStore interface {
 	AddTeamMember(ctx context.Context, teamID, accountID, profileID string) error
 	RemoveTeamMember(ctx context.Context, teamID, accountID string) error
 	ListMembersOfTeam(ctx context.Context, teamID string) ([]cloudstore.TeamMember, error)
+	// ListTeamDerivedGrantsForAccount is the batched, account-keyed equivalent
+	// of ListTeams + a per-team ListMembersOfTeam (membership test) +
+	// ListProjectsForTeam that teamDerivedForAccount (admin_teams_dashboard.go)
+	// used to run once PER TEAM IN THE ORG — an N+1 flagged by the 2026-07-19
+	// performance audit. See cloudstore.CloudStore.ListTeamDerivedGrantsForAccount.
+	ListTeamDerivedGrantsForAccount(ctx context.Context, accountID string) ([]cloudstore.TeamDerivedGrant, error)
 	// Project classification + known projects
 	UpsertProjectMeta(ctx context.Context, project, kind, displayName string) error
 	GetProjectMeta(ctx context.Context, project string) (*cloudstore.ProjectMeta, error)

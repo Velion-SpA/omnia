@@ -432,6 +432,16 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// N+1 fix (2026-07-19 performance audit): one batched query for ALL known
+	// projects' sync-control rows, instead of one GetProjectSyncControl call
+	// per project inside the loop below. Mirrors the chunkStats pattern above.
+	var syncControls map[string]cloudstore.ProjectSyncControl
+	if hasSyncControls {
+		if m, serr := pcs.ListProjectSyncControlsMap(r.Context()); serr == nil {
+			syncControls = m
+		}
+	}
+
 	// Slice 5a: parent/child links + the reverse sub-count + the name-prefix
 	// suggestion engine. All three degrade to zero values when the store
 	// doesn't support linking — see projectLinksStore's doc comment.
@@ -477,12 +487,10 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 			LinkParentURL:  "/admin/projects/" + escProject + "/parent",
 			ClearParentURL: "/admin/projects/" + escProject + "/parent/clear",
 		}
-		if hasSyncControls {
-			if ctrl, cerr := pcs.GetProjectSyncControl(k.Project); cerr == nil && ctrl != nil {
-				row.SyncEnabled = ctrl.SyncEnabled
-				if ctrl.PausedReason != nil {
-					row.PausedReason = *ctrl.PausedReason
-				}
+		if ctrl, ok := syncControls[k.Project]; ok {
+			row.SyncEnabled = ctrl.SyncEnabled
+			if ctrl.PausedReason != nil {
+				row.PausedReason = *ctrl.PausedReason
 			}
 		}
 		cs, csok := chunkStats[k.Project]
@@ -642,14 +650,17 @@ func (s *CloudServer) projectKindMap(ctx context.Context, ts teamsAdminStore) ma
 // teamDerivedForAccount computes the read-only "from teams" view for the Access
 // page: for the selected account, the union (bit_or) of profile perms per project
 // across every team the account belongs to, plus which teams grant them. It reads
-// only through the existing OBL-14 store seam (ListTeams + ListMembersOfTeam +
-// ListProjectsForTeam) — it does NOT re-implement the EffectivePerms resolver; it
-// is a display projection of the same team-union layer. Projects are grouped
-// personal / work / other by their classification. overridden marks projects that
-// also carry a cloud_memberships override (shown above), so the UI can note that
-// the override wins.
+// through ListTeamDerivedGrantsForAccount — ONE account-keyed query joining
+// cloud_team_members/cloud_team_projects/cloud_profiles (N+1 fix, 2026-07-19
+// performance audit; previously ListTeams + a per-team ListMembersOfTeam
+// membership test + ListProjectsForTeam, one query per team IN THE ORG rather
+// than per team the account belongs to). It does NOT re-implement the
+// EffectivePerms resolver; it is a display projection of the same team-union
+// layer. Projects are grouped personal / work / other by their classification.
+// overridden marks projects that also carry a cloud_memberships override (shown
+// above), so the UI can note that the override wins.
 func (s *CloudServer) teamDerivedForAccount(ctx context.Context, ts teamsAdminStore, accountID string, overridden map[string]bool) (personal, work, other []adminTeamPermRow) {
-	teams, err := ts.ListTeams(ctx)
+	grants, err := ts.ListTeamDerivedGrantsForAccount(ctx, accountID)
 	if err != nil {
 		return nil, nil, nil
 	}
@@ -658,39 +669,19 @@ func (s *CloudServer) teamDerivedForAccount(ctx context.Context, ts teamsAdminSt
 
 	agg := map[string]*adminTeamPermRow{}
 	var order []string
-	for _, t := range teams {
-		members, merr := ts.ListMembersOfTeam(ctx, t.ID)
-		if merr != nil {
-			continue
+	for _, g := range grants {
+		row, exists := agg[g.Project]
+		if !exists {
+			row = &adminTeamPermRow{Project: g.Project, Kind: kindByProject[g.Project].Kind, Overridden: overridden[g.Project]}
+			agg[g.Project] = row
+			order = append(order, g.Project)
 		}
-		var mine *cloudstore.TeamMember
-		for i := range members {
-			if members[i].AccountID == accountID {
-				mine = &members[i]
-				break
-			}
-		}
-		if mine == nil {
-			continue
-		}
-		projects, perr := ts.ListProjectsForTeam(ctx, t.ID)
-		if perr != nil {
-			continue
-		}
-		for _, proj := range projects {
-			row, exists := agg[proj]
-			if !exists {
-				row = &adminTeamPermRow{Project: proj, Kind: kindByProject[proj].Kind, Overridden: overridden[proj]}
-				agg[proj] = row
-				order = append(order, proj)
-			}
-			row.Perms |= mine.Perms
-			row.Sources = append(row.Sources, adminTeamPermSource{
-				Team:    t.Name,
-				Profile: mine.ProfileName,
-				Summary: permSummary(lang, mine.Perms),
-			})
-		}
+		row.Perms |= g.Perms
+		row.Sources = append(row.Sources, adminTeamPermSource{
+			Team:    g.Team,
+			Profile: g.Profile,
+			Summary: permSummary(lang, g.Perms),
+		})
 	}
 	sort.Strings(order)
 	for _, proj := range order {
