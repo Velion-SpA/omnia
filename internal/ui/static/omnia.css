@@ -2096,6 +2096,37 @@
 	border-color: var(--calypso);
 }
 
+/* ── Lang toggle (ES | EN) ────────────────────────────────────────── */
+
+.lang-toggle {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-family: var(--mono);
+	font-size: 10px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+}
+
+.lang-current {
+	color: var(--text);
+	font-weight: 700;
+}
+
+.lang-link {
+	color: var(--text-3);
+	text-decoration: none;
+	transition: color 0.15s;
+}
+
+.lang-link:hover {
+	color: var(--calypso);
+}
+
+.lang-sep {
+	color: var(--border-2);
+}
+
 /* ─── Admin section — searchable project selector + admin forms (OBL-15) ─────
    Scoped to the operator Admin pages. Extends the existing tokens; introduces no
    new framework. */

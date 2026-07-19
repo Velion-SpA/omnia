@@ -15,6 +15,7 @@ import (
 	"github.com/velion/omnia/internal/audit"
 	"github.com/velion/omnia/internal/engramdb"
 	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // Config holds the runtime configuration for the dashboard server.
@@ -118,22 +119,23 @@ func NewServerWithDataSource(cfg Config, src DataSource, logger *slog.Logger, op
 
 // Handler returns the dashboard's HTTP handler with all routes registered. The
 // cloud server mounts this directly (fronted by its own auth/session middleware),
-// so both surfaces share identical routing.
+// so both surfaces share identical routing. Wrapped in i18n.Middleware so every
+// request — local or cloud — carries the caller's resolved display language
+// (and current path, for the header lang toggle's next= link) on its context.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
-	return mux
+	return i18n.Middleware(mux)
 }
 
 // Start binds to localhost and serves until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) error {
-	mux := http.NewServeMux()
-	s.registerRoutes(mux)
+	handler := s.Handler()
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.cfg.Port)
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
@@ -167,6 +169,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Shared Omnia design-system assets (internal/ui) — the exact same CSS the cloud
 	// dashboard serves, so both surfaces stay visually identical.
 	mux.Handle("GET /static/", ui.StaticHandler("/static/"))
+
+	// Language switch (PUBLIC, no auth — the cloud mount adds it to its
+	// public-path allowlist alongside /login and /static so the toggle also
+	// works from the unauthenticated login page).
+	mux.HandleFunc("GET /lang/{lang}", i18n.SwitchHandler())
 
 	// Pages
 	mux.HandleFunc("GET /", s.handleOverview)
@@ -351,9 +358,9 @@ func (s *Server) buildOverviewData(ctx context.Context, stats []ProjectStats, sy
 		curatedCount += p.Curated
 	}
 	sources := []SourceStat{
-		{Name: "GitHub", Sub: "PRs · commits · reviews", IconKey: "github", Count: githubCount},
-		{Name: "Discord", Sub: "digests · threads · mentions", IconKey: "discord", Count: discordCount},
-		{Name: "Claude Code", Sub: "sessions · fixes · decisions", IconKey: "claude", Count: curatedCount},
+		{Name: ui.T(ctx, "overview.source.github.name"), Sub: ui.T(ctx, "overview.source.github.sub"), IconKey: "github", Count: githubCount},
+		{Name: ui.T(ctx, "overview.source.discord.name"), Sub: ui.T(ctx, "overview.source.discord.sub"), IconKey: "discord", Count: discordCount},
+		{Name: ui.T(ctx, "overview.source.claude.name"), Sub: ui.T(ctx, "overview.source.claude.sub"), IconKey: "claude", Count: curatedCount},
 	}
 
 	return OverviewData{

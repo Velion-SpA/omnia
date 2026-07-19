@@ -151,8 +151,11 @@ func TestHandleOverview_Renders(t *testing.T) {
 	if !strings.Contains(bodyStr, "Omnia") {
 		t.Error("expected 'Omnia' in overview response")
 	}
-	if !strings.Contains(bodyStr, "Overview") {
-		t.Error("expected 'Overview' in response")
+	// The dashboard defaults to Spanish (see internal/ui/i18n); "Resumen" is
+	// the localized Overview page title/nav label. See overview_i18n_test.go
+	// for the full Spanish-default / English-cookie coverage.
+	if !strings.Contains(bodyStr, "Resumen") {
+		t.Error("expected 'Resumen' (Spanish default Overview label) in response")
 	}
 }
 
