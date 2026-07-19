@@ -1,0 +1,89 @@
+id: OBL-16
+title: Admin is a user account role (not a separate operator token)
+status: done
+priority: P1
+blocks_homelab_test: false
+estimated_effort: M
+recommended_model: opus-4.8
+depends_on: [OBL-01, OBL-02, OBL-03, OBL-13]
+tags: [cloud, auth, admin, rbac, users]
+
+context: |
+  Today "admin" is a standalone operator credential — the OMNIA_CLOUD_ADMIN env token
+  pasted into a separate "operator token" field, disconnected from the cloud_users
+  accounts. The user wants admin to be just a USER like the others: a normal account
+  (username/password) carrying an admin flag, who logs in the normal way and gets the
+  Admin section because they are an admin. The standalone operator token stays as a
+  bootstrap/recovery path, but account-level admin becomes the primary model.
+
+  DEFERRED (do NOT build now — the user said "luego"): step-up auth where admin actions
+  additionally require a separate token on top of username+password. Just leave a clean
+  seam for it; note it in the report.
+
+current_state: |
+  - Operator = the OMNIA_CLOUD_ADMIN token (OBL-03 isDashboardAdmin) or, since OBL-13,
+    the operator session cookie minted from that token; requireOperator accepts the
+    operator cookie OR the admin Bearer.
+    evidence: internal/cloud/cloudserver/cloudserver.go (dashboardSessionClaims,
+    isDashboardAdmin), admin_dashboard.go (requireOperator)
+  - bootstrap-admin creates a plain cloud_users row with no admin flag; its "admin"
+    power comes only from the separate token, not the account.
+    evidence: cmd/omnia/cloud_bootstrap.go; cloud_users schema has no is_admin
+  - Account login mints an account session (AccountID/Username in the cookie).
+    evidence: internal/cloud/auth/accounts.go (Login), auth.go (dashboard session codec)
+
+gap: |
+  An is_admin flag on cloud_users, operator gating that treats a logged-in admin account
+  as operator, bootstrap-admin setting it, and an operator action to promote/demote a
+  user's admin status.
+
+tasks: |
+  1. Migration: add `is_admin BOOLEAN NOT NULL DEFAULT false` to cloud_users via the
+     guarded ALTER pattern in migrate().
+  2. Store: IsUserAdmin(accountID) + SetUserAdmin(accountID, bool); include is_admin in
+     ListUsers (OBL-13) so the Users page can show/toggle it.
+  3. bootstrap-admin: set is_admin=true on the created first admin (so that account is a
+     real admin by login, not only via the token).
+  4. Operator gating: extend requireOperator / the dashboard operator check so that an
+     authenticated ACCOUNT session whose cloud_users.is_admin=true is treated as operator
+     (per-request DB lookup by AccountID, same pattern as OBL-01 token validation). KEEP
+     the OMNIA_CLOUD_ADMIN token path working (bootstrap/recovery) and KEEP OBL-03's
+     rule that the plain SYNC bearer is NOT operator.
+  5. Operator endpoint + Users-page action: POST /admin/users/{id}/promote and
+     /demote (or a single set-admin) to grant/revoke is_admin; guard so an admin cannot
+     demote the last remaining admin (avoid lockout).
+  6. Dashboard login UX: an admin logs in with username/password (normal account login)
+     and lands with the Admin section visible. The "operator token" field remains for
+     recovery but is no longer the only way in.
+  7. Leave a clean seam for the deferred step-up token (e.g. a check point in the admin
+     mutation path) but DO NOT implement it now.
+  8. Tests: is_admin round-trip; admin account login → operator (sees Admin, /admin 200);
+     non-admin account → 403 + no Admin nav; sync bearer still NOT operator; last-admin
+     demotion refused; OMNIA_CLOUD_ADMIN token still works.
+
+acceptance_criteria: |
+  - An admin account logs in with username+password and gets the Admin section — no
+    separate operator token needed.
+  - A non-admin account never sees Admin and every /admin/* returns 403.
+  - The operator can promote/demote a user's admin status from the Users page; the last
+    admin cannot be demoted.
+  - The OMNIA_CLOUD_ADMIN token still grants operator (recovery), and the sync bearer
+    still does NOT (OBL-03 preserved).
+
+verification: |
+  - go build ./... && go vet ./... && go test ./internal/cloud/... ./internal/dashboard/...
+  - PG integration vs a throwaway DB.
+  - Manual on homelab: mark labadmin is_admin, log in as labadmin (user+pass), confirm
+    the Admin section appears; log in as personal, confirm no Admin + 403.
+
+do_not_touch: |
+  - OBL-03's separation: the plain sync bearer must NEVER become operator.
+  - Cookie name engram_dashboard_token, table/column names (additive only), LICENSE.
+  - Do NOT implement the deferred step-up admin token now.
+
+references: |
+  - internal/cloud/cloudserver/cloudserver.go (dashboardSessionClaims, isDashboardAdmin)
+  - internal/cloud/cloudserver/admin_dashboard.go (requireOperator, OBL-13 endpoints)
+  - internal/cloud/cloudstore/cloudstore.go (migrate, cloud_users), admin.go (ListUsers)
+  - internal/cloud/auth/accounts.go (Login), auth.go (session codec)
+  - cmd/omnia/cloud_bootstrap.go (bootstrap-admin)

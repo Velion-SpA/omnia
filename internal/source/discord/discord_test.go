@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/config"
-	discord "github.com/Velion-SpA/omnia/internal/source/discord"
+	"github.com/velion/omnia/internal/config"
+	discord "github.com/velion/omnia/internal/source/discord"
 )
 
 // stubDiscordRouter satisfies the discord source's projectRouter interface.

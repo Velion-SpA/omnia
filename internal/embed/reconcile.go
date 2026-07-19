@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/engramdb"
-	"github.com/Velion-SpA/omnia/internal/meta"
+	"github.com/velion/omnia/internal/engramdb"
+	"github.com/velion/omnia/internal/meta"
 )
 
 // Stats summarizes a reconciliation run.
@@ -111,37 +111,14 @@ func Reconcile(ctx context.Context, reader *engramdb.DB, store *Store, emb Embed
 	return stats, nil
 }
 
-// embedBudgets are the input rune caps tried, in order, by embedDocument.
-// Ollama's nomic-embed-text /api/embeddings returns HTTP 500 once the prompt
-// exceeds the model context (~2048 tokens); empirically dense content fails
-// above ~5000 chars. We cap at 4000 first (title + leading content is a strong
-// topical signal), then shrink on a residual failure so even pathologically
-// token-dense memories still get a vector. A future enhancement could chunk long
-// memories into several vectors instead of truncating.
-var embedBudgets = []int{4000, 2000, 1000}
-
-// embedDocument embeds input, truncating to successively smaller rune budgets if
-// the model rejects an over-long prompt. Returns the first successful vector, or
-// the last error if every budget fails.
+// embedDocument embeds input in a single call. Previously this shrank the
+// input across successively smaller rune budgets (4000/2000/1000) because
+// Ollama's legacy /api/embeddings endpoint returned HTTP 500 above ~2048
+// tokens regardless of the model's real context window. The /api/embed
+// client now sends truncate:true + options.num_ctx:8192 on every request, so
+// the server itself truncates over-long input — no client-side retry needed.
 func embedDocument(ctx context.Context, emb Embedder, input string) ([]float32, error) {
-	var lastErr error
-	for _, budget := range embedBudgets {
-		vec, err := emb.Embed(ctx, truncateRunes(input, budget), TaskDocument)
-		if err == nil {
-			return vec, nil
-		}
-		lastErr = err
-	}
-	return nil, lastErr
-}
-
-// truncateRunes returns s capped at n runes (UTF-8 safe — never splits a rune).
-func truncateRunes(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n])
+	return emb.Embed(ctx, input)
 }
 
 // embedInput builds the text we embed: title + content with the omnia-meta block

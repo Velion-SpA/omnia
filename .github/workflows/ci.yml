@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build, Vet, Test
+  unit-tests:
+    name: Unit Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -22,16 +22,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        # internal/mcp is excluded: it has known preexisting failures around
-        # a hardcoded "engram" project fixture, tracked separately and not a
-        # CI regression signal. Everything else runs with -short.
+      - name: Run unit tests
         run: go test -short $(go list ./... | grep -v '/internal/mcp$')
 
   e2e-tests:

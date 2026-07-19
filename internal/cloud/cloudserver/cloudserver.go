@@ -11,13 +11,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/chunkcodec"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
-	"github.com/Velion-SpA/omnia/internal/cloud/constants"
-	engramproject "github.com/Velion-SpA/omnia/internal/project"
-	"github.com/Velion-SpA/omnia/internal/store"
-	engramsync "github.com/Velion-SpA/omnia/internal/sync"
+	"github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/chunkcodec"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/cloud/constants"
+	"github.com/velion/omnia/internal/embed"
+	engramproject "github.com/velion/omnia/internal/project"
+	"github.com/velion/omnia/internal/store"
+	engramsync "github.com/velion/omnia/internal/sync"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 type Option func(*CloudServer)
@@ -77,6 +79,15 @@ type CloudServer struct {
 	maxPushBodyBytes   int64
 	mux                *http.ServeMux
 	listenAndServe     func(addr string, handler http.Handler) error
+
+	// cloudSemanticEnabled/cloudSemanticEmbedder wire cloud semantic parity
+	// (design D5, PR5 slice 3) into the mounted dashboard's clouddash.Source.
+	// Disabled by default (D7 rollback guarantee, cloud side); embedder may
+	// be nil even when enabled (no reachable Ollama endpoint configured for
+	// the cloud host) — see clouddash.WithCloudSemantic for the degrade
+	// contract.
+	cloudSemanticEnabled  bool
+	cloudSemanticEmbedder embed.Embedder
 }
 
 const defaultHost = "127.0.0.1"
@@ -125,6 +136,18 @@ func WithMaxPushBodyBytes(limit int64) Option {
 	}
 }
 
+// WithCloudSemantic enables cloud semantic parity (design D5, PR5 slice 3)
+// on the mounted dashboard. embedder may be nil: interactive query embedding
+// then degrades cleanly while corpus-side search over vectors already
+// synced in from devices that DO run Ollama still works for any caller that
+// supplies its own query vector (see clouddash.WithCloudSemantic).
+func WithCloudSemantic(enabled bool, embedder embed.Embedder) Option {
+	return func(s *CloudServer) {
+		s.cloudSemanticEnabled = enabled
+		s.cloudSemanticEmbedder = embedder
+	}
+}
+
 func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *CloudServer {
 	s := &CloudServer{
 		store:            store,
@@ -158,6 +181,12 @@ func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *Clo
 		if resolver, ok := store.(effectivePermsResolver); ok {
 			ra.resolver = resolver
 		}
+		// C1: wire the disabled-account gate when the store provides it, so a
+		// disabled account is denied on the sync data plane BEFORE perms resolve
+		// (mirrors the managed-token UserDisabled runtime rejection).
+		if dc, ok := store.(accountDisabledChecker); ok {
+			ra.disabled = dc
+		}
 		s.accountProjectAuth = ra
 	}
 	// Detect device scope store for Phase 4 enforcement.
@@ -181,11 +210,25 @@ func (s *CloudServer) Start() error {
 	return s.listenAndServe(addr, s.Handler())
 }
 
+// Handler returns the cloud server's top-level HTTP handler, wrapped in
+// i18n.Middleware (i18n Slice 3) so EVERY route — not just the ones the
+// shared internal/dashboard mux already wraps via mountDashboard/Handler() —
+// carries the caller's resolved display language and current path on its
+// context. This matters specifically for the Admin section and the login
+// page: their handlers are registered directly on s.mux (see routes()'s
+// "GET pages fall through the dashboard's GET / catch-all unless registered
+// here explicitly" comment) and therefore never reach the shared dashboard's
+// own i18n.Middleware wrap. Without this outer wrap, i18n.LangFrom(ctx) would
+// always resolve to DefaultLang inside admin_*.templ and the login page,
+// making the ES|EN header toggle a no-op there. Double-wrapping the routes
+// that DO already pass through the shared dashboard's Handler() is harmless
+// — i18n.Middleware only recomputes WithLang/WithPath from the same request,
+// never anything stateful.
 func (s *CloudServer) Handler() http.Handler {
 	if s.mux == nil {
 		s.routes()
 	}
-	return s.mux
+	return i18n.Middleware(s.mux)
 }
 
 func (s *CloudServer) pushBodyLimit() int64 {
@@ -219,6 +262,10 @@ func (s *CloudServer) routes() {
 		s.mux.HandleFunc("GET /projects/{project}/members", s.withAuth(s.handleListMembers))
 		s.mux.HandleFunc("POST /projects/{project}/members", s.withAuth(s.handleAddMember))
 		s.mux.HandleFunc("DELETE /projects/{project}/members/{account_id}", s.withAuth(s.handleRemoveMember))
+		// Account-facing project discovery: returns the caller's own readable
+		// projects (teams ∪ membership overrides), so a read-only account can
+		// enumerate what it can pull without operator access to GET /admin/projects.
+		s.mux.HandleFunc("GET /projects", s.withAuth(s.handleListProjects))
 		// Device-management endpoints. Account-only (requires withAuth + claims != nil).
 		// Registered only when device management is available.
 		if _, ok := s.store.(deviceManager); ok {
@@ -252,10 +299,30 @@ func (s *CloudServer) routes() {
 			s.mux.HandleFunc("GET /admin/users/{id}/memberships", s.handleAdminListUserMemberships)
 			s.mux.HandleFunc("PUT /admin/memberships", s.handleAdminUpsertMembership)
 			s.mux.HandleFunc("DELETE /admin/memberships/{account_id}/{project}", s.handleAdminDeleteMembership)
+			// Command Center v2, Slice 3: the unified Access page's per-row
+			// edit-in-place fragments. Pure view wiring (no store mutation) —
+			// same convention as the Slice 2 delete-confirm/-cancel routes
+			// above. The mutations they trigger are the two routes right above.
+			s.mux.HandleFunc("GET /admin/access/rows/{account_id}/{project}", s.handleAdminAccessRowView)
+			s.mux.HandleFunc("GET /admin/access/rows/{account_id}/{project}/edit", s.handleAdminAccessRowEdit)
+			s.mux.HandleFunc("GET /admin/access/rows/{account_id}/{project}/revoke", s.handleAdminAccessRowRevokeConfirm)
 			// OBL-16: account-level admin promote/demote. Operator-gated like the
 			// rest of the section; demote refuses the last remaining admin.
 			s.mux.HandleFunc("POST /admin/users/{id}/promote", s.handleAdminPromoteUser)
 			s.mux.HandleFunc("POST /admin/users/{id}/demote", s.handleAdminDemoteUser)
+			// Command Center v2, Slice 1: operator-facing user CRUD (backend
+			// only — no UI/templ yet, that is Slice 2). Same operator gate,
+			// same audit-every-mutation pattern as the rest of this block.
+			s.mux.HandleFunc("POST /admin/users", s.handleAdminCreateUser)
+			s.mux.HandleFunc("PUT /admin/users/{id}", s.handleAdminUpdateUser)
+			s.mux.HandleFunc("POST /admin/users/{id}/password", s.handleAdminResetUserPassword)
+			s.mux.HandleFunc("POST /admin/users/{id}/delete", s.handleAdminHardDeleteUser)
+			// Command Center v2, Slice 2: the Users page UI. These two GET routes
+			// are pure view wiring (no store call) — the swap-in-place hard-delete
+			// confirm/cancel round trip for the reused ui.ConfirmDialog, mirroring
+			// internal/dashboard/detail.templ's delete-confirm/delete-cancel.
+			s.mux.HandleFunc("GET /admin/users/{id}/delete-confirm", s.handleAdminUserDeleteConfirm)
+			s.mux.HandleFunc("GET /admin/users/{id}/delete-cancel", s.handleAdminUserDeleteCancel)
 		}
 		// Teams + profiles + project-classification operator endpoints (OBL-14).
 		// Operator-gated (requireOperator) and the data plane the OBL-15 UI consumes.
@@ -296,6 +363,20 @@ func (s *CloudServer) routes() {
 		if _, ok := s.store.(projectSyncControlAdminStore); ok {
 			s.mux.HandleFunc("POST /admin/projects/{project}/pause", s.handleAdminPauseProject)
 			s.mux.HandleFunc("POST /admin/projects/{project}/resume", s.handleAdminResumeProject)
+		}
+		// Command Center v2, Slice 4b: the Admin Projects reverse-access
+		// fragment ("who has access", lazily loaded per card). Registered
+		// only when the store supports the new stats/reverse-access
+		// capability, mirroring projectSyncControlAdminStore above.
+		if _, ok := s.store.(projectAdminStatsStore); ok {
+			s.mux.HandleFunc("GET /admin/projects/{project}/access", s.handleAdminProjectAccessFragment)
+		}
+		// Command Center v2, Slice 5a: cloud sub-project linking (associate,
+		// never merge — see project_links_admin.go). Registered only when
+		// the store supports it, mirroring projectAdminStatsStore above.
+		if _, ok := s.store.(projectLinksAdminStore); ok {
+			s.mux.HandleFunc("POST /admin/projects/{project}/parent", s.handleAdminSetProjectParent)
+			s.mux.HandleFunc("POST /admin/projects/{project}/parent/clear", s.handleAdminClearProjectParent)
 		}
 		// Operator-only, read-only Audit page (OBL-05): surfaces the expanded
 		// audit trail alongside the rest of the Admin section. Registered only
@@ -692,9 +773,9 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	// Uses a structural interface assertion so the ChunkStore interface is NOT extended.
 	// Satisfies REQ-109 / Design Decision 5.
 	if storeForControls, ok := s.store.(interface {
-		IsProjectSyncEnabled(project string) (bool, error)
+		IsProjectSyncEnabled(ctx context.Context, project string) (bool, error)
 	}); ok {
-		enabled, err := storeForControls.IsProjectSyncEnabled(project)
+		enabled, err := storeForControls.IsProjectSyncEnabled(r.Context(), project)
 		if err != nil {
 			writeActionableError(w, http.StatusInternalServerError,
 				constants.UpgradeErrorClassBlocked,
@@ -809,7 +890,7 @@ func projectFromRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
 func (s *CloudServer) authorizeProjectOp(w http.ResponseWriter, r *http.Request, project string, required auth.Permission) bool {
 	if s.accountProjectAuth != nil {
 		claims, _ := auth.AccountFromContext(r.Context())
-		err := s.accountProjectAuth.AuthorizeAccountProject(claims, project, required)
+		err := s.accountProjectAuth.AuthorizeAccountProject(r.Context(), claims, project, required)
 		if err != nil {
 			if errors.Is(err, auth.ErrPermissionDenied) {
 				writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: project access denied")

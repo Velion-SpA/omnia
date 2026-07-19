@@ -1,35 +1,31 @@
 package ui
 
 // MemoryCard renders one memory card in the browse feed. Shared by both dashboards.
+// Layout: a left accent stripe colored by observation type, a type badge,
+// title, a 2-line snippet, and a footer of project chip · source · age.
 templ MemoryCard(card Card) {
 	<a href={ templ.SafeURL(card.Href) } class="memory-card">
-		<div class={ "card-accent-bar", templ.KV("ingested", card.Ingested), templ.KV("curated", !card.Ingested) }></div>
+		<div class={ "card-accent-bar", cardTypeAccentClass(card.Type), templ.KV("ingested", card.Ingested) }></div>
 		<div class="card-body">
-			<div class="card-title-row">
-				<span class="card-type-glyph">
-					@templ.Raw(typeGlyphSVG(card.Type))
-				</span>
-				<span class="card-title">{ truncateTitle(card.Title) }</span>
-			</div>
+			if card.Type != "" {
+				<div class="card-type-row">
+					<span class={ "card-type-badge", cardTypeAccentClass(card.Type) }>{ card.Type }</span>
+				</div>
+			}
+			<div class="card-title">{ truncateTitle(card.Title) }</div>
 			if card.Snippet != "" {
 				<p class="card-snippet">{ card.Snippet }</p>
 			}
 			<div class="card-meta">
-				if card.Type != "" {
-					<span class="meta-type">{ card.Type }</span>
-					<span class="meta-dot"></span>
+				if card.Project != "" {
+					<span class="card-project-chip">{ card.Project }</span>
 				}
 				if card.SourceKey != "" {
 					@sourceChip(card.SourceKey)
-					<span class="meta-dot"></span>
 				} else if card.Tag != "" {
 					<span class="meta-source">{ card.Tag }</span>
-					<span class="meta-dot"></span>
-				}
-				if card.Ingested {
-					<span class="meta-layer ingested"><span class="meta-pip"></span>ingested</span>
 				} else {
-					<span class="meta-layer curated"><span class="meta-pip"></span>curated</span>
+					<span class="meta-source">{ T(ctx, "cards.manual") }</span>
 				}
 				<span class="meta-time">{ card.Age }</span>
 			</div>
@@ -41,17 +37,17 @@ templ MemoryCard(card Card) {
 templ MemoryFeed(cards []Card) {
 	if len(cards) == 0 {
 		<div class="empty-state">
-			<p class="section-kicker">NO SIGNAL YET</p>
-			<h3>No results</h3>
-			<p>No observations found. Try a different filter or search term.</p>
+			<p class="section-kicker">{ T(ctx, "cards.emptySignal") }</p>
+			<h3>{ T(ctx, "cards.noResults") }</h3>
+			<p>{ T(ctx, "cards.noResultsHint") }</p>
 		</div>
 	} else {
 		<div class="panel panel-results bracketed">
 			<div class="feed-header">
-				<span class="density-label">View</span>
+				<span class="density-label">{ T(ctx, "cards.view") }</span>
 				<div class="density-toggle">
-					<button class="density-btn density-btn-active" data-density="comfortable" onclick="omniaSetDensity('comfortable')">comfortable</button>
-					<button class="density-btn" data-density="compact" onclick="omniaSetDensity('compact')">compact</button>
+					<button class="density-btn density-btn-active" data-density="comfortable" onclick="omniaSetDensity('comfortable')">{ T(ctx, "cards.densityComfortable") }</button>
+					<button class="density-btn" data-density="compact" onclick="omniaSetDensity('compact')">{ T(ctx, "cards.densityCompact") }</button>
 				</div>
 			</div>
 			<div class="memory-feed comfortable" id="memory-feed">

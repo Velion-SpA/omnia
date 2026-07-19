@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/state"
+	"github.com/velion/omnia/internal/state"
 )
 
 func TestCursorRoundTrip(t *testing.T) {

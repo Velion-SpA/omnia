@@ -20,21 +20,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: "1.25.10"
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
-          # Pinned exact version: .goreleaser.yaml still uses the (deprecated
-          # since v2.10) `brews:` section to publish the Homebrew formula.
-          # Bump deliberately and re-run `goreleaser check` locally before
-          # moving the floor, since a future release may drop `brews:`
-          # entirely in favor of `homebrew_casks:`.
-          version: "2.17.0"
+          version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Fine-grained PAT (or classic PAT) with contents:write on
-          # velion/homebrew-tap. GITHUB_TOKEN is scoped to this repo only and
-          # cannot push the formula update to the separate tap repo.
-          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

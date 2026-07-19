@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud"
+	"github.com/velion/omnia/internal/cloud"
 )
 
 // newTokenTestStore spins up a CloudStore against an isolated, throwaway Postgres

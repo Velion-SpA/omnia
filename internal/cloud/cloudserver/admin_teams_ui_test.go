@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	cloudauth "github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	cloudauth "github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // htmlPageRequest is a browser-style navigation: it carries Accept: text/html so
@@ -44,8 +44,10 @@ func TestAdminProfilesPageRendersAndGated(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator GET /admin/profiles (html): expected 200, got %d", rec.Code)
 	}
+	// i18n Slice 3: Spanish default ("PERFILES"/"NUEVO PERFIL"); "Moderator"
+	// is seeded profile DATA, not UI copy, so it stays unchanged.
 	body := rec.Body.String()
-	for _, want := range []string{"PROFILES", "Moderator", "NEW PROFILE", `data-perm-bit="1"`, `data-perms-into="perms"`} {
+	for _, want := range []string{"PERFILES", "Moderator", "NUEVO PERFIL", `data-perm-bit="1"`, `data-perms-into="perms"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Profiles page missing %q, body=%q", want, body)
 		}
@@ -90,8 +92,10 @@ func TestAdminTeamsPageAndDetail(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator GET /admin/teams (html): expected 200, got %d", rec.Code)
 	}
+	// i18n Slice 3: Spanish default; "Migración" is a seeded team NAME (data),
+	// not UI copy, so it stays unchanged.
 	body := rec.Body.String()
-	for _, want := range []string{"Work teams", "Personal teams", "Migración", "NEW TEAM", "/admin/teams/" + team.ID} {
+	for _, want := range []string{"Equipos de trabajo", "Equipos personales", "Migración", "NUEVO EQUIPO", "/admin/teams/" + team.ID} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Teams page missing %q, body=%q", want, body)
 		}
@@ -103,9 +107,11 @@ func TestAdminTeamsPageAndDetail(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator GET /admin/teams/%s (html): expected 200, got %d", team.ID, rec.Code)
 	}
+	// i18n Slice 3: Spanish default. "workly"/"alice"/"Moderator" are seeded
+	// project/username/profile DATA, not UI copy, so they stay unchanged.
 	body = rec.Body.String()
 	for _, want := range []string{
-		"PROJECTS", "MEMBERS", "workly", "Add project", "Add member",
+		"Proyectos", "MIEMBROS", "workly", "Agregar proyecto", "Agregar miembro",
 		"data-proj-select", // searchable selector present
 		"alice",            // member username resolved
 		"Moderator",        // profile option
@@ -118,31 +124,41 @@ func TestAdminTeamsPageAndDetail(t *testing.T) {
 	}
 }
 
-// TestAdminProjectsPageSplit verifies the Projects page splits known projects into
-// Personal / Work / Unclassified with a reclassify control per row.
-func TestAdminProjectsPageSplit(t *testing.T) {
+// TestAdminProjectsPageShowsCards verifies the Command Center v2, Slice 4b
+// Projects page: known projects render as cards (not the old Personal/Work/
+// Unclassified sections — superseded by this test, formerly
+// TestAdminProjectsPageSplit), each carrying its own classification badge
+// (kindBadge) and a reclassify control folded into its "•••" menu.
+func TestAdminProjectsPageShowsCards(t *testing.T) {
 	srv, store, authSvc := newTeamsAdminTestServer(t)
 	ctx := context.Background()
 	_ = store.UpsertProjectMeta(ctx, "homelab", "personal", "Home Lab")
 	_ = store.UpsertProjectMeta(ctx, "workly", "work", "")
-	store.grant("1", "unclass", 1, "member") // classified nowhere → Unclassified
+	store.grant("1", "unclass", 1, "member") // classified nowhere → "unclassified" badge
 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, htmlPageRequest(http.MethodGet, "/admin/projects", operatorCookie(t, authSvc)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator GET /admin/projects (html): expected 200, got %d", rec.Code)
 	}
+	// i18n Slice 3: kindBadge renders translated text now (">personal<" is
+	// unchanged, same word in both langs; "work"/"unclassified" differ).
 	body := rec.Body.String()
-	for _, want := range []string{"Personal", "Work", "Unclassified", "homelab", "workly", "unclass", "/admin/projects/homelab/meta"} {
+	for _, want := range []string{
+		"projcard", "homelab", "workly", "unclass", "/admin/projects/homelab/meta",
+		">personal<", ">laboral<", ">sin clasificar<", // per-card kindBadge, not section headers
+	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Projects page missing %q, body=%q", want, body)
 		}
 	}
 }
 
-// TestAdminAccessPageTeamDerived verifies the Access page shows the per-project
-// OVERRIDES ABOVE the read-only "from teams" section, marks a project that is
-// overridden, and surfaces the contributing team + profile.
+// TestAdminAccessPageTeamDerived verifies the Command Center v2, Slice 3
+// unified Access page: an override on one project (workly) wins outright
+// over its team-derived perms, while a SECOND project reachable only through
+// the team (trackly) shows the team + profile that grants it — all in ONE
+// merged row per project, not two disconnected sections.
 func TestAdminAccessPageTeamDerived(t *testing.T) {
 	srv, store, authSvc := newTeamsAdminTestServer(t)
 	ctx := context.Background()
@@ -153,7 +169,8 @@ func TestAdminAccessPageTeamDerived(t *testing.T) {
 	_ = store.AddTeamMember(ctx, team.ID, "1", profileIDByName(t, store, "Moderator"))
 	_ = store.UpsertProjectMeta(ctx, "workly", "work", "")
 	_ = store.UpsertProjectMeta(ctx, "trackly", "work", "")
-	// An override on workly (read-only) must win and be flagged in the team view.
+	// An override on workly (read-only) must win outright over the team's
+	// Moderator (full) perms for that same project.
 	store.grant("1", "workly", int(cloudauth.PermRead), "member")
 
 	rec := httptest.NewRecorder()
@@ -162,14 +179,24 @@ func TestAdminAccessPageTeamDerived(t *testing.T) {
 		t.Fatalf("operator GET /admin/access (html): expected 200, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"PER-PROJECT OVERRIDES", "FROM TEAMS", "Migración", "Moderator", "trackly", "overridden above"} {
+
+	// workly: the override wins — Override source, read-only, its own role.
+	for _, want := range []string{`id="access-row-workly"`, "badge-warn", ">Override<", "member"} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("Access page missing %q, body=%q", want, body)
+			t.Fatalf("workly row missing %q, body=%q", want, body)
 		}
 	}
-	// Overrides must sit ABOVE the team-derived section.
-	if strings.Index(body, "PER-PROJECT OVERRIDES") >= strings.Index(body, "FROM TEAMS") {
-		t.Fatalf("overrides must render above the from-teams section")
+	// trackly: no override — the team-derived perms show through, naming the
+	// contributing team + profile explicitly.
+	for _, want := range []string{`id="access-row-trackly"`, "badge-team", "Migración", "Moderator"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("trackly row missing %q, body=%q", want, body)
+		}
+	}
+	// The unified table renders each project exactly once — no more
+	// disconnected "overrides" + "from teams" duplicate listing.
+	if strings.Count(body, `id="access-row-workly"`) != 1 {
+		t.Fatalf("expected workly to render exactly once, body=%q", body)
 	}
 }
 

@@ -3,7 +3,7 @@ package tui
 import (
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/setup"
+	"github.com/velion/omnia/internal/setup"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 )

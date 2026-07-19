@@ -1,0 +1,152 @@
+[
+  {
+    "id": "auth-jwt-timezone",
+    "query_es": "¿Cómo arreglamos el bug de expiración de tokens JWT?",
+    "memory_en": "Fixed JWT auth bug: the token expiry check compared UTC to local time, causing false 'expired' errors for users in GMT-3."
+  },
+  {
+    "id": "ci-macos-cache",
+    "query_es": "¿Por qué falla el pipeline de CI en macOS?",
+    "memory_en": "CI failures on macOS runners traced to a stale Homebrew cache; pinned the actions/cache key to include the Xcode version."
+  },
+  {
+    "id": "db-migration-lock",
+    "query_es": "¿Cómo evitamos que la migración de base de datos bloquee la tabla en producción?",
+    "memory_en": "Adopted online schema migrations with pt-online-schema-change to avoid long table locks on the orders table during deploys."
+  },
+  {
+    "id": "testing-strategy-e2e",
+    "query_es": "¿Cuál es nuestra estrategia de testing end-to-end?",
+    "memory_en": "Decided to keep E2E tests thin and fast: cover only the critical checkout flow, push everything else down to unit and integration tests."
+  },
+  {
+    "id": "cache-invalidation",
+    "query_es": "¿Cómo invalidamos la caché cuando cambia el precio de un producto?",
+    "memory_en": "Cache invalidation for product pricing now publishes a Redis pub/sub event on price change, consumed by every API replica to evict the local LRU entry."
+  },
+  {
+    "id": "logging-structured",
+    "query_es": "¿Por qué migramos a logs estructurados?",
+    "memory_en": "Switched all services to structured JSON logging with slog so the log aggregator can index request_id and trace fields without regex parsing."
+  },
+  {
+    "id": "deploy-blue-green",
+    "query_es": "¿Cómo funciona nuestro despliegue blue-green?",
+    "memory_en": "Blue-green deployment routes traffic via the load balancer target group swap; the old version stays warm for 10 minutes as an instant rollback path."
+  },
+  {
+    "id": "git-workflow-rebase",
+    "query_es": "¿Cuál es la convención del equipo para hacer rebase antes de mergear?",
+    "memory_en": "Team convention: always rebase feature branches onto main before opening a PR, never merge main back into the feature branch."
+  },
+  {
+    "id": "code-review-checklist",
+    "query_es": "¿Qué chequeamos en el checklist de code review?",
+    "memory_en": "Code review checklist covers test coverage, error handling on the unhappy path, and whether the PR touches any documented API contract."
+  },
+  {
+    "id": "perf-n-plus-one",
+    "query_es": "¿Cómo solucionamos el problema de N+1 queries en el listado de usuarios?",
+    "memory_en": "Fixed the N+1 query in the user list endpoint by eager-loading the profile relation with a single JOIN instead of one query per row."
+  },
+  {
+    "id": "security-secrets-rotation",
+    "query_es": "¿Cada cuánto rotamos las credenciales de la base de datos?",
+    "memory_en": "Database credentials rotate automatically every 90 days via the secrets manager; app pods pick up the new value on next restart without downtime."
+  },
+  {
+    "id": "frontend-state-management",
+    "query_es": "¿Por qué elegimos Zustand en vez de Redux para el estado global?",
+    "memory_en": "Picked Zustand over Redux for global state: less boilerplate, no reducers/actions ceremony, and it plays well with React Server Components."
+  },
+  {
+    "id": "api-versioning",
+    "query_es": "¿Cómo versionamos los endpoints de la API pública?",
+    "memory_en": "Public API versioning uses a URL path prefix (/v1, /v2) rather than headers, since it is easier for external partners to discover and pin."
+  },
+  {
+    "id": "feature-flags-rollout",
+    "query_es": "¿Cómo hacemos el rollout gradual de una feature flag nueva?",
+    "memory_en": "New feature flags roll out in stages: internal team first, then 5% of users, then 50%, monitoring error rate at each step before widening."
+  },
+  {
+    "id": "error-handling-retries",
+    "query_es": "¿Qué política de reintentos usamos para las llamadas al proveedor de pagos?",
+    "memory_en": "Payment provider calls retry with exponential backoff and jitter, capped at 3 attempts, and treat 5xx responses as retryable but 4xx as terminal."
+  },
+  {
+    "id": "monitoring-alerting",
+    "query_es": "¿Qué métrica dispara la alerta de latencia alta?",
+    "memory_en": "The high-latency alert fires when p95 request duration exceeds 800ms for 5 consecutive minutes on any of the checkout service pods."
+  },
+  {
+    "id": "docker-multi-stage",
+    "query_es": "¿Por qué usamos builds multi-stage en el Dockerfile?",
+    "memory_en": "Multi-stage Docker builds keep the final image small by discarding the Go compiler and build cache, shipping only the static binary and CA certs."
+  },
+  {
+    "id": "kubernetes-resource-limits",
+    "query_es": "¿Cómo calculamos los límites de CPU y memoria de los pods?",
+    "memory_en": "Pod CPU and memory limits are set from the 99th percentile of 7-day usage plus a 30% safety margin, reviewed monthly against actual load."
+  },
+  {
+    "id": "websockets-reconnect",
+    "query_es": "¿Cómo maneja el cliente la reconexión de websockets?",
+    "memory_en": "The websocket client reconnects with exponential backoff and replays any missed events by requesting a diff since the last acknowledged sequence number."
+  },
+  {
+    "id": "rate-limiting-strategy",
+    "query_es": "¿Qué algoritmo de rate limiting usamos en el gateway?",
+    "memory_en": "The API gateway uses a token bucket rate limiter per API key, refilling at a configurable rate, to allow short bursts while capping sustained throughput."
+  },
+  {
+    "id": "config-management",
+    "query_es": "¿Dónde vive la configuración de cada entorno?",
+    "memory_en": "Per-environment configuration lives in YAML files under config/, loaded by environment variable and never committed with real secrets."
+  },
+  {
+    "id": "dependency-upgrade-major",
+    "query_es": "¿Qué pasos seguimos para actualizar una dependencia con un cambio de versión mayor?",
+    "memory_en": "Major dependency upgrades go through a spike branch first: upgrade, run the full test suite, read the changelog for breaking changes, then open the real PR."
+  },
+  {
+    "id": "memory-leak-goroutine",
+    "query_es": "¿Cuál fue la causa de la fuga de memoria en el worker en segundo plano?",
+    "memory_en": "Root-caused the background worker memory leak to a goroutine that never returned from a channel read because the context was never cancelled on shutdown."
+  },
+  {
+    "id": "race-condition-mutex",
+    "query_es": "¿Cómo resolvimos la condición de carrera en el contador de solicitudes?",
+    "memory_en": "Fixed the request counter race condition by replacing the unguarded map access with a sync.Mutex around every read and write."
+  },
+  {
+    "id": "pagination-cursor",
+    "query_es": "¿Por qué cambiamos la paginación por offset a paginación por cursor?",
+    "memory_en": "Switched list endpoints from offset-based to cursor-based pagination, since offset pagination skipped or duplicated rows under concurrent writes."
+  },
+  {
+    "id": "search-relevance-bm25",
+    "query_es": "¿Qué algoritmo de ranking usa la búsqueda de texto completo?",
+    "memory_en": "Full-text search ranks results with BM25 over the FTS5 index, weighting the title field higher than the body for tie-breaking."
+  },
+  {
+    "id": "notification-system-dedup",
+    "query_es": "¿Cómo evitamos mandar notificaciones duplicadas al usuario?",
+    "memory_en": "Notification delivery is deduplicated by hashing the event payload and checking a short-lived idempotency key before sending, avoiding duplicate pushes on retry."
+  },
+  {
+    "id": "onboarding-docs-runbook",
+    "query_es": "¿Dónde está el runbook para dar de alta a un desarrollador nuevo?",
+    "memory_en": "The new-developer onboarding runbook lives in the docs/ folder and covers repo access, local environment setup, and the first-week pairing schedule."
+  },
+  {
+    "id": "rollback-strategy-canary",
+    "query_es": "¿Cómo decidimos si hacer rollback de un despliegue canary?",
+    "memory_en": "Canary rollout automatically rolls back if the error rate on the canary pods exceeds twice the baseline for more than 2 minutes."
+  },
+  {
+    "id": "embeddings-vector-search",
+    "query_es": "¿Qué modelo de embeddings usamos para la búsqueda semántica?",
+    "memory_en": "Adopted a local Ollama embeddings model for semantic search over stored memories, keeping vectors in Omnia's own SQLite store separate from the read-only engram database."
+  }
+]

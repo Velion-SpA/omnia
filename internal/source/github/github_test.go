@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	github "github.com/Velion-SpA/omnia/internal/source/github"
+	github "github.com/velion/omnia/internal/source/github"
 )
 
 // stubRouter satisfies projectRouter by returning a fixed project string.

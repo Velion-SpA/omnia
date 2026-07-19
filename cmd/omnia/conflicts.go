@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/llm"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/llm"
+	"github.com/velion/omnia/internal/store"
 )
 
 // cmdConflicts is the top-level dispatcher for `omnia conflicts <subcommand>`.

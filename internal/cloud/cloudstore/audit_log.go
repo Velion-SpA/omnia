@@ -123,6 +123,38 @@ const AuditActionAdminDemote = "admin_demote"
 // AuditOutcomeAdminDemoted is the outcome for a successful demote.
 const AuditOutcomeAdminDemoted = "demoted"
 
+// ─── Command Center v2, Slice 1: user CRUD event constants ───────────────────
+//
+// AuditActionUserCreate discriminates an operator creating a new account. The
+// generated one-time password is NEVER included in this event's metadata.
+const AuditActionUserCreate = "user_create"
+
+// AuditOutcomeUserCreated is the outcome for a successful create.
+const AuditOutcomeUserCreated = "created"
+
+// AuditActionUserUpdate discriminates an operator editing an account's
+// username/email.
+const AuditActionUserUpdate = "user_update"
+
+// AuditOutcomeUserUpdated is the outcome for a successful edit.
+const AuditOutcomeUserUpdated = "updated"
+
+// AuditActionUserPasswordReset discriminates an operator resetting an
+// account's password (admin-provided or generated). The password value is
+// NEVER included in this event's metadata.
+const AuditActionUserPasswordReset = "user_password_reset"
+
+// AuditOutcomeUserPasswordReset is the outcome for a successful reset.
+const AuditOutcomeUserPasswordReset = "reset"
+
+// AuditActionUserHardDelete discriminates an operator permanently deleting an
+// account (distinct from AuditActionUserDisable, which is the reversible
+// soft-deactivate).
+const AuditActionUserHardDelete = "user_hard_delete"
+
+// AuditOutcomeUserHardDeleted is the outcome for a successful hard delete.
+const AuditOutcomeUserHardDeleted = "hard_deleted"
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 // AuditEntry is the write-side struct for inserting an audit log row.

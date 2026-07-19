@@ -3,7 +3,8 @@ package dashboard
 import (
 	"context"
 
-	"github.com/Velion-SpA/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // adminNavKey marks a request context whose session is the cloud operator, so the
@@ -31,6 +32,38 @@ func adminNavEnabled(ctx context.Context) bool {
 // adminNavItem is the operator-only nav entry pointing at the cloud Admin section.
 var adminNavItem = ui.NavItem{Href: "/admin", Label: "Admin", ID: "admin"}
 
+// userIdentity carries the signed-in user's display name and logout action for
+// the shared shell's nav-meta block (see internal/ui/layout.templ). It is kept
+// as an unexported struct behind a context key — the same pattern as adminNav —
+// so internal/dashboard never needs to know about cloud accounts/sessions.
+type userIdentity struct {
+	Username  string
+	LogoutURL string
+}
+
+// userIdentityKey marks a request context carrying the signed-in user's identity
+// for the shared shell. Only the cloud mount sets it (for authenticated dashboard
+// sessions); the LOCAL dashboard never does — there are no accounts locally, so
+// the nav's user/logout block never renders there.
+type userIdentityKeyType struct{}
+
+var userIdentityKey userIdentityKeyType
+
+// WithUserIdentity returns a context that renders the signed-in user's name and
+// a logout button in the shared shell's nav. The cloud dashboard gate calls this
+// for authenticated dashboard sessions; nothing calls it on the local dashboard,
+// keeping the user/logout block cloud-only.
+func WithUserIdentity(ctx context.Context, username, logoutURL string) context.Context {
+	return context.WithValue(ctx, userIdentityKey, userIdentity{Username: username, LogoutURL: logoutURL})
+}
+
+// userIdentityFromContext reports the signed-in user's identity set by the cloud
+// gate, if any.
+func userIdentityFromContext(ctx context.Context) (userIdentity, bool) {
+	v, ok := ctx.Value(userIdentityKey).(userIdentity)
+	return v, ok
+}
+
 // BaseNavItems returns the standard dashboard nav entries (Overview…Activity)
 // shared by the local and cloud shells. The cloud Admin pages reuse this so their
 // nav stays in lockstep with the rest of the dashboard.
@@ -49,11 +82,48 @@ func BaseNavItems() []ui.NavItem {
 func AdminNavItem() ui.NavItem { return adminNavItem }
 
 // layoutPropsForContext builds the shared shell props for a page, appending the
-// operator-only Admin entry when the request context is an operator session.
-func layoutPropsForContext(ctx context.Context, title string) ui.LayoutProps {
-	props := localLayoutProps(title)
+// operator-only Admin entry when the request context is an operator session and
+// populating the signed-in user's name + logout action when the request context
+// carries one (cloud dashboard sessions). This applies to every page the shared
+// dashboard renders — Overview, Browse, Graph, Sync, Activity, Detail and Admin
+// — so the nav's user/logout block is consistent across the whole shell instead
+// of only appearing on the Admin pages.
+func layoutPropsForContext(ctx context.Context, active, title string) ui.LayoutProps {
+	props := localLayoutProps(active, title)
 	if adminNavEnabled(ctx) {
 		props.Nav = append(props.Nav, adminNavItem)
 	}
+	if identity, ok := userIdentityFromContext(ctx); ok {
+		props.User = identity.Username
+		props.LogoutURL = identity.LogoutURL
+	}
+	TranslateShellProps(ctx, &props)
 	return props
+}
+
+// TranslateShellProps localizes the shell chrome that localLayoutProps sets
+// as English literals: the nav item labels (keyed by NavItem.ID via
+// "nav.<id>" catalog entries — BaseNavItems/AdminNavItem stay English
+// identifiers, only the rendered Label changes), the wordmark subtitle, and
+// the status chip text. Applied last in layoutPropsForContext so it covers
+// every nav item, including the operator-only Admin entry appended above.
+//
+// Exported (i18n Slice 3) so internal/cloud/cloudserver's adminLayoutProps
+// can reuse it too — the Admin pages build ui.LayoutProps directly rather
+// than through layoutPropsForContext (they need the operator-only Nav/User
+// shape, not the account-session one), so without this export the Admin
+// section's nav labels, brand subtitle and status text would stay
+// hardcoded English forever. Mirrors the same cross-package reuse PageTitle
+// already established (internal/dashboard/layout.templ).
+func TranslateShellProps(ctx context.Context, props *ui.LayoutProps) {
+	lang := i18n.LangFrom(ctx)
+	for i, item := range props.Nav {
+		props.Nav[i].Label = i18n.T(lang, "nav."+item.ID)
+	}
+	if props.BrandSub == "Unified Knowledge" {
+		props.BrandSub = i18n.T(lang, "shell.brand.sub")
+	}
+	if props.StatusText == "Online" {
+		props.StatusText = i18n.T(lang, "shell.status.online")
+	}
 }

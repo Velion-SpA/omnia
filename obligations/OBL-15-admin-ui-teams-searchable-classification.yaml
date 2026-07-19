@@ -1,0 +1,89 @@
+id: OBL-15
+title: Admin UI — teams, profiles, searchable project selector, personal/work views
+status: done
+priority: P1
+blocks_homelab_test: false
+estimated_effort: L
+recommended_model: opus-4.8
+depends_on: [OBL-13, OBL-14]
+tags: [dashboard, admin, teams, profiles, ui, ux]
+
+context: |
+  The operator-facing UI for the OBL-14 model. The operator manages profiles (permission
+  presets), teams (grouped projects, classified personal/work), team membership (assign a
+  user to a team with a profile), and per-project overrides — all on screen. Two UX asks
+  from the user: (1) project pickers must be a SEARCHABLE select that filters options as
+  you type (not a free-text project name), and (2) the per-project specific-permission
+  add/list sits VISUALLY ABOVE the profiles/teams to reflect that it takes precedence.
+  Projects are shown split into personal vs work.
+
+current_state: |
+  - OBL-13 shipped the Admin section: Users page + Access page (per-project memberships
+    with R/W/U/D checkboxes), operator-gated, HTMX, reusing internal/ui + omnia.css.
+    evidence: internal/cloud/cloudserver/admin_ui.templ, admin_dashboard.go; internal/dashboard/adminnav.go
+  - OBL-14 provides the backend: profiles/teams/team_members/project_meta + operator
+    endpoints + a "known projects" list for autocomplete.
+    evidence: obligations/OBL-14 (admin endpoints, GET /admin/projects)
+
+gap: |
+  New/updated Admin pages for Teams + Profiles, a searchable project selector component,
+  the personal/work project split, and the Access page re-laid so per-project overrides
+  sit above the team-derived permissions.
+
+tasks: |
+  1. Profiles page (new templ): list profiles with their perm bits (R/I/U/D shown as
+     chips), create/edit a profile (name + checkboxes), delete. Seeded ones (Moderator/
+     Member/Editor) editable; guard against deleting a profile still in use (or reassign).
+  2. Teams page (new templ): list teams grouped by kind (Personal | Work), create a team
+     (name + kind), edit, delete. Team detail: its projects (add via searchable selector /
+     remove) and its members (add a user + pick a profile / remove / change profile).
+  3. Searchable project selector (reusable component): an input that filters the "known
+     projects" list (GET /admin/projects) as the user types, keyboard-navigable, and on
+     pick submits the project id — used in Teams (add project) and the Access page
+     (per-project override). No free-text project typing. Use HTMX + a small inline
+     script or a datalist; keep it within the existing design system (no new framework).
+  4. Access page (rework): for a selected user, show (top) the PER-PROJECT OVERRIDES list
+     with the searchable selector to add one and R/W/U/D + role to set it — labeled clearly
+     as taking precedence — and (below) a read-only "from teams" section showing the
+     effective team-derived perms per project and which team grants them, so the operator
+     sees the full picture. Effective perms = override if present, else team union.
+  5. Project classification UI: on a Projects page (or within Teams), let the operator set
+     each project's kind (personal|work) + optional display name (PUT /admin/projects/
+     {project}/meta), and show projects split into Personal vs Work sections everywhere
+     projects are listed.
+  6. Nav: add Teams / Profiles / Projects entries under the operator-only Admin section
+     (extend the OBL-13 admin nav gating; still cloud-only + operator-only).
+  7. All mutations operator-gated server-side (OBL-14 endpoints already are); the UI never
+     bypasses. HTMX HX-Refresh / fragment swaps consistent with OBL-13.
+  8. Tests: pages render for operator, absent/403 for non-operator; the searchable
+     selector filters the known-projects list; adding a user to a team via the UI grants
+     the profile perms (end-to-end with OBL-14); override shown above team perms.
+
+acceptance_criteria: |
+  - Operator can CREATE a profile (e.g. name it, tick R/I/U/D) and it appears for team
+    assignment.
+  - Operator can create a team classified Personal or Work, add projects to it via a
+    type-to-filter selector, and add a user with a profile.
+  - The Access page shows a user's per-project overrides ABOVE the team-derived perms, and
+    a project is added via the searchable selector (no free-text).
+  - Projects are shown split Personal vs Work; the operator can reclassify a project.
+  - Non-operator sees none of it (403 + no nav).
+
+verification: |
+  - go build ./... && go vet ./... && go test ./internal/cloud/... ./internal/dashboard/...
+  - templ generate ./internal/dashboard/... ./internal/ui/...
+  - Manual on homelab: create profile "Moderator", team "Migración" (Work) with workly+
+    trackly, add usuario as Moderator, confirm from HP that usuario now has CRUD on those;
+    add an override restricting one project to read-only and confirm it wins.
+
+do_not_touch: |
+  - Operator-only + cloud-only gating (no Admin on the local dashboard).
+  - The existing design system (internal/ui, omnia.css) — extend, don't replace; no new
+    CSS/JS framework.
+  - Cookie name, table/column names, LICENSE.
+
+references: |
+  - internal/cloud/cloudserver/admin_ui.templ, admin_dashboard.go (OBL-13 pattern to extend)
+  - internal/dashboard/adminnav.go, layout.templ (nav gating)
+  - internal/ui/ (shared shell, omnia.css, badges), HTMX already bundled
+  - obligations/OBL-14 (backend endpoints + known-projects list this UI consumes)

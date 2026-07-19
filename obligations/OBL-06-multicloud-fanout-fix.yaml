@@ -1,0 +1,66 @@
+id: OBL-06
+title: Fix multi-cloud fan-out — alias-scope the local mutation queue
+status: done
+priority: P1
+blocks_homelab_test: false   # each notebook targets ONE cloud; this blocks the "one local -> many clouds" product feature
+estimated_effort: L
+recommended_model: opus-4.8
+depends_on: []
+
+context: |
+  REAL CORRECTNESS BUG discovered during this audit. The multi-cloud CLI plumbing
+  (cloudnFor / resolveCloudSyncAliases / per-alias sync_state) only scopes STATUS
+  bookkeeping by alias. The actual data-transfer engine and the local pending-mutation
+  QUEUE are NOT alias-scoped: there is exactly one queue keyed by the hardcoded
+  "cloud" target. So when `omnia sync --cloud` loops over every configured cloud, the
+  FIRST alias drains and ACKs the shared queue for a project; every later alias finds
+  zero pending mutations, returns "Nothing new to sync", AND is still marked HEALTHY.
+  Net: the second/third cloud silently never receives the data, but the dashboard/CLI
+  report it as healthy. Today PRUEBA-LOCAL.md sidesteps this by using two SEPARATE
+  data dirs (one local DB per cloud). To deliver the product vision (one local memory
+  fanning out to personal + work clouds), the queue must be per-alias.
+
+current_state:
+  - claim: The local mutation enqueue hardcodes target_key = DefaultSyncTargetKey ("cloud"), no alias parameter.
+    evidence: internal/store/store.go:5361-5388 (enqueueSyncMutationTx); "cloud" default at internal/store/store.go:221
+  - claim: The Syncer export/ack/list all use the shared "cloud" key regardless of alias.
+    evidence: internal/sync/sync.go:1063-1070 (cloudTargetKey), 1316-1332 (listPendingMutationsForExport), Export() acks at ~sync.go:443,478, 849-858 (chunkTrackingTargetKey)
+  - claim: The multi-cloud loop constructs a per-alias Syncer but the Syncer is alias-unaware internally.
+    evidence: cmd/omnia/main.go:1648-1675 (runCloudSync loop), 1738-1845 (runCloudSyncTarget), 1752 (NewCloudWithTransport)
+  - claim: markCloudSyncOutcome marks a no-op alias HEALTHY even though it sent nothing.
+    evidence: cmd/omnia/main.go:1754-1781
+  - claim: The only existing multi-cloud test stubs syncExport/Import entirely, so it never exercises this path.
+    evidence: cmd/omnia/sync_multicloud_test.go:16-33 (stubCloudSyncHooks), 151-187
+
+gap: |
+  The local sync_mutations queue and the export/ack path must be keyed per alias
+  target (e.g. "alias:project") so each configured cloud consumes its OWN pending
+  set. A local write must enqueue one pending row PER configured cloud target (or the
+  export must not ACK-consume across aliases).
+
+tasks:
+  - Decide the model (recommend: fan-out on enqueue). On each local write, enqueue one sync_mutations row per active cloud target alias, keyed by the alias-scoped target_key (cloudnFor(alias, project)). This keeps per-cloud acked/pulled seq independent.
+  - Thread the alias/target_key through: enqueueSyncMutationTx (store.go:5361-5388), the Syncer's cloudTargetKey/listPendingMutationsForExport/Export-ack/chunkTrackingTargetKey (sync.go), and the per-alias Syncer construction (main.go:1752).
+  - Handle the migration/back-compat: existing rows keyed "cloud" must keep working for single-cloud/default deployments (cloudnFor("cloud", p) == legacy key is already true — preserve that invariant).
+  - Fix markCloudSyncOutcome so an alias is only marked healthy after its OWN queue drained successfully, never because a shared queue was already emptied by a sibling alias.
+  - Add a REAL integration test (not stubbed at syncExport): one local DB, two in-memory/loopback cloud targets, one local write, run the multi-cloud sync, assert BOTH remotes received the chunk/mutation and BOTH sync_state rows advanced last_acked_seq.
+  - Update PRUEBA-LOCAL.md once fixed: the "two separate data dirs" workaround note can be replaced with true single-DB fan-out.
+
+acceptance_criteria:
+  - One local DB with two configured clouds: a single local write is delivered to BOTH clouds.
+  - Each cloud's sync_state advances independently; none is falsely marked healthy without delivery.
+  - Single-cloud/default deployments are unaffected (legacy "cloud" key still works).
+
+verification:
+  - go build ./... && go test ./internal/sync/... ./internal/store/... ./cmd/omnia/...
+  - Manual: with dev-multicloud-up.sh (two clouds), configure one local DB with both aliases, save a memory, sync, and confirm both dashboards show the project/chunk.
+
+do_not_touch:
+  - The invariant cloudnFor("cloud", p) == cloudTargetKeyForProject(p) (main.go:603-621) — keep it so the default cloud never gets an orphaned row.
+  - Wire format of sync push/pull (mutations.go:367-368 warns against field renames without a version bump).
+
+references:
+  - internal/store/store.go:221,5361-5388
+  - internal/sync/sync.go:1063-1070,1316-1332,849-858 (+ Export ack sites)
+  - cmd/omnia/main.go:591-621,1648-1675,1738-1845,1754-1781
+  - cmd/omnia/sync_multicloud_test.go:16-33,151-187

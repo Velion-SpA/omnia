@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/autosync"
-	"github.com/Velion-SpA/omnia/internal/cloud/remote"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/cloud/autosync"
+	"github.com/velion/omnia/internal/cloud/remote"
+	"github.com/velion/omnia/internal/store"
 	_ "modernc.org/sqlite"
 )
 

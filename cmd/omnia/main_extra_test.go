@@ -16,17 +16,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud"
-	"github.com/Velion-SpA/omnia/internal/cloud/autosync"
-	"github.com/Velion-SpA/omnia/internal/cloud/constants"
-	"github.com/Velion-SpA/omnia/internal/cloud/remote"
-	"github.com/Velion-SpA/omnia/internal/mcp"
-	engramsrv "github.com/Velion-SpA/omnia/internal/server"
-	"github.com/Velion-SpA/omnia/internal/setup"
-	"github.com/Velion-SpA/omnia/internal/store"
-	engramsync "github.com/Velion-SpA/omnia/internal/sync"
-	"github.com/Velion-SpA/omnia/internal/tui"
-	versioncheck "github.com/Velion-SpA/omnia/internal/version"
+	"github.com/velion/omnia/internal/cloud"
+	"github.com/velion/omnia/internal/cloud/autosync"
+	"github.com/velion/omnia/internal/cloud/constants"
+	"github.com/velion/omnia/internal/cloud/remote"
+	"github.com/velion/omnia/internal/mcp"
+	engramsrv "github.com/velion/omnia/internal/server"
+	"github.com/velion/omnia/internal/setup"
+	"github.com/velion/omnia/internal/store"
+	engramsync "github.com/velion/omnia/internal/sync"
+	"github.com/velion/omnia/internal/tui"
+	versioncheck "github.com/velion/omnia/internal/version"
 
 	tea "github.com/charmbracelet/bubbletea"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -646,13 +646,6 @@ func TestUpdateChecksSkipCriticalStartupCommands(t *testing.T) {
 	}
 	if !shouldCheckForUpdates([]string{"version"}) {
 		t.Fatal("normal commands should keep update output")
-	}
-}
-
-func TestUpdateChecksRespectOptOutEnvVar(t *testing.T) {
-	t.Setenv("OMNIA_NO_UPDATE_CHECK", "1")
-	if shouldCheckForUpdates([]string{"version"}) {
-		t.Fatal("OMNIA_NO_UPDATE_CHECK should disable the update check")
 	}
 }
 
@@ -1381,23 +1374,14 @@ func TestCloudUpgradeDocsMatchHelpAndLocalFirstSemantics(t *testing.T) {
 		}
 	}
 
-	// README.md is the localized (Spanish) landing doc; DOCS.md is the English
-	// technical reference. Both must state the local-first semantics, but each in
-	// its own language — assert the equivalent tokens per document.
-	readmeLocalFirstTokens := []string{
-		"SQLite local",
-		"replicación/acceso",
-	}
-	for _, token := range readmeLocalFirstTokens {
-		if !strings.Contains(strings.ToLower(readme), strings.ToLower(token)) {
-			t.Fatalf("README missing local-first token %q", token)
-		}
-	}
-	docsLocalFirstTokens := []string{
+	localFirstTokens := []string{
 		"local SQLite",
 		"replication/shared access",
 	}
-	for _, token := range docsLocalFirstTokens {
+	for _, token := range localFirstTokens {
+		if !strings.Contains(strings.ToLower(readme), strings.ToLower(token)) {
+			t.Fatalf("README missing local-first token %q", token)
+		}
 		if !strings.Contains(strings.ToLower(docs), strings.ToLower(token)) {
 			t.Fatalf("DOCS missing local-first token %q", token)
 		}

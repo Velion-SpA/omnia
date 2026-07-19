@@ -2,27 +2,29 @@ package dashboard
 
 import (
 	"fmt"
-	"github.com/Velion-SpA/omnia/internal/audit"
+
+	"github.com/velion/omnia/internal/audit"
+	"github.com/velion/omnia/internal/ui"
 )
 
 // activityPage renders the audit log newest-first.
 templ activityPage(entries []audit.Entry) {
-	@layout("Activity") {
-		<h1 style="font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;">Activity Log</h1>
+	@layout("activity", ui.T(ctx, "nav.activity")) {
+		<h1 style="font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; margin: 0 0 1.5rem 0;">{ ui.T(ctx, "activity.pageTitle") }</h1>
 		if len(entries) == 0 {
-			@emptyState("No activity recorded yet. Edits and deletes will appear here.")
+			@emptyState(ui.T(ctx, "activity.emptyState"))
 		} else {
 			<div class="card" style="padding: 0; overflow: hidden;">
 				<table class="data-table">
 					<thead>
 						<tr>
-							<th style="width: 160px;">Time</th>
+							<th style="width: 160px;">{ ui.T(ctx, "activity.time") }</th>
 							<th style="width: 80px;">Actor</th>
-							<th style="width: 110px;">Action</th>
+							<th style="width: 110px;">{ ui.T(ctx, "activity.action") }</th>
 							<th style="width: 80px;">Obs</th>
-							<th style="width: 80px;">Project</th>
-							<th>Summary</th>
-							<th style="width: 60px;">Result</th>
+							<th style="width: 80px;">{ ui.T(ctx, "field.project") }</th>
+							<th>{ ui.T(ctx, "activity.summary") }</th>
+							<th style="width: 60px;">{ ui.T(ctx, "activity.result") }</th>
 						</tr>
 					</thead>
 					<tbody>

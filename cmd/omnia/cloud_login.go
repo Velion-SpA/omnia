@@ -13,7 +13,7 @@ import (
 
 	term "github.com/charmbracelet/x/term"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 // resolveCloudServer returns the server URL to use for login/signup.

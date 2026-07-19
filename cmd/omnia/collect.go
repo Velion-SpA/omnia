@@ -9,15 +9,15 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/config"
-	"github.com/Velion-SpA/omnia/internal/core"
-	engramsink "github.com/Velion-SpA/omnia/internal/sink/engram"
-	"github.com/Velion-SpA/omnia/internal/source/atlassian"
-	confluence "github.com/Velion-SpA/omnia/internal/source/confluence"
-	discord "github.com/Velion-SpA/omnia/internal/source/discord"
-	github "github.com/Velion-SpA/omnia/internal/source/github"
-	jira "github.com/Velion-SpA/omnia/internal/source/jira"
-	"github.com/Velion-SpA/omnia/internal/state"
+	"github.com/velion/omnia/internal/config"
+	"github.com/velion/omnia/internal/core"
+	engramsink "github.com/velion/omnia/internal/sink/engram"
+	"github.com/velion/omnia/internal/source/atlassian"
+	confluence "github.com/velion/omnia/internal/source/confluence"
+	discord "github.com/velion/omnia/internal/source/discord"
+	github "github.com/velion/omnia/internal/source/github"
+	jira "github.com/velion/omnia/internal/source/jira"
+	"github.com/velion/omnia/internal/state"
 )
 
 // cmdCollect runs the external-source collectors (GitHub, Discord, ...) that pull

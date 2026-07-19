@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/source/atlassian/adf"
+	"github.com/velion/omnia/internal/source/atlassian/adf"
 )
 
 func TestToMarkdown(t *testing.T) {

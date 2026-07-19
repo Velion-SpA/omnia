@@ -12,8 +12,8 @@ import (
 	"testing"
 
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
-	engrammcp "github.com/Velion-SpA/omnia/internal/mcp"
-	"github.com/Velion-SpA/omnia/internal/store"
+	engrammcp "github.com/velion/omnia/internal/mcp"
+	"github.com/velion/omnia/internal/store"
 	_ "modernc.org/sqlite"
 )
 

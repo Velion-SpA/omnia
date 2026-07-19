@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/engramdb"
+	"github.com/velion/omnia/internal/engramdb"
 )
 
 // createSyncTestDB builds a throwaway DB whose rows carry sync_id values, so the

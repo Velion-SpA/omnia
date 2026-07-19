@@ -24,3 +24,23 @@ sources:
       - owner/repo
 
 backfill_days: 30
+
+# Omnia's own local semantic-search index. Disabled by default: off keeps
+# `omnia embed` a no-op and the dashboard serves keyword (FTS) search only.
+# embeddings:
+#   enabled: true
+#   base_url: http://localhost:11434  # Ollama base URL
+#   model: jina/jina-embeddings-v2-base-es
+#   dim: 768
+#   db_path: ~/.local/share/omnia/embeddings.db
+
+# Hybrid (lexical+semantic) recall fusion for mem_search. Disabled by
+# default: off calls store.Search directly, byte-for-byte today's FTS5-only
+# path — zero engram.db migration. Requires `embeddings.enabled: true` above.
+# recall:
+#   enabled: true
+#   rrf_k: 60
+#   dense_k: 5
+#   strong_floor: 0.65
+#   base_floor: 0.55
+#   max_results: 50

@@ -27,23 +27,25 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/autosync"
-	"github.com/Velion-SpA/omnia/internal/cloud/constants"
-	"github.com/Velion-SpA/omnia/internal/cloud/remote"
-	"github.com/Velion-SpA/omnia/internal/cloud/syncguidance"
-	"github.com/Velion-SpA/omnia/internal/datadir"
-	"github.com/Velion-SpA/omnia/internal/diagnostic"
-	"github.com/Velion-SpA/omnia/internal/envx"
-	"github.com/Velion-SpA/omnia/internal/mcp"
-	"github.com/Velion-SpA/omnia/internal/obsidian"
-	"github.com/Velion-SpA/omnia/internal/project"
-	"github.com/Velion-SpA/omnia/internal/server"
-	"github.com/Velion-SpA/omnia/internal/setup"
-	"github.com/Velion-SpA/omnia/internal/store"
-	engramsync "github.com/Velion-SpA/omnia/internal/sync"
-	"github.com/Velion-SpA/omnia/internal/timeutil"
-	"github.com/Velion-SpA/omnia/internal/tui"
-	versioncheck "github.com/Velion-SpA/omnia/internal/version"
+	"github.com/velion/omnia/internal/cloud/autosync"
+	"github.com/velion/omnia/internal/cloud/constants"
+	"github.com/velion/omnia/internal/cloud/remote"
+	"github.com/velion/omnia/internal/cloud/syncguidance"
+	"github.com/velion/omnia/internal/config"
+	"github.com/velion/omnia/internal/datadir"
+	"github.com/velion/omnia/internal/diagnostic"
+	"github.com/velion/omnia/internal/embed"
+	"github.com/velion/omnia/internal/envx"
+	"github.com/velion/omnia/internal/mcp"
+	"github.com/velion/omnia/internal/obsidian"
+	"github.com/velion/omnia/internal/project"
+	"github.com/velion/omnia/internal/server"
+	"github.com/velion/omnia/internal/setup"
+	"github.com/velion/omnia/internal/store"
+	engramsync "github.com/velion/omnia/internal/sync"
+	"github.com/velion/omnia/internal/timeutil"
+	"github.com/velion/omnia/internal/tui"
+	versioncheck "github.com/velion/omnia/internal/version"
 
 	tea "github.com/charmbracelet/bubbletea"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -758,11 +760,6 @@ func shouldCheckForUpdates(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	// Opt-out escape hatch (e.g. for CI or offline environments). Any non-empty
-	// value disables the check.
-	if envx.Get("OMNIA_NO_UPDATE_CHECK") != "" {
-		return false
-	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
 	case "mcp", "serve":
@@ -797,11 +794,7 @@ func handleConfigFreeCommand(args []string) bool {
 }
 
 func printUpdateCheckResult(result versioncheck.CheckResult) {
-	// Only surface an actual update. Check failures (offline, GitHub rate
-	// limits/403, timeouts, etc.) are expected and must stay silent — they are
-	// not actionable for the user and would otherwise print noise on every
-	// command. Set OMNIA_NO_UPDATE_CHECK to skip the check entirely.
-	if result.Status == versioncheck.StatusUpdateAvailable && result.Message != "" {
+	if result.Status != versioncheck.StatusUpToDate && result.Message != "" {
 		fmt.Fprintln(os.Stderr, result.Message)
 		fmt.Fprintln(os.Stderr)
 	}
@@ -842,6 +835,20 @@ func cmdServe(cfg store.Config) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Auto-embed-on-save (human-like-memory PR4): when embeddings are enabled,
+	// run the worker on this shutdown ctx so POST /observations embeds new
+	// memories out-of-band. nil (disabled) leaves the save path byte-for-byte
+	// today's. Hoisted to function scope so the SIGINT/SIGTERM handler below
+	// can Stop() it (graceful drain) before the process exits.
+	var autoEmbedWorker *embed.Worker
+	if appCfg, cfgErr := config.Load(config.DefaultPath()); cfgErr == nil {
+		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s); worker != nil {
+			worker.Start(ctx)
+			srv.SetAutoEmbed(worker)
+			autoEmbedWorker = worker
+		}
+	}
+
 	// Try to start autosync (opt-in via ENGRAM_CLOUD_AUTOSYNC=1).
 	// BW7: tryStartAutosync returns (status provider, stop func) so the signal
 	// handler can call mgrStop() before os.Exit, giving the manager time to
@@ -863,6 +870,12 @@ func cmdServe(cfg store.Config) {
 		cancel()
 		if mgrStop != nil {
 			mgrStop() // BW7: wait for Manager to release lease before exiting
+		}
+		// Drain the auto-embed worker (human-like-memory PR4 review fix):
+		// ctx is already cancelled above, so Stop() waits for the in-flight
+		// job (if any) to finish rather than letting os.Exit kill it mid-embed.
+		if autoEmbedWorker != nil {
+			autoEmbedWorker.Stop()
 		}
 		exitFunc(0)
 	}()
@@ -1011,6 +1024,13 @@ func startAutosyncManagersForAlias(ctx context.Context, s *store.Store, cfg stor
 		log.Printf("[autosync] started for cloud %q (server=%s, target=%s)", label, serverURL, mgrCfg.TargetKey)
 		mgrs = append(mgrs, mgr)
 	}
+
+	// Start the proactive token refresher for this alias. All managers above
+	// share the same underlying MutationTransport (remoteMT), so passing it once
+	// is sufficient — SetToken updates the token for every request in flight on
+	// any of the target-key managers.
+	startTokenRefresher(ctx, cfg, alias, applyEnvOverrides, []*remote.MutationTransport{remoteMT})
+
 	return mgrs
 }
 
@@ -1051,6 +1071,10 @@ func cmdMCP(cfg store.Config) {
 	// startup fatal when cloud config is missing or invalid.
 	ctx, cancel := context.WithCancel(context.Background())
 	_, mgrStop := tryStartAutosync(ctx, s, cfg)
+	// Hoisted to function scope (human-like-memory PR4 review fix) so
+	// stopAutosync below can Stop() it — draining the worker's in-flight
+	// job instead of leaving it to be killed mid-embed by process exit.
+	var autoEmbedWorker *embed.Worker
 	autosyncStopped := false
 	stopAutosync := func() {
 		if autosyncStopped {
@@ -1061,10 +1085,29 @@ func cmdMCP(cfg store.Config) {
 		if mgrStop != nil {
 			mgrStop()
 		}
+		if autoEmbedWorker != nil {
+			autoEmbedWorker.Stop()
+		}
 	}
 	defer stopAutosync()
 
 	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride}
+	// Recall wiring (design D6/D7, human-like-memory PR3): only constructs
+	// the embeddings store/Ollama client/recall.Service when recall.enabled
+	// is true in config.yaml. A missing/unparseable config file degrades
+	// silently (mcpCfg.Recall stays nil), matching every other `omnia`
+	// subcommand's config.Load graceful-degradation convention.
+	if appCfg, cfgErr := config.Load(config.DefaultPath()); cfgErr == nil {
+		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings)
+		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
+		// enabled, run the worker on the same ctx cancelled at shutdown so
+		// mem_save embeds new memories out-of-band. nil when disabled.
+		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s); worker != nil {
+			worker.Start(ctx)
+			mcpCfg.AutoEmbed = worker
+			autoEmbedWorker = worker
+		}
+	}
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
 

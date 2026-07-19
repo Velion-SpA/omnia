@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/core"
-	github "github.com/Velion-SpA/omnia/internal/source/github"
+	"github.com/velion/omnia/internal/core"
+	github "github.com/velion/omnia/internal/source/github"
 )
 
 // stubRouter satisfies the github source's projectRouter interface.

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/source/atlassian"
+	"github.com/velion/omnia/internal/source/atlassian"
 )
 
 func TestGetJSON_Success(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/config"
+	"github.com/velion/omnia/internal/config"
 )
 
 func writeTempConfig(t *testing.T, body string) string {
@@ -31,8 +31,12 @@ func TestEmbeddings_DefaultsDisabled(t *testing.T) {
 	if cfg.Embeddings.BaseURL != "http://localhost:11434" {
 		t.Errorf("BaseURL default: got %q", cfg.Embeddings.BaseURL)
 	}
-	if cfg.Embeddings.Model != "nomic-embed-text" {
-		t.Errorf("Model default: got %q", cfg.Embeddings.Model)
+	// jina-embeddings-v2-base-es replaces nomic-embed-text as the default: a
+	// purpose-built ES<->EN shared-space model with 768-dim (same as nomic, so
+	// no vector-store schema change) and real 8192-token context. See engram
+	// obs #1401 (supersedes design.md D3's original nomic pick).
+	if cfg.Embeddings.Model != "jina/jina-embeddings-v2-base-es" {
+		t.Errorf("Model default: got %q, want jina/jina-embeddings-v2-base-es", cfg.Embeddings.Model)
 	}
 	if cfg.Embeddings.Dim != 768 {
 		t.Errorf("Dim default: got %d, want 768", cfg.Embeddings.Dim)

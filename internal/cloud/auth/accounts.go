@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // Account-based authentication (multi-tenant evolution, Phase 1).
@@ -43,7 +43,24 @@ var (
 	// ErrInvalidAccountToken is returned by ParseAccountToken for any malformed,
 	// tampered, wrong-domain, or expired account token.
 	ErrInvalidAccountToken = errors.New("auth: invalid account token")
+	// ErrAccountDisabled is returned by Login/LoginForDevice/Refresh when the
+	// account has been deactivated (cloud_users.disabled_at IS NOT NULL). It mirrors
+	// cloudstore.ErrManagedTokenUserDisabled for the account-token path. Handlers map
+	// it to the SAME HTTP status as bad credentials (401) so a caller cannot tell a
+	// disabled account apart from a nonexistent/wrong-password one.
+	ErrAccountDisabled = errors.New("auth: account disabled")
 )
+
+// C1 residual (documented follow-up, intentionally NOT built here): account tokens
+// are STATELESS HMAC blobs (see MintAccountToken/ParseAccountToken) — an
+// already-issued token's SIGNATURE stays valid until its 24h TTL even after the
+// owner is disabled or hard-deleted. The disabled-account enforcement added below
+// (reject at Login/LoginForDevice/Refresh) plus IsUserAdmin and the sync data-plane
+// RBAC disabled gate make a disabled account's ACCESS a no-op everywhere (0 perms,
+// never operator, cannot re-login or refresh). INSTANTANEOUS revocation of an
+// outstanding token before its TTL would require a server-side revocation list /
+// token-version check on every request; that is the correct next step for true
+// stateless-token revocation but is out of scope for this change.
 
 // dummyBcryptHash is a valid DefaultCost bcrypt hash used only to equalize
 // Login's response time when the username does not exist, so an attacker cannot
@@ -209,6 +226,12 @@ func (s *Service) Login(username, password string) (token string, user *cloudsto
 	if err := bcrypt.CompareHashAndPassword([]byte(found.PasswordHash), []byte(password)); err != nil {
 		return "", nil, ErrInvalidCredentials
 	}
+	// C1: reject a disabled account AFTER the bcrypt compare so the check adds no
+	// user-enumeration side channel (the timing path is identical to a good login),
+	// and never mint a token for a deactivated user.
+	if found.Disabled() {
+		return "", nil, ErrAccountDisabled
+	}
 	token, err = s.MintAccountToken(found.ID, found.Username)
 	if err != nil {
 		return "", nil, err
@@ -237,6 +260,10 @@ func (s *Service) LoginForDevice(username, password, deviceName string) (token s
 	if err := bcrypt.CompareHashAndPassword([]byte(found.PasswordHash), []byte(password)); err != nil {
 		return "", nil, ErrInvalidCredentials
 	}
+	// C1: same disabled-account rejection as Login, applied after bcrypt.
+	if found.Disabled() {
+		return "", nil, ErrAccountDisabled
+	}
 	deviceID := ""
 	if deviceName != "" && s.deviceStore != nil {
 		dev, err := s.deviceStore.GetOrCreateDevice(found.ID, deviceName)
@@ -254,10 +281,25 @@ func (s *Service) LoginForDevice(username, password, deviceName string) (token s
 
 // Refresh parses the current account token and mints a fresh one with a new
 // expiry. It rejects expired or invalid tokens before issuing a replacement.
+//
+// C1: Refresh must NOT hand a disabled account a brand-new 24h token off an old
+// one. When an account store is wired, it re-reads the owning account (by username,
+// the only lookup seam) and rejects with ErrAccountDisabled when that account is
+// present, matches the token's AccountID, and is disabled. A non-disabled account
+// refreshes exactly as before. (A hard-deleted account — no row — falls through to
+// mint; instantaneous revocation of an outstanding stateless token is the documented
+// follow-up above, not built here.)
 func (s *Service) Refresh(currentToken string) (string, error) {
 	claims, err := s.ParseAccountToken(currentToken)
 	if err != nil {
 		return "", err
+	}
+	if s.accountStore != nil {
+		if found, lookupErr := s.accountStore.GetUserByUsername(claims.Username); lookupErr == nil {
+			if found != nil && found.ID == claims.AccountID && found.Disabled() {
+				return "", ErrAccountDisabled
+			}
+		}
 	}
 	return s.MintAccountTokenForDevice(claims.AccountID, claims.Username, claims.DeviceID)
 }

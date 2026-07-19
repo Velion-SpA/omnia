@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // fakeManagedTokenStore is an in-memory managedTokenStore for auth unit tests, so

@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/core"
-	"github.com/Velion-SpA/omnia/internal/source/atlassian"
-	confluence "github.com/Velion-SpA/omnia/internal/source/confluence"
+	"github.com/velion/omnia/internal/core"
+	"github.com/velion/omnia/internal/source/atlassian"
+	confluence "github.com/velion/omnia/internal/source/confluence"
 )
 
 // stubRouter satisfies confluence's projectRouter interface by returning a

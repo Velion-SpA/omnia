@@ -1,0 +1,55 @@
+id: OBL-05
+title: Expand and harden the audit log
+status: done
+priority: P2
+blocks_homelab_test: false
+estimated_effort: M
+recommended_model: sonnet-5
+depends_on: [OBL-01]
+
+context: |
+  The audit log currently records exactly ONE category of event — a push rejected
+  because a project's sync is paused — and even that insert is best-effort (a failed
+  audit write only logs a warning and the request proceeds). Upstream v1.18.0 makes
+  audit atomic specifically for credential issuance, so a failed audit write never
+  leaves a live unaudited credential. We want broader coverage and atomicity on the
+  sensitive paths.
+
+current_state:
+  - claim: Only two action constants and one outcome exist; only paused-push rejections are audited.
+    evidence: internal/cloud/cloudstore/audit_log.go:13-21; call sites cloudserver.go:547-561 and mutations.go:179-194
+  - claim: Audit insert is best-effort — on failure the request still proceeds (warning only).
+    evidence: internal/cloud/cloudserver/cloudserver.go:556-558; internal/cloud/cloudserver/mutations.go:189-191
+  - claim: Nothing else is audited — no login/signup/token-issue/revoke/membership/device/admin-login events.
+    evidence: repo-wide grep of InsertAuditEntry / AuditEntry{ = only the two sites above
+  - claim: Schema supports it (contributor, project, action, outcome, entry_count, reason_code, metadata).
+    evidence: internal/cloud/cloudstore/cloudstore.go:664-675
+
+gap: |
+  Add audit events for security-relevant actions, and make credential-issuance audit
+  ATOMIC (same tx as the token insert), so audit failure rolls back the credential.
+
+tasks:
+  - Add action/outcome constants for: token_issued, token_revoked, user_disabled, user_enabled, login_success, login_failed, signup, membership_granted, membership_revoked, device_created, device_revoked, project_paused, project_resumed, admin_login.
+  - Make token issuance atomic with its audit insert in the SAME transaction (coordinate with OBL-01): if the audit insert fails, roll back the token row. This is the "no live unaudited credential" guarantee.
+  - Add best-effort (non-blocking) audit for the non-credential events (login/signup/membership/device/pause) — these should NOT block the action, matching current behavior, but MUST be emitted.
+  - Ensure metadata JSONB carries useful context (actor, target user/project, source IP if available).
+  - Surface a filtered audit view in the dashboard admin area (read-only) if not already present.
+  - Tests: token issuance audit rolls back on audit failure; each new event type is emitted on its action.
+
+acceptance_criteria:
+  - Issuing a token writes an atomic audit row; simulated audit failure prevents the token from existing.
+  - Login/signup/membership/device/pause actions each produce an audit row.
+
+verification:
+  - go build ./... && go test ./internal/cloud/...
+  - Manual: perform a login + a membership grant + a device create; confirm audit rows exist.
+
+do_not_touch:
+  - cloud_sync_audit_log schema column names (extend via metadata JSONB, not new columns, unless truly needed).
+
+references:
+  - internal/cloud/cloudstore/audit_log.go:13-21
+  - internal/cloud/cloudserver/cloudserver.go:547-561
+  - internal/cloud/cloudserver/mutations.go:179-194
+  - internal/cloud/cloudstore/cloudstore.go:664-675

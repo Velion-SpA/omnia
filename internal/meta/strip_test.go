@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/meta"
+	"github.com/velion/omnia/internal/meta"
 )
 
 func TestStrip_RemovesValidBlock(t *testing.T) {

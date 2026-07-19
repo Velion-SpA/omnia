@@ -5,8 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	cloudauth "github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	cloudauth "github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // TestDeleteDeviceEmitsAudit verifies OBL-05: an account deleting one of its

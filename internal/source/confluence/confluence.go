@@ -51,11 +51,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/core"
-	"github.com/Velion-SpA/omnia/internal/enrich"
-	"github.com/Velion-SpA/omnia/internal/meta"
-	"github.com/Velion-SpA/omnia/internal/source/atlassian"
-	"github.com/Velion-SpA/omnia/internal/source/atlassian/storage"
+	"github.com/velion/omnia/internal/core"
+	"github.com/velion/omnia/internal/enrich"
+	"github.com/velion/omnia/internal/meta"
+	"github.com/velion/omnia/internal/source/atlassian"
+	"github.com/velion/omnia/internal/source/atlassian/storage"
 )
 
 const (

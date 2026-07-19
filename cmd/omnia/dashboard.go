@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/config"
-	"github.com/Velion-SpA/omnia/internal/dashboard"
+	"github.com/velion/omnia/internal/config"
+	"github.com/velion/omnia/internal/dashboard"
 )
 
 // cmdDashboard starts the unified Omnia web UI dashboard (localhost only).

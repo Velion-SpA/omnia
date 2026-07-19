@@ -10,9 +10,9 @@
 package tui
 
 import (
-	"github.com/Velion-SpA/omnia/internal/setup"
-	"github.com/Velion-SpA/omnia/internal/store"
-	"github.com/Velion-SpA/omnia/internal/version"
+	"github.com/velion/omnia/internal/setup"
+	"github.com/velion/omnia/internal/store"
+	"github.com/velion/omnia/internal/version"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"

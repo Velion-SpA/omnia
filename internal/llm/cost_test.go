@@ -3,7 +3,7 @@ package llm_test
 import (
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/llm"
+	"github.com/velion/omnia/internal/llm"
 )
 
 // ─── A.5 tests ────────────────────────────────────────────────────────────────

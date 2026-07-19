@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/cloud"
+	"github.com/velion/omnia/internal/cloud"
 )
 
 // openTestCloudStore opens a CloudStore using CLOUDSTORE_TEST_DSN env var.
@@ -38,7 +38,7 @@ func TestProjectSyncControlPersists(t *testing.T) {
 	const project = "test-project-controls"
 
 	// Default: enabled (no row).
-	enabled, err := cs.IsProjectSyncEnabled(project)
+	enabled, err := cs.IsProjectSyncEnabled(context.Background(), project)
 	if err != nil {
 		t.Fatalf("IsProjectSyncEnabled: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestProjectSyncControlPersists(t *testing.T) {
 		t.Fatalf("SetProjectSyncEnabled(false): %v", err)
 	}
 
-	enabled, err = cs.IsProjectSyncEnabled(project)
+	enabled, err = cs.IsProjectSyncEnabled(context.Background(), project)
 	if err != nil {
 		t.Fatalf("IsProjectSyncEnabled after disable: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestProjectSyncControlPersists(t *testing.T) {
 	if err := cs.SetProjectSyncEnabled(project, true, "operator", ""); err != nil {
 		t.Fatalf("SetProjectSyncEnabled(true): %v", err)
 	}
-	enabled, err = cs.IsProjectSyncEnabled(project)
+	enabled, err = cs.IsProjectSyncEnabled(context.Background(), project)
 	if err != nil {
 		t.Fatalf("IsProjectSyncEnabled after re-enable: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestProjectSyncControlPersists(t *testing.T) {
 func TestProjectSyncControlUnknownProjectDefaultsEnabled(t *testing.T) {
 	cs := openTestCloudStore(t)
 
-	enabled, err := cs.IsProjectSyncEnabled("no-such-project-xyz-" + t.Name())
+	enabled, err := cs.IsProjectSyncEnabled(context.Background(), "no-such-project-xyz-"+t.Name())
 	if err != nil {
 		t.Fatalf("IsProjectSyncEnabled: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestIsProjectSyncEnabledReturnsFalseOnDBError(t *testing.T) {
 	}
 	cs := &CloudStore{db: db}
 
-	enabled, err := cs.IsProjectSyncEnabled("some-project")
+	enabled, err := cs.IsProjectSyncEnabled(context.Background(), "some-project")
 	if err == nil {
 		t.Fatal("expected error from DB failure, got nil")
 	}
@@ -333,4 +333,86 @@ func TestProjectSyncControlListIncludesKnownChunkProjects(t *testing.T) {
 	if !found {
 		t.Errorf("expected project %q in ListProjectSyncControls (via UNION with cloud_chunks), not found in %d controls", chunkProject, len(controls))
 	}
+}
+
+// TestListProjectSyncControlsMapMatchesGetProjectSyncControl proves the batched
+// ListProjectSyncControlsMap (ONE query over cloud_project_controls) returns
+// results IDENTICAL to calling GetProjectSyncControl once per project. This is
+// the fix for the Admin Projects page N+1 (previously one SELECT per known
+// project — see handleAdminProjectsPage in cloudserver). Covers: an explicit
+// enabled row, an explicit paused row (with reason + updated_by), and a
+// project with NO control row at all — which must be ABSENT from the map,
+// exactly like GetProjectSyncControl returns (nil, nil) for it (the OBL-04
+// "absent row = enabled" default is a caller-side convention, not baked into
+// either query).
+func TestListProjectSyncControlsMapMatchesGetProjectSyncControl(t *testing.T) {
+	cs := openTestCloudStore(t)
+	ctx := context.Background()
+
+	const (
+		enabledProject = "nplus1-sync-enabled"
+		pausedProject  = "nplus1-sync-paused"
+		absentProject  = "nplus1-sync-absent"
+	)
+	t.Cleanup(func() {
+		for _, p := range []string{enabledProject, pausedProject, absentProject} {
+			_, _ = cs.db.Exec(`DELETE FROM cloud_project_controls WHERE project = $1`, p)
+		}
+	})
+
+	if err := cs.SetProjectSyncEnabled(enabledProject, true, "alice", ""); err != nil {
+		t.Fatalf("seed enabled control: %v", err)
+	}
+	if err := cs.SetProjectSyncEnabled(pausedProject, false, "bob", "runaway agent"); err != nil {
+		t.Fatalf("seed paused control: %v", err)
+	}
+	// absentProject: deliberately no SetProjectSyncEnabled call — no row exists.
+
+	batched, err := cs.ListProjectSyncControlsMap(ctx)
+	if err != nil {
+		t.Fatalf("ListProjectSyncControlsMap: %v", err)
+	}
+
+	for _, project := range []string{enabledProject, pausedProject, absentProject} {
+		perItem, err := cs.GetProjectSyncControl(project)
+		if err != nil {
+			t.Fatalf("GetProjectSyncControl(%q): %v", project, err)
+		}
+		fromMap, ok := batched[project]
+
+		if perItem == nil {
+			if ok {
+				t.Fatalf("project %q: GetProjectSyncControl reports no row, but batched map has an entry %+v", project, fromMap)
+			}
+			continue // absent from both — matches.
+		}
+		if !ok {
+			t.Fatalf("project %q: GetProjectSyncControl found a row %+v, but batched map is missing it", project, *perItem)
+		}
+		if fromMap.Project != perItem.Project ||
+			fromMap.SyncEnabled != perItem.SyncEnabled ||
+			fromMap.UpdatedAt != perItem.UpdatedAt ||
+			!stringPtrEqual(fromMap.PausedReason, perItem.PausedReason) ||
+			!stringPtrEqual(fromMap.UpdatedBy, perItem.UpdatedBy) {
+			t.Fatalf("project %q: batched=%+v (paused=%q updatedBy=%q) != per-item=%+v (paused=%q updatedBy=%q)",
+				project, fromMap, strPtrVal(fromMap.PausedReason), strPtrVal(fromMap.UpdatedBy),
+				*perItem, strPtrVal(perItem.PausedReason), strPtrVal(perItem.UpdatedBy))
+		}
+	}
+}
+
+// stringPtrEqual compares two *string for equality, including both-nil.
+func stringPtrEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// strPtrVal renders a *string for a failure message, tolerating nil.
+func strPtrVal(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return *p
 }

@@ -3,57 +3,19 @@ package ui
 import (
 	"fmt"
 	"time"
+
+	"github.com/velion/omnia/internal/ui/i18n"
 )
-
-// typeColor returns the Calypso-palette hex foreground for an observation type.
-func typeColor(t string) string {
-	switch t {
-	case "decision":
-		return "#22d3ee"
-	case "bugfix":
-		return "#f87171"
-	case "architecture":
-		return "#a78bfa"
-	case "discovery":
-		return "#34d399"
-	case "pattern":
-		return "#fb923c"
-	case "config":
-		return "#fbbf24"
-	case "learning":
-		return "#38bdf8"
-	default:
-		return "#94a3b8"
-	}
-}
-
-// typeColorBg returns a translucent rgba background for an observation type chip.
-func typeColorBg(t string) string {
-	switch t {
-	case "decision":
-		return "rgba(34,211,238,0.10)"
-	case "bugfix":
-		return "rgba(248,113,113,0.10)"
-	case "architecture":
-		return "rgba(167,139,250,0.10)"
-	case "discovery":
-		return "rgba(52,211,153,0.10)"
-	case "pattern":
-		return "rgba(251,146,60,0.10)"
-	case "config":
-		return "rgba(251,191,36,0.10)"
-	case "learning":
-		return "rgba(56,189,248,0.10)"
-	default:
-		return "rgba(148,163,184,0.08)"
-	}
-}
 
 // isFresh reports whether t is within the last 24 hours.
 func isFresh(t time.Time) bool { return time.Since(t) < 24*time.Hour }
 
-// relativeTime formats t as a human-readable relative duration.
-func relativeTime(t time.Time) string {
+// RelativeTime formats t as a human-readable relative duration (e.g. "5m
+// ago", "yesterday", falling back to an absolute date after 30 days).
+// Exported for cross-package reuse — Command Center v2, Slice 4b uses it for
+// the Admin Projects card's "last activity" stat (cloudserver is a separate
+// package from ui, so it needs a public name).
+func RelativeTime(t time.Time) string {
 	d := time.Since(t)
 	switch {
 	case d < time.Minute:
@@ -73,10 +35,29 @@ func relativeTime(t time.Time) string {
 	return t.Format("Jan 2, 2006")
 }
 
-// typePct returns the bar fill percentage for a type count relative to the max.
-func typePct(count int, all []TypeCount) string {
-	if len(all) == 0 || all[0].Count == 0 {
-		return "0"
+// RelativeTimeLang is the locale-aware variant of RelativeTime, added in
+// i18n Slice 2 for the shared-dashboard pages (project detail's
+// "Last activity" stat). RelativeTime itself is left UNCHANGED (still
+// English-only) because internal/cloud/cloudserver's admin pages — which
+// call it directly — are Slice 3 scope; changing RelativeTime's signature
+// would force edits there. Same thresholds as RelativeTime, only the wording
+// is resolved through the i18n catalog.
+func RelativeTimeLang(t time.Time, lang i18n.Lang) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return i18n.T(lang, "age.justNow")
+	case d < time.Hour:
+		return i18n.Tf(lang, "age.minutesAgo", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return i18n.Tf(lang, "age.hoursAgo", int(d.Hours()))
 	}
-	return fmt.Sprintf("%d", (count*100)/all[0].Count)
+	days := int(d.Hours() / 24)
+	switch {
+	case days == 1:
+		return i18n.T(lang, "age.yesterday")
+	case days < 30:
+		return i18n.Tf(lang, "age.daysAgo", days)
+	}
+	return i18n.FormatDate(t, lang)
 }

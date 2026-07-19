@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Velion-SpA/omnia/internal/datadir"
+	"github.com/velion/omnia/internal/datadir"
 )
 
 // cmdMigrate explicitly performs the safe, non-destructive migration of a legacy

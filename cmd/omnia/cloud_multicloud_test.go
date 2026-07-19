@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/constants"
+	"github.com/velion/omnia/internal/cloud/constants"
 )
 
 // TestCloudConfigV2MigrationFromV1 verifies that a v1 cloud.json (server_url + token

@@ -1,0 +1,61 @@
+id: OBL-04
+title: Wire project sync controls (pause/resume) to an HTTP route + CLI
+status: done
+priority: P2
+blocks_homelab_test: false
+estimated_effort: M
+recommended_model: sonnet-5
+depends_on: []
+tags: [cloud, operator, controls]
+
+context: |
+  The server can already ENFORCE a per-project sync pause — enforcement is fully wired
+  and rejects pushes for a paused project. But the CONTROL side is dead code:
+  SetProjectSyncEnabled is implemented (and even invalidates the dashboard read cache)
+  yet has zero callers. There is no HTTP route and no CLI to actually pause or resume a
+  project, so an operator cannot pause a runaway/abusive project's sync.
+
+current_state: |
+  - IsProjectSyncEnabled gates pushes; absent row defaults to ENABLED (opt-out).
+    evidence: internal/cloud/cloudstore/project_controls.go:21-46; enforced at
+    cloudserver.go:529-574 and mutations.go:164-206
+  - SetProjectSyncEnabled fully implemented but has zero non-test callers (no route, no CLI).
+    evidence: internal/cloud/cloudstore/project_controls.go:48-83 (cache invalidation 79-82)
+  - cloud_project_controls schema exists.
+    evidence: internal/cloud/cloudstore/cloudstore.go:621-627
+
+gap: |
+  Expose SetProjectSyncEnabled via a managed-admin HTTP route and an omnia cloud CLI
+  subcommand, and surface control state in the dashboard admin area.
+
+tasks: |
+  1. Add managed-admin routes POST /admin/projects/{project}/pause (optional
+     paused_reason body) and POST /admin/projects/{project}/resume, both calling
+     SetProjectSyncEnabled. Gate to operator/admin only (align with OBL-03).
+  2. Add CLI omnia cloud project pause <project> [--reason ...] and
+     omnia cloud project resume <project> hitting those routes with the admin credential.
+  3. Surface control state (enabled/paused + reason) in the dashboard admin project view
+     (read via GetProjectSyncControl, project_controls.go:99).
+  4. Record an audit event on pause/resume (ties into OBL-05), including actor.
+  5. Tests: pause then push -> rejected with the existing paused audit outcome; resume
+     then push -> accepted; non-admin cannot pause.
+
+acceptance_criteria: |
+  - An operator can pause a project's sync and pushes are rejected (existing enforcement fires).
+  - Resume restores pushes.
+  - Non-admin callers cannot pause/resume.
+
+verification: |
+  - go build ./... && go test ./internal/cloud/... ./cmd/omnia/...
+  - Manual: pause a project on the dev cloud, attempt a push (expect 409 project paused),
+    resume, push succeeds.
+
+do_not_touch: |
+  - The default-enabled semantics of IsProjectSyncEnabled (absent row = enabled) unless
+    the product explicitly wants deny-by-default here — that is a separate decision.
+
+references: |
+  - internal/cloud/cloudstore/project_controls.go:21-46,48-83,99
+  - internal/cloud/cloudserver/cloudserver.go:529-574
+  - internal/cloud/cloudserver/mutations.go:164-206
+  - internal/cloud/cloudstore/cloudstore.go:621-627

@@ -1,34 +1,38 @@
 package dashboard
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/velion/omnia/internal/ui"
+)
 
 // overviewPage renders the home "Command Center" overview.
 templ overviewPage(data OverviewData) {
-	@layout("Overview") {
+	@layout("overview", ui.T(ctx, "overview.pageTitle")) {
 		<!-- Bento grid -->
 		<div style="display: grid; grid-template-columns: repeat(12, 1fr); grid-template-rows: auto auto 1fr; gap: 12px; min-height: calc(100vh - 120px);">
 
 			<!-- TILE: Total Memories (cols 1-4) -->
 			<div class="panel accented" style="grid-column: 1 / 5;">
-				<div class="tile-label">Total Memories</div>
+				<div class="tile-label">{ ui.T(ctx, "overview.totalMemories") }</div>
 				<div class="tile-value" id="cnt-total">{ fmt.Sprintf("%d", data.TotalMemories) }</div>
 			</div>
 
 			<!-- TILE: Projects (cols 5-8) -->
 			<div class="panel accented" style="grid-column: 5 / 9;">
-				<div class="tile-label">Projects</div>
+				<div class="tile-label">{ ui.T(ctx, "overview.projects") }</div>
 				<div class="tile-value" id="cnt-projects">{ fmt.Sprintf("%d", data.TotalProjects) }</div>
 			</div>
 
 			<!-- TILE: Last Sync (cols 9-12) -->
 			<div class="panel accented" style="grid-column: 9 / 13;">
-				<div class="tile-label">Last Sync</div>
+				<div class="tile-label">{ ui.T(ctx, "overview.lastSync") }</div>
 				if data.LastSync != "" {
 					<div class="tile-value" style="font-size: 32px;">{ data.LastSync }</div>
-					<div class="tile-delta live">● { data.LastSyncSource } · auto-mode</div>
+					<div class="tile-delta live">● { data.LastSyncSource } · { ui.T(ctx, "overview.autoMode") }</div>
 				} else {
 					<div class="tile-value" style="font-size: 22px; color: var(--text-2);">—</div>
-					<div class="tile-delta neutral">no sync yet</div>
+					<div class="tile-delta neutral">{ ui.T(ctx, "overview.noSyncYet") }</div>
 				}
 			</div>
 
@@ -36,35 +40,35 @@ templ overviewPage(data OverviewData) {
 			<div class="panel bracketed" style="grid-column: 1 / 5; grid-row: 2 / 4; display: flex; flex-direction: column;">
 				<div class="panel-header">
 					<div>
-						<div class="panel-eyebrow">Knowledge Bases</div>
-						<div class="panel-title">Projects</div>
+						<div class="panel-eyebrow">{ ui.T(ctx, "overview.knowledgeBases") }</div>
+						<div class="panel-title">{ ui.T(ctx, "overview.projects") }</div>
 					</div>
-					<div class="panel-badge">sorted by count</div>
+					<div class="panel-badge">{ ui.T(ctx, "overview.sortedByCount") }</div>
 				</div>
 				<div style="flex: 1; overflow-y: auto;">
 					if len(data.Projects) == 0 {
-						<p style="color: var(--text-2); font-size: 10px;">No projects found. Run <code>omnia sync</code> first.</p>
+						<p style="color: var(--text-2); font-size: 10px;">{ ui.T(ctx, "overview.noProjectsPrefix") }<code>omnia sync</code>{ ui.T(ctx, "overview.noProjectsSuffix") }</p>
 					} else {
 						for i, p := range data.Projects {
-							<a href={ templ.SafeURL("/browse?project=" + p.Name) } class="proj-row" style="display: grid; grid-template-columns: 18px 1fr auto 44px; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border-2); text-decoration: none;">
+							<div class="proj-row" style="display: grid; grid-template-columns: 18px 1fr auto 44px; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border-2);">
 								<span class="proj-rank">{ fmt.Sprintf("%02d", i+1) }</span>
 								<span class="proj-name-cell">
-									<span class="proj-name">{ p.Name }</span>
+									<a href={ templ.SafeURL(projectDetailURL(p.Name)) } class="proj-name" style="text-decoration: none;">{ p.Name }</a>
 									if data.ShowClouds {
 										@cloudPills(p.Clouds)
 									}
 								</span>
 								if p.LatestUpdateAt != "" {
 									if isFresh(p.LatestUpdateAt) {
-										<span class="freshness fresh"><span class="freshness-pip"></span>fresh</span>
+										<span class="freshness fresh"><span class="freshness-pip"></span>{ ui.T(ctx, "overview.freshnessFresh") }</span>
 									} else {
-										<span class="freshness stale"><span class="freshness-pip"></span>review</span>
+										<span class="freshness stale"><span class="freshness-pip"></span>{ ui.T(ctx, "overview.freshnessReview") }</span>
 									}
 								} else {
 									<span></span>
 								}
-								<span class="proj-count">{ fmt.Sprintf("%d", p.Total) }</span>
-							</a>
+								<a href={ templ.SafeURL("/browse?project=" + p.Name) } class="proj-count" style="text-decoration: none;" title="Browse all">{ fmt.Sprintf("%d", p.Total) }</a>
+							</div>
 						}
 					}
 				</div>
@@ -74,12 +78,12 @@ templ overviewPage(data OverviewData) {
 			<div class="panel" style="grid-column: 5 / 9; grid-row: 2;">
 				<div class="panel-header">
 					<div>
-						<div class="panel-eyebrow">Breakdown</div>
-						<div class="panel-title">Memory Types</div>
+						<div class="panel-eyebrow">{ ui.T(ctx, "overview.breakdown") }</div>
+						<div class="panel-title">{ ui.T(ctx, "overview.memoryTypes") }</div>
 					</div>
 				</div>
 				if len(data.ByType) == 0 {
-					<p style="color: var(--text-2); font-size: 10px;">No type data available.</p>
+					<p style="color: var(--text-2); font-size: 10px;">{ ui.T(ctx, "overview.noTypeData") }</p>
 				} else {
 					<!-- Bar chart — rendered via inline script below. ByType is capped to 8 by buildOverviewData. -->
 					<div id="type-bars">
@@ -102,15 +106,15 @@ templ overviewPage(data OverviewData) {
 			<div class="panel" style="grid-column: 5 / 9; grid-row: 3;">
 				<div class="panel-header">
 					<div>
-						<div class="panel-eyebrow">Recent Ingest</div>
-						<div class="panel-title">Live Feed</div>
+						<div class="panel-eyebrow">{ ui.T(ctx, "overview.recentIngest") }</div>
+						<div class="panel-title">{ ui.T(ctx, "overview.liveFeed") }</div>
 					</div>
 					<div class="live-badge">
-						<span class="live-dot"></span>Live
+						<span class="live-dot"></span>{ ui.T(ctx, "overview.live") }
 					</div>
 				</div>
 				if len(data.LiveFeed) == 0 {
-					<p style="color: var(--text-2); font-size: 10px;">No recent activity.</p>
+					<p style="color: var(--text-2); font-size: 10px;">{ ui.T(ctx, "overview.noRecentActivity") }</p>
 				} else {
 					for _, item := range data.LiveFeed {
 						<div class="feed-item">
@@ -139,8 +143,8 @@ templ overviewPage(data OverviewData) {
 			<!-- RIGHT: Sources (cols 9-12, rows 2-4) -->
 			<div class="panel" style="grid-column: 9 / 13; grid-row: 2 / 4;">
 				<div style="margin-bottom: 18px;">
-					<div class="panel-eyebrow">Connected</div>
-					<div class="panel-title">Sources</div>
+					<div class="panel-eyebrow">{ ui.T(ctx, "overview.connected") }</div>
+					<div class="panel-title">{ ui.T(ctx, "overview.sources") }</div>
 				</div>
 				for _, s := range data.Sources {
 					<div class="source-row">

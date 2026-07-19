@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // CursorEntry holds a single source cursor from state.json.
@@ -29,8 +31,9 @@ type SyncStatus struct {
 }
 
 // loadSyncStatus reads ~/.local/state/omnia/state.json and the log tail.
-// It degrades gracefully when files are absent.
-func loadSyncStatus() SyncStatus {
+// It degrades gracefully when files are absent. lang selects the display
+// language for each cursor's Age (i18n Slice 2).
+func loadSyncStatus(lang i18n.Lang) SyncStatus {
 	home, _ := os.UserHomeDir()
 	stateFile := filepath.Join(home, ".local", "state", "omnia", "state.json")
 	logFile := filepath.Join(home, "Library", "Logs", "omnia", "omnia.log")
@@ -57,7 +60,7 @@ func loadSyncStatus() SyncStatus {
 				}
 				age := ""
 				if t, err := time.Parse(time.RFC3339, v); err == nil {
-					age = formatAge(t.Format("2006-01-02 15:04:05"))
+					age = formatAge(t.Format("2006-01-02 15:04:05"), lang)
 				}
 				status.Cursors = append(status.Cursors, CursorEntry{
 					Key:       k,
@@ -96,11 +99,23 @@ type SyncTargetView struct {
 
 // healthChipLabel returns the display label for a lifecycle value, defaulting
 // to "unknown" for an empty value and echoing anything unrecognized verbatim
-// (forward-compatible with a future lifecycle without hiding the row).
-func healthChipLabel(lifecycle string) string {
+// (forward-compatible with a future lifecycle without hiding the row). The
+// known lifecycle values are Omnia's own UI vocabulary (not an external
+// system's literal API value, unlike e.g. a source name), so — like
+// shell.status.online/offline in Slice 1 — they're translated per lang
+// (i18n Slice 2); an unrecognized value still echoes through untranslated.
+func healthChipLabel(lifecycle string, lang i18n.Lang) string {
 	switch strings.TrimSpace(lifecycle) {
 	case "":
-		return "unknown"
+		return i18n.T(lang, "sync.health.unknown")
+	case "healthy":
+		return i18n.T(lang, "sync.health.healthy")
+	case "pending":
+		return i18n.T(lang, "sync.health.pending")
+	case "running":
+		return i18n.T(lang, "sync.health.running")
+	case "degraded":
+		return i18n.T(lang, "sync.health.degraded")
 	default:
 		return lifecycle
 	}

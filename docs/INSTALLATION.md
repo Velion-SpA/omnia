@@ -40,7 +40,7 @@ brew update && brew upgrade engram
 If you have Go installed, this is the cleanest and most trustworthy path — the binary is compiled on your machine from source, so no antivirus will flag it:
 
 ```powershell
-go install github.com/Velion-SpA/omnia/cmd/omnia@latest
+go install github.com/velion/omnia/cmd/omnia@latest
 # Binary goes to %GOPATH%\bin\omnia.exe (typically %USERPROFILE%\go\bin\)
 ```
 
@@ -49,7 +49,7 @@ Ensure `%GOPATH%\bin` (or `%USERPROFILE%\go\bin`) is on your `PATH`.
 **Option B: Build from source**
 
 ```powershell
-git clone https://github.com/Velion-SpA/omnia.git
+git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
 go install ./cmd/omnia
 # Binary goes to %GOPATH%\bin\omnia.exe (typically %USERPROFILE%\go\bin\)
@@ -78,7 +78,7 @@ go install ./cmd/omnia
 
 **Option C: Download the prebuilt binary**
 
-1. Go to [GitHub Releases](https://github.com/Velion-SpA/omnia/releases)
+1. Go to [GitHub Releases](https://github.com/Gentleman-Programming/engram/releases)
 2. Download `engram_<version>_windows_amd64.zip` (or `arm64` for ARM devices)
 3. Extract `omnia.exe` to a folder in your `PATH` (e.g. `C:\Users\<you>\bin\`)
 
@@ -120,7 +120,7 @@ Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin
 ## Install from source (macOS / Linux)
 
 ```bash
-git clone https://github.com/Velion-SpA/omnia.git
+git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
 go install ./cmd/omnia
 # Binary goes to $GOPATH/bin (typically ~/go/bin/)
@@ -149,7 +149,7 @@ go install ./cmd/omnia
 
 ## Download binary (all platforms)
 
-Grab the latest release for your platform from [GitHub Releases](https://github.com/Velion-SpA/omnia/releases).
+Grab the latest release for your platform from [GitHub Releases](https://github.com/Gentleman-Programming/engram/releases).
 
 | Platform | File |
 |----------|------|

@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/constants"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/cloud/constants"
+	"github.com/velion/omnia/internal/store"
 )
 
 const header = "Known repairable cloud sync failure detected."

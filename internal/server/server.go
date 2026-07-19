@@ -20,10 +20,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/diagnostic"
-	"github.com/Velion-SpA/omnia/internal/envx"
-	projectpkg "github.com/Velion-SpA/omnia/internal/project"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/diagnostic"
+	"github.com/velion/omnia/internal/embed"
+	"github.com/velion/omnia/internal/envx"
+	projectpkg "github.com/velion/omnia/internal/project"
+	"github.com/velion/omnia/internal/store"
 )
 
 var loadServerStats = func(s *store.Store) (*store.Stats, error) {
@@ -78,6 +79,13 @@ type Server struct {
 	// promptBuilder constructs LLM prompts for semantic scan pairs.
 	// When nil and semantic=true, a no-op builder is used (returns empty string).
 	promptBuilder SemanticPromptBuilder
+
+	// autoEmbed, when non-nil, embeds a memory out-of-band right after it is
+	// saved via POST /observations, so it becomes semantically searchable
+	// within seconds (human-like-memory PR4). nil means embeddings are
+	// disabled — the save path stays byte-for-byte today's. Enqueue is
+	// non-blocking, so a save never waits on the embedding.
+	autoEmbed *embed.Worker
 }
 
 func New(s *store.Store, port int) *Server {
@@ -102,6 +110,40 @@ func (s *Server) SetSyncStatus(provider SyncStatusProvider) {
 // when semantic=true. When not set, semantic=true requests fail with 500.
 func (s *Server) SetRunnerFactory(fn SemanticRunnerFactory) {
 	s.runnerFactory = fn
+}
+
+// SetAutoEmbed configures the async auto-embed worker that embeds memories
+// out-of-band after they are saved via POST /observations. nil disables it
+// (the save path then stays byte-for-byte today's).
+func (s *Server) SetAutoEmbed(w *embed.Worker) { s.autoEmbed = w }
+
+// enqueueAutoEmbed schedules an out-of-band embedding for a just-saved memory
+// (non-blocking). It is a no-op when the worker is disabled. A fetch or
+// full-queue miss is swallowed because the periodic Reconcile backstop
+// re-embeds anything missed — a save must never fail or slow down for it.
+func (s *Server) enqueueAutoEmbed(id int64) {
+	if s.autoEmbed == nil {
+		return
+	}
+	obs, err := s.store.GetObservation(id)
+	if err != nil {
+		return
+	}
+	job := embed.Job{
+		SyncID:    obs.SyncID,
+		ObsID:     int(obs.ID),
+		Type:      obs.Type,
+		Title:     obs.Title,
+		Content:   obs.Content,
+		UpdatedAt: obs.UpdatedAt,
+	}
+	if obs.Project != nil {
+		job.Project = *obs.Project
+	}
+	if obs.TopicKey != nil {
+		job.TopicKey = *obs.TopicKey
+	}
+	s.autoEmbed.Enqueue(job)
 }
 
 // SetPromptBuilder configures the LLM prompt builder for semantic scan pairs.
@@ -343,6 +385,9 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.notifyWrite()
+	// Auto-embed the just-saved memory out-of-band (non-blocking): it becomes
+	// semantically searchable within seconds. No-op when embeddings disabled.
+	s.enqueueAutoEmbed(id)
 	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
 }
 
@@ -918,7 +963,7 @@ func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
 	// Normalize both names using the same rules the store applies so that
 	// case-only differences (e.g. "repo_name" vs "Repo_Name") are treated as
 	// identical and do not trigger a migration that would create duplicates.
-	// See: https://github.com/Velion-SpA/omnia/issues/438
+	// See: https://github.com/velion/omnia/issues/438
 	normalizedOld, _ := store.NormalizeProject(body.OldProject)
 	normalizedNew, _ := store.NormalizeProject(body.NewProject)
 	if normalizedOld == normalizedNew {

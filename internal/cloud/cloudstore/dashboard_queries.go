@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/chunkcodec"
-	"github.com/Velion-SpA/omnia/internal/store"
-	engramsync "github.com/Velion-SpA/omnia/internal/sync"
+	"github.com/velion/omnia/internal/cloud/chunkcodec"
+	"github.com/velion/omnia/internal/store"
+	engramsync "github.com/velion/omnia/internal/sync"
 )
 
 var ErrDashboardProjectInvalid = errors.New("cloudstore: dashboard project is invalid")
@@ -741,19 +741,40 @@ func (m dashboardReadModel) scoped(allowed map[string]struct{}) dashboardReadMod
 	if _, ok := allowed["*"]; ok {
 		return m
 	}
-	projects := make([]DashboardProjectRow, 0, len(m.projects))
 	projectDetails := make(map[string]DashboardProjectDetail)
-	totalChunks := 0
-	for _, row := range m.projects {
-		if _, ok := allowed[strings.TrimSpace(row.Project)]; !ok {
+	for project, detail := range m.projectDetails {
+		if _, ok := allowed[strings.TrimSpace(project)]; !ok {
 			continue
 		}
-		projects = append(projects, row)
-		totalChunks += row.Chunks
-		if detail, exists := m.projectDetails[row.Project]; exists {
-			projectDetails[row.Project] = detail
-		}
+		projectDetails[project] = detail
 	}
+	return rebuildDashboardAggregatesFromDetails(projectDetails)
+}
+
+// rebuildDashboardAggregatesFromDetails recomputes the cross-project surfaces
+// (projects list, contributors list, admin overview) purely from a
+// project->detail map. Every detail's Stats/Contributors are already
+// project-scoped (computed once by buildDashboardReadModelFromRows), so the
+// global aggregates here are just a deterministic fold over whatever set of
+// project details is passed in — the SAME fold scoped() has always used to
+// apply an allowlist.
+//
+// H2 fix: this is also the merge step used when refreshing only the specific
+// projects touched by recent writes (see refreshDashboardReadModelProjects)
+// instead of rebuilding from a full cloud_chunks/cloud_mutations scan. Reusing
+// one fold for both call sites means the partitioned-refresh path can never
+// drift from what a full rebuild would produce for the same underlying data —
+// summing each project's own per-project contributor Chunks/LastChunkAt is
+// mathematically equivalent to the global per-chunk counters a full rebuild
+// would compute, since every chunk belongs to exactly one project's detail.
+func rebuildDashboardAggregatesFromDetails(projectDetails map[string]DashboardProjectDetail) dashboardReadModel {
+	projects := make([]DashboardProjectRow, 0, len(projectDetails))
+	totalChunks := 0
+	for _, detail := range projectDetails {
+		projects = append(projects, detail.Stats)
+		totalChunks += detail.Stats.Chunks
+	}
+	sort.Slice(projects, func(i, j int) bool { return projects[i].Project < projects[j].Project })
 
 	type contributorAgg struct {
 		chunks      int
@@ -888,40 +909,216 @@ func (m dashboardReadModel) filterPrompts(project, query string) []DashboardProm
 	return rows
 }
 
+// loadDashboardReadModel returns the cached dashboard read model, refreshing
+// it first if needed.
+//
+// H2 follow-up fix (obs #1490 — lock-held-across-DB-IO regression): the
+// previous version of this function held cs.dashboardReadModelMu.Lock() across
+// the ENTIRE cold full-rebuild and warm per-project rebuild, both of which run
+// DB SQL with no bound on duration. Because WriteChunk/InsertMutationBatch/
+// BackfillMutationChunks/SetProjectSyncEnabled call
+// invalidateDashboardReadModel[ForProjects] (which takes the SAME lock) right
+// after their tx commits, a single slow dashboard rebuild stalled the live
+// sync WRITE path server-wide for the unbounded duration of that query.
+//
+// The fix restores the original discipline — build OUTSIDE the lock, merge
+// UNDER the lock — while preserving the H2 partitioning:
+//  1. Under a SHORT critical section, decide cold vs warm and, for the warm
+//     path, snapshot + optimistically CLEAR the dirty set before releasing
+//     the lock. A write landing on one of those projects during the
+//     now-unlocked reload calls invalidateDashboardReadModelForProjects again,
+//     which re-adds it to a FRESH dashboardDirtyProjects map — so that
+//     project simply stays dirty and reloads again on a later call. No write
+//     is ever silently lost. (The cold path uses dashboardColdRebuildInFlight
+//     for the equivalent guarantee — see its doc comment.)
+//  2. Outside any lock: run the actual DB I/O (buildDashboardReadModel for
+//     cold, buildDashboardReadModelForProject per dirty project for warm).
+//  3. Re-acquire the lock to merge/publish. The merge reads cs.dashboardReadModel
+//     fresh AT MERGE TIME (not a value captured before unlocking), and bails
+//     out (looping back to re-decide) if a concurrent full invalidation raced
+//     us — so a concurrent cold rebuild can never be clobbered by a stale
+//     partial merge.
+//
+// The `for` loop only ever re-executes when THIS goroutine did no DB work
+// itself (it joined an in-flight cold rebuild, or got raced by a full
+// invalidation) — every path that performs its own DB I/O returns directly
+// once it publishes, matching "reloads next time" eventual consistency rather
+// than looping to chase a continuously-dirtied cache.
 func (cs *CloudStore) loadDashboardReadModel() (dashboardReadModel, error) {
 	if cs == nil {
 		return dashboardReadModel{}, fmt.Errorf("cloudstore: not initialized")
 	}
 
-	cs.dashboardReadModelMu.RLock()
-	if cs.dashboardReadModelOK {
-		cached := cs.dashboardReadModel
+	for {
+		cs.dashboardReadModelMu.RLock()
+		if cs.dashboardReadModelOK && len(cs.dashboardDirtyProjects) == 0 {
+			cached := cs.dashboardReadModel
+			cs.dashboardReadModelMu.RUnlock()
+			return cached, nil
+		}
 		cs.dashboardReadModelMu.RUnlock()
+
+		cs.dashboardReadModelMu.Lock()
+
+		if cs.dashboardReadModelOK && len(cs.dashboardDirtyProjects) == 0 {
+			// Another goroutine already refreshed while we waited for the lock.
+			cached := cs.dashboardReadModel
+			cs.dashboardReadModelMu.Unlock()
+			return cached, nil
+		}
+
+		if !cs.dashboardReadModelOK {
+			// Cold path: first load, or after a full invalidation.
+			if inFlight := cs.dashboardColdRebuildInFlight; inFlight != nil {
+				// Someone else is already rebuilding — wait for THEM instead of
+				// launching a second full-table scan (thundering-herd guard),
+				// then loop back to re-decide (the cache may now be warm, or
+				// may need a warm per-project reload for projects dirtied
+				// during that rebuild — see dashboardColdRebuildInFlight).
+				cs.dashboardReadModelMu.Unlock()
+				<-inFlight
+				continue
+			}
+
+			done := make(chan struct{})
+			cs.dashboardColdRebuildInFlight = done
+			cs.dashboardReadModelMu.Unlock()
+
+			// DB I/O happens here — with NO lock held. This is the primary fix:
+			// a concurrent WriteChunk/InsertMutationBatch/etc. invalidation call
+			// only ever needs the lock for a fast in-memory map update (see
+			// invalidateDashboardReadModelForProjects), never blocking on this.
+			var (
+				model dashboardReadModel
+				err   error
+			)
+			if cs.dashboardReadModelLoad != nil {
+				model, err = cs.dashboardReadModelLoad()
+			} else {
+				model, err = cs.buildDashboardReadModel()
+			}
+
+			cs.dashboardReadModelMu.Lock()
+			cs.dashboardColdRebuildInFlight = nil
+			close(done)
+			if err != nil {
+				cs.dashboardReadModelMu.Unlock()
+				return dashboardReadModel{}, err
+			}
+			cs.dashboardReadModel = model
+			cs.dashboardReadModelOK = true
+			// Deliberately NOT clearing dashboardDirtyProjects here: any project
+			// invalidated by a write that landed during this rebuild's unlocked
+			// DB-I/O window was recorded (not dropped — see
+			// invalidateDashboardReadModelForProjects) precisely because `model`
+			// may not reflect it. Leaving it dirty means the NEXT load does a
+			// cheap partitioned reload for exactly that project instead of
+			// silently losing the write.
+			cached := cs.dashboardReadModel
+			cs.dashboardReadModelMu.Unlock()
+			return cached, nil
+		}
+
+		// Warm-but-dirty path: snapshot the dirty set and optimistically clear
+		// it BEFORE releasing the lock (see function doc for why this makes
+		// re-dirtying during the unlocked reload self-heal correctly).
+		dirty := cs.dashboardDirtyProjects
+		cs.dashboardDirtyProjects = nil
+		cs.dashboardReadModelMu.Unlock()
+
+		// DB I/O happens here — with NO lock held.
+		partials := make(map[string]dashboardReadModel, len(dirty))
+		for project := range dirty {
+			fresh, err := cs.buildDashboardReadModelForProject(project)
+			if err != nil {
+				// Don't swallow the invalidation on error — put the dirty set
+				// back so a later read retries the reload instead of silently
+				// serving stale data for these projects forever.
+				cs.dashboardReadModelMu.Lock()
+				if cs.dashboardDirtyProjects == nil {
+					cs.dashboardDirtyProjects = make(map[string]struct{}, len(dirty))
+				}
+				for p := range dirty {
+					cs.dashboardDirtyProjects[p] = struct{}{}
+				}
+				cs.dashboardReadModelMu.Unlock()
+				return dashboardReadModel{}, err
+			}
+			partials[project] = fresh
+		}
+
+		cs.dashboardReadModelMu.Lock()
+		if !cs.dashboardReadModelOK {
+			// A full invalidation (e.g. SetDashboardAllowedProjects) raced us
+			// while these partitions were reloading unlocked. A cold rebuild
+			// must run instead of merging our now-superseded partials onto
+			// nothing — discard them and let the loop re-decide.
+			cs.dashboardReadModelMu.Unlock()
+			continue
+		}
+		// Merge onto the CURRENT cached baseline — read here, under the lock,
+		// not a value captured before we released it earlier. A concurrent warm
+		// reload for OTHER dirty projects may have already published its own
+		// merge while we were unlocked; building on top of the live value
+		// (instead of a stale snapshot) means we can never clobber it.
+		cs.dashboardReadModel = mergeDashboardReadModelPartials(cs.dashboardReadModel, partials)
+		cached := cs.dashboardReadModel
+		cs.dashboardReadModelMu.Unlock()
 		return cached, nil
 	}
-	cs.dashboardReadModelMu.RUnlock()
+}
 
-	var (
-		model dashboardReadModel
-		err   error
-	)
-	if cs.dashboardReadModelLoad != nil {
-		model, err = cs.dashboardReadModelLoad()
-	} else {
-		model, err = cs.buildDashboardReadModel()
+// mergeDashboardReadModelPartials merges freshly-reloaded per-project detail
+// partitions into baseline and recomputes the cross-project aggregates from
+// the merged whole via rebuildDashboardAggregatesFromDetails — never patched
+// incrementally, so they can never drift out of sync with the per-project
+// details they're derived from. Pure (no DB I/O, no locking) so
+// loadDashboardReadModel can call it after re-acquiring the lock, against
+// whatever the CURRENT cached baseline is at merge time.
+func mergeDashboardReadModelPartials(baseline dashboardReadModel, partials map[string]dashboardReadModel) dashboardReadModel {
+	if len(partials) == 0 {
+		return baseline
 	}
+
+	projectDetails := make(map[string]DashboardProjectDetail, len(baseline.projectDetails))
+	for project, detail := range baseline.projectDetails {
+		projectDetails[project] = detail
+	}
+
+	for project, fresh := range partials {
+		if detail, ok := fresh.projectDetails[project]; ok {
+			projectDetails[project] = detail
+		} else {
+			// No rows left for this project (all deleted, or no longer in the
+			// dashboard's allowed scope) — drop the stale cached entry rather
+			// than keep serving it.
+			delete(projectDetails, project)
+		}
+	}
+
+	return rebuildDashboardAggregatesFromDetails(projectDetails)
+}
+
+// buildDashboardReadModelForProject reloads a single project's chunk/mutation
+// rows and builds a dashboardReadModel scoped to just that project. Used by
+// the H2 partitioned-refresh path. loadChunkRows/loadMutationRows already
+// enforce cs.dashboardAllowedScopes internally for a concrete (non-empty)
+// project argument (returning zero rows if the project isn't allowed), so —
+// unlike the full-scan buildDashboardReadModel — no additional .scoped() call
+// is needed here; it would be a no-op given only one project's data is present.
+func (cs *CloudStore) buildDashboardReadModelForProject(project string) (dashboardReadModel, error) {
+	if cs.dashboardProjectReadModelLoad != nil {
+		return cs.dashboardProjectReadModelLoad(project)
+	}
+	chunks, err := cs.loadChunkRows(project)
 	if err != nil {
 		return dashboardReadModel{}, err
 	}
-
-	cs.dashboardReadModelMu.Lock()
-	defer cs.dashboardReadModelMu.Unlock()
-	if cs.dashboardReadModelOK {
-		return cs.dashboardReadModel, nil
+	mutations, err := cs.loadMutationRows(project)
+	if err != nil {
+		return dashboardReadModel{}, err
 	}
-	cs.dashboardReadModel = model
-	cs.dashboardReadModelOK = true
-	return cs.dashboardReadModel, nil
+	return buildDashboardReadModelFromRows(chunks, mutations)
 }
 
 func (cs *CloudStore) buildDashboardReadModel() (dashboardReadModel, error) {
@@ -938,6 +1135,105 @@ func (cs *CloudStore) buildDashboardReadModel() (dashboardReadModel, error) {
 		return dashboardReadModel{}, err
 	}
 	return model.scoped(cs.dashboardAllowedScopes), nil
+}
+
+// ─── H2: affected-project extraction for partitioned invalidation ────────────
+//
+// Sync chunks are overwhelmingly single-project: chunk.project (the physical
+// cloud_chunks.project_name the row is stored under) equals every entity's own
+// resolved project. But Omnia also supports an explicit per-entity project
+// override (store.Session/Observation/Prompt.Project, and the equivalent
+// dashboard*MutationPayload.Project field for materialized mutations) — e.g.
+// mem_save can save to a project other than the caller's current one. These
+// helpers detect whether a write is the common single-project case (safe to
+// narrow invalidation to exactly that one project) or touches another logical
+// project (in which case callers must fall back to a full invalidation, since
+// that other project's complete cached data may span chunk rows physically
+// stored under yet other projects and cannot be safely reconstructed by
+// reloading just one project's rows).
+
+// dashboardAffectedProjectsForChunk returns every project name that a chunk's
+// materialized entities (sessions, observations, prompts, and any embedded
+// mutations) resolve to — including deletes/tombstones, which must still be
+// counted as "affecting" their target project even though they contribute no
+// rows to the final projectDetails output.
+func dashboardAffectedProjectsForChunk(chunkProject string, chunk engramsync.ChunkData) map[string]struct{} {
+	chunkProject = strings.TrimSpace(chunkProject)
+	affected := make(map[string]struct{})
+	if chunkProject != "" {
+		affected[chunkProject] = struct{}{}
+	}
+	for _, session := range chunk.Sessions {
+		affected[resolveProjectValue(session.Project, chunkProject)] = struct{}{}
+	}
+	for _, obs := range chunk.Observations {
+		project := chunkProject
+		if obs.Project != nil {
+			project = resolveProjectValue(*obs.Project, chunkProject)
+		}
+		affected[project] = struct{}{}
+	}
+	for _, prompt := range chunk.Prompts {
+		affected[resolveProjectValue(prompt.Project, chunkProject)] = struct{}{}
+	}
+	for _, mutation := range chunk.Mutations {
+		// Mirror buildDashboardReadModelFromRows' actual processing exactly:
+		// embedded (in-chunk) mutations are applied with the enclosing chunk's
+		// own project as the base — applyDashboardMutation(project, mutation, ...)
+		// — mutation.Project itself is only meaningful for standalone
+		// cloud_mutations rows, not for mutations embedded in a chunk payload.
+		resolved := dashboardResolvedProjectForMutationPayload(mutation.Entity, chunkProject, []byte(mutation.Payload))
+		affected[resolved] = struct{}{}
+	}
+	delete(affected, "")
+	return affected
+}
+
+// dashboardWriteTouchesOnlyOwnProject reports whether a chunk's affected-project
+// set is exactly {chunkProject} — the common case where narrowing invalidation
+// to that one project is provably safe.
+func dashboardWriteTouchesOnlyOwnProject(chunkProject string, chunk engramsync.ChunkData) bool {
+	chunkProject = strings.TrimSpace(chunkProject)
+	affected := dashboardAffectedProjectsForChunk(chunkProject, chunk)
+	if len(affected) != 1 {
+		return false
+	}
+	_, ok := affected[chunkProject]
+	return ok
+}
+
+// dashboardResolvedProjectForMutationPayload decodes a mutation payload just
+// far enough to read its own project override (mirroring applyDashboardMutation's
+// per-entity-type decode), without mutating any read-model state. On any
+// decode error or unrecognized entity it conservatively returns fallbackProject
+// unchanged — the actual dashboard rebuild will independently re-decode (and
+// correctly error) this same payload, so this extraction never masks a real
+// data problem, it only ever affects which projects get marked dirty.
+func dashboardResolvedProjectForMutationPayload(entity, fallbackProject string, payload []byte) string {
+	switch strings.TrimSpace(entity) {
+	case store.SyncEntitySession:
+		var body dashboardSessionMutationPayload
+		if err := chunkcodec.DecodeSyncMutationPayload(string(payload), &body); err == nil {
+			return resolveProjectValue(body.Project, fallbackProject)
+		}
+	case store.SyncEntityObservation:
+		var body dashboardObservationMutationPayload
+		if err := chunkcodec.DecodeSyncMutationPayload(string(payload), &body); err == nil {
+			if body.Project != nil {
+				return resolveProjectValue(*body.Project, fallbackProject)
+			}
+			return fallbackProject
+		}
+	case store.SyncEntityPrompt:
+		var body dashboardPromptMutationPayload
+		if err := chunkcodec.DecodeSyncMutationPayload(string(payload), &body); err == nil {
+			if body.Project != nil {
+				return resolveProjectValue(*body.Project, fallbackProject)
+			}
+			return fallbackProject
+		}
+	}
+	return fallbackProject
 }
 
 func (cs *CloudStore) ListProjects(query string) ([]DashboardProjectRow, error) {
@@ -1095,6 +1391,16 @@ type dashboardMutationRow struct {
 	occurredAt time.Time
 }
 
+// dashboardReadModelQueryTimeout bounds each dashboard rebuild query
+// (loadChunkRows / loadMutationRows). Defense-in-depth for the H2 follow-up
+// fix (obs #1490): the PRIMARY fix is that loadDashboardReadModel no longer
+// holds cs.dashboardReadModelMu across this DB I/O at all, but a query that
+// runs forever would still tie up the calling goroutine (and, for the cold
+// path, keep other readers waiting on dashboardColdRebuildInFlight) — so these
+// queries get a generous but finite bound instead of context.Background()'s
+// unbounded wait.
+const dashboardReadModelQueryTimeout = 30 * time.Second
+
 func (cs *CloudStore) loadChunkRows(project string) ([]dashboardChunkRow, error) {
 	if cs == nil || cs.db == nil {
 		return nil, fmt.Errorf("cloudstore: not initialized")
@@ -1124,7 +1430,9 @@ func (cs *CloudStore) loadChunkRows(project string) ([]dashboardChunkRow, error)
 		args = append(args, project)
 	}
 	query += ` ORDER BY created_at DESC, chunk_id DESC`
-	rows, err := cs.db.QueryContext(context.Background(), query, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), dashboardReadModelQueryTimeout)
+	defer cancel()
+	rows, err := cs.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("cloudstore: dashboard query chunks: %w", err)
 	}
@@ -1181,7 +1489,9 @@ func (cs *CloudStore) loadMutationRows(project string) ([]dashboardMutationRow, 
 		args = append(args, project)
 	}
 	query += ` ORDER BY seq ASC, occurred_at ASC`
-	rows, err := cs.db.QueryContext(context.Background(), query, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), dashboardReadModelQueryTimeout)
+	defer cancel()
+	rows, err := cs.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("cloudstore: dashboard query mutations: %w", err)
 	}

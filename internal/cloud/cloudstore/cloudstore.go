@@ -13,10 +13,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/Velion-SpA/omnia/internal/cloud"
-	"github.com/Velion-SpA/omnia/internal/cloud/chunkcodec"
-	"github.com/Velion-SpA/omnia/internal/store"
-	engramsync "github.com/Velion-SpA/omnia/internal/sync"
+	"github.com/velion/omnia/internal/cloud"
+	"github.com/velion/omnia/internal/cloud/chunkcodec"
+	"github.com/velion/omnia/internal/store"
+	engramsync "github.com/velion/omnia/internal/sync"
 )
 
 type CloudStore struct {
@@ -27,10 +27,63 @@ type CloudStore struct {
 	dashboardReadModel     dashboardReadModel
 	dashboardReadModelOK   bool
 	dashboardReadModelLoad func() (dashboardReadModel, error)
+
+	// H2 (perf/correctness): projects invalidated since the read model was last
+	// assembled. When non-empty, the cache is still "OK" overall but must reload
+	// ONLY these projects (via dashboardProjectReadModelLoad / the project-scoped
+	// loadChunkRows/loadMutationRows path) before serving the next read, instead
+	// of re-scanning cloud_chunks/cloud_mutations for every tenant on every write.
+	dashboardDirtyProjects map[string]struct{}
+	// dashboardProjectReadModelLoad overrides the project-scoped rebuild (tests only).
+	dashboardProjectReadModelLoad func(project string) (dashboardReadModel, error)
+
+	// dashboardColdRebuildInFlight, when non-nil, is a channel that closes once
+	// an in-flight cold (full) dashboard read-model rebuild completes.
+	//
+	// H2 follow-up fix (obs #1490 — lock-held-across-DB-IO regression): a slow
+	// full or per-project rebuild must never hold dashboardReadModelMu while
+	// running its (unbounded) DB queries, because WriteChunk/
+	// InsertMutationBatch/BackfillMutationChunks/SetProjectSyncEnabled all take
+	// the SAME lock (via invalidateDashboardReadModel[ForProjects]) right after
+	// their tx commits — holding it across DB I/O would stall the live sync
+	// write path server-wide. This field serves two purposes for the cold path:
+	//  1. Thundering-herd guard: concurrent callers that also observe a cold
+	//     cache wait on this channel instead of each launching their own
+	//     full-table rebuild.
+	//  2. Dirty-tracking gate: invalidateDashboardReadModelForProjects treats
+	//     "cold rebuild in flight" the same as "warm" for dirty-set purposes —
+	//     a write landing during the unlocked rebuild window is recorded into
+	//     dashboardDirtyProjects instead of being silently dropped, so it is
+	//     never lost even if the rebuild's SELECT already ran before the
+	//     write's commit became visible. The warm (per-project) path needs no
+	//     equivalent flag: it never sets dashboardReadModelOK to false, so
+	//     invalidateDashboardReadModelForProjects already tracks writes that
+	//     land during a warm reload unconditionally.
+	dashboardColdRebuildInFlight chan struct{}
 }
 
 var ErrChunkNotFound = errors.New("cloudstore: chunk not found")
 var ErrChunkConflict = errors.New("cloudstore: chunk id conflict")
+
+// maxPostgresQueryParams matches PostgreSQL's hard limit on bind parameters in
+// a single statement (the wire protocol's parameter count field is uint16).
+// H4 (perf): batch INSERT helpers below chunk their VALUES lists into
+// sub-batches when a single multi-row INSERT would exceed it.
+const maxPostgresQueryParams = 65535
+
+// maxInsertRowsPerStatement returns how many rows of a multi-row INSERT fit
+// in one statement given how many bind parameters each row consumes, while
+// staying under maxPostgresQueryParams.
+func maxInsertRowsPerStatement(paramsPerRow int) int {
+	if paramsPerRow <= 0 {
+		return 1
+	}
+	n := maxPostgresQueryParams / paramsPerRow
+	if n < 1 {
+		return 1
+	}
+	return n
+}
 
 // ErrUserExists is returned by CreateUser when the username (or email) is already
 // taken. Unlike the previous ON CONFLICT DO UPDATE behaviour, a conflicting signup
@@ -95,6 +148,17 @@ type User struct {
 	Username     string
 	Email        string
 	PasswordHash string
+	// DisabledAt is the lifecycle marker mirrored from cloud_users.disabled_at
+	// (OBL-01). A valid (non-NULL) value means the account is deactivated and its
+	// access must be rejected at every capability-resolution point — exactly as the
+	// managed-token path already does via ManagedTokenResolution.UserDisabled.
+	DisabledAt sql.NullTime
+}
+
+// Disabled reports whether the account is deactivated. It is nil-safe so callers
+// on the auth hot path can check it without a separate presence guard.
+func (u *User) Disabled() bool {
+	return u != nil && u.DisabledAt.Valid
 }
 
 func (cs *CloudStore) CreateUser(username, email, passwordHash string) (*User, error) {
@@ -136,9 +200,12 @@ func (cs *CloudStore) GetUserByUsername(username string) (*User, error) {
 	if cs == nil || cs.db == nil {
 		return nil, fmt.Errorf("cloudstore: not initialized")
 	}
-	const q = `SELECT id::text, username, email, password_hash FROM cloud_users WHERE username = $1`
+	// SELECT disabled_at (OBL-01): the account auth flows (Login/LoginForDevice/
+	// Refresh) enforce it, mirroring the managed-token disabled check. Omitting it
+	// here was the C1 gap — the query physically could not surface a disabled account.
+	const q = `SELECT id::text, username, email, password_hash, disabled_at FROM cloud_users WHERE username = $1`
 	var u User
-	err := cs.db.QueryRowContext(context.Background(), q, strings.TrimSpace(username)).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash)
+	err := cs.db.QueryRowContext(context.Background(), q, strings.TrimSpace(username)).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisabledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -152,9 +219,10 @@ func (cs *CloudStore) GetUserByEmail(email string) (*User, error) {
 	if cs == nil || cs.db == nil {
 		return nil, fmt.Errorf("cloudstore: not initialized")
 	}
-	const q = `SELECT id::text, username, email, password_hash FROM cloud_users WHERE email = $1`
+	// SELECT disabled_at (OBL-01), same rationale as GetUserByUsername above.
+	const q = `SELECT id::text, username, email, password_hash, disabled_at FROM cloud_users WHERE email = $1`
 	var u User
-	err := cs.db.QueryRowContext(context.Background(), q, strings.TrimSpace(email)).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash)
+	err := cs.db.QueryRowContext(context.Background(), q, strings.TrimSpace(email)).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisabledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -257,7 +325,7 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 			return fmt.Errorf("%w: existing chunk %q has different payload", ErrChunkConflict, chunkID)
 		}
 		_ = cs.indexChunkSessions(ctx, project, payload)
-		cs.invalidateDashboardReadModel()
+		cs.invalidateDashboardReadModelForChunkPayload(project, payload)
 		return nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -294,7 +362,7 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 			if conflictErr != nil {
 				return conflictErr
 			}
-			cs.invalidateDashboardReadModel()
+			cs.invalidateDashboardReadModelForChunk(project, chunk)
 			return nil
 		}
 		return fmt.Errorf("cloudstore: write chunk: %w", err)
@@ -309,10 +377,19 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 		return fmt.Errorf("cloudstore: commit write chunk: %w", err)
 	}
 	tx = nil
-	cs.invalidateDashboardReadModel()
+	cs.invalidateDashboardReadModelForChunk(project, chunk)
 	return nil
 }
 
+// invalidateDashboardReadModel fully drops the cached dashboard read model.
+// Reserved for changes that can affect ANY project's visibility (e.g.
+// SetDashboardAllowedProjects changing the allowlist) or for writes whose
+// affected-project set cannot be safely narrowed (see
+// invalidateDashboardReadModelForChunk's cross-project fallback). Prefer
+// invalidateDashboardReadModelForProjects for anything scoped to known
+// projects — H2 fix: a full invalidation forces the next read to re-scan
+// cloud_chunks/cloud_mutations for EVERY tenant, which is the exact
+// pathology this fix removes from the hot write path.
 func (cs *CloudStore) invalidateDashboardReadModel() {
 	if cs == nil {
 		return
@@ -321,6 +398,101 @@ func (cs *CloudStore) invalidateDashboardReadModel() {
 	defer cs.dashboardReadModelMu.Unlock()
 	cs.dashboardReadModel = dashboardReadModel{}
 	cs.dashboardReadModelOK = false
+	cs.dashboardDirtyProjects = nil
+}
+
+// invalidateDashboardReadModelForProjects marks specific projects as needing a
+// reload without dropping the rest of the cached read model. H2 fix: this is
+// what WriteChunk/InsertMutationBatch/etc. call on the hot write path instead
+// of invalidateDashboardReadModel, so a write to one tenant's project no
+// longer forces every other tenant's cached dashboard data to be rebuilt from
+// a full-table scan on the next read.
+func (cs *CloudStore) invalidateDashboardReadModelForProjects(projects map[string]struct{}) {
+	if cs == nil || len(projects) == 0 {
+		return
+	}
+	cs.dashboardReadModelMu.Lock()
+	defer cs.dashboardReadModelMu.Unlock()
+	if !cs.dashboardReadModelOK && cs.dashboardColdRebuildInFlight == nil {
+		// Cache is fully cold with no rebuild in flight — the next load will be
+		// a full rebuild that already reflects every project's current state,
+		// so there's nothing to mark dirty yet.
+		//
+		// If a cold rebuild IS in flight, fall through and mark dirty anyway:
+		// that in-flight rebuild's SELECT may already have run before this
+		// write's commit became visible, so we cannot assume it will be
+		// reflected — see dashboardColdRebuildInFlight's doc comment.
+		return
+	}
+	if cs.dashboardDirtyProjects == nil {
+		cs.dashboardDirtyProjects = make(map[string]struct{}, len(projects))
+	}
+	for project := range projects {
+		project = strings.TrimSpace(project)
+		if project == "" {
+			continue
+		}
+		cs.dashboardDirtyProjects[project] = struct{}{}
+	}
+}
+
+// invalidateDashboardReadModelForChunk narrows invalidation to the project(s)
+// actually affected by a just-written chunk. Sync chunks are overwhelmingly
+// single-project (chunk.project == every entity's own project), which is the
+// fast path this optimizes. A handful of entities can carry an explicit
+// different logical project (e.g. store.Observation.Project — mem_save
+// supports saving to an explicit project other than the current one), and in
+// that case we cannot safely prove which OTHER projects need a refresh (that
+// project's complete data may span chunk rows physically stored under yet
+// other projects), so we conservatively fall back to a full invalidation —
+// exactly the pre-fix, always-correct behavior — rather than risk serving
+// stale data for a project we didn't know to mark dirty.
+func (cs *CloudStore) invalidateDashboardReadModelForChunk(project string, chunk engramsync.ChunkData) {
+	project = strings.TrimSpace(project)
+	if dashboardWriteTouchesOnlyOwnProject(project, chunk) {
+		cs.invalidateDashboardReadModelForProjects(map[string]struct{}{project: {}})
+		return
+	}
+	cs.invalidateDashboardReadModel()
+}
+
+// invalidateDashboardReadModelForChunkPayload is invalidateDashboardReadModelForChunk
+// for callers that only have the raw payload bytes (not yet parsed). If the
+// payload fails to parse, we cannot determine the affected-project set at all,
+// so fail safe with a full invalidation.
+func (cs *CloudStore) invalidateDashboardReadModelForChunkPayload(project string, payload []byte) {
+	chunk, err := parseChunkData(payload)
+	if err != nil {
+		cs.invalidateDashboardReadModel()
+		return
+	}
+	cs.invalidateDashboardReadModelForChunk(project, chunk)
+}
+
+// invalidateDashboardReadModelForMutationBatch narrows invalidation for
+// InsertMutationBatch to the projects declared by each entry, unless a mutation
+// payload's own embedded project override disagrees with its entry-level
+// project (the same cross-project edge case handled in
+// invalidateDashboardReadModelForChunk), in which case it falls back to a full
+// invalidation for safety.
+func (cs *CloudStore) invalidateDashboardReadModelForMutationBatch(batch []MutationEntry) {
+	affected := make(map[string]struct{}, len(batch))
+	for _, entry := range batch {
+		project := strings.TrimSpace(entry.Project)
+		if project == "" {
+			continue
+		}
+		resolved := dashboardResolvedProjectForMutationPayload(entry.Entity, project, entry.Payload)
+		if resolved != project {
+			cs.invalidateDashboardReadModel()
+			return
+		}
+		affected[project] = struct{}{}
+	}
+	if len(affected) == 0 {
+		return
+	}
+	cs.invalidateDashboardReadModelForProjects(affected)
 }
 
 func (cs *CloudStore) KnownSessionIDs(ctx context.Context, project string) (map[string]struct{}, error) {
@@ -368,12 +540,39 @@ func (cs *CloudStore) indexChunkSessionsWith(ctx context.Context, execer chunkSe
 	if len(sessionIDs) == 0 {
 		return nil
 	}
+	ids := make([]string, 0, len(sessionIDs))
 	for sessionID := range sessionIDs {
-		if _, err := execer.ExecContext(ctx,
-			`INSERT INTO cloud_project_sessions (project_name, session_id) VALUES ($1, $2) ON CONFLICT (project_name, session_id) DO NOTHING`,
-			project, sessionID,
-		); err != nil {
-			return fmt.Errorf("cloudstore: index session %q: %w", sessionID, err)
+		ids = append(ids, sessionID)
+	}
+
+	// H4 (perf): a single multi-row INSERT instead of one round trip per
+	// session id. ON CONFLICT (project_name, session_id) DO NOTHING is
+	// preserved per row; sessionIDs is already a deduplicated set (map keys),
+	// so no row can conflict with another row in the same VALUES list.
+	const paramsPerRow = 2
+	rowsPerStmt := maxInsertRowsPerStatement(paramsPerRow)
+	for start := 0; start < len(ids); start += rowsPerStmt {
+		end := start + rowsPerStmt
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+
+		var b strings.Builder
+		b.WriteString("INSERT INTO cloud_project_sessions (project_name, session_id) VALUES ")
+		args := make([]any, 0, len(batch)*paramsPerRow)
+		for i, sessionID := range batch {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			p1 := i*paramsPerRow + 1
+			fmt.Fprintf(&b, "($%d, $%d)", p1, p1+1)
+			args = append(args, project, sessionID)
+		}
+		b.WriteString(" ON CONFLICT (project_name, session_id) DO NOTHING")
+
+		if _, err := execer.ExecContext(ctx, b.String(), args...); err != nil {
+			return fmt.Errorf("cloudstore: index session batch (project %q, %d ids): %w", project, len(batch), err)
 		}
 	}
 	return nil
@@ -423,18 +622,46 @@ func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]M
 }
 
 func insertMaterializedMutations(ctx context.Context, tx *sql.Tx, entries []MutationEntry) error {
-	for _, entry := range entries {
-		payload := entry.Payload
-		if len(payload) == 0 {
-			payload = json.RawMessage("{}")
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// H4 (perf): a single multi-row INSERT instead of one round trip per
+	// materialized session/observation/prompt. Plain insert, no ON CONFLICT
+	// clause to preserve (matches the pre-batch behavior exactly).
+	const paramsPerRow = 5
+	rowsPerStmt := maxInsertRowsPerStatement(paramsPerRow)
+	for start := 0; start < len(entries); start += rowsPerStmt {
+		end := start + rowsPerStmt
+		if end > len(entries) {
+			end = len(entries)
 		}
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO cloud_mutations (project, entity, entity_key, op, payload)
-			VALUES ($1, $2, $3, $4, $5)`,
-			strings.TrimSpace(entry.Project), strings.TrimSpace(entry.Entity), strings.TrimSpace(entry.EntityKey), strings.TrimSpace(entry.Op), payload,
-		)
-		if err != nil {
-			return fmt.Errorf("cloudstore: insert materialized chunk mutation %s/%s/%s: %w", entry.Project, entry.Entity, entry.EntityKey, err)
+		batch := entries[start:end]
+
+		var b strings.Builder
+		b.WriteString("INSERT INTO cloud_mutations (project, entity, entity_key, op, payload) VALUES ")
+		args := make([]any, 0, len(batch)*paramsPerRow)
+		for i, entry := range batch {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			base := i * paramsPerRow
+			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5)
+			payload := entry.Payload
+			if len(payload) == 0 {
+				payload = json.RawMessage("{}")
+			}
+			args = append(args,
+				strings.TrimSpace(entry.Project),
+				strings.TrimSpace(entry.Entity),
+				strings.TrimSpace(entry.EntityKey),
+				strings.TrimSpace(entry.Op),
+				payload,
+			)
+		}
+
+		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
+			return fmt.Errorf("cloudstore: insert materialized chunk mutation batch (%d entries): %w", len(batch), err)
 		}
 	}
 	return nil
@@ -777,6 +1004,13 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 			kind         TEXT NOT NULL DEFAULT 'work',
 			display_name TEXT
 		)`,
+		// Command Center v2, Slice 5a: cloud sub-project linking. A child
+		// project stays a real, independent project with its own chunks —
+		// this column ONLY records the parent relationship (associate, never
+		// merge). NULL means unlinked. See project_links.go for the
+		// validated 2-level accessors (SetProjectParent/ClearProjectParent/
+		// ListProjectParents).
+		`ALTER TABLE cloud_project_meta ADD COLUMN IF NOT EXISTS parent_project TEXT`,
 		// Hot-path resolver indexes (EffectivePerms joins members by account and
 		// projects by name). Deny-by-default keeps the resolver a couple of indexed
 		// lookups, per OBL-14 performance requirement.
@@ -789,6 +1023,26 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 			('Editor', 7),
 			('Member', 1)
 		 ON CONFLICT (name) DO NOTHING`,
+		// cloud_embeddings: server-side vector store for cloud semantic parity
+		// (human-like-memory PR5). Vectors are computed LOCALLY (where Ollama
+		// runs) and synced here as an opaque BLOB — no pgvector dependency
+		// (verified not installed on the homelab Postgres, see design D5).
+		// Scoped by (account_id, project), the same multi-tenant boundary as
+		// cloud_memberships/cloud_devices; SearchEmbeddings only ever loads
+		// rows matching that scope.
+		`CREATE TABLE IF NOT EXISTS cloud_embeddings (
+			account_id   TEXT NOT NULL,
+			project      TEXT NOT NULL,
+			sync_id      TEXT NOT NULL,
+			type         TEXT NOT NULL DEFAULT '',
+			vector       BYTEA NOT NULL,
+			model        TEXT NOT NULL,
+			dim          INT NOT NULL,
+			content_hash TEXT NOT NULL DEFAULT '',
+			updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (account_id, project, sync_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_cloud_embeddings_scope ON cloud_embeddings(account_id, project)`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {
@@ -860,37 +1114,14 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 		}
 	}()
 
-	seqs := make([]int64, 0, len(batch))
-	for _, entry := range batch {
-		project := strings.TrimSpace(entry.Project)
-		entity := strings.TrimSpace(entry.Entity)
-		entityKey := strings.TrimSpace(entry.EntityKey)
-		op := strings.TrimSpace(entry.Op)
-		payload := entry.Payload
-		if len(payload) == 0 {
-			payload = json.RawMessage("{}")
-		}
-		var seq int64
-		err := tx.QueryRowContext(ctx, `
-			INSERT INTO cloud_mutations (project, entity, entity_key, op, payload)
-			VALUES ($1, $2, $3, $4, $5)
-			RETURNING seq`,
-			project, entity, entityKey, op, payload,
-		).Scan(&seq)
-		if err != nil {
-			return nil, fmt.Errorf("cloudstore: insert mutation: %w", err)
-		}
-		seqs = append(seqs, seq)
+	seqs, err := insertMutationBatchEntries(ctx, tx, batch)
+	if err != nil {
+		return nil, err
+	}
+	if err := insertMaterializedMutationBatchChunks(ctx, tx, chunks); err != nil {
+		return nil, err
 	}
 	for _, chunk := range chunks {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload, sessions_count, observations_count, prompts_count)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (project_name, chunk_id) DO NOTHING`,
-			chunk.project, chunk.id, "mutation-push", chunk.payload, chunk.counts.sessions, chunk.counts.observations, chunk.counts.prompts,
-		); err != nil {
-			return nil, fmt.Errorf("cloudstore: materialize mutation batch chunk: %w", err)
-		}
 		if err := cs.indexChunkSessionsWith(ctx, tx, chunk.project, chunk.payload); err != nil {
 			return nil, err
 		}
@@ -901,9 +1132,130 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 	}
 	tx = nil // mark committed so deferred Rollback is a no-op
 	if len(chunks) > 0 {
-		cs.invalidateDashboardReadModel()
+		cs.invalidateDashboardReadModelForMutationBatch(batch)
 	}
 	return seqs, nil
+}
+
+// insertMutationBatchEntries inserts every entry in batch into cloud_mutations
+// and returns the assigned seq for each entry, in the same order as batch.
+//
+// H4 (perf): batched into a single multi-row `INSERT ... RETURNING seq`
+// (chunked further if batch exceeds maxPostgresQueryParams) instead of one
+// round trip per entry. PostgreSQL does not formally document the row order
+// of a RETURNING clause, so we do not rely on it: cloud_mutations.seq is a
+// monotonically increasing sequence assigned in VALUES-list order for a
+// single INSERT statement (nextval() is invoked per row, in the order rows
+// are listed — INSERT is never parallelized in PostgreSQL), so sorting the
+// returned seqs ascending within each sub-batch deterministically recovers
+// the input order regardless of the order RETURNING happens to hand rows
+// back in.
+func insertMutationBatchEntries(ctx context.Context, tx *sql.Tx, batch []MutationEntry) ([]int64, error) {
+	if len(batch) == 0 {
+		return []int64{}, nil
+	}
+
+	const paramsPerRow = 5
+	rowsPerStmt := maxInsertRowsPerStatement(paramsPerRow)
+	seqs := make([]int64, 0, len(batch))
+	for start := 0; start < len(batch); start += rowsPerStmt {
+		end := start + rowsPerStmt
+		if end > len(batch) {
+			end = len(batch)
+		}
+		sub := batch[start:end]
+
+		var b strings.Builder
+		b.WriteString("INSERT INTO cloud_mutations (project, entity, entity_key, op, payload) VALUES ")
+		args := make([]any, 0, len(sub)*paramsPerRow)
+		for i, entry := range sub {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			base := i * paramsPerRow
+			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5)
+			payload := entry.Payload
+			if len(payload) == 0 {
+				payload = json.RawMessage("{}")
+			}
+			args = append(args,
+				strings.TrimSpace(entry.Project),
+				strings.TrimSpace(entry.Entity),
+				strings.TrimSpace(entry.EntityKey),
+				strings.TrimSpace(entry.Op),
+				payload,
+			)
+		}
+		b.WriteString(" RETURNING seq")
+
+		rows, err := tx.QueryContext(ctx, b.String(), args...)
+		if err != nil {
+			return nil, fmt.Errorf("cloudstore: insert mutation batch (%d entries): %w", len(sub), err)
+		}
+		subSeqs := make([]int64, 0, len(sub))
+		for rows.Next() {
+			var seq int64
+			if err := rows.Scan(&seq); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("cloudstore: scan inserted mutation seq: %w", err)
+			}
+			subSeqs = append(subSeqs, seq)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("cloudstore: iterate inserted mutation seqs: %w", err)
+		}
+		rows.Close()
+		if len(subSeqs) != len(sub) {
+			return nil, fmt.Errorf("cloudstore: insert mutation batch: expected %d seqs, got %d", len(sub), len(subSeqs))
+		}
+		sort.Slice(subSeqs, func(i, j int) bool { return subSeqs[i] < subSeqs[j] })
+		seqs = append(seqs, subSeqs...)
+	}
+	return seqs, nil
+}
+
+// insertMaterializedMutationBatchChunks writes the materialized cloud_chunks
+// rows derived from a mutation batch (grouped one-per-distinct-project by
+// materializedMutationBatchChunks).
+//
+// H4 (perf): batched into a single multi-row `INSERT ... ON CONFLICT (project_name,
+// chunk_id) DO NOTHING` instead of one round trip per chunk. chunks always
+// carries at most one entry per distinct project (see
+// materializedMutationBatchChunks), so no two rows in the same VALUES list
+// can target the same conflict key.
+func insertMaterializedMutationBatchChunks(ctx context.Context, tx *sql.Tx, chunks []materializedMutationChunk) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	const paramsPerRow = 7
+	rowsPerStmt := maxInsertRowsPerStatement(paramsPerRow)
+	for start := 0; start < len(chunks); start += rowsPerStmt {
+		end := start + rowsPerStmt
+		if end > len(chunks) {
+			end = len(chunks)
+		}
+		sub := chunks[start:end]
+
+		var b strings.Builder
+		b.WriteString("INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload, sessions_count, observations_count, prompts_count) VALUES ")
+		args := make([]any, 0, len(sub)*paramsPerRow)
+		for i, chunk := range sub {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			base := i * paramsPerRow
+			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5, base+6, base+7)
+			args = append(args, chunk.project, chunk.id, "mutation-push", chunk.payload, chunk.counts.sessions, chunk.counts.observations, chunk.counts.prompts)
+		}
+		b.WriteString(" ON CONFLICT (project_name, chunk_id) DO NOTHING")
+
+		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
+			return fmt.Errorf("cloudstore: materialize mutation batch chunk batch (%d chunks): %w", len(sub), err)
+		}
+	}
+	return nil
 }
 
 const mutationBackfillChunkSize = 100
@@ -1008,7 +1360,10 @@ func (cs *CloudStore) BackfillMutationChunks(ctx context.Context, project string
 	}
 	tx = nil
 	if report.ChunksInserted > 0 {
-		cs.invalidateDashboardReadModel()
+		// H2: these backfilled rows are re-materializations of mutations already
+		// scoped to `project` at the DB row level (see the query above), so reuse
+		// the same batch-aware, cross-project-safe invalidation as InsertMutationBatch.
+		cs.invalidateDashboardReadModelForMutationBatch(missing)
 	}
 	return report, nil
 }

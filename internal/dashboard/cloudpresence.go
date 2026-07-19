@@ -8,7 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/engramdb"
+	"github.com/velion/omnia/internal/engramdb"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // defaultCloudTargetPrefix mirrors store.DefaultSyncTargetKey ("cloud"). Legacy
@@ -319,6 +320,7 @@ func mergeCloudPlacements(a, b []CloudPlacement) []CloudPlacement {
 // (e.g. the cloud dashboard's backend, which intentionally doesn't implement
 // it) or when there is nothing recorded yet.
 func (s *Server) syncTargetViews(ctx context.Context) []SyncTargetView {
+	lang := i18n.LangFrom(ctx)
 	reader, ok := s.db.(syncStateReader)
 	if !ok {
 		return nil
@@ -348,7 +350,7 @@ func (s *Server) syncTargetViews(ctx context.Context) []SyncTargetView {
 			ReasonCode:    st.ReasonCode,
 			ReasonMessage: st.ReasonMessage,
 			LastError:     st.LastError,
-			Age:           formatAge(st.UpdatedAt),
+			Age:           formatAge(st.UpdatedAt, lang),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

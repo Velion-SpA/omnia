@@ -467,6 +467,63 @@ func (cs *CloudStore) EffectivePerms(ctx context.Context, accountID, project str
 	return perms, nil
 }
 
+// TeamDerivedGrant is one (team, project, profile) grant an account holds via
+// team membership — the row shape the Admin Access page's teamDerivedForAccount
+// view needs to attribute each project's team-derived permission to the
+// contributing team(s) and profile(s), exactly like the per-project
+// adminTeamPermSource breakdown it renders today.
+type TeamDerivedGrant struct {
+	Team    string
+	Project string
+	Profile string
+	Perms   int
+}
+
+// ListTeamDerivedGrantsForAccount returns, in ONE query, every (team, project,
+// profile, perms) row a team membership grants accountID — the batched
+// equivalent of what teamDerivedForAccount previously assembled via ListTeams
+// + a per-team ListMembersOfTeam (used only to test membership) +
+// ListProjectsForTeam: a scan that cost one query PER TEAM IN THE ORG,
+// regardless of how many teams the account actually belongs to. This query is
+// keyed by account_id from the start (using idx_cloud_team_members_account),
+// so its cost scales with the account's own memberships, mirroring the JOIN
+// shape EffectivePerms already uses for the per-project resolver above. The
+// caller aggregates rows per project with bit_or(perms), exactly as
+// EffectivePerms' team-union subquery does — see
+// TestListTeamDerivedGrantsForAccountIntegration for the equivalence proof.
+func (cs *CloudStore) ListTeamDerivedGrantsForAccount(ctx context.Context, accountID string) ([]TeamDerivedGrant, error) {
+	if cs == nil || cs.db == nil {
+		return nil, fmt.Errorf("cloudstore: not initialized")
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return nil, nil
+	}
+	const q = `
+		SELECT t.name, tp.project, COALESCE(p.name, ''), COALESCE(p.perms, 0)
+		FROM cloud_team_members tm
+		JOIN cloud_teams t ON t.id = tm.team_id
+		JOIN cloud_team_projects tp ON tp.team_id = tm.team_id
+		LEFT JOIN cloud_profiles p ON p.id = tm.profile_id
+		WHERE tm.account_id = $1
+		ORDER BY tp.project ASC, t.name ASC`
+	rows, err := cs.db.QueryContext(ctx, q, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("cloudstore: list team derived grants for account: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TeamDerivedGrant
+	for rows.Next() {
+		var g TeamDerivedGrant
+		if err := rows.Scan(&g.Team, &g.Project, &g.Profile, &g.Perms); err != nil {
+			return nil, fmt.Errorf("cloudstore: scan team derived grant: %w", err)
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
 // ListReadableProjectsForAccount returns the distinct projects an account can
 // READ under the full layered model: a per-project override (cloud_memberships)
 // wins over the union of the account's team-profile perms, and a project is

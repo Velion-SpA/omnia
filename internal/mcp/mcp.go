@@ -26,10 +26,12 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/Velion-SpA/omnia/internal/diagnostic"
-	projectpkg "github.com/Velion-SpA/omnia/internal/project"
-	"github.com/Velion-SpA/omnia/internal/store"
-	"github.com/Velion-SpA/omnia/internal/timeutil"
+	"github.com/velion/omnia/internal/diagnostic"
+	"github.com/velion/omnia/internal/embed"
+	projectpkg "github.com/velion/omnia/internal/project"
+	"github.com/velion/omnia/internal/recall"
+	"github.com/velion/omnia/internal/store"
+	"github.com/velion/omnia/internal/timeutil"
 )
 
 const sourceProcessOverride = "process_override"
@@ -57,6 +59,24 @@ type MCPConfig struct {
 	// mem_save call (REQ-001). nil means "use the store default" (3).
 	// An explicit pointer value (including 0) is forwarded directly.
 	Limit *int
+
+	// Recall, when non-nil, enables hybrid (lexical+semantic) recall fusion
+	// for mem_search (design D1/D2/D6, human-like-memory PR3). nil (the
+	// default) means recall.enabled=false in config — handleSearch calls
+	// store.Search directly, exactly as it always has (D7 rollback
+	// guarantee: byte-for-byte today's FTS5-only path, zero data migration).
+	// Built by cmd/omnia/main.go from RecallConfig + EmbeddingsConfig when
+	// recall.enabled is true.
+	Recall *recall.Service
+
+	// AutoEmbed, when non-nil, is the async worker that embeds a memory
+	// out-of-band right after it is saved, so it becomes semantically
+	// searchable within seconds without a manual `omnia embed` run
+	// (human-like-memory PR4). nil (the default) means embeddings are
+	// disabled in config — mem_save enqueues nothing and the save path is
+	// byte-for-byte today's. Enqueue is non-blocking, so the save never waits
+	// on the embedding.
+	AutoEmbed *embed.Worker
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -75,6 +95,39 @@ func currentWorkingDirectory() string {
 		return ""
 	}
 	return cwd
+}
+
+// enqueueAutoEmbed schedules an out-of-band embedding for a just-saved memory
+// so it becomes semantically searchable within seconds, without a manual
+// `omnia embed` run. It is a no-op when the worker is disabled (nil). Enqueue
+// is non-blocking, and a fetch or full-queue miss is intentionally swallowed:
+// the periodic Reconcile backstop re-embeds anything missed, so a save must
+// never fail or slow down because of embedding.
+func enqueueAutoEmbed(cfg MCPConfig, s *store.Store, obsID int64) {
+	if cfg.AutoEmbed == nil {
+		return
+	}
+	obs, err := s.GetObservation(obsID)
+	if err != nil {
+		return
+	}
+	cfg.AutoEmbed.Enqueue(embed.Job{
+		SyncID:    obs.SyncID,
+		ObsID:     int(obs.ID),
+		Project:   strFromPtr(obs.Project),
+		Type:      obs.Type,
+		TopicKey:  strFromPtr(obs.TopicKey),
+		Title:     obs.Title,
+		Content:   obs.Content,
+		UpdatedAt: obs.UpdatedAt,
+	})
+}
+
+func strFromPtr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string) error {
@@ -1001,14 +1054,45 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
-		results, err := s.Search(query, store.SearchOptions{
-			Type:    typ,
-			Project: searchProject,
-			Scope:   scope,
-			Limit:   limit,
-		})
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", err)), nil
+		// Recall wiring (design D6/D7, PR3): when cfg.Recall is non-nil
+		// (recall.enabled=true in config), fuse lexical + semantic hits via
+		// recall.Service and hydrate the fused, ranked ID list back into full
+		// store.SearchResult records ("rank then hydrate" — recall.Fuse never
+		// carries Project/Type/Content). When nil (the default), this branch
+		// is skipped entirely: the else branch below is byte-for-byte today's
+		// FTS5-only store.Search call, unchanged, so rollback is always safe.
+		var results []store.SearchResult
+		if cfg.Recall != nil {
+			// recallFetchLimit over-fetches candidates (beyond the caller's
+			// real limit) so hydrateFusedResults's project/scope/type
+			// re-check below has enough headroom to still fill up to limit
+			// valid results after filtering out any cross-project semantic
+			// noise (bugfix: see recallScopeFilter's doc in recall_adapter.go).
+			fused, ferr := cfg.Recall.Search(ctx, query, recall.LexicalSearchOptions{
+				Type:    typ,
+				Project: searchProject,
+				Scope:   scope,
+				Limit:   recallFetchLimit(limit),
+			})
+			if ferr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", ferr)), nil
+			}
+			results = hydrateFusedResults(s, fused, limit, recallScopeFilter{
+				Type:    typ,
+				Project: searchProject,
+				Scope:   scope,
+			})
+		} else {
+			r, serr := s.Search(query, store.SearchOptions{
+				Type:    typ,
+				Project: searchProject,
+				Scope:   scope,
+				Limit:   limit,
+			})
+			if serr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", serr)), nil
+			}
+			results = r
 		}
 
 		if len(results) == 0 {
@@ -1343,6 +1427,11 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
 		}
+
+		// Auto-embed the just-saved memory out-of-band (non-blocking): it
+		// becomes semantically searchable within seconds without slowing the
+		// save. No-op when embeddings are disabled.
+		enqueueAutoEmbed(cfg, s, savedID)
 
 		if capturePrompt && activity != nil {
 			if prompt, ok := activity.CurrentPrompt(sessionID, project); ok {

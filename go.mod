@@ -1,4 +1,4 @@
-module github.com/Velion-SpA/omnia
+module github.com/velion/omnia
 
 go 1.26.4
 

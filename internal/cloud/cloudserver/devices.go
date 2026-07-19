@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // deviceManager is the subset of cloudstore needed for device-management endpoints.

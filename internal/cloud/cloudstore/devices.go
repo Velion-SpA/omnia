@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 // Device represents a registered device for an account.

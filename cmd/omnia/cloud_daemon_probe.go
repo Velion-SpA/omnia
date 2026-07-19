@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/envx"
+	"github.com/velion/omnia/internal/envx"
 )
 
 // daemonProbeStatus describes the outcome of probing the local omnia daemon.

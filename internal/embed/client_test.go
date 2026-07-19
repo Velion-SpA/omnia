@@ -7,50 +7,59 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
 // fakeOllama returns a server that responds with the given embedding and records
-// the last prompt it received.
-func fakeOllama(t *testing.T, embedding []float32, status int, lastPrompt *string) *httptest.Server {
+// the last request it received.
+func fakeOllama(t *testing.T, embedding []float32, status int, lastReq *embedRequest) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/embeddings" {
-			t.Errorf("unexpected path %q", r.URL.Path)
+		if r.URL.Path != "/api/embed" {
+			t.Errorf("unexpected path %q, want /api/embed", r.URL.Path)
 		}
 		body, _ := io.ReadAll(r.Body)
 		var req embedRequest
 		if err := json.Unmarshal(body, &req); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
-		if lastPrompt != nil {
-			*lastPrompt = req.Prompt
+		if lastReq != nil {
+			*lastReq = req
 		}
 		if status != http.StatusOK {
 			w.WriteHeader(status)
 			return
 		}
-		json.NewEncoder(w).Encode(embedResponse{Embedding: embedding})
+		json.NewEncoder(w).Encode(embedResponse{Embeddings: [][]float32{embedding}})
 	}))
 }
 
-func TestClient_Embed_DocumentPrefixAndUnitNorm(t *testing.T) {
-	var prompt string
-	srv := fakeOllama(t, []float32{3, 4, 0}, http.StatusOK, &prompt) // norm 5
+func TestClient_Embed_PostsToApiEmbedWithNoPrefix(t *testing.T) {
+	var req embedRequest
+	srv := fakeOllama(t, []float32{3, 4, 0}, http.StatusOK, &req) // norm 5
 	defer srv.Close()
 
 	c := New(srv.URL, "test-model", 3)
-	vec, err := c.Embed(context.Background(), "hello", TaskDocument)
+	vec, err := c.Embed(context.Background(), "hello")
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
-	if !strings.HasPrefix(prompt, "search_document: ") {
-		t.Errorf("document prompt missing prefix: %q", prompt)
+
+	// jina-embeddings-v2-base-es has no search_document:/search_query: prefix
+	// convention (unlike nomic-embed-text) — the raw text must be sent as-is.
+	if req.Input != "hello" {
+		t.Errorf("input: got %q, want %q (no prefix)", req.Input, "hello")
 	}
-	if prompt != "search_document: hello" {
-		t.Errorf("prompt: got %q, want %q", prompt, "search_document: hello")
+	if req.Model != "test-model" {
+		t.Errorf("model: got %q, want %q", req.Model, "test-model")
 	}
+	if !req.Truncate {
+		t.Error("truncate: got false, want true (server-side truncation replaces the shrink-retry loop)")
+	}
+	if req.Options.NumCtx != 8192 {
+		t.Errorf("options.num_ctx: got %d, want 8192 (fixes Ollama's 2048-token /api/embed 500 bug)", req.Options.NumCtx)
+	}
+
 	// [3,4,0] normalized → [0.6,0.8,0]
 	want := []float32{0.6, 0.8, 0}
 	for i := range want {
@@ -67,33 +76,12 @@ func TestClient_Embed_DocumentPrefixAndUnitNorm(t *testing.T) {
 	}
 }
 
-func TestClient_Embed_QueryPrefix(t *testing.T) {
-	var prompt string
-	srv := fakeOllama(t, []float32{1, 0, 0}, http.StatusOK, &prompt)
-	defer srv.Close()
-
-	c := New(srv.URL, "test-model", 3)
-	if _, err := c.Embed(context.Background(), "find this", TaskQuery); err != nil {
-		t.Fatalf("Embed: %v", err)
-	}
-	if prompt != "search_query: find this" {
-		t.Errorf("query prompt: got %q, want %q", prompt, "search_query: find this")
-	}
-}
-
-func TestClient_Embed_UnknownTask(t *testing.T) {
-	c := New("http://127.0.0.1:0", "test-model", 3)
-	if _, err := c.Embed(context.Background(), "x", "classification"); err == nil {
-		t.Error("expected error for unknown task, got nil")
-	}
-}
-
 func TestClient_Embed_DimMismatch(t *testing.T) {
 	srv := fakeOllama(t, []float32{1, 0, 0}, http.StatusOK, nil) // 3 dims
 	defer srv.Close()
 
 	c := New(srv.URL, "test-model", 4) // expect 4
-	if _, err := c.Embed(context.Background(), "x", TaskDocument); err == nil {
+	if _, err := c.Embed(context.Background(), "x"); err == nil {
 		t.Error("expected dim-mismatch error, got nil")
 	}
 }
@@ -103,7 +91,7 @@ func TestClient_Embed_ZeroVectorRejected(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "test-model", 3)
-	if _, err := c.Embed(context.Background(), "x", TaskDocument); err == nil {
+	if _, err := c.Embed(context.Background(), "x"); err == nil {
 		t.Error("expected zero-norm error, got nil")
 	}
 }
@@ -113,7 +101,19 @@ func TestClient_Embed_Non200(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "test-model", 3)
-	if _, err := c.Embed(context.Background(), "x", TaskDocument); err == nil {
+	if _, err := c.Embed(context.Background(), "x"); err == nil {
 		t.Error("expected error on 500, got nil")
+	}
+}
+
+func TestClient_Embed_EmptyEmbeddingsRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(embedResponse{Embeddings: nil})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-model", 3)
+	if _, err := c.Embed(context.Background(), "x"); err == nil {
+		t.Error("expected error on empty embeddings array, got nil")
 	}
 }

@@ -1,0 +1,57 @@
+id: OBL-09
+title: Phase 5 — per-account project namespacing (no cross-account collision)
+status: pending
+priority: P3
+blocks_homelab_test: false   # single-owner homelab: no two accounts reuse the same project name
+estimated_effort: XL
+recommended_model: opus-4.8
+depends_on: []
+
+context: |
+  KNOWN GAP explicitly acknowledged in the code. Project names are assumed globally
+  unique across the whole server. Two different accounts pushing the SAME project name
+  would let whoever pushes first claim ownership of the other's namespace (via
+  claimOrphanProject "first push wins"). For a single-owner homelab this is fine and
+  NOT a blocker. It becomes real only when multiple independent accounts/tenants share
+  a server and reuse names like "app" or "notes".
+
+current_state:
+  - claim: The gap is documented in code.
+    evidence: internal/cloud/cloudserver/members.go:53-56 ("KNOWN GAP (Phase 5)...")
+  - claim: Only cloud_memberships and cloud_devices carry account_id; all data tables key on the bare (normalized) project string, globally.
+    evidence: internal/cloud/cloudstore/cloudstore.go:680-687 (memberships PK account_id,project), 688-698 (devices); data tables below
+  - claim: Every project-keyed query is global (bare NormalizeProject string).
+    evidence: cloud_chunks (cloudstore.go:150-154,227,489,521,598,924, dashboard_queries.go:1111,1123), cloud_project_sessions (cloudstore.go:309), cloud_project_controls (project_controls.go:34,99), cloud_mutations (cloudstore.go:836,652,1167-1183, dashboard_queries.go:1160-1183)
+  - claim: NormalizeProject lower-cases + collapses separators.
+    evidence: internal/store/store.go:6244-6261
+  - claim: claimOrphanProject grants first-pusher PermAll+owner.
+    evidence: internal/cloud/cloudserver/members.go:57-81
+
+gap: |
+  Introduce a tenant/namespace dimension so (account-or-namespace, project) is the key
+  across all data tables and the dashboard read-model, without breaking existing
+  single-tenant data.
+
+tasks:
+  - Design decision first (write it down): namespace by owning account_id, or by an explicit workspace/namespace id? Recommend an explicit namespace/workspace concept so a team can share one namespace while staying isolated from another team. Capture the decision in this file before coding.
+  - Add the namespace dimension to: cloud_chunks, cloud_project_sessions, cloud_project_controls, cloud_mutations (schema migration with a backfill that assigns all existing rows to a single default namespace so current data keeps working).
+  - Update every query site listed in current_state to include the namespace key.
+  - Update the dashboard read-model machinery (dashboardReadModel/dashboardChunkRow/dashboardMutationRow, dashboardEntityKey at dashboard_queries.go:112-122) to key by (namespace, project).
+  - Update claimOrphanProject so ownership is per (namespace, project), removing the cross-account collision.
+  - Extensive tests: two accounts in different namespaces push the same project name and stay fully isolated (chunks, mutations, memberships, controls, dashboard).
+
+acceptance_criteria:
+  - Two accounts (different namespaces) using project "app" never see or overwrite each other's data.
+  - Existing single-namespace data is untouched and continues to work after migration.
+
+verification:
+  - go build ./... && go test ./internal/cloud/... — plus a dedicated cross-namespace isolation test.
+
+do_not_touch:
+  - Wire format compatibility (mutations.go:367-368) — a schema/wire change here likely needs a version bump; plan it.
+
+references:
+  - internal/cloud/cloudserver/members.go:53-81
+  - internal/cloud/cloudstore/cloudstore.go:150-154,227,489,521,598,680-698,836,924,1167-1183
+  - internal/cloud/cloudstore/dashboard_queries.go:112-122,1111-1183
+  - internal/store/store.go:6244-6261

@@ -1,0 +1,76 @@
+id: OBL-08
+title: Device management CLI + last_seen_at (drive the two-notebook per-device scope test)
+status: done
+priority: P0
+blocks_homelab_test: true
+estimated_effort: M
+recommended_model: sonnet-5
+depends_on: []
+tags: [cloud, devices, cli, homelab]
+
+context: |
+  The two-notebook homelab test is fundamentally a per-device-scope test: each notebook
+  registers as a device restricted to certain projects, and you verify one notebook
+  cannot pull the other's projects. Server-side enforcement (Phase 4) is DONE and
+  correct — but there is NO CLI to list, scope, or revoke devices. Today you can only
+  create a device implicitly via omnia cloud login --device NAME, and managing scope
+  requires raw curl against GET/POST/DELETE /devices. Also last_seen_at is a dead column
+  (never updated), so there is no "when did this notebook last sync" signal.
+
+current_state: |
+  - Device enforcement is complete — additive-only AND-gate on project ops, fail-closed
+    on missing device. evidence: internal/cloud/cloudserver/cloudserver.go:644-706,
+    713-732; mutations.go:152,292-294
+  - HTTP endpoints exist (register-implicit via login; GET list; POST scope; DELETE) but
+    no CLI wraps them. evidence: cmd/omnia/cloud_login.go:173,221 (--device flag);
+    internal/cloud/cloudserver/devices.go:101-164; DELETE route cloudserver.go:196
+  - No cmd/omnia/cloud_devices.go exists; device management CLI is absent.
+    evidence: repo-wide grep — only device CLI surface is the --device login flag
+  - last_seen_at column exists but is never written.
+    evidence: internal/cloud/cloudstore/cloudstore.go:688-698; no UPDATE last_seen_at anywhere
+  - Revoking a device row does NOT invalidate the still-valid account token carrying that
+    DeviceID (enforced only by DB lookup at auth time).
+    evidence: internal/cloud/cloudserver/devices.go:120-145
+
+gap: |
+  A first-class omnia cloud devices command group, and last_seen_at updates so the
+  operator can see device activity.
+
+tasks: |
+  1. Add cmd/omnia/cloud_devices.go with subcommands: omnia cloud devices list;
+     omnia cloud devices scope <device> --projects a,b,c (sets scope_projects; empty =
+     unrestricted per existing semantics); omnia cloud devices revoke <device>. Use the
+     logged-in account token; map friendly device NAME to id via the list endpoint.
+  2. Update last_seen_at on each authenticated device request (best-effort UPDATE in the
+     authorize path when claims.DeviceID is present). Keep it out of the hot transaction.
+  3. Show devices + scope + last_seen in the dashboard account view (read-only) if feasible.
+  4. Document the nuance in help text and OMNIA-CLOUD.md: revoking a device denies its
+     scope immediately (fail-closed) but the underlying account token stays valid until
+     TTL/refresh. Cryptographic token-device binding is separate, optional hardening —
+     note it, do not require it here.
+  5. Tests: devices list/scope/revoke round-trip; a scoped device pulls only in-scope
+     projects and is denied out-of-scope (drive the exact isolation the homelab test
+     needs); last_seen_at advances after a request.
+
+acceptance_criteria: |
+  - omnia cloud devices list/scope/revoke work end to end against a running cloud.
+  - A device scoped to project X can pull X and is denied Y; revoking the device denies
+    all pulls (fail-closed).
+  - last_seen_at reflects the last authenticated request from that device.
+
+verification: |
+  - go build ./... && go test ./internal/cloud/... ./cmd/omnia/...
+  - Manual (the homelab rehearsal): from two logins with --device notebook-a /
+    notebook-b, scope each to a different project, confirm cross-device isolation.
+
+do_not_touch: |
+  - The additive-only scope semantics (empty scope = unrestricted, never "deny all") —
+    cloudserver.go:656-662.
+  - Ownership-scoped 404 (not 403) on foreign device access — devices.go:101-104,135-138.
+
+references: |
+  - internal/cloud/cloudserver/cloudserver.go:644-706,713-732
+  - internal/cloud/cloudserver/devices.go:101-164
+  - internal/cloud/cloudstore/devices.go:25-56,150-164
+  - internal/cloud/cloudstore/cloudstore.go:688-698
+  - cmd/omnia/cloud_login.go:166-259

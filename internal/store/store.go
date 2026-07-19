@@ -9,11 +9,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,8 +23,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/datadir"
-	"github.com/Velion-SpA/omnia/internal/timeutil"
+	"github.com/velion/omnia/internal/datadir"
+	"github.com/velion/omnia/internal/projectname"
+	"github.com/velion/omnia/internal/timeutil"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -231,6 +234,14 @@ const (
 	SyncEntityObservation = "observation"
 	SyncEntityPrompt      = "prompt"
 	SyncEntityRelation    = "relation"
+	// SyncEntityEmbedding carries a locally computed vector (human-like-memory
+	// PR5 slice 2, cloud semantic parity) as an opaque BLOB payload — mirrors
+	// SyncEntityRelation's precedent of a free-text entity needing no new
+	// engram.db DDL. Unlike relation rows (which live in memory_relations,
+	// inside this same package's DB), embeddings live in internal/embed's own
+	// separate sqlite file, which this package must never import (keeps
+	// degrade-to-FTS clean — see design.md "store must not import embed").
+	SyncEntityEmbedding = "embedding"
 
 	SyncOpUpsert = "upsert"
 	SyncOpDelete = "delete"
@@ -432,6 +443,27 @@ type syncRelationPayload struct {
 	UpdatedAt      string   `json:"updated_at"`
 }
 
+// syncEmbeddingPayload is the wire format for a locally computed embedding
+// vector sent over the sync_mutations / cloud_mutations rails (entity =
+// SyncEntityEmbedding, op = 'upsert'). human-like-memory PR5 slice 2.
+//
+// Vector is the SAME little-endian float32 encoding internal/embed.Row and
+// cloudstore.EmbeddingRow use — duplicated here (not imported) so
+// internal/store stays free of the Ollama-dependent embed package, matching
+// the precedent cloudstore/embeddings.go already set for its own encode/decode
+// pair in slice 1. json.Marshal renders a []byte field as base64, which is
+// exactly the "opaque BLOB" shape the design calls for.
+type syncEmbeddingPayload struct {
+	SyncID      string `json:"sync_id"`
+	Project     string `json:"project"`
+	Type        string `json:"type,omitempty"`
+	Model       string `json:"model"`
+	Dim         int    `json:"dim"`
+	Vector      []byte `json:"vector"`
+	ContentHash string `json:"content_hash"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
 // ExportData is the full serializable dump of the engram database.
 type ExportData struct {
 	Version      string        `json:"version"`
@@ -485,6 +517,11 @@ type Store struct {
 	db    *sql.DB
 	cfg   Config
 	hooks storeHooks
+
+	// onEmbeddingPulled is an optional hook invoked by applyEmbeddingUpsertTx
+	// for every successfully decoded pulled SyncEntityEmbedding mutation. See
+	// SetEmbeddingPulledHook / EmbeddingPulled (human-like-memory PR5 slice 2).
+	onEmbeddingPulled EmbeddingPulledHook
 }
 
 type execer interface {
@@ -4247,11 +4284,14 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 					return fmt.Errorf("ApplyPulledMutation: write deferred row: %w", deferErr)
 				}
 				// Fall through to advance the cursor (ACK the seq).
-			} else if mutation.Entity == SyncEntityRelation && errors.Is(applyErr, ErrApplyDead) {
+			} else if (mutation.Entity == SyncEntityRelation || mutation.Entity == SyncEntityEmbedding) && errors.Is(applyErr, ErrApplyDead) {
 				// Payload is permanently undecodable — write directly as dead and ACK.
 				// There is no point retrying; a malformed payload will never become valid.
-				log.Printf("[store] ApplyPulledMutation: relation payload dead seq=%d entity_key=%s err=%v — marking dead",
-					mutation.Seq, mutation.EntityKey, applyErr)
+				// Embeddings have no FK-miss equivalent (no target table in this
+				// db to reference — see applyEmbeddingUpsertTx's doc), so only
+				// this dead-payload branch applies to SyncEntityEmbedding.
+				log.Printf("[store] ApplyPulledMutation: %s payload dead seq=%d entity_key=%s err=%v — marking dead",
+					mutation.Entity, mutation.Seq, mutation.EntityKey, applyErr)
 				if _, deferErr := s.execHook(tx, `
 					INSERT INTO sync_apply_deferred
 						(sync_id, entity, payload, apply_status, retry_count, first_seen_at)
@@ -5693,10 +5733,93 @@ func (s *Store) resolveSessionProjectTx(tx *sql.Tx, sessionID string) (string, e
 	return project, nil
 }
 
+// EmbeddingSyncInput carries the fields needed to record a sync mutation for a
+// locally computed embedding vector (human-like-memory PR5 slice 2). It is a
+// plain struct — not embed.Row — so internal/store never imports
+// internal/embed (mirrors the "store must not import embed" rule that keeps
+// degrade-to-FTS clean, and the same no-cross-import precedent cloudstore set
+// for cloud_embeddings in slice 1).
+type EmbeddingSyncInput struct {
+	SyncID      string
+	Project     string
+	Type        string
+	Model       string
+	Dim         int
+	Vector      []float32
+	ContentHash string
+	UpdatedAt   string
+}
+
+// EnqueueEmbeddingMutation records a sync mutation for a locally computed
+// embedding vector so autosync propagates it toward cloud_embeddings,
+// mirroring how JudgeRelation enqueues relation mutations. It is called from
+// the composition root's embed.Worker upsert hook — internal/embed never
+// imports internal/sync or internal/store directly (architecture-guardrails).
+//
+// Unlike relations (gated on project enrollment — REQ-001), embeddings are
+// unconditionally enqueued, matching how observation/prompt mutations are
+// always enqueued regardless of enrollment.
+func (s *Store) EnqueueEmbeddingMutation(input EmbeddingSyncInput) error {
+	syncID := strings.TrimSpace(input.SyncID)
+	if syncID == "" {
+		return fmt.Errorf("EnqueueEmbeddingMutation: sync_id is required")
+	}
+	if len(input.Vector) == 0 {
+		return fmt.Errorf("EnqueueEmbeddingMutation: vector is required")
+	}
+	blob, err := encodeSyncVectorFloat32(input.Vector)
+	if err != nil {
+		return fmt.Errorf("EnqueueEmbeddingMutation: %w", err)
+	}
+	project, _ := NormalizeProject(strings.TrimSpace(input.Project))
+	payload := syncEmbeddingPayload{
+		SyncID:      syncID,
+		Project:     strings.TrimSpace(project),
+		Type:        strings.TrimSpace(input.Type),
+		Model:       strings.TrimSpace(input.Model),
+		Dim:         input.Dim,
+		Vector:      blob,
+		ContentHash: strings.TrimSpace(input.ContentHash),
+		UpdatedAt:   strings.TrimSpace(input.UpdatedAt),
+	}
+	return s.withTx(func(tx *sql.Tx) error {
+		return s.enqueueSyncMutationTx(tx, SyncEntityEmbedding, syncID, SyncOpUpsert, payload)
+	})
+}
+
+// encodeSyncVectorFloat32 serializes v as little-endian float32 (dim*4 bytes)
+// — the SAME encoding internal/embed.encodeVector and
+// cloudstore.encodeEmbeddingVector use, duplicated here per the no-cross-import
+// precedent (see syncEmbeddingPayload doc).
+func encodeSyncVectorFloat32(v []float32) ([]byte, error) {
+	if len(v) == 0 {
+		return nil, fmt.Errorf("refuse to encode empty vector")
+	}
+	buf := make([]byte, len(v)*4)
+	for i, x := range v {
+		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(x))
+	}
+	return buf, nil
+}
+
+// decodeSyncVectorFloat32 reverses encodeSyncVectorFloat32.
+func decodeSyncVectorFloat32(b []byte) ([]float32, error) {
+	if len(b) == 0 || len(b)%4 != 0 {
+		return nil, fmt.Errorf("bad vector blob length %d", len(b))
+	}
+	out := make([]float32, len(b)/4)
+	for i := range out {
+		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return out, nil
+}
+
 func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 	switch mutation.Entity {
 	case SyncEntityRelation:
 		return s.applyRelationUpsertTx(tx, mutation)
+	case SyncEntityEmbedding:
+		return s.applyEmbeddingUpsertTx(tx, mutation)
 	case SyncEntitySession:
 		var payload syncSessionPayload
 		if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
@@ -5808,6 +5931,86 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	return nil
 }
 
+// EmbeddingPulled is the decoded, validated payload of a pulled
+// SyncEntityEmbedding mutation, handed to an optional hook installed via
+// SetEmbeddingPulledHook. It is a plain struct — not embed.Row — so
+// internal/store never imports internal/embed (see syncEmbeddingPayload doc).
+type EmbeddingPulled struct {
+	SyncID      string
+	Project     string
+	Type        string
+	Model       string
+	Dim         int
+	Vector      []float32
+	ContentHash string
+	UpdatedAt   string
+}
+
+// EmbeddingPulledHook is invoked after a pulled embedding mutation decodes and
+// validates successfully. A nil hook (the default) means this device does not
+// wire pulled vectors anywhere — see applyEmbeddingUpsertTx doc for why that
+// is a correct, intentional default rather than a gap.
+type EmbeddingPulledHook func(EmbeddingPulled)
+
+// SetEmbeddingPulledHook installs hook, called by applyEmbeddingUpsertTx for
+// every successfully decoded pulled embedding mutation. A nil hook restores
+// the no-op default. Not required for correctness — see applyEmbeddingUpsertTx.
+func (s *Store) SetEmbeddingPulledHook(hook EmbeddingPulledHook) { s.onEmbeddingPulled = hook }
+
+// applyEmbeddingUpsertTx handles a pulled mutation with entity=SyncEntityEmbedding
+// and op='upsert'. human-like-memory PR5 slice 2.
+//
+// Unlike relations (whose target table, memory_relations, lives in this same
+// engram.db), a locally computed vector lives in internal/embed's OWN sqlite
+// file — a package this store must never import (architecture-guardrails:
+// store must not couple to the Ollama-dependent embed package, keeping
+// degrade-to-FTS clean; design.md's own architecture decision states this
+// explicitly). So this function only decodes and validates the payload
+// (mirroring applyRelationUpsertTx's step 1 decode / step 1b field
+// validation) and, if a hook is installed, hands it the decoded vector; it
+// never writes to engram.db itself.
+//
+// Each device already recomputes its own vectors locally via Reconcile once
+// the underlying observation syncs (session/observation/prompt entities), so
+// a peer's pushed vector is redundant data on THIS device — pushing it exists
+// to populate cloud_embeddings for cloud-side semantic search (PR5 slice 3),
+// not to replicate vectors between local peers. Decoding without a mandatory
+// write is therefore correct: the no-op default (hook unset) is safe, and
+// idempotency is trivial — decode-and-optionally-notify has no local state to
+// duplicate, so applying the identical mutation any number of times behaves
+// identically every time (this is also guarded upstream: ApplyPulledMutation
+// never re-applies a Seq at or below the target's last_pulled_seq).
+//
+// Decode failures or a missing/malformed vector return ErrApplyDead
+// (non-retryable), matching applyRelationUpsertTx's contract for a
+// permanently malformed payload.
+func (s *Store) applyEmbeddingUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
+	var p syncEmbeddingPayload
+	if err := decodeSyncPayload([]byte(mutation.Payload), &p); err != nil {
+		return fmt.Errorf("%w: decode embedding payload: %v", ErrApplyDead, err)
+	}
+	if strings.TrimSpace(p.SyncID) == "" || len(p.Vector) == 0 {
+		return fmt.Errorf("%w: embedding payload missing required sync_id or vector", ErrApplyDead)
+	}
+	vec, err := decodeSyncVectorFloat32(p.Vector)
+	if err != nil {
+		return fmt.Errorf("%w: embedding payload has a malformed vector: %v", ErrApplyDead, err)
+	}
+	if s.onEmbeddingPulled != nil {
+		s.onEmbeddingPulled(EmbeddingPulled{
+			SyncID:      strings.TrimSpace(p.SyncID),
+			Project:     strings.TrimSpace(p.Project),
+			Type:        strings.TrimSpace(p.Type),
+			Model:       strings.TrimSpace(p.Model),
+			Dim:         p.Dim,
+			Vector:      vec,
+			ContentHash: strings.TrimSpace(p.ContentHash),
+			UpdatedAt:   strings.TrimSpace(p.UpdatedAt),
+		})
+	}
+	return nil
+}
+
 // extractProjectFromPayload returns the project string from a sync payload struct.
 // It handles both string and *string Project fields across all entity payload types.
 // Returns empty string if the payload has no project or project is nil.
@@ -5826,6 +6029,8 @@ func extractProjectFromPayload(payload any) string {
 		}
 		return ""
 	case syncRelationPayload:
+		return p.Project
+	case syncEmbeddingPayload:
 		return p.Project
 	default:
 		// Fallback: marshal to JSON and extract $.project via json.Unmarshal.
@@ -6462,24 +6667,30 @@ func normalizeScope(scope string) string {
 	}
 }
 
+// NormalizeScope applies the same scope-folding rule Search/AddObservation
+// already use internally (normalizeScope): "personal"/"global" pass through,
+// anything else (including "") folds to "project". Exported so wiring layers
+// outside internal/store (e.g. internal/mcp's recall hydration re-check) can
+// mirror Search's scope-matching semantics without duplicating the rule.
+func NormalizeScope(scope string) string {
+	return normalizeScope(scope)
+}
+
 // NormalizeProject applies canonical project name normalization:
 // lowercase + trim whitespace + collapse consecutive hyphens/underscores.
 // Returns the normalized name and a warning message if the name was changed
 // (empty string if no change was needed).
 // Exported so MCP and CLI handlers can surface the warning to users.
+//
+// This is the canonical implementation; the actual normalization rule
+// lives in the leaf package internal/projectname so that internal/config
+// and internal/project can delegate to the exact same rule instead of
+// reimplementing (and diverging from) it.
 func NormalizeProject(project string) (normalized string, warning string) {
 	if project == "" {
 		return "", ""
 	}
-	n := strings.TrimSpace(strings.ToLower(project))
-	// Collapse multiple consecutive hyphens
-	for strings.Contains(n, "--") {
-		n = strings.ReplaceAll(n, "--", "-")
-	}
-	// Collapse multiple consecutive underscores
-	for strings.Contains(n, "__") {
-		n = strings.ReplaceAll(n, "__", "_")
-	}
+	n := projectname.Normalize(project)
 	if n == project {
 		return n, ""
 	}

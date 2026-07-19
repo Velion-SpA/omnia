@@ -4,8 +4,8 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/Velion-SpA/omnia/internal/embed"
-	"github.com/Velion-SpA/omnia/internal/engramdb"
+	"github.com/velion/omnia/internal/embed"
+	"github.com/velion/omnia/internal/engramdb"
 )
 
 // localDataSource is the production DataSource for the local dashboard (:7800).
@@ -64,7 +64,10 @@ func (l *localDataSource) Semantic() (SemanticIndex, bool) {
 	if l.emb == nil || l.embClient == nil {
 		return nil, false
 	}
-	return localSemantic{store: l.emb, embClient: l.embClient}, true
+	// embed.LocalSearcher promotes the former dashboard-local `localSemantic`
+	// adapter into the shared embed.Searcher port (design D6), so mem_search
+	// recall (internal/recall) and this dashboard use the exact same type.
+	return embed.NewSearcher(l.emb, l.embClient), true
 }
 
 func (l *localDataSource) Mutations() (MutationWriter, bool) { return l.client, true }
@@ -78,23 +81,4 @@ func (l *localDataSource) Close() error {
 		return l.db.Close()
 	}
 	return nil
-}
-
-// localSemantic adapts the embeddings store + client to SemanticIndex. EmbedQuery
-// pins the search_query task so interactive queries embed with the correct prefix.
-type localSemantic struct {
-	store     *embed.Store
-	embClient embed.Embedder
-}
-
-func (s localSemantic) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
-	return s.embClient.Embed(ctx, text, embed.TaskQuery)
-}
-
-func (s localSemantic) Search(ctx context.Context, vec []float32, k int) ([]embed.Hit, error) {
-	return s.store.Search(ctx, vec, k)
-}
-
-func (s localSemantic) Graph(k int, minScore float32) ([]embed.GraphNode, []embed.GraphEdge, error) {
-	return s.store.Graph(k, minScore)
 }

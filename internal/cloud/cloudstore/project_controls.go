@@ -20,7 +20,11 @@ type ProjectSyncControl struct {
 
 // IsProjectSyncEnabled returns whether sync is enabled for the project.
 // An absent row defaults to enabled=true (safe default).
-func (cs *CloudStore) IsProjectSyncEnabled(project string) (bool, error) {
+//
+// H1: takes the request ctx so this per-request auth-adjacent DB call is
+// cancellable — a slow/stuck query is aborted when the client disconnects instead
+// of pinning a pooled connection (pool-exhaustion risk under DB slowness).
+func (cs *CloudStore) IsProjectSyncEnabled(ctx context.Context, project string) (bool, error) {
 	if cs == nil || cs.db == nil {
 		return true, nil
 	}
@@ -30,7 +34,7 @@ func (cs *CloudStore) IsProjectSyncEnabled(project string) (bool, error) {
 	}
 	var enabled bool
 	err := cs.db.QueryRowContext(
-		context.Background(),
+		ctx,
 		`SELECT sync_enabled FROM cloud_project_controls WHERE project = $1`,
 		project,
 	).Scan(&enabled)
@@ -78,7 +82,9 @@ func (cs *CloudStore) SetProjectSyncEnabled(project string, enabled bool, update
 	}
 	// W4: invalidate the dashboard read model cache so SystemHealth / paused_projects
 	// reflect the change immediately without waiting for the next chunk write.
-	cs.invalidateDashboardReadModel()
+	// H2: scoped to this one project — this control record doesn't touch any
+	// other project's cached chunk/mutation data.
+	cs.invalidateDashboardReadModelForProjects(map[string]struct{}{project: {}})
 	return nil
 }
 
@@ -158,4 +164,50 @@ func (cs *CloudStore) ListProjectSyncControls() ([]ProjectSyncControl, error) {
 		return nil, fmt.Errorf("cloudstore: ListProjectSyncControls iterate: %w", err)
 	}
 	return result, nil
+}
+
+// ListProjectSyncControlsMap returns EVERY row of cloud_project_controls in
+// ONE query, keyed by project. This batches what the Admin Projects handler
+// (handleAdminProjectsPage in cloudserver) previously issued as one
+// GetProjectSyncControl call per known project — an N+1 flagged by the
+// 2026-07-19 performance audit. A project absent from the map has no explicit
+// control row: callers must treat a missing key exactly like GetProjectSyncControl
+// returning (nil, nil) for it (the OBL-04 default: sync enabled, no pause
+// reason) — the same "missing key = zero/default" convention
+// ListProjectChunkStats already established for missing chunk stats.
+//
+// Deliberately distinct from the legacy ListProjectSyncControls() above (kept
+// unchanged — it is spec'd by name in openspec/specs/cloud-dashboard/spec.md,
+// REQ-104, and additionally UNIONs in projects known only via cloud_chunks).
+// This method mirrors GetProjectSyncControl's own query exactly (a plain SELECT
+// over cloud_project_controls, no UNION), so its results are byte-for-byte
+// identical to calling GetProjectSyncControl once per project — see
+// TestListProjectSyncControlsMapMatchesGetProjectSyncControl.
+func (cs *CloudStore) ListProjectSyncControlsMap(ctx context.Context) (map[string]ProjectSyncControl, error) {
+	if cs == nil || cs.db == nil {
+		return nil, fmt.Errorf("cloudstore: not initialized")
+	}
+	const q = `
+		SELECT project, sync_enabled, paused_reason, updated_by, updated_at
+		FROM cloud_project_controls`
+	rows, err := cs.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("cloudstore: list project sync controls map: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]ProjectSyncControl)
+	for rows.Next() {
+		var ctrl ProjectSyncControl
+		var updatedAt time.Time
+		if err := rows.Scan(&ctrl.Project, &ctrl.SyncEnabled, &ctrl.PausedReason, &ctrl.UpdatedBy, &updatedAt); err != nil {
+			return nil, fmt.Errorf("cloudstore: scan project sync control: %w", err)
+		}
+		ctrl.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+		out[ctrl.Project] = ctrl
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cloudstore: list project sync controls map iterate: %w", err)
+	}
+	return out, nil
 }

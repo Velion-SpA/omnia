@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/datadir"
+	"github.com/velion/omnia/internal/datadir"
 
 	_ "modernc.org/sqlite" // register "sqlite" driver
 )

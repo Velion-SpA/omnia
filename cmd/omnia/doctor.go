@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/diagnostic"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/diagnostic"
+	"github.com/velion/omnia/internal/store"
 )
 
 func cmdDoctor(cfg store.Config) {

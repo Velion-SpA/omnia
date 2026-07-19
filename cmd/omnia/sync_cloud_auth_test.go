@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/autosync"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/cloud/autosync"
+	"github.com/velion/omnia/internal/store"
 )
 
 // TestResolveCloudRuntimeConfigFallsBackToFileToken asserts that

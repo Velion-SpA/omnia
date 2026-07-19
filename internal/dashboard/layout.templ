@@ -1,31 +1,41 @@
 package dashboard
 
-import "github.com/Velion-SpA/omnia/internal/ui"
+import "github.com/velion/omnia/internal/ui"
 
 // layout wraps page content in the SHARED Omnia command-center shell (internal/ui).
 // The local and cloud dashboards now render the exact same shell + CSS — the design
-// base lives in one place and can no longer drift between them.
-templ layout(title string) {
-	@ui.Layout(layoutPropsForContext(ctx, title)) {
+// base lives in one place and can no longer drift between them. active is the nav
+// item ID (see BaseNavItems) that should render aria-current="page".
+templ layout(active, title string) {
+	@ui.Layout(layoutPropsForContext(ctx, active, title)) {
 		{ children... }
 	}
 }
 
-func localLayoutProps(title string) ui.LayoutProps {
+func localLayoutProps(active, title string) ui.LayoutProps {
 	return ui.LayoutProps{
 		Title:      title,
 		BrandTitle: "Omnia",
 		BrandSub:   "Unified Knowledge",
 		BrandHref:  "/",
 		Nav:        BaseNavItems(),
+		Active:     active,
 		StatusText: "Online",
 		AssetBase:  "/static",
 	}
 }
 
-// pageTitle is a small helper for consistent H1 rendering.
-templ pageTitle(text string) {
-	<h1 style="font-family: var(--display); font-size: 24px; font-weight: 800; color: var(--text); letter-spacing: 0.04em; text-transform: uppercase; margin: 0 0 1.5rem 0;">{ text }</h1>
+// PageTitle is the shared H1 + optional subtitle helper, exported so the cloud
+// Admin section (internal/cloud/cloudserver) can render through the same
+// component instead of hand-rolling its own — see adminPageTitle, which now
+// delegates here. sub == "" renders no subtitle paragraph.
+templ PageTitle(text, sub string) {
+	<div style="margin-bottom: 1.5rem;">
+		<h1 style="font-family: var(--display); font-size: 24px; font-weight: 800; color: var(--text); letter-spacing: 0.04em; text-transform: uppercase; margin: 0;">{ text }</h1>
+		if sub != "" {
+			<p style="font-size: 13px; color: var(--text-dim); margin: 0.35rem 0 0 0;">{ sub }</p>
+		}
+	</div>
 }
 
 // errorBanner renders an error message in a styled banner.

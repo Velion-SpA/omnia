@@ -254,6 +254,112 @@ func TestEffectivePermsLayeredIntegration(t *testing.T) {
 	assertPerms("owner", "owned", permMod)
 }
 
+// TestListTeamDerivedGrantsForAccountIntegration proves the batched, account-keyed
+// ListTeamDerivedGrantsForAccount (ONE join over cloud_team_members/
+// cloud_team_projects/cloud_profiles, filtered to a single account_id) returns
+// the same team-derived grants the old per-request scan (ListTeams + per-team
+// ListMembersOfTeam membership test + ListProjectsForTeam) used to assemble —
+// the fix for the Admin Access page N+1 (teamDerivedForAccount, previously
+// scaling with the TOTAL org team count). Mirrors the multi-team fixture from
+// TestEffectivePermsLayeredIntegration so the aggregated (project -> OR'd
+// perms) can be cross-checked against EffectivePerms itself (both reflect the
+// same team-union layer when no cloud_memberships override exists yet).
+func TestListTeamDerivedGrantsForAccountIntegration(t *testing.T) {
+	cs := newTokenTestStore(t)
+	ctx := context.Background()
+
+	readOnly := profileIDByName(t, cs, "Member") // perms = 1 (Read)
+	inserter, err := cs.CreateProfile(ctx, "Inserter", permInsert)
+	if err != nil {
+		t.Fatalf("create Inserter: %v", err)
+	}
+
+	teamA, _ := cs.CreateTeam(ctx, "TeamA", "work")
+	teamB, _ := cs.CreateTeam(ctx, "TeamB", "work")
+	// A third team the account does NOT belong to — its members/projects must
+	// never appear in the account-keyed result and must not cost an extra
+	// query (asserted separately at the cloudserver call-count layer).
+	teamC, _ := cs.CreateTeam(ctx, "TeamC", "work")
+
+	for _, p := range []string{"projA", "shared"} {
+		if err := cs.AddTeamProject(ctx, teamA.ID, p); err != nil {
+			t.Fatalf("teamA add %s: %v", p, err)
+		}
+	}
+	for _, p := range []string{"projB", "shared"} {
+		if err := cs.AddTeamProject(ctx, teamB.ID, p); err != nil {
+			t.Fatalf("teamB add %s: %v", p, err)
+		}
+	}
+	if err := cs.AddTeamProject(ctx, teamC.ID, "projC"); err != nil {
+		t.Fatalf("teamC add projC: %v", err)
+	}
+
+	// worker is in both TeamA and TeamB; stranger is in TeamC only.
+	if err := cs.AddTeamMember(ctx, teamA.ID, "worker", readOnly); err != nil {
+		t.Fatalf("member A: %v", err)
+	}
+	if err := cs.AddTeamMember(ctx, teamB.ID, "worker", inserter.ID); err != nil {
+		t.Fatalf("member B: %v", err)
+	}
+	if err := cs.AddTeamMember(ctx, teamC.ID, "stranger", readOnly); err != nil {
+		t.Fatalf("member C: %v", err)
+	}
+
+	grants, err := cs.ListTeamDerivedGrantsForAccount(ctx, "worker")
+	if err != nil {
+		t.Fatalf("ListTeamDerivedGrantsForAccount: %v", err)
+	}
+
+	// Exactly 4 grant rows: TeamA→{projA,shared} + TeamB→{projB,shared}. TeamC
+	// (stranger's team) must not leak in, even though it exists in the org.
+	if len(grants) != 4 {
+		t.Fatalf("expected 4 grant rows for worker, got %d: %+v", len(grants), grants)
+	}
+	for _, g := range grants {
+		if g.Team == "TeamC" || g.Project == "projC" {
+			t.Fatalf("worker must not see TeamC's grant (not a member): %+v", g)
+		}
+	}
+
+	// Aggregate exactly like teamDerivedForAccount does: OR perms per project.
+	agg := map[string]int{}
+	for _, g := range grants {
+		agg[g.Project] |= g.Perms
+	}
+	wantAgg := map[string]int{
+		"projA":  permRead,
+		"projB":  permInsert,
+		"shared": permRead | permInsert,
+	}
+	for project, want := range wantAgg {
+		if agg[project] != want {
+			t.Fatalf("aggregated perms for %q = %d, want %d (grants=%+v)", project, agg[project], want, grants)
+		}
+		// Cross-check against EffectivePerms: with no cloud_memberships override
+		// yet, both reflect the identical team-union layer.
+		effective, err := cs.EffectivePerms(ctx, "worker", project)
+		if err != nil {
+			t.Fatalf("EffectivePerms(worker,%s): %v", project, err)
+		}
+		if effective != want {
+			t.Fatalf("EffectivePerms(worker,%s) = %d, want %d (sanity check on fixture)", project, effective, want)
+		}
+	}
+	if len(agg) != 3 {
+		t.Fatalf("expected exactly 3 distinct projects for worker, got %d: %+v", len(agg), agg)
+	}
+
+	// A stranger-only account with no team membership at all gets no grants.
+	none, err := cs.ListTeamDerivedGrantsForAccount(ctx, "nobody")
+	if err != nil {
+		t.Fatalf("ListTeamDerivedGrantsForAccount(nobody): %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("expected no grants for an unrelated account, got %+v", none)
+	}
+}
+
 // TestProjectMetaAndKnownProjectsIntegration covers classification round-trip and
 // the union-sourced known-projects list.
 func TestProjectMetaAndKnownProjectsIntegration(t *testing.T) {

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 func newSlogLogger() *slog.Logger {
@@ -151,8 +153,11 @@ func TestHandleOverview_Renders(t *testing.T) {
 	if !strings.Contains(bodyStr, "Omnia") {
 		t.Error("expected 'Omnia' in overview response")
 	}
-	if !strings.Contains(bodyStr, "Overview") {
-		t.Error("expected 'Overview' in response")
+	// The dashboard defaults to Spanish (see internal/ui/i18n); "Resumen" is
+	// the localized Overview page title/nav label. See overview_i18n_test.go
+	// for the full Spanish-default / English-cookie coverage.
+	if !strings.Contains(bodyStr, "Resumen") {
+		t.Error("expected 'Resumen' (Spanish default Overview label) in response")
 	}
 }
 
@@ -176,6 +181,113 @@ func TestHandleBrowse_ListsObservations(t *testing.T) {
 	bodyStr := string(body)
 	if !strings.Contains(bodyStr, "feat: add feature 10") {
 		t.Error("expected ingested obs title in browse response")
+	}
+}
+
+// TestHandleBrowse_FragmentEndpoint_ReturnsPartialOnly verifies the htmx
+// partial-swap contract (Slice 4a): a request carrying the HX-Request header
+// gets ONLY the #browse-region fragment (filter panel + results), not the
+// full page shell (layout/nav). A plain GET (no header) still gets the full
+// page — the no-JS/full-page fallback.
+func TestHandleBrowse_FragmentEndpoint_ReturnsPartialOnly(t *testing.T) {
+	fe := newFakeEngram()
+	fe.add(sampleObs(300, "omnia"))
+
+	dashServer := newTestServerOnly(t, fe)
+
+	req, _ := http.NewRequest(http.MethodGet, dashServer.URL+"/browse?project=omnia", nil)
+	req.Header.Set("HX-Request", "true")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /browse (fragment): %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	// The fragment must still contain the filter panel + results.
+	if !strings.Contains(bodyStr, "feat: add feature 300") {
+		t.Error("expected obs title in fragment response")
+	}
+	// Spanish default (see browse.filters).
+	if !strings.Contains(bodyStr, "Filtros") {
+		t.Error("expected filter panel in fragment response")
+	}
+	// The fragment must NOT contain the page shell/nav.
+	if strings.Contains(bodyStr, "<!doctype html>") {
+		t.Error("fragment response should not include the full page shell (<!doctype html>)")
+	}
+	if strings.Contains(bodyStr, `class="cmd-nav"`) {
+		t.Error("fragment response should not include the nav shell")
+	}
+
+	// A plain GET (no HX-Request header) for the SAME params still renders
+	// the full page — the no-JS/full-page fallback.
+	fullResp, err := http.Get(dashServer.URL + "/browse?project=omnia")
+	if err != nil {
+		t.Fatalf("GET /browse (full page): %v", err)
+	}
+	defer fullResp.Body.Close()
+	fullBody, _ := io.ReadAll(fullResp.Body)
+	fullBodyStr := string(fullBody)
+	if !strings.Contains(fullBodyStr, "<!doctype html>") {
+		t.Error("plain GET should render the full page shell")
+	}
+	if !strings.Contains(fullBodyStr, "feat: add feature 300") {
+		t.Error("expected obs title in full-page response too")
+	}
+}
+
+// TestHandleBrowse_FragmentEndpoint_FilterRoundTrip verifies that a filter
+// applied through the fragment endpoint narrows results correctly and shows
+// the active-filter chip + updated count.
+func TestHandleBrowse_FragmentEndpoint_FilterRoundTrip(t *testing.T) {
+	fe := newFakeEngram()
+
+	arch := sampleObs(310, "omnia")
+	arch.Type = "architecture"
+	fe.add(arch)
+
+	dec := sampleObs(311, "omnia")
+	dec.Type = "decision"
+	fe.add(dec)
+
+	dashServer := newTestServerOnly(t, fe)
+
+	req, _ := http.NewRequest(http.MethodGet, dashServer.URL+"/browse?project=omnia&type=architecture", nil)
+	req.Header.Set("HX-Request", "true")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /browse?type=architecture (fragment): %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	if !strings.Contains(bodyStr, "feat: add feature 310") {
+		t.Error("expected architecture obs in filtered fragment")
+	}
+	if strings.Contains(bodyStr, "feat: add feature 311") {
+		t.Error("decision obs should be filtered out of the fragment")
+	}
+	// Spanish is the default language (no lang cookie / middleware bypassed by
+	// newTestServerOnly), so the result count and chip prefix render in
+	// Spanish — see browse.resultsCount / browse.filterChipType.
+	if !strings.Contains(bodyStr, "1 resultados") {
+		t.Errorf("expected result count '1 resultados' in fragment, got body without it")
+	}
+	if !strings.Contains(bodyStr, "Tipo · architecture") {
+		t.Error("expected active-filter chip 'Tipo · architecture' in fragment")
 	}
 }
 
@@ -208,8 +320,9 @@ func TestHandleDetail_RendersMetaPanel(t *testing.T) {
 	if !strings.Contains(bodyStr, "alice") {
 		t.Error("expected author in meta panel")
 	}
-	if !strings.Contains(bodyStr, "ingested") {
-		t.Error("expected 'ingested' badge")
+	// Spanish default (see detail.badgeIngested).
+	if !strings.Contains(bodyStr, "ingerido") {
+		t.Error("expected 'ingerido' badge")
 	}
 	// The raw omnia-meta block should NOT appear in the rendered content.
 	if strings.Contains(bodyStr, "schema_version: 1") {
@@ -232,8 +345,9 @@ func TestHandleDetail_CuratedObsNometa(t *testing.T) {
 
 	body, _ := io.ReadAll(resp.Body)
 	bodyStr := string(body)
-	if !strings.Contains(bodyStr, "curated") {
-		t.Error("expected 'curated' badge for observation without meta block")
+	// Spanish default (see detail.badgeCurated).
+	if !strings.Contains(bodyStr, "curado") {
+		t.Error("expected 'curado' badge for observation without meta block")
 	}
 }
 
@@ -307,8 +421,9 @@ func TestHandleDelete_SoftAndHard(t *testing.T) {
 		t.Errorf("soft delete: expected 200, got %d", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "Soft deleted") {
-		t.Error("expected 'Soft deleted' in response")
+	// Spanish default (see detail.deletedSoft).
+	if !strings.Contains(string(body), "Borrado suave") {
+		t.Error("expected 'Borrado suave' in response")
 	}
 
 	// Hard delete.
@@ -322,8 +437,9 @@ func TestHandleDelete_SoftAndHard(t *testing.T) {
 		t.Errorf("hard delete: expected 200, got %d", resp2.StatusCode)
 	}
 	body2, _ := io.ReadAll(resp2.Body)
-	if !strings.Contains(string(body2), "Permanently deleted") {
-		t.Error("expected 'Permanently deleted' in response")
+	// Spanish default (see detail.deletedPermanently).
+	if !strings.Contains(string(body2), "Eliminado permanentemente") {
+		t.Error("expected 'Eliminado permanentemente' in response")
 	}
 
 	// Both should be removed from fake engram.
@@ -349,12 +465,13 @@ func TestHandleDeleteConfirm_RequiresExplicitConfirm(t *testing.T) {
 
 	body, _ := io.ReadAll(resp.Body)
 	bodyStr := string(body)
-	// Confirm step should show both soft and hard delete buttons.
-	if !strings.Contains(bodyStr, "Soft delete") {
-		t.Error("expected 'Soft delete' option in confirm step")
+	// Confirm step should show both soft and hard delete buttons (Spanish
+	// default — see detail.softDelete / detail.hardDeletePermanent).
+	if !strings.Contains(bodyStr, "Borrado suave") {
+		t.Error("expected 'Borrado suave' option in confirm step")
 	}
-	if !strings.Contains(bodyStr, "Hard delete") {
-		t.Error("expected 'Hard delete' option in confirm step")
+	if !strings.Contains(bodyStr, "Borrado permanente") {
+		t.Error("expected 'Borrado permanente' option in confirm step")
 	}
 }
 
@@ -362,8 +479,8 @@ func TestMetaMapping_IngestedVsCurated(t *testing.T) {
 	ingested := sampleObs(1, "omnia")
 	curated := curatedObs(2, "omnia")
 
-	vi := enrichObs(ingested)
-	vc := enrichObs(curated)
+	vi := enrichObs(ingested, i18n.LangEN)
+	vc := enrichObs(curated, i18n.LangEN)
 
 	if !vi.HasMeta {
 		t.Error("sampleObs should have a valid meta block")
@@ -389,7 +506,7 @@ func TestMetaMapping_IngestedVsCurated(t *testing.T) {
 func TestSyncStatus_GraceWhenMissing(t *testing.T) {
 	// loadSyncStatus should not panic when files are absent.
 	// It degrades gracefully.
-	status := loadSyncStatus()
+	status := loadSyncStatus(i18n.LangEN)
 	// Just ensure it returns (no panic), Missing may or may not be set.
 	_ = status
 }
@@ -414,24 +531,48 @@ func TestFormatAge(t *testing.T) {
 		{"bad-format", "bad-format"},
 	}
 	for _, c := range cases {
-		got := formatAge(c.ts)
+		got := formatAge(c.ts, i18n.LangEN)
 		if got != c.want {
-			t.Errorf("formatAge(%q) = %q, want %q", c.ts, got, c.want)
+			t.Errorf("formatAge(%q, en) = %q, want %q", c.ts, got, c.want)
 		}
 	}
 
 	// Recent timestamp (UTC) should return "just now".
 	recent := time.Now().UTC().Add(-5 * time.Second).Format("2006-01-02 15:04:05")
-	got := formatAge(recent)
+	got := formatAge(recent, i18n.LangEN)
 	if got != "just now" {
-		t.Errorf("formatAge(recent) = %q, want 'just now'", got)
+		t.Errorf("formatAge(recent, en) = %q, want 'just now'", got)
 	}
 
 	// Old timestamp should return a date string (not "just now" or "unknown").
 	old := time.Now().UTC().Add(-30 * 24 * time.Hour).Format("2006-01-02 15:04:05")
-	got = formatAge(old)
+	got = formatAge(old, i18n.LangEN)
 	if got == "just now" || got == "unknown" {
-		t.Errorf("formatAge(old) = %q, expected a date string", got)
+		t.Errorf("formatAge(old, en) = %q, expected a date string", got)
+	}
+}
+
+// TestFormatAge_Spanish is the i18n Slice 2 counterpart of TestFormatAge:
+// formatAge must localize every branch (unknown/just-now/minutes/hours/days)
+// when called with i18n.LangES, not just echo the English strings.
+func TestFormatAge_Spanish(t *testing.T) {
+	if got, want := formatAge("", i18n.LangES), "desconocido"; got != want {
+		t.Errorf("formatAge(\"\", es) = %q, want %q", got, want)
+	}
+
+	recent := time.Now().UTC().Add(-5 * time.Second).Format("2006-01-02 15:04:05")
+	if got, want := formatAge(recent, i18n.LangES), "ahora mismo"; got != want {
+		t.Errorf("formatAge(recent, es) = %q, want %q", got, want)
+	}
+
+	minutesAgo := time.Now().UTC().Add(-5 * time.Minute).Format("2006-01-02 15:04:05")
+	if got, want := formatAge(minutesAgo, i18n.LangES), "hace 5m"; got != want {
+		t.Errorf("formatAge(minutesAgo, es) = %q, want %q", got, want)
+	}
+
+	daysAgo := time.Now().UTC().Add(-3 * 24 * time.Hour).Format("2006-01-02 15:04:05")
+	if got, want := formatAge(daysAgo, i18n.LangES), "hace 3d"; got != want {
+		t.Errorf("formatAge(daysAgo, es) = %q, want %q", got, want)
 	}
 }
 
@@ -572,8 +713,9 @@ func TestActivityPage_Renders(t *testing.T) {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "Activity") {
-		t.Error("expected 'Activity' in activity page")
+	// Spanish default (see activity.pageTitle).
+	if !strings.Contains(string(body), "Registro de Actividad") {
+		t.Error("expected 'Registro de Actividad' in activity page")
 	}
 }
 

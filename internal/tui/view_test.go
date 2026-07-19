@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/setup"
-	"github.com/Velion-SpA/omnia/internal/store"
-	"github.com/Velion-SpA/omnia/internal/version"
+	"github.com/velion/omnia/internal/setup"
+	"github.com/velion/omnia/internal/store"
+	"github.com/velion/omnia/internal/version"
 )
 
 func TestTruncateStr(t *testing.T) {
@@ -174,8 +174,8 @@ func TestViewDashboardSearchAndRecent(t *testing.T) {
 	m.UpdateStatus = version.StatusCheckFailed
 	m.UpdateMsg = "Could not check for updates: GitHub took too long to respond."
 	out = m.viewDashboard()
-	if strings.Contains(out, "Could not check for updates") {
-		t.Fatal("dashboard should stay silent on update check failures")
+	if !strings.Contains(out, "Could not check for updates") {
+		t.Fatal("dashboard should render update failure banner")
 	}
 
 	m.Stats = nil

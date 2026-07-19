@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/Velion-SpA/omnia/internal/cloud/autosync"
-	"github.com/Velion-SpA/omnia/internal/server"
+	"github.com/velion/omnia/internal/cloud/autosync"
+	"github.com/velion/omnia/internal/server"
 )
 
 // autosyncStatusProvider is the interface subset of autosync.Manager used by the adapter.

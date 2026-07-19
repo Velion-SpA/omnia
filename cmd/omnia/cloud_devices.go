@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 // cloudDeviceInfo is the client-side view of a device returned by GET /devices.

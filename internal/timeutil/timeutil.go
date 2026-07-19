@@ -3,7 +3,7 @@ package timeutil
 import (
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/envx"
+	"github.com/velion/omnia/internal/envx"
 )
 
 // defaultLayout is used by FormatLocal when callers do not care about display style.

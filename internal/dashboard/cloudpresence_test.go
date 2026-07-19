@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/engramdb"
+	"github.com/velion/omnia/internal/engramdb"
 )
 
 // fakeStructural satisfies StructuralReader and exposes CloudTargetKeys so it can

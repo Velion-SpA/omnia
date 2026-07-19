@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/Velion-SpA/omnia/internal/enrich"
+	"github.com/velion/omnia/internal/enrich"
 )
 
 func TestNormalizeTopicKey(t *testing.T) {

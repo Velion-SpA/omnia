@@ -14,7 +14,7 @@
 
 [Unit]
 Description=Omnia Cloud server (multi-tenant memory sync backend)
-Documentation=https://github.com/Velion-SpA/omnia/blob/main/OMNIA-CLOUD.md
+Documentation=https://github.com/velion/omnia/blob/main/OMNIA-CLOUD.md
 After=network-online.target postgresql.service
 Wants=network-online.target
 # Requires the local postgresql.service unit. If Postgres runs elsewhere
