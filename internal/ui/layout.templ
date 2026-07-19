@@ -1,11 +1,17 @@
 package ui
 
+import (
+	"net/url"
+
+	"github.com/velion/omnia/internal/ui/i18n"
+)
+
 // Layout is the shared command-center shell used by BOTH dashboards. The header
 // (logomark + wordmark + nav + clock + status), the page frame and the footer are
 // identical everywhere; only LayoutProps differs (brand, nav items, optional user).
 templ Layout(props LayoutProps) {
 	<!DOCTYPE html>
-	<html lang="en" data-theme="dark">
+	<html lang={ string(i18n.LangFrom(ctx)) } data-theme="dark">
 		<head>
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
@@ -44,11 +50,12 @@ templ Layout(props LayoutProps) {
 							</div>
 							<span class="status-text">{ props.StatusText }</span>
 						</div>
+						@langToggle()
 						if props.User != "" {
 							<span class="nav-user">{ props.User }</span>
 							if props.LogoutURL != "" {
 								<form method="post" action={ templ.SafeURL(props.LogoutURL) } style="margin:0">
-									<button type="submit" class="nav-logout">Logout</button>
+									<button type="submit" class="nav-logout">{ i18n.T(i18n.LangFrom(ctx), "shell.logout") }</button>
 								</form>
 							}
 						}
@@ -90,4 +97,34 @@ templ navLink(item NavItem, active string) {
 	} else {
 		<a href={ templ.SafeURL(item.Href) } class="nav-link" data-nav={ item.Href }>{ item.Label }</a>
 	}
+}
+
+// langToggle renders the header ES | EN language switch. The active language
+// renders as plain (non-clickable) text; the other renders as a link to
+// GET /lang/{lang}?next=<current path>, which sets the lang cookie and
+// redirects back here (internal/ui/i18n.SwitchHandler). The current language
+// and path both come from ctx, populated by i18n.Middleware for every
+// dashboard request on both mounts.
+templ langToggle() {
+	<div class="lang-toggle" aria-label="Language">
+		if i18n.LangFrom(ctx) == i18n.LangES {
+			<span class="lang-current" aria-current="true">ES</span>
+		} else {
+			<a href={ templ.SafeURL(langSwitchHref(i18n.LangES, i18n.PathFrom(ctx))) } class="lang-link">ES</a>
+		}
+		<span class="lang-sep">|</span>
+		if i18n.LangFrom(ctx) == i18n.LangEN {
+			<span class="lang-current" aria-current="true">EN</span>
+		} else {
+			<a href={ templ.SafeURL(langSwitchHref(i18n.LangEN, i18n.PathFrom(ctx))) } class="lang-link">EN</a>
+		}
+	</div>
+}
+
+// langSwitchHref builds the /lang/{lang}?next=<currentPath> target for the
+// header toggle. currentPath is expected to already be a same-origin path
+// (i18n.PathFrom reads it from the request's own URL), so it round-trips
+// through i18n.SwitchHandler's next= sanitization cleanly.
+func langSwitchHref(target i18n.Lang, currentPath string) string {
+	return "/lang/" + string(target) + "?next=" + url.QueryEscape(currentPath)
 }

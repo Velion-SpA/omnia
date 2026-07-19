@@ -1,0 +1,81 @@
+id: OBL-10
+title: Homelab deployment enablement (systemd, TLS, env template, cross-compile, runbook)
+status: done
+priority: P0
+blocks_homelab_test: true
+estimated_effort: L
+recommended_model: sonnet-5
+depends_on: []
+tags: [deployment, homelab, systemd, tls, ops]
+
+context: |
+  Getting the cloud server onto a homelab box and two Linux notebooks talking to it.
+  The binary cross-compiles cleanly (pure Go, CGO_ENABLED=0, safe embeds), Postgres
+  auto-migrates on boot, and docker-compose examples exist — but there is NO systemd
+  unit for a Linux server, NO built-in TLS (needs a reverse proxy), and no single
+  runbook + .env template for a from-scratch homelab bring-up. Make the deploy
+  reproducible.
+
+current_state: |
+  - Cross-compile is already exercised and safe (pure Go, CGO off, static embeds).
+    evidence: .goreleaser.yaml; modernc.org/sqlite + pgx stdlib (go.mod:17);
+    embeds internal/ui/embed.go:13-14, internal/setup/setup.go:63-64
+  - Postgres schema auto-migrates on every boot (idempotent CREATE TABLE IF NOT EXISTS).
+    evidence: internal/cloud/cloudstore/cloudstore.go:35-51, 531+
+  - Plain HTTP only — no TLS listener in the binary.
+    evidence: internal/cloud/cloudserver/cloudserver.go:111,143-151; OMNIA-CLOUD.md:47-48
+  - Default bind 127.0.0.1, overridable via OMNIA_CLOUD_HOST.
+    evidence: internal/cloud/config.go:32,57-59; cmd/omnia/cloud.go:72
+  - Deploy assets present are macOS launchd only; NO systemd unit exists.
+    evidence: deploy/com.velion.omnia.plist, deploy/com.velion.omnia.embed.plist;
+    docker/cloud/Dockerfile; docker-compose.cloud.yml; docker-compose.beta.yml
+  - Boot-time env gate enforces auth config.
+    evidence: cmd/omnia/cloud.go:996-1028; required envs internal/cloud/config.go:41-83
+
+tasks: |
+  1. Author systemd unit deploy/omnia-cloud.service (server) running omnia cloud serve,
+     reading EnvironmentFile /etc/omnia/cloud.env, restart on failure, non-root omnia
+     user, After/Requires postgresql.service. Also author deploy/omnia-agent.service for
+     omnia serve / omnia mcp as a user service on the notebooks if wanted.
+  2. Write deploy/cloud.env.example with EVERY required/optional env for omnia cloud
+     serve, canonical OMNIA_ names, commented: OMNIA_DATABASE_URL, OMNIA_JWT_SECRET
+     (non-default, >=32 bytes), OMNIA_CLOUD_TOKEN, OMNIA_CLOUD_ADMIN,
+     OMNIA_CLOUD_ALLOWED_PROJECTS (required non-empty even in RBAC mode — placeholder),
+     OMNIA_CLOUD_HOST (0.0.0.0 behind proxy), OMNIA_PORT, OMNIA_CLOUD_MAX_PUSH_BYTES,
+     and from OBL-01 OMNIA_CLOUD_TOKEN_PEPPER.
+  3. Provide a reverse-proxy TLS snippet (Caddy simplest: 3-line Caddyfile terminating
+     TLS to 127.0.0.1:PORT). Document the binary must stay behind it; do NOT add ACME.
+  4. Write deploy/HOMELAB.md runbook: provision Postgres + role/db; cross-compile
+     (GOOS=linux GOARCH=amd64 go build -o omnia ./cmd/omnia; note arm64 for ARM
+     notebooks); copy binary + env + unit; bootstrap first admin (OBL-02); point each
+     notebook cloud.json at https://server; register each notebook as a device with a
+     project scope (OBL-08); verify isolation.
+  5. Verify a real GOOS=linux amd64 AND arm64 build succeeds from the mac (build only).
+  6. Do NOT expose 0.0.0.0 without the reverse proxy in the default path; call out the
+     LAN-firewall consideration.
+
+acceptance_criteria: |
+  - GOOS=linux GOARCH=amd64 go build -o /tmp/omnia-linux ./cmd/omnia and the arm64
+    variant both succeed.
+  - systemd unit + env template + Caddy snippet + HOMELAB.md exist and are consistent
+    with the boot env gate (cloud.go:996-1028).
+  - Following HOMELAB.md on a clean box brings up an authenticated server reachable over
+    HTTPS by a notebook.
+
+verification: |
+  - GOOS=linux GOARCH=amd64 go build -o /tmp/omnia-linux ./cmd/omnia
+  - GOOS=linux GOARCH=arm64 go build -o /tmp/omnia-linux-arm64 ./cmd/omnia
+  - Lint the systemd unit (systemd-analyze verify if available) and the Caddyfile syntax.
+
+do_not_touch: |
+  - Do not add TLS/ACME into the Go binary — reverse proxy is the deliberate design
+    (OMNIA-CLOUD.md:47-48).
+  - Keep 127.0.0.1 as the code default; only the deploy env sets 0.0.0.0.
+
+references: |
+  - .goreleaser.yaml; docker/cloud/Dockerfile; docker-compose.cloud.yml; docker-compose.beta.yml
+  - deploy/com.velion.omnia.plist (pattern to mirror for systemd)
+  - internal/cloud/config.go:32,41-83
+  - cmd/omnia/cloud.go:72,996-1028
+  - internal/cloud/cloudserver/cloudserver.go:111,143-151
+  - OMNIA-CLOUD.md

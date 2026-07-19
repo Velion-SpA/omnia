@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	engramsync "github.com/Velion-SpA/omnia/internal/sync"
+	engramsync "github.com/velion/omnia/internal/sync"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 // stubCloudSyncHooks overrides the sync hooks so cloud pushes succeed without a

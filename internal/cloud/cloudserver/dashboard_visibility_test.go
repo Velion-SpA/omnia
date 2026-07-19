@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	cloudauth "github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	cloudauth "github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // TestSyncBearerCannotSeeAllProjectsInMultiTenantMode is the OBL-03 guard: in a

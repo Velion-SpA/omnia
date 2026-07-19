@@ -64,7 +64,7 @@ engram-beta version
 ### From source (`go install`)
 
 ```bash
-go install github.com/Velion-SpA/omnia/cmd/omnia@v1.12.0-beta.1
+go install github.com/velion/omnia/cmd/omnia@v1.12.0-beta.1
 mv ~/go/bin/engram ~/go/bin/engram-beta
 engram-beta version
 ```

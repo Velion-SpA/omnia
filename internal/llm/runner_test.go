@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/llm"
+	"github.com/velion/omnia/internal/llm"
 )
 
 // fakeRunner is a compile-time check that a concrete struct satisfying

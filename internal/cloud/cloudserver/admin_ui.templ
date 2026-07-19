@@ -1,6 +1,12 @@
 package cloudserver
 
-import "github.com/Velion-SpA/omnia/internal/ui"
+import (
+	"strings"
+
+	"github.com/velion/omnia/internal/dashboard"
+	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
+)
 
 // Admin section templ pages (OBL-13). Operator-only, cloud-only. They render
 // inside the SHARED Omnia command-center shell (internal/ui) so the Admin section
@@ -10,49 +16,69 @@ import "github.com/Velion-SpA/omnia/internal/ui"
 
 // ─── shared bits ─────────────────────────────────────────────────────────────
 
+// adminPageTitle now delegates to the shared dashboard.PageTitle helper
+// (internal/dashboard/layout.templ) instead of hand-rolling its own H1 — one
+// of the previously-unused pageTitle/emptyState helpers this slice put to use.
 templ adminPageTitle(text, sub string) {
-	<div style="margin-bottom: 1.5rem;">
-		<h1 style="font-family: var(--display); font-size: 24px; font-weight: 800; color: var(--text); letter-spacing: 0.04em; text-transform: uppercase; margin: 0;">{ text }</h1>
-		if sub != "" {
-			<p style="font-size: 13px; color: var(--text-dim); margin: 0.35rem 0 0 0;">{ sub }</p>
-		}
-	</div>
+	@dashboard.PageTitle(text, sub)
 }
 
 templ adminNavTabs(active string) {
 	<div style="display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.25rem;">
-		<a href="/admin" class={ "badge", templ.KV("badge-ok", active == "users") } style="text-decoration: none; padding: 0.35rem 0.75rem;">Users</a>
-		<a href="/admin/access" class={ "badge", templ.KV("badge-ok", active == "access") } style="text-decoration: none; padding: 0.35rem 0.75rem;">Access</a>
-		<a href="/admin/teams" class={ "badge", templ.KV("badge-ok", active == "teams") } style="text-decoration: none; padding: 0.35rem 0.75rem;">Teams</a>
-		<a href="/admin/profiles" class={ "badge", templ.KV("badge-ok", active == "profiles") } style="text-decoration: none; padding: 0.35rem 0.75rem;">Profiles</a>
-		<a href="/admin/projects" class={ "badge", templ.KV("badge-ok", active == "projects") } style="text-decoration: none; padding: 0.35rem 0.75rem;">Projects</a>
-		<a href="/admin/audit" class={ "badge", templ.KV("badge-ok", active == "audit") } style="text-decoration: none; padding: 0.35rem 0.75rem;">Audit</a>
+		<a href="/admin" class={ "badge", templ.KV("badge-ok", active == "users") } style="text-decoration: none; padding: 0.35rem 0.75rem;">{ ui.T(ctx, "admin.tabs.users") }</a>
+		<a href="/admin/access" class={ "badge", templ.KV("badge-ok", active == "access") } style="text-decoration: none; padding: 0.35rem 0.75rem;">{ ui.T(ctx, "admin.tabs.access") }</a>
+		<a href="/admin/teams" class={ "badge", templ.KV("badge-ok", active == "teams") } style="text-decoration: none; padding: 0.35rem 0.75rem;">{ ui.T(ctx, "admin.tabs.teams") }</a>
+		<a href="/admin/profiles" class={ "badge", templ.KV("badge-ok", active == "profiles") } style="text-decoration: none; padding: 0.35rem 0.75rem;">{ ui.T(ctx, "admin.tabs.profiles") }</a>
+		<a href="/admin/projects" class={ "badge", templ.KV("badge-ok", active == "projects") } style="text-decoration: none; padding: 0.35rem 0.75rem;">{ ui.T(ctx, "admin.tabs.projects") }</a>
+		<a href="/admin/audit" class={ "badge", templ.KV("badge-ok", active == "audit") } style="text-decoration: none; padding: 0.35rem 0.75rem;">{ ui.T(ctx, "admin.tabs.audit") }</a>
 	</div>
 }
 
 // ─── Users page ──────────────────────────────────────────────────────────────
+//
+// Command Center v2, Slice 2 (UI only — the CRUD routes shipped in Slice 1):
+// a toolbar (search + "+ New user"), rows collapsed to one primary "Access"
+// link + a "•••" overflow menu, and three modals (create / edit / reset
+// password). Destructive menu items read danger and go through a confirm —
+// Disable via a native hx-confirm, hard Delete via the reused
+// ui.ConfirmDialog swapped in place of its trigger (mirrors
+// internal/dashboard/detail.templ's delete flow). Create/edit/reset-password
+// call the existing JSON endpoints via admin.js; the create/reset-password
+// flows render the generated password exactly once, client-side, since the
+// backend response is JSON, not an HTML fragment.
 
 templ adminUsersPage(view adminUsersView) {
 	@ui.Layout(view.Props) {
-		@adminPageTitle("Admin", "Manage accounts, tokens, and access. Operator-only.")
+		@adminPageTitle(ui.T(ctx, "admin.title"), ui.T(ctx, "admin.users.subtitle"))
 		@adminNavTabs("users")
+		<div id="admin-error-banner" class="admin-error-banner" hidden></div>
 		<div id="admin-token-modal"></div>
 		<div class="card">
-			<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">USERS</span>
+			<div class="admin-toolbar">
+				<div class="admin-search">
+					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
+					<input type="search" id="admin-user-search" placeholder={ ui.T(ctx, "admin.users.searchPlaceholder") } autocomplete="off" oninput="filterAdminUsers(this.value)"/>
+				</div>
+				<span class="admin-count">{ adminUserCountLabel(i18n.LangFrom(ctx), view.Users) }</span>
+				<button type="button" class="shell-button" data-action="open-modal" data-modal="admin-create-user-modal">
+					<span style="font-size: 14px; line-height: 0;">+</span> { ui.T(ctx, "admin.users.newUser") }
+				</button>
+			</div>
+			<span class="micro-label" style="display: block; margin: 0 0 0.6rem;">{ ui.T(ctx, "admin.users.label") }</span>
 			if len(view.Users) == 0 {
-				<p style="color: var(--text-dim); font-size: 13px;">No accounts yet.</p>
+				<p style="color: var(--text-dim); font-size: 13px;">{ ui.T(ctx, "admin.users.noneYet") }</p>
 			} else {
 				<div style="overflow-x: auto;">
-					<table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+					<table id="admin-users-table" style="width: 100%; border-collapse: collapse; font-size: 13px;">
 						<thead>
 							<tr style="text-align: left; color: var(--text-faint);">
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Username</th>
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Email</th>
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Status</th>
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Created</th>
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Tokens</th>
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Last token use</th>
-								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">Actions</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.users.colUsername") }</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.users.colEmail") }</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.users.colStatus") }</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.users.colCreated") }</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.users.colTokens") }</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.users.colLastTokenUse") }</th>
+								<th style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);">{ ui.T(ctx, "admin.users.colActions") }</th>
 							</tr>
 						</thead>
 						<tbody>
@@ -64,18 +90,22 @@ templ adminUsersPage(view adminUsersView) {
 				</div>
 			}
 		</div>
+		@adminCreateUserModal()
+		@adminEditUserModal()
+		@adminResetPasswordModal()
+		@adminAssets()
 	}
 }
 
 templ adminUserRowView(u adminUserRow) {
-	<tr style="border-bottom: 1px solid var(--border);">
+	<tr style="border-bottom: 1px solid var(--border);" data-username={ strings.ToLower(u.Username) } data-email={ strings.ToLower(u.Email) }>
 		<td style="padding: 0.55rem 0.75rem; color: var(--text); font-family: 'JetBrains Mono', monospace;">{ u.Username }</td>
 		<td style="padding: 0.55rem 0.75rem; color: var(--text-dim);">{ u.Email }</td>
 		<td style="padding: 0.55rem 0.75rem;">
 			if u.Disabled {
-				<span class="badge badge-bad">disabled</span>
+				<span class="badge badge-bad">{ ui.T(ctx, "admin.users.statusDisabled") }</span>
 			} else {
-				<span class="badge badge-ok">active</span>
+				<span class="badge badge-ok">{ ui.T(ctx, "admin.users.statusActive") }</span>
 			}
 			if u.IsAdmin {
 				<span class="badge badge-ok" style="margin-left: 0.3rem;">admin</span>
@@ -90,45 +120,228 @@ templ adminUserRowView(u adminUserRow) {
 		</td>
 		<td style="padding: 0.55rem 0.75rem; color: var(--text-dim);">{ u.LastTokenUse }</td>
 		<td style="padding: 0.55rem 0.75rem;">
-			<div style="display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center;">
-				if u.Disabled {
-					<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px;" hx-post={ "/admin/users/" + u.ID + "/enable" } hx-swap="none">Enable</button>
-				} else {
-					<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px;" hx-post={ "/admin/users/" + u.ID + "/disable" } hx-swap="none">Disable</button>
-				}
-				if u.IsAdmin {
-					<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px;" hx-post={ "/admin/users/" + u.ID + "/demote" } hx-swap="none">Demote</button>
-				} else {
-					<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px;" hx-post={ "/admin/users/" + u.ID + "/promote" } hx-swap="none">Promote</button>
-				}
-				<a href={ templ.SafeURL("/admin/access?user=" + u.ID) } class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px; text-decoration: none;">Access</a>
-				<form hx-post="/admin/tokens" hx-target="#admin-token-modal" hx-swap="innerHTML" style="display: inline-flex; gap: 0.35rem; align-items: center; margin: 0;">
-					<input type="hidden" name="user_id" value={ u.ID }/>
-					<input type="hidden" name="username" value={ u.Username }/>
-					<input type="text" name="label" placeholder="label" style="width: 90px; padding: 0.25rem 0.4rem; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.35rem; color: var(--text);"/>
-					<button type="submit" class="shell-button" style="padding: 0.3rem 0.7rem; font-size: 12px;">Issue token</button>
-				</form>
+			<div class="admin-rowact">
+				<a href={ templ.SafeURL("/admin/access?user=" + u.ID) } class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px; text-decoration: none;">{ ui.T(ctx, "admin.users.accessLink") }</a>
+				<div class="admin-menu-wrap">
+					<button type="button" class="admin-kebab" data-action="toggle-menu" data-menu={ "user-menu-" + u.ID } aria-haspopup="true" aria-expanded="false">•••</button>
+					<div class="admin-menu" id={ "user-menu-" + u.ID } hidden>
+						<a href={ templ.SafeURL("/admin/access?user=" + u.ID) }><span class="ic">◈</span> { ui.T(ctx, "admin.users.manageAccess") }</a>
+						<button type="button" data-action="edit-user" data-user-id={ u.ID } data-username={ u.Username } data-email={ u.Email }><span class="ic">✎</span> { ui.T(ctx, "admin.users.editUser") }</button>
+						<button type="button" data-action="reset-password" data-user-id={ u.ID } data-username={ u.Username }><span class="ic">↻</span> { ui.T(ctx, "admin.users.resetPassword") }</button>
+						<button type="button" data-action="toggle-token-form" data-target={ "user-token-form-" + u.ID }><span class="ic">⬡</span> { ui.T(ctx, "admin.users.issueToken") }</button>
+						<div class="admin-menu-token-form" id={ "user-token-form-" + u.ID } hidden>
+							<form hx-post="/admin/tokens" hx-target="#admin-token-modal" hx-swap="innerHTML" style="display: contents;">
+								<input type="hidden" name="user_id" value={ u.ID }/>
+								<input type="hidden" name="username" value={ u.Username }/>
+								<input type="text" name="label" placeholder={ ui.T(ctx, "admin.users.tokenLabelPlaceholder") }/>
+								<button type="submit" class="shell-button" style="padding: 0.3rem 0.5rem; font-size: 11px;" hx-disabled-elt="this">
+									<span class="htmx-indicator spinner"></span>
+									{ ui.T(ctx, "admin.users.go") }
+								</button>
+							</form>
+						</div>
+						<div class="admin-menu-sep"></div>
+						if u.IsAdmin {
+							<button type="button" hx-post={ "/admin/users/" + u.ID + "/demote" } hx-swap="none" hx-disabled-elt="this">
+								<span class="ic">⏻</span> { ui.T(ctx, "admin.users.demote") }
+								<span class="htmx-indicator spinner"></span>
+							</button>
+						} else {
+							<button type="button" hx-post={ "/admin/users/" + u.ID + "/promote" } hx-swap="none" hx-disabled-elt="this">
+								<span class="ic">⏻</span> { ui.T(ctx, "admin.users.promote") }
+								<span class="htmx-indicator spinner"></span>
+							</button>
+						}
+						if u.Disabled {
+							<button type="button" hx-post={ "/admin/users/" + u.ID + "/enable" } hx-swap="none" hx-disabled-elt="this">
+								<span class="ic">◎</span> { ui.T(ctx, "admin.users.enable") }
+								<span class="htmx-indicator spinner"></span>
+							</button>
+						} else {
+							<button type="button" class="danger" hx-post={ "/admin/users/" + u.ID + "/disable" } hx-confirm={ ui.T(ctx, "admin.users.disableConfirm") } hx-swap="none" hx-disabled-elt="this">
+								<span class="ic">⊘</span> { ui.T(ctx, "admin.users.disable") }
+								<span class="htmx-indicator spinner"></span>
+							</button>
+						}
+						@adminUserDeleteSlot(u)
+					</div>
+				</div>
 			</div>
 		</td>
 	</tr>
 }
 
+// adminUserDeleteSlot is the swap target for the hard-delete confirm round
+// trip: it starts on the danger trigger and, on click, htmx GETs the reused
+// ui.ConfirmDialog into the SAME slot (handleAdminUserDeleteConfirm); Cancel
+// swaps the trigger back (handleAdminUserDeleteCancel). This is the exact
+// swap-in-place pattern internal/dashboard/detail.templ already uses for
+// observation delete, just embedded in a dropdown menu instead of a page
+// section.
+templ adminUserDeleteSlot(u adminUserRow) {
+	<div id={ "user-delete-slot-" + u.ID }>
+		@adminUserDeleteTrigger(u)
+	</div>
+}
+
+templ adminUserDeleteTrigger(u adminUserRow) {
+	<button type="button" class="danger" hx-get={ adminUserDeleteConfirmPath(u.ID) } hx-target={ "#user-delete-slot-" + u.ID } hx-swap="innerHTML" hx-disabled-elt="this">
+		<span class="ic">🗑</span> { ui.T(ctx, "admin.users.deleteEllipsis") }
+		<span class="htmx-indicator spinner"></span>
+	</button>
+}
+
+templ adminUserDeleteConfirmFragment(u adminUserRow) {
+	@ui.ConfirmDialog(ui.ConfirmDialogProps{
+		Title:     ui.Tf(ctx, "admin.users.deleteTitle", u.Username),
+		Message:   u.Username,
+		Note:      ui.T(ctx, "admin.users.deleteNote"),
+		CancelURL: adminUserDeleteCancelPath(u.ID),
+		Target:    "#user-delete-slot-" + u.ID,
+		Actions: []ui.ConfirmAction{
+			{
+				Label:   ui.T(ctx, "admin.users.deletePermanently"),
+				Method:  "post",
+				URL:     "/admin/users/" + u.ID + "/delete?confirm=1",
+				Danger:  true,
+				Confirm: ui.T(ctx, "admin.users.deleteConfirmPrompt"),
+			},
+		},
+	})
+}
+
+// ─── Create / edit / reset-password modals ──────────────────────────────────
+//
+// These POST/PUT JSON to the Slice-1 endpoints via admin.js (not plain HTMX
+// forms) because handleAdminCreateUser / handleAdminResetUserPassword return
+// JSON with the one-time generated password — an HTMX auto-swap would either
+// discard it (JSON isn't renderable HTML) or force a page reload that erases
+// it before the operator can copy it.
+
+templ adminCreateUserModal() {
+	<div id="admin-create-user-modal" class="modal-backdrop admin-modal-backdrop" hidden>
+		<div class="modal admin-modal">
+			<div class="admin-modal-head">
+				<h3>{ ui.T(ctx, "admin.users.newUser") }</h3>
+				<button type="button" class="admin-modal-close" data-action="close-modal" data-modal="admin-create-user-modal" aria-label="Close">✕</button>
+			</div>
+			<div class="admin-modal-body" id="admin-create-user-body">
+				@adminCreateUserForm()
+			</div>
+		</div>
+	</div>
+}
+
+templ adminCreateUserForm() {
+	<form id="admin-create-user-form">
+		<div class="admin-field">
+			<label>{ ui.T(ctx, "admin.users.fieldUsername") }</label>
+			<input type="text" name="username" required autocomplete="off"/>
+		</div>
+		<div class="admin-field">
+			<label>{ ui.T(ctx, "admin.users.fieldEmail") }</label>
+			<input type="email" name="email" required autocomplete="off"/>
+		</div>
+		<div class="admin-field">
+			<label>{ ui.T(ctx, "admin.users.fieldRole") }</label>
+			<div class="admin-seg" role="radiogroup" aria-label="Role">
+				<label class="admin-seg-opt on"><input type="radio" name="role" value="member" checked/> { ui.T(ctx, "admin.users.roleMember") }</label>
+				<label class="admin-seg-opt"><input type="radio" name="role" value="admin"/> { ui.T(ctx, "admin.users.roleAdmin") }</label>
+			</div>
+		</div>
+		<div class="admin-form-error" data-form-error hidden></div>
+		<div class="admin-modal-foot">
+			<button type="button" class="shell-button shell-button-ghost" data-action="close-modal" data-modal="admin-create-user-modal">{ ui.T(ctx, "common.cancel") }</button>
+			<button type="submit" class="shell-button">
+				<span class="htmx-indicator spinner"></span>
+				{ ui.T(ctx, "admin.users.createUser") }
+			</button>
+		</div>
+	</form>
+}
+
+templ adminEditUserModal() {
+	<div id="admin-edit-user-modal" class="modal-backdrop admin-modal-backdrop" hidden>
+		<div class="modal admin-modal">
+			<div class="admin-modal-head">
+				<h3>{ ui.T(ctx, "admin.users.editUser") }</h3>
+				<button type="button" class="admin-modal-close" data-action="close-modal" data-modal="admin-edit-user-modal" aria-label="Close">✕</button>
+			</div>
+			<div class="admin-modal-body">
+				<form id="admin-edit-user-form" data-admin-form data-method="PUT" data-url-template="/admin/users/{id}" data-body="json">
+					<input type="hidden" name="id"/>
+					<div class="admin-field">
+						<label>{ ui.T(ctx, "admin.users.fieldUsername") }</label>
+						<input type="text" name="username" required autocomplete="off"/>
+					</div>
+					<div class="admin-field">
+						<label>{ ui.T(ctx, "admin.users.fieldEmail") }</label>
+						<input type="email" name="email" required autocomplete="off"/>
+					</div>
+					<div class="admin-form-error" data-form-error hidden></div>
+					<div class="admin-modal-foot">
+						<button type="button" class="shell-button shell-button-ghost" data-action="close-modal" data-modal="admin-edit-user-modal">{ ui.T(ctx, "common.cancel") }</button>
+						<button type="submit" class="shell-button">
+							<span class="htmx-indicator spinner"></span>
+							{ ui.T(ctx, "admin.users.saveChanges") }
+						</button>
+					</div>
+				</form>
+			</div>
+		</div>
+	</div>
+}
+
+templ adminResetPasswordModal() {
+	<div id="admin-reset-password-modal" class="modal-backdrop admin-modal-backdrop" hidden>
+		<div class="modal admin-modal">
+			<div class="admin-modal-head">
+				<h3>{ ui.T(ctx, "admin.users.resetPassword") }</h3>
+				<button type="button" class="admin-modal-close" data-action="close-modal" data-modal="admin-reset-password-modal" aria-label="Close">✕</button>
+			</div>
+			<div class="admin-modal-body" id="admin-reset-password-body">
+				@adminResetPasswordForm()
+			</div>
+		</div>
+	</div>
+}
+
+templ adminResetPasswordForm() {
+	<form id="admin-reset-password-form">
+		<input type="hidden" name="id"/>
+		<p class="admin-hint" id="admin-reset-password-target" style="margin: 0 0 0.9rem;"></p>
+		<div class="admin-field">
+			<label>{ ui.T(ctx, "admin.users.newPasswordOptional") }</label>
+			<input type="password" name="password" autocomplete="new-password" placeholder={ ui.T(ctx, "admin.users.autoGeneratePlaceholder") }/>
+			<p class="admin-hint">{ ui.T(ctx, "admin.users.autoGenerateHint") }</p>
+		</div>
+		<div class="admin-form-error" data-form-error hidden></div>
+		<div class="admin-modal-foot">
+			<button type="button" class="shell-button shell-button-ghost" data-action="close-modal" data-modal="admin-reset-password-modal">{ ui.T(ctx, "common.cancel") }</button>
+			<button type="submit" class="shell-button">
+				<span class="htmx-indicator spinner"></span>
+				{ ui.T(ctx, "admin.users.resetPassword") }
+			</button>
+		</div>
+	</form>
+}
+
 templ adminTokenList(u adminUserRow) {
 	if len(u.Tokens) == 0 {
-		<p style="color: var(--text-faint); font-size: 12px; margin: 0.5rem 0 0 0;">No tokens issued.</p>
+		<p style="color: var(--text-faint); font-size: 12px; margin: 0.5rem 0 0 0;">{ ui.T(ctx, "admin.users.noTokensIssued") }</p>
 	} else {
 		<div style="display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.5rem;">
 			for _, t := range u.Tokens {
 				<div style="display: flex; align-items: center; gap: 0.5rem; font-size: 12px;">
 					if t.Revoked {
-						<span class="badge badge-bad">revoked</span>
+						<span class="badge badge-bad">{ ui.T(ctx, "admin.users.tokenRevoked") }</span>
 					} else {
-						<span class="badge badge-ok">live</span>
+						<span class="badge badge-ok">{ ui.T(ctx, "admin.users.tokenLive") }</span>
 					}
-					<span style="color: var(--text); font-family: 'JetBrains Mono', monospace;">{ tokenLabel(t.Label) }</span>
-					<span style="color: var(--text-faint);">created { t.Created } · last used { t.LastUsed }</span>
+					<span style="color: var(--text); font-family: 'JetBrains Mono', monospace;">{ tokenLabel(i18n.LangFrom(ctx), t.Label) }</span>
+					<span style="color: var(--text-faint);">{ ui.T(ctx, "admin.users.tokenCreated") } { t.Created } · { ui.T(ctx, "admin.users.tokenLastUsed") } { t.LastUsed }</span>
 					if !t.Revoked {
-						<button type="button" class="shell-button shell-button-ghost" style="padding: 0.2rem 0.55rem; font-size: 11px;" hx-post={ "/admin/tokens/" + t.ID + "/revoke" } hx-swap="none">Revoke</button>
+						<button type="button" class="shell-button shell-button-ghost" style="padding: 0.2rem 0.55rem; font-size: 11px;" hx-post={ "/admin/tokens/" + t.ID + "/revoke" } hx-swap="none">{ ui.T(ctx, "admin.users.revoke") }</button>
 					}
 				</div>
 			}
@@ -140,135 +353,204 @@ templ adminTokenList(u adminUserRow) {
 // RAW token EXACTLY ONCE (it is unrecoverable afterwards).
 templ adminTokenIssuedFragment(view adminTokenIssuedView) {
 	<div class="card" style="border: 1px solid rgba(34,211,238,0.4); margin-bottom: 1rem;">
-		<span class="micro-label" style="display: block; margin-bottom: 0.5rem; color: var(--good);">NEW TOKEN FOR { view.Username }</span>
-		<p style="font-size: 12px; color: var(--warn); margin: 0 0 0.5rem 0;">Copy it now — this is the only time it is shown.</p>
+		<span class="micro-label" style="display: block; margin-bottom: 0.5rem; color: var(--good);">{ ui.Tf(ctx, "admin.users.newTokenFor", view.Username) }</span>
+		<p style="font-size: 12px; color: var(--warn); margin: 0 0 0.5rem 0;">{ ui.T(ctx, "admin.users.copyNowWarning") }</p>
 		<code style="display: block; word-break: break-all; padding: 0.6rem 0.8rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text);">{ view.Raw }</code>
 		<div style="margin-top: 0.6rem;">
-			<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px;" onclick="window.location.reload()">Done</button>
+			<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.7rem; font-size: 12px;" onclick="window.location.reload()">{ ui.T(ctx, "admin.users.done") }</button>
 		</div>
 	</div>
 }
 
-// ─── Access page ─────────────────────────────────────────────────────────────
+// ─── Access page (Command Center v2, Slice 3) ───────────────────────────────
+//
+// Replaces the old two disconnected lists (an editable per-project override
+// list, then a read-only "from teams" list below it) with ONE unified table:
+// one row per project, its effective permission label + R/W/U/D chips, and an
+// explicit source badge (Override / Team · X / None). Edited in place — each
+// row's Access/Source/Edit region swaps between a view state, an inline edit
+// form and (for Revoke) the reused ui.ConfirmDialog, all through the SAME
+// swap-in-place convention Slice 2 established for the hard-delete flow. The
+// account picker is a searchable combobox (accountSelector) rather than a
+// plain <select>.
 
 templ adminAccessPage(view adminAccessView) {
 	@ui.Layout(view.Props) {
-		@adminPageTitle("Admin", "Per-project overrides take precedence over team-derived perms. Operator-only.")
+		@adminPageTitle(ui.T(ctx, "admin.title"), ui.T(ctx, "admin.access.subtitle"))
 		@adminNavTabs("access")
+		<div id="admin-error-banner" class="admin-error-banner" hidden></div>
 		<div class="card" style="margin-bottom: 1.25rem;">
-			<span class="micro-label" style="display: block; margin-bottom: 0.6rem;">ACCOUNT</span>
+			<span class="micro-label" style="display: block; margin-bottom: 0.6rem;">{ ui.T(ctx, "admin.access.accountLabel") }</span>
 			if len(view.Users) == 0 {
-				<p style="color: var(--text-dim); font-size: 13px;">No accounts yet.</p>
+				<p style="color: var(--text-dim); font-size: 13px;">{ ui.T(ctx, "admin.users.noneYet") }</p>
 			} else {
-				<form method="get" action="/admin/access" style="margin: 0;">
-					<select name="user" onchange="this.form.submit()" style="padding: 0.45rem 0.6rem; font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.4rem; color: var(--text); min-width: 220px;">
-						for _, o := range view.Users {
-							<option value={ o.ID } selected?={ o.Selected }>{ o.Username }</option>
-						}
-					</select>
-					<noscript><button type="submit" class="shell-button shell-button-ghost" style="padding: 0.4rem 0.8rem; font-size: 12px; margin-left: 0.5rem;">Select</button></noscript>
-				</form>
+				@accountSelector(view)
 			}
 		</div>
 		if view.SelectedID != "" {
-			// ── Per-project OVERRIDES (top — take precedence) ──────────────────────
-			<div class="card" style="margin-bottom: 1rem; border-color: var(--border-accent);">
-				<span class="micro-label" style="display: block; margin-bottom: 0.3rem; color: var(--accent);">PER-PROJECT OVERRIDES · { view.SelectedName }</span>
-				<p style="font-size: 12px; color: var(--text-dim); margin: 0 0 0.85rem 0;">An override REPLACES the team-derived perms for that project — it wins outright (it can elevate or restrict, including to no access).</p>
-				if len(view.Memberships) == 0 {
-					<p style="color: var(--text-dim); font-size: 13px; margin-bottom: 1rem;">No overrides. This account's access comes entirely from its teams below.</p>
+			<div class="card" style="padding: 0;">
+				<div class="admin-toolbar" style="padding: 0.85rem 1rem 0; margin-bottom: 0;">
+					<span class="micro-label">{ ui.T(ctx, "admin.access.effectiveAccess") } · { view.SelectedName }</span>
+					<span class="admin-count">{ accessProjectCountLabel(i18n.LangFrom(ctx), view.Rows) }</span>
+				</div>
+				<div class="access-head-row">
+					<span class="micro-label">{ ui.T(ctx, "admin.access.colProject") }</span>
+					<span class="micro-label">{ ui.T(ctx, "admin.access.colAccess") }</span>
+					<span class="micro-label">{ ui.T(ctx, "admin.access.colSource") }</span>
+					<span class="micro-label" style="text-align: right;">{ ui.T(ctx, "admin.access.colEdit") }</span>
+				</div>
+				if len(view.Rows) == 0 {
+					<p style="color: var(--text-dim); font-size: 13px; padding: 0.9rem 1rem;">{ ui.T(ctx, "admin.access.noKnownProjects") }</p>
 				} else {
-					<div style="display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 0.5rem;">
-						for _, m := range view.Memberships {
-							@adminMembershipRowView(view, m)
-						}
-					</div>
+					for _, row := range view.Rows {
+						@adminAccessRowSlot(row)
+					}
 				}
 			</div>
-			@adminAddOverrideCard(view)
-			// ── Team-derived perms (below — read-only) ─────────────────────────────
-			if view.HasTeams {
-				<div style="margin: 1.75rem 0 0.75rem 0;">
-					<span class="micro-label" style="display: block; color: var(--text-2);">FROM TEAMS · read-only</span>
-					<p style="font-size: 12px; color: var(--text-dim); margin: 0.3rem 0 0 0;">Effective perms granted by team membership. An override above supersedes the matching project here.</p>
-				</div>
-				@adminTeamPermGroup("Personal", view.TeamPersonal)
-				@adminTeamPermGroup("Work", view.TeamWork)
-				if len(view.TeamOther) > 0 {
-					@adminTeamPermGroup("Unclassified", view.TeamOther)
-				}
-				if len(view.TeamPersonal) == 0 && len(view.TeamWork) == 0 && len(view.TeamOther) == 0 {
-					<div class="card"><p style="color: var(--text-dim); font-size: 13px; margin: 0;">This account is not on any team, or its teams have no projects yet.</p></div>
-				}
-			}
 		}
 		@adminAssets()
 	}
 }
 
-// adminAddOverrideCard adds a per-project override via the searchable project
-// selector (no free-text) + R/W/U/D + role. Posts to the OBL-13 membership upsert.
-templ adminAddOverrideCard(view adminAccessView) {
-	<div class="card" style="margin-bottom: 0.5rem;">
-		<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">ADD / UPDATE OVERRIDE</span>
-		<form data-admin-form data-method="PUT" data-url-template="/admin/memberships" data-body="form" style="display: grid; grid-template-columns: 1.6fr 1.6fr 1fr auto; gap: 0.6rem; align-items: start; margin: 0;">
-			<input type="hidden" name="account_id" value={ view.SelectedID }/>
-			@projectSelector("Search projects…")
-			@adminPermChecks(true, false, false, false)
-			@adminRoleSelect(view.Roles, "member")
-			<button type="submit" class="shell-button" style="padding: 0.35rem 0.9rem; font-size: 12px;">Save</button>
-		</form>
-		<div class="admin-form-error" data-form-error hidden></div>
+// accountSelector is the Access page's searchable account combobox (Slice 3):
+// the first extra consumer of the combobox mechanics factored out of
+// projectSelector's admin.js (wireSearchSelect). It filters the account list
+// ALREADY rendered into this page — no new fetch/endpoint — and navigates to
+// /admin/access?user={id} when the operator picks one.
+templ accountSelector(view adminAccessView) {
+	<div class="acct-select" data-acct-select>
+		<input
+			type="text"
+			class="acct-select-input"
+			data-acct-input
+			value={ accountComboLabel(view.SelectedName, view.SelectedEmail) }
+			placeholder={ ui.T(ctx, "admin.access.searchAccountsPlaceholder") }
+			autocomplete="off"
+			role="combobox"
+			aria-autocomplete="list"
+			aria-expanded="false"
+		/>
+		<ul class="proj-list" data-acct-list role="listbox" hidden></ul>
+		<ul hidden data-acct-source>
+			for _, u := range view.Users {
+				<li data-account-id={ u.ID } data-username={ u.Username } data-email={ u.Email }></li>
+			}
+		</ul>
 	</div>
 }
 
-// adminTeamPermGroup renders one classification bucket of the read-only team-derived
-// perms: each project with its effective (union) perms and the teams that grant them.
-templ adminTeamPermGroup(label string, rows []adminTeamPermRow) {
-	if len(rows) > 0 {
-		<div class="card" style="margin-bottom: 1rem;">
-			<span class="micro-label" style="display: block; margin-bottom: 0.75rem;">{ label }</span>
-			<div style="display: flex; flex-direction: column; gap: 0.55rem;">
-				for _, row := range rows {
-					<div style="padding: 0.55rem 0.75rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem;">
-						<div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
-							<span style="font-family: var(--mono); font-size: 13px; color: var(--text);">{ row.Project }</span>
-							<span class="badge" style="padding: 0.15rem 0.5rem;">{ row.Summary }</span>
-							if row.Overridden {
-								<span class="badge badge-warn" style="padding: 0.15rem 0.5rem;">overridden above</span>
-							}
-						</div>
-						<div style="margin-top: 0.35rem; font-size: 11px; color: var(--text-dim);">
-							for i, src := range row.Sources {
-								if i > 0 {
-									<span> · </span>
-								}
-								<span>{ src.Team }</span>
-								if src.Profile != "" {
-									<span style="color: var(--text-faint);"> ({ src.Profile })</span>
-								}
-							}
-						</div>
-					</div>
-				}
-			</div>
-		</div>
+// adminAccessRowSlot renders the row's STABLE wrapper (#access-row-{slug}),
+// exactly once, around its initial view-state content. Every edit/revoke
+// trigger below targets this same id with hx-swap="innerHTML" — mirroring
+// Slice 2's adminUserDeleteSlot — so the fragment handlers only ever render
+// the INNER content (adminAccessRowView / adminAccessRowEdit /
+// adminAccessRowRevokeConfirm), never a duplicate wrapper.
+templ adminAccessRowSlot(row unifiedAccessRow) {
+	<div class="access-row" id={ "access-row-" + row.Slug }>
+		@adminAccessRowView(row)
+	</div>
+}
+
+// adminAccessRowView is a project row's default (non-editing) INNER content:
+// the project name, its effective label + R/W/U/D chips, its source badge,
+// and the edit-in-place trigger appropriate to that source. Rendered both by
+// adminAccessRowSlot (initial page load) and by handleAdminAccessRowView (the
+// Cancel target for the edit form and the revoke-confirm dialog).
+templ adminAccessRowView(row unifiedAccessRow) {
+	<div class="access-proj">{ row.Project }</div>
+	<div class="access-perm">
+		<span class={ "access-lvl", templ.KV("access-lvl-none", row.Label == ui.T(ctx, "admin.access.none")) }>{ row.Label }</span>
+		<span class="access-chips">
+			<span class={ "access-chip", templ.KV("on", row.Read) }>R</span>
+			<span class={ "access-chip", templ.KV("on", row.Insert) }>W</span>
+			<span class={ "access-chip", templ.KV("on", row.Update) }>U</span>
+			<span class={ "access-chip", templ.KV("on", row.Delete) }>D</span>
+		</span>
+	</div>
+	<div class="access-src">
+		@accessSourceBadge(row)
+	</div>
+	<div class="access-edit">
+		if row.Source == "override" {
+			<button type="button" class="linkish" hx-get={ row.EditURL } hx-target={ "#access-row-" + row.Slug } hx-swap="innerHTML">{ ui.T(ctx, "admin.access.edit") }</button>
+			<span class="access-sep">·</span>
+			<button type="button" class="linkish access-danger" hx-get={ row.RevokeConfirmURL } hx-target={ "#access-row-" + row.Slug } hx-swap="innerHTML">{ ui.T(ctx, "admin.access.revoke") }</button>
+		} else if row.Source == "team" {
+			<button type="button" class="linkish" hx-get={ row.EditURL } hx-target={ "#access-row-" + row.Slug } hx-swap="innerHTML">{ ui.T(ctx, "admin.access.overrideEllipsis") }</button>
+		} else {
+			<button type="button" class="linkish" hx-get={ row.EditURL } hx-target={ "#access-row-" + row.Slug } hx-swap="innerHTML">{ ui.T(ctx, "admin.access.grantEllipsis") }</button>
+		}
+	</div>
+}
+
+// accessSourceBadge renders the row's source: Override (+ role), Team · name
+// (+ profile, when a single team contributes), or None.
+templ accessSourceBadge(row unifiedAccessRow) {
+	if row.Source == "override" {
+		<span class="badge badge-warn">{ ui.T(ctx, "admin.access.override") }</span>
+		if row.Role != "" {
+			<span class="access-src-detail"> · { row.Role }</span>
+		}
+	} else if row.Source == "team" {
+		<span class="badge badge-team">{ ui.T(ctx, "admin.access.team") } · { row.TeamSummary }</span>
+		if row.TeamProfile != "" {
+			<span class="access-src-detail"> · { row.TeamProfile }</span>
+		}
+	} else {
+		<span class="badge badge-muted">{ ui.T(ctx, "admin.access.none") }</span>
 	}
 }
 
-templ adminMembershipRowView(view adminAccessView, m adminMembershipRow) {
-	<form hx-put="/admin/memberships" hx-swap="none" style="display: grid; grid-template-columns: 1.3fr 1.6fr 1fr auto auto; gap: 0.6rem; align-items: center; padding: 0.6rem 0.75rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem; margin: 0;">
-		<input type="hidden" name="account_id" value={ view.SelectedID }/>
-		<input type="hidden" name="project" value={ m.Project }/>
-		<div>
-			<span style="font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text);">{ m.Project }</span>
-			<span style="display: block; font-size: 11px; color: var(--text-faint);">{ m.Summary }</span>
+// adminAccessRowEdit is the row's INNER content while editing: role + R/W/U/D
+// checkboxes, PUTting to the pre-existing /admin/memberships route. Serves
+// all three triggers (Edit / Override… / Grant…) — they differ only in the
+// row's current perms/role, already folded into row by loadAccessRow. The
+// form uses display:contents so its children act as direct grid items of the
+// parent .access-row grid (set up by adminAccessRowSlot), keeping the
+// Project/Access/Source/Edit columns aligned in edit mode too.
+templ adminAccessRowEdit(roles []string, row unifiedAccessRow) {
+	<form hx-put="/admin/memberships" hx-swap="none" style="display: contents;">
+		<input type="hidden" name="account_id" value={ row.AccountID }/>
+		<input type="hidden" name="project" value={ row.Project }/>
+		<div class="access-proj">{ row.Project }</div>
+		<div class="access-perm">
+			if row.Source == "none" {
+				@adminPermChecks(true, false, false, false)
+			} else {
+				@adminPermChecks(row.Read, row.Insert, row.Update, row.Delete)
+			}
 		</div>
-		@adminPermChecks(m.Read, m.Insert, m.Update, m.Delete)
-		@adminRoleSelect(view.Roles, m.Role)
-		<button type="submit" class="shell-button" style="padding: 0.3rem 0.8rem; font-size: 12px;">Save</button>
-		<button type="button" class="shell-button shell-button-ghost" style="padding: 0.3rem 0.8rem; font-size: 12px;" hx-delete={ m.DeleteURL } hx-swap="none">Revoke</button>
+		<div class="access-src">
+			@adminRoleSelect(roles, accessRowFormRole(row))
+		</div>
+		<div class="access-edit">
+			<button type="submit" class="shell-button" style="padding: 0.3rem 0.8rem; font-size: 12px;">{ ui.T(ctx, "admin.access.save") }</button>
+			<button type="button" class="linkish" hx-get={ row.ViewURL } hx-target={ "#access-row-" + row.Slug } hx-swap="innerHTML">{ ui.T(ctx, "common.cancel") }</button>
+		</div>
 	</form>
+}
+
+// adminAccessRowRevokeConfirm is the row's INNER content while confirming a
+// revoke: the reused Slice-0 ui.ConfirmDialog, wired to the existing DELETE
+// /admin/memberships route. `.access-row .card` (omnia.css) makes the card
+// span the full row width instead of being squeezed into one grid column.
+templ adminAccessRowRevokeConfirm(row unifiedAccessRow) {
+	@ui.ConfirmDialog(ui.ConfirmDialogProps{
+		Title:     ui.Tf(ctx, "admin.access.revokeTitle", row.Project),
+		Message:   row.Project,
+		Note:      ui.T(ctx, "admin.access.revokeNote"),
+		CancelURL: row.ViewURL,
+		Target:    "#access-row-" + row.Slug,
+		Actions: []ui.ConfirmAction{
+			{
+				Label:   ui.T(ctx, "admin.access.revoke"),
+				Method:  "delete",
+				URL:     adminMembershipDeletePath(row.AccountID, row.Project),
+				Danger:  true,
+				Confirm: ui.Tf(ctx, "admin.access.revokeConfirmPrompt", row.Project),
+			},
+		},
+	})
 }
 
 templ adminPermChecks(read, insert, update, del bool) {

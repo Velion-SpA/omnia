@@ -5,8 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/remote"
-	engramsync "github.com/Velion-SpA/omnia/internal/sync"
+	"github.com/velion/omnia/internal/cloud/remote"
+	engramsync "github.com/velion/omnia/internal/sync"
 )
 
 func TestRemoteTransportImplementsTransportContract(t *testing.T) {

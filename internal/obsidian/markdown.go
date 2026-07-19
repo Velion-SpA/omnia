@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 // ObservationToMarkdown converts a store.Observation into an Obsidian-compatible

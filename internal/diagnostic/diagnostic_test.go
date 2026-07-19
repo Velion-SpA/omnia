@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 func newDiagnosticTestStore(t *testing.T) *store.Store {

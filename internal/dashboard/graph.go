@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/Velion-SpA/omnia/internal/embed"
+	"github.com/velion/omnia/internal/embed"
 )
 
 // Graph tuning defaults. k is the per-node neighbor cap; min is the minimum

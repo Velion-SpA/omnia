@@ -13,8 +13,8 @@ import (
 	"time"
 
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
-	"github.com/Velion-SpA/omnia/internal/project"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/project"
+	"github.com/velion/omnia/internal/store"
 )
 
 func newMCPTestStore(t *testing.T) *store.Store {

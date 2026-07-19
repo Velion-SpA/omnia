@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // newTestAuthService builds a real *auth.Service backed by a nil cloudstore

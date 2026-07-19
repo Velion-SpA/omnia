@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/velion/omnia/internal/projectname"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,6 +34,11 @@ type Config struct {
 	// Embeddings configures Omnia's own local semantic-search index ("capa propia").
 	// Disabled by default so the production sync job is unaffected until opted in.
 	Embeddings EmbeddingsConfig `yaml:"embeddings"`
+	// Recall configures Omnia's hybrid (lexical+semantic) recall fusion for
+	// mem_search (design D1/D2/D6, human-like-memory PR3). Disabled by default:
+	// off reproduces today's FTS5-only store.Search path byte-for-byte, so
+	// enabling it is a pure config flip with zero engram.db migration (D7).
+	Recall RecallConfig `yaml:"recall"`
 }
 
 type EngramConfig struct {
@@ -46,9 +52,28 @@ type EngramConfig struct {
 type EmbeddingsConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	BaseURL string `yaml:"base_url"` // Ollama base URL, e.g. http://localhost:11434
-	Model   string `yaml:"model"`    // e.g. nomic-embed-text
-	Dim     int    `yaml:"dim"`      // embedding dimension, e.g. 768 for nomic-embed-text
+	Model   string `yaml:"model"`    // e.g. jina/jina-embeddings-v2-base-es (default), bge-m3
+	Dim     int    `yaml:"dim"`      // embedding dimension, e.g. 768 for jina-v2-es, 1024 for bge-m3
 	DBPath  string `yaml:"db_path"`  // path to Omnia's own embeddings SQLite file
+}
+
+// RecallConfig configures Omnia's hybrid (lexical+semantic) recall fusion
+// (design D1: reciprocal rank fusion; D2: adaptive relevance floor). Enabled
+// defaults to false — off, mem_search calls store.Search directly, exactly
+// as it always has (D7 rollback guarantee: byte-for-byte today's FTS5-only
+// path, zero engram.db migration). RRFK/DenseK/StrongFloor/BaseFloor/
+// MaxResults default to the same values internal/recall.DefaultFuseParams()
+// already uses as the single source of truth (PR2) — duplicated here (not
+// imported) so this package stays a plain config leaf, mirroring how
+// EmbeddingsConfig's Dim default duplicates the embed package's convention
+// rather than importing it.
+type RecallConfig struct {
+	Enabled     bool    `yaml:"enabled"`
+	RRFK        int     `yaml:"rrf_k"`
+	DenseK      int     `yaml:"dense_k"`
+	StrongFloor float32 `yaml:"strong_floor"`
+	BaseFloor   float32 `yaml:"base_floor"`
+	MaxResults  int     `yaml:"max_results"`
 }
 
 type SourcesConfig struct {
@@ -193,8 +218,12 @@ func (r *Router) ResolveConfluence(spaceKey string) string {
 	return r.defaultProject
 }
 
+// normalizeProject delegates to the canonical internal/projectname leaf
+// package so config-sourced project names normalize identically to the
+// store and project-detection paths (see internal/store.NormalizeProject
+// and internal/project's normalize).
 func normalizeProject(s string) string {
-	return strings.ToLower(strings.TrimSpace(s))
+	return projectname.Normalize(s)
 }
 
 // DefaultPath returns the default config file path.
@@ -243,7 +272,10 @@ func applyDefaults(cfg *Config) {
 		cfg.Embeddings.BaseURL = "http://localhost:11434"
 	}
 	if cfg.Embeddings.Model == "" {
-		cfg.Embeddings.Model = "nomic-embed-text"
+		// jina/jina-embeddings-v2-base-es: purpose-built ES<->EN shared-space
+		// model, 768-dim (matches the prior nomic default, no schema change),
+		// 8192-token context. See engram obs #1401 (supersedes design.md D3).
+		cfg.Embeddings.Model = "jina/jina-embeddings-v2-base-es"
 	}
 	if cfg.Embeddings.Dim == 0 {
 		cfg.Embeddings.Dim = 768
@@ -251,5 +283,24 @@ func applyDefaults(cfg *Config) {
 	if cfg.Embeddings.DBPath == "" {
 		home, _ := os.UserHomeDir()
 		cfg.Embeddings.DBPath = filepath.Join(home, ".local", "share", "omnia", "embeddings.db")
+	}
+	// Recall.Enabled intentionally has NO default override — its zero value
+	// (false) IS the default (D7: off = today's FTS5-only path). Only the
+	// fusion params get defaults, so an operator who opts in by setting only
+	// `recall: { enabled: true }` still gets the proven D1/D2 constants.
+	if cfg.Recall.RRFK == 0 {
+		cfg.Recall.RRFK = 60
+	}
+	if cfg.Recall.DenseK == 0 {
+		cfg.Recall.DenseK = 5
+	}
+	if cfg.Recall.StrongFloor == 0 {
+		cfg.Recall.StrongFloor = 0.65
+	}
+	if cfg.Recall.BaseFloor == 0 {
+		cfg.Recall.BaseFloor = 0.55
+	}
+	if cfg.Recall.MaxResults == 0 {
+		cfg.Recall.MaxResults = 50
 	}
 }

@@ -25,9 +25,10 @@ Related files in this directory:
 ```
 
 - `omnia cloud serve` speaks **plain HTTP only** — there is no TLS listener in
-  the binary. This is deliberate: a reverse proxy terminates TLS, the binary
-  stays simple. **Never** expose `omnia cloud serve`'s raw port directly on
-  the LAN or internet without a proxy in front of it.
+  the binary. This is deliberate (see `do_not_touch` in
+  `obligations/OBL-10-homelab-deployment.yaml`): a reverse proxy terminates
+  TLS, the binary stays simple. **Never** expose `omnia cloud serve`'s raw
+  port directly on the LAN or internet without a proxy in front of it.
 - The binary is pure Go (`CGO_ENABLED=0`), so cross-compiling from macOS for
   a Linux homelab box is a plain `go build` with `GOOS`/`GOARCH` set — no
   toolchain, no Docker required (though `docker-compose.cloud.yml` /
@@ -74,11 +75,17 @@ GOOS=linux GOARCH=amd64 go build -o /tmp/omnia-linux ./cmd/omnia
 GOOS=linux GOARCH=arm64 go build -o /tmp/omnia-linux-arm64 ./cmd/omnia
 ```
 
-> `CGO_ENABLED` does not need to be set explicitly — the project has no cgo
-> dependencies (pure-Go SQLite driver `modernc.org/sqlite`, pure-Go pgx
-> stdlib driver), and Go disables cgo automatically when cross-compiling
-> without a matching C toolchain; add `CGO_ENABLED=0` explicitly if you want
-> the guarantee spelled out.
+> **These are the exact acceptance-criteria/verification commands from
+> `obligations/OBL-10-homelab-deployment.yaml`, run verbatim.** They are
+> intentionally NOT run as part of THIS change — the binary spans packages
+> owned by a concurrently-running agent in this same working tree, so a full
+> `./cmd/omnia` build here would catch code that isn't ready yet. **The
+> orchestrator runs these two cross-compiles** (plus the integrated
+> `go build ./...`) after both obligations land. `CGO_ENABLED` does not need
+> to be set explicitly — the project has no cgo dependencies (pure-Go SQLite
+> driver `modernc.org/sqlite`, pure-Go pgx stdlib driver), and Go disables
+> cgo automatically when cross-compiling without a matching C toolchain; add
+> `CGO_ENABLED=0` explicitly if you want the guarantee spelled out.
 
 Copy the binary matching the server's architecture (`uname -m`: `x86_64` →
 amd64, `aarch64`/`arm64` → arm64) to the homelab box:
@@ -149,32 +156,26 @@ Any HTTP response (even a 404 on `/`) confirms the proxy → server path works.
 
 ## 6. Bootstrap the first account
 
-Run `omnia cloud bootstrap-admin` **on the server host**, against its own
-storage (no HTTP involved) — this creates the first account directly and is
-idempotent (it refuses if any account already exists):
-
-```bash
-omnia cloud bootstrap-admin --username admin --password 'CHANGE_ME'
-
-# optional: also issue a managed token on the spot (shown once).
-# Requires OMNIA_CLOUD_MANAGED_TOKENS=1 and a non-default OMNIA_CLOUD_TOKEN_PEPPER.
-omnia cloud bootstrap-admin --username admin --password 'CHANGE_ME' --issue-token
-```
-
-Signup (`POST /auth/signup` / `omnia cloud signup`) is closed by default on a
-LAN-reachable server. To provision additional accounts afterwards, use the
-admin API, or temporarily set `OMNIA_CLOUD_OPEN_SIGNUP=1` on the server to
-re-open self-signup:
+**Current state (today):** there is no dedicated first-admin bootstrap CLI
+yet — that's tracked separately (`obligations/OBL-02-first-admin-bootstrap.yaml`,
+pending). Today, the **first** account is created against the open signup
+endpoint, from either notebook:
 
 ```bash
 omnia cloud config --server https://cloud.yourdomain.tld
-omnia cloud signup --username otro --email otro@example.com --password 'CHANGE_ME_2'
+omnia cloud signup --username benja --email benja@velion --password 'CHANGE_ME'
 ```
 
 That account becomes the `owner` of a project the first time it pushes to
-it (see [`OMNIA-CLOUD.md`](../OMNIA-CLOUD.md) — "claim on first push").
+it (see [`OMNIA-CLOUD.md`](../OMNIA-CLOUD.md) §"Claim al primer push").
 `OMNIA_CLOUD_ADMIN` (if set in `cloud.env`) is a separate, independent
 operator token for the dashboard — it is not a `cloud_users` row.
+
+> **Once OBL-02 lands**, replace this step with the dedicated
+> `omnia cloud bootstrap-admin --username ... --issue-token` command it
+> introduces, and close the open signup endpoint per whatever gate flag its
+> docs specify. This runbook will be updated then; nothing here blocks that
+> follow-up.
 
 ## 7. Connect each notebook
 
@@ -182,24 +183,24 @@ On **notebook A**:
 
 ```bash
 omnia cloud config --server https://cloud.yourdomain.tld
-omnia cloud login --username admin --device notebook-a
+omnia cloud login --username benja --device notebook-a
 ```
 
 On **notebook B** (a second account, so isolation is actually exercised):
 
 ```bash
-omnia cloud signup --username otro --email otro@example.com --password 'CHANGE_ME_2'
+omnia cloud signup --username otro --email otro@velion --password 'CHANGE_ME_2'
 omnia cloud config --server https://cloud.yourdomain.tld
 omnia cloud login --username otro --device notebook-b
 ```
 
-`--device <name>` registers the login as a named device against the server.
-Devices can be scoped to specific projects with `omnia cloud devices
-list|scope|revoke` — a device with an empty scope is unrestricted (sees
-everything its account can see); a non-empty scope narrows it further (it
-never grants more than the account's project membership already allows).
-The isolation boundary that matters for this test is **project membership**
-(step 8), which is enforced independently of device scoping.
+`--device <name>` (already supported by `omnia cloud login`) registers the
+login as a named device against the server. Per-device **project scoping**
+(restricting a device to specific projects via a dedicated CLI) is tracked
+separately (`obligations/OBL-08-device-management-cli.yaml`, pending) — today
+a device is registered for `last_seen_at`/audit visibility, but the isolation
+boundary that actually matters for this test is **project membership**
+(step 8), which is fully implemented and enforced today.
 
 ## 8. Enroll projects and grant access
 
@@ -210,7 +211,7 @@ omnia cloud enroll homelab-a
 omnia sync --cloud --project homelab-a
 ```
 
-The first push claims `admin` as `homelab-a`'s owner. To let `otro`
+The first push claims `benja` as `homelab-a`'s owner. To let `otro`
 (notebook B) read a *different* project you explicitly share, grant
 membership (see [`OMNIA-CLOUD.md`](../OMNIA-CLOUD.md) §2 for the full
 permission bitmask):
@@ -218,7 +219,7 @@ permission bitmask):
 ```bash
 TOK=$(curl -s -X POST https://cloud.yourdomain.tld/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"CHANGE_ME"}' | jq -r .token)
+  -d '{"username":"benja","password":"CHANGE_ME"}' | jq -r .token)
 
 curl -X POST https://cloud.yourdomain.tld/projects/shared-project/members \
   -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 // TestCloudFanoutDeliversSingleWriteToEveryCloud is the OBL-06 regression test.

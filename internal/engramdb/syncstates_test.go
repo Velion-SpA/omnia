@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/engramdb"
+	"github.com/velion/omnia/internal/engramdb"
 )
 
 // createFullSyncStateDB builds a throwaway DB with the full sync_state schema

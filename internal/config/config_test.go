@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/velion/omnia/internal/projectname"
 )
 
 func TestRouterResolveGitHub_Default(t *testing.T) {
@@ -61,6 +63,31 @@ func TestRouterNormalizesDefaultProject(t *testing.T) {
 	got := r.ResolveDiscord("99999", "")
 	if got != "omnia" {
 		t.Errorf("Router normalizes defaultProject: got %q, want %q", got, "omnia")
+	}
+}
+
+// TestNormalizeProjectAgreesWithProjectnameLeaf pins the H6 audit fix:
+// config.normalizeProject must delegate to the shared internal/projectname
+// leaf package so it can never diverge from the store/project copies again.
+// Before the fix, normalizeProject did NOT collapse repeated separators
+// (unlike store.NormalizeProject) — this now intentionally changes to match.
+func TestNormalizeProjectAgreesWithProjectnameLeaf(t *testing.T) {
+	inputs := []string{
+		"engram",
+		"Engram",
+		"  engram  ",
+		"my--project",
+		"my__project",
+		"",
+	}
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			got := normalizeProject(in)
+			want := projectname.Normalize(in)
+			if got != want {
+				t.Errorf("normalizeProject(%q) = %q, want %q (from projectname.Normalize)", in, got, want)
+			}
+		})
 	}
 }
 

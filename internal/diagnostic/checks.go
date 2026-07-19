@@ -5,8 +5,8 @@ import (
 	"os"
 	"strings"
 
-	projectpkg "github.com/Velion-SpA/omnia/internal/project"
-	"github.com/Velion-SpA/omnia/internal/store"
+	projectpkg "github.com/velion/omnia/internal/project"
+	"github.com/velion/omnia/internal/store"
 )
 
 const (

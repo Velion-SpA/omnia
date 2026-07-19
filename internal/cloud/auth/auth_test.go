@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 func TestNewServiceSecretValidation(t *testing.T) {

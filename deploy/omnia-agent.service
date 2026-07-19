@@ -32,7 +32,7 @@
 
 [Unit]
 Description=Omnia local agent (HTTP server for dashboard + MCP)
-Documentation=https://github.com/Velion-SpA/omnia/blob/main/OMNIA-CLOUD.md
+Documentation=https://github.com/velion/omnia/blob/main/OMNIA-CLOUD.md
 After=network.target
 
 [Service]

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/llm"
+	"github.com/velion/omnia/internal/llm"
 )
 
 // TestNewRunner_Claude verifies that "claude" returns a *ClaudeRunner without error.

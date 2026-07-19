@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // fakeUserStore is an in-memory userStore so account unit tests never require a

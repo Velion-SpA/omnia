@@ -1,14 +1,15 @@
 package cloudserver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	cloudauth "github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
-	"github.com/Velion-SpA/omnia/internal/store"
+	cloudauth "github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/store"
 )
 
 // ─── Membership-manager methods on the RBAC fake store ────────────────────────
@@ -33,6 +34,22 @@ func (s *fakeMembershipStore) GrantMembership(accountID, project string, perms i
 func (s *fakeMembershipStore) RevokeMembership(accountID, project string) error {
 	delete(s.memberships, membershipKey(accountID, project))
 	return nil
+}
+
+// ClaimProjectOwnership is the fake's (single-threaded, test-only) analogue of
+// cloudstore.ClaimProjectOwnership: it grants accountID as owner IFF project
+// currently has no members. Unlike the real Postgres implementation, this fake
+// has no lock and is not safe for concurrent use — cloudserver unit tests
+// exercise the sequential contract only; the concurrency invariant itself is
+// covered by the cloudstore integration tests against real Postgres.
+func (s *fakeMembershipStore) ClaimProjectOwnership(_ context.Context, accountID, project string, perms int, role string) (bool, error) {
+	for _, m := range s.memberships {
+		if m.Project == project {
+			return false, nil
+		}
+	}
+	s.grant(accountID, project, perms, role)
+	return true, nil
 }
 
 // ─── Account-capable auth fake ────────────────────────────────────────────────

@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/core"
-	"github.com/Velion-SpA/omnia/internal/source/atlassian"
-	jira "github.com/Velion-SpA/omnia/internal/source/jira"
+	"github.com/velion/omnia/internal/core"
+	"github.com/velion/omnia/internal/source/atlassian"
+	jira "github.com/velion/omnia/internal/source/jira"
 )
 
 // stubRouter satisfies jira's projectRouter interface by returning a fixed project string.

@@ -12,9 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/audit"
-	"github.com/Velion-SpA/omnia/internal/engramdb"
-	"github.com/Velion-SpA/omnia/internal/ui"
+	"github.com/velion/omnia/internal/audit"
+	"github.com/velion/omnia/internal/engramdb"
+	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // Config holds the runtime configuration for the dashboard server.
@@ -75,20 +76,25 @@ type Server struct {
 	mut     MutationWriter   // nil → dashboard is read-only
 	logger  *slog.Logger
 	groups  *GroupIndex
+
+	// subProjects is the OPTIONAL sub-project resolver (Command Center v2,
+	// Slice 5b) — nil unless a caller supplies WithSubProjectResolver (only
+	// the cloud dashboard does). See SubProjectResolver's doc comment.
+	subProjects SubProjectResolver
 }
 
 // NewServer creates a new dashboard Server backed by the LOCAL Engram stack.
 // It attempts to open the Engram SQLite DB for structural queries and the
 // optional embeddings store; failures are logged and the dashboard continues with
 // reduced capabilities (HTTP/FTS, no graph). cmd/omnia uses this unchanged.
-func NewServer(cfg Config, logger *slog.Logger) *Server {
-	return NewServerWithDataSource(cfg, newLocalDataSource(cfg, logger), logger)
+func NewServer(cfg Config, logger *slog.Logger, opts ...Option) *Server {
+	return NewServerWithDataSource(cfg, newLocalDataSource(cfg, logger), logger, opts...)
 }
 
 // NewServerWithDataSource builds a Server over an arbitrary DataSource. The cloud
 // wires its replicated-store DataSource here; everything else (routing, handlers,
 // templ pages) is identical to the local dashboard.
-func NewServerWithDataSource(cfg Config, src DataSource, logger *slog.Logger) *Server {
+func NewServerWithDataSource(cfg Config, src DataSource, logger *slog.Logger, opts ...Option) *Server {
 	s := &Server{
 		cfg:    cfg,
 		src:    src,
@@ -105,27 +111,31 @@ func NewServerWithDataSource(cfg Config, src DataSource, logger *slog.Logger) *S
 	if mw, ok := src.Mutations(); ok {
 		s.mut = mw
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
 	return s
 }
 
 // Handler returns the dashboard's HTTP handler with all routes registered. The
 // cloud server mounts this directly (fronted by its own auth/session middleware),
-// so both surfaces share identical routing.
+// so both surfaces share identical routing. Wrapped in i18n.Middleware so every
+// request — local or cloud — carries the caller's resolved display language
+// (and current path, for the header lang toggle's next= link) on its context.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
-	return mux
+	return i18n.Middleware(mux)
 }
 
 // Start binds to localhost and serves until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) error {
-	mux := http.NewServeMux()
-	s.registerRoutes(mux)
+	handler := s.Handler()
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.cfg.Port)
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
@@ -160,9 +170,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// dashboard serves, so both surfaces stay visually identical.
 	mux.Handle("GET /static/", ui.StaticHandler("/static/"))
 
+	// Language switch (PUBLIC, no auth — the cloud mount adds it to its
+	// public-path allowlist alongside /login and /static so the toggle also
+	// works from the unauthenticated login page).
+	mux.HandleFunc("GET /lang/{lang}", i18n.SwitchHandler())
+
 	// Pages
 	mux.HandleFunc("GET /", s.handleOverview)
 	mux.HandleFunc("GET /browse", s.handleBrowse)
+	mux.HandleFunc("GET /project/{name}", s.handleProjectDetail)
 	mux.HandleFunc("GET /detail/{id}", s.handleDetail)
 	mux.HandleFunc("GET /sync", s.handleSyncStatus)
 	mux.HandleFunc("GET /activity", s.handleActivity)
@@ -183,7 +199,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	engUp := s.src.Health(ctx) == nil
-	syncStatus := loadSyncStatus()
+	syncStatus := loadSyncStatus(i18n.LangFrom(ctx))
 
 	// Load project stats (existing logic preserved).
 	var stats []ProjectStats
@@ -258,6 +274,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 // buildOverviewData assembles the OverviewData struct from already-loaded stats,
 // plus live feed and type breakdown from the DB (when available).
 func (s *Server) buildOverviewData(ctx context.Context, stats []ProjectStats, syncStatus SyncStatus, engUp bool, canonicalize func(string) string) OverviewData {
+	lang := i18n.LangFrom(ctx)
 	// Total memories = sum of project totals (group parents include children).
 	var totalMem int
 	for _, p := range stats {
@@ -328,7 +345,7 @@ func (s *Server) buildOverviewData(ctx context.Context, stats []ProjectStats, sy
 					Title:   title,
 					Type:    o.Type,
 					Project: canonicalize(o.Project),
-					Age:     formatAge(o.UpdatedAt),
+					Age:     formatAge(o.UpdatedAt, lang),
 				})
 			}
 		}
@@ -342,9 +359,9 @@ func (s *Server) buildOverviewData(ctx context.Context, stats []ProjectStats, sy
 		curatedCount += p.Curated
 	}
 	sources := []SourceStat{
-		{Name: "GitHub", Sub: "PRs · commits · reviews", IconKey: "github", Count: githubCount},
-		{Name: "Discord", Sub: "digests · threads · mentions", IconKey: "discord", Count: discordCount},
-		{Name: "Claude Code", Sub: "sessions · fixes · decisions", IconKey: "claude", Count: curatedCount},
+		{Name: ui.T(ctx, "overview.source.github.name"), Sub: ui.T(ctx, "overview.source.github.sub"), IconKey: "github", Count: githubCount},
+		{Name: ui.T(ctx, "overview.source.discord.name"), Sub: ui.T(ctx, "overview.source.discord.sub"), IconKey: "discord", Count: discordCount},
+		{Name: ui.T(ctx, "overview.source.claude.name"), Sub: ui.T(ctx, "overview.source.claude.sub"), IconKey: "claude", Count: curatedCount},
 	}
 
 	return OverviewData{
@@ -368,6 +385,7 @@ func (s *Server) buildOverviewData(ctx context.Context, stats []ProjectStats, sy
 // LOWER(TRIM(project)) = ?, which would miss structurally different raw names
 // like "01.- velion".
 func (s *Server) overviewStatsFromDB(ctx context.Context, syncStatus SyncStatus) []ProjectStats {
+	lang := i18n.LangFrom(ctx)
 	canonicalize := canonicalizerFunc(s.cfg.ProjectAliases)
 	hidden := hiddenSet(s.cfg.ProjectHidden, s.cfg.ProjectAliases)
 
@@ -435,7 +453,7 @@ func (s *Server) overviewStatsFromDB(ctx context.Context, syncStatus SyncStatus)
 		}
 		views := make([]ObsView, len(dbObs))
 		for i, o := range dbObs {
-			views[i] = enrichObs(obsFromDB(o))
+			views[i] = enrichObs(obsFromDB(o), lang)
 		}
 		if s.groups.IsParent(proj) {
 			stats = append(stats, computeGroupProjectStats(proj, views, s.groups, s.cfg.ProjectAliases))
@@ -448,6 +466,7 @@ func (s *Server) overviewStatsFromDB(ctx context.Context, syncStatus SyncStatus)
 
 func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	lang := i18n.LangFrom(ctx)
 	q := r.URL.Query()
 
 	params := BrowseParams{
@@ -459,7 +478,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		Query:   q.Get("q"),
 	}
 
-	syncStatus := loadSyncStatus()
+	syncStatus := loadSyncStatus(lang)
 	// Sidebar project list: union of DB projects + config projects.
 	projectNames := s.effectiveProjectNames(ctx, syncStatus)
 
@@ -469,13 +488,13 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		items := []GroupNavItem{
 			{
 				Sub:      "",
-				Label:    "All",
+				Label:    i18n.T(lang, "browse.all"),
 				URL:      "/browse?project=" + params.Project,
 				IsActive: params.Sub == "",
 			},
 			{
 				Sub:      "core",
-				Label:    params.Project + " (core)",
+				Label:    i18n.Tf(lang, "browse.subNavCore", params.Project),
 				URL:      "/browse?project=" + params.Project + "&sub=core",
 				IsActive: params.Sub == "core",
 			},
@@ -501,9 +520,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	if s.db != nil && params.Query == "" {
 		views, types, ok := s.browseFromDB(ctx, params)
 		if ok {
-			if err := browsePage(params, views, projectNames, types, groupNav).Render(ctx, w); err != nil {
-				s.logger.Error("render browse", "err", err)
-			}
+			s.renderBrowse(w, r, params, views, projectNames, types, groupNav)
 			return
 		}
 		s.logger.Warn("engramdb browse failed; falling back to HTTP/FTS")
@@ -524,7 +541,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 				s.logger.Warn("browse search failed", "err", err)
 			}
 			for _, o := range raw {
-				allViews = append(allViews, enrichObs(o))
+				allViews = append(allViews, enrichObs(o, lang))
 			}
 		}
 	case params.Project != "":
@@ -575,7 +592,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("browse search failed", "err", err)
 		}
 		for _, o := range raw {
-			allViews = append(allViews, enrichObs(o))
+			allViews = append(allViews, enrichObs(o, lang))
 		}
 	}
 
@@ -597,6 +614,26 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		views = append(views, v)
 	}
 
+	s.renderBrowse(w, r, params, views, projectNames, types, groupNav)
+}
+
+// renderBrowse writes the browse response, branching on whether this is an
+// htmx-driven filter change or a plain navigation. Requests carrying the
+// HX-Request header (set automatically by htmx for every ajax call — see
+// browseRegion's hx-get attributes) get just the #browse-region fragment;
+// everything else — including a plain GET with query params typed/bookmarked
+// directly, or any client with JS/htmx unavailable — gets the full page. Both
+// render paths in handleBrowse (structural DB path and FTS/semantic
+// fallback) funnel through here so the fragment/full-page decision is made
+// in exactly one place.
+func (s *Server) renderBrowse(w http.ResponseWriter, r *http.Request, params BrowseParams, views []ObsView, projectNames []string, types []string, groupNav *GroupNav) {
+	ctx := r.Context()
+	if r.Header.Get("HX-Request") == "true" {
+		if err := browseRegion(params, views, projectNames, types, groupNav).Render(ctx, w); err != nil {
+			s.logger.Error("render browse fragment", "err", err)
+		}
+		return
+	}
 	if err := browsePage(params, views, projectNames, types, groupNav).Render(ctx, w); err != nil {
 		s.logger.Error("render browse", "err", err)
 	}
@@ -626,6 +663,7 @@ func (s *Server) semanticSearch(ctx context.Context, params BrowseParams) ([]Obs
 	if s.sem == nil || s.db == nil {
 		return nil, false
 	}
+	lang := i18n.LangFrom(ctx)
 
 	// Bound the interactive query embedding so a slow/down Ollama can't hang the
 	// browse request for the client's full 60s timeout before FTS takes over.
@@ -672,7 +710,7 @@ func (s *Server) semanticSearch(ctx context.Context, params BrowseParams) ([]Obs
 	}
 	byID := make(map[int]ObsView, len(rows))
 	for _, o := range rows {
-		byID[o.ID] = enrichObs(obsFromDB(o))
+		byID[o.ID] = enrichObs(obsFromDB(o), lang)
 	}
 
 	// Optional project scoping (canonical match; group parents include children).
@@ -764,6 +802,7 @@ func (s *Server) expandCanonical(ctx context.Context, canonical string) ([]strin
 // aliased canonicals like "velion" retrieve "01.- velion" and "01.- Velion" rows
 // that CanonicalProject's LOWER(TRIM) = ? would miss.
 func (s *Server) browseFromDB(ctx context.Context, params BrowseParams) ([]ObsView, []string, bool) {
+	lang := i18n.LangFrom(ctx)
 	f := engramdb.Filter{
 		Type:  params.Type,
 		Limit: 1000,
@@ -832,7 +871,7 @@ func (s *Server) browseFromDB(ctx context.Context, params BrowseParams) ([]ObsVi
 	// Enrich and apply meta-only filters (Source, Kind) client-side.
 	views := make([]ObsView, 0, len(dbObs))
 	for _, o := range dbObs {
-		v := enrichObs(obsFromDB(o))
+		v := enrichObs(obsFromDB(o), lang)
 		if params.Source != "" && v.Meta.Source != params.Source {
 			continue
 		}
@@ -873,7 +912,7 @@ func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	v := enrichObs(*obs)
+	v := enrichObs(*obs, i18n.LangFrom(ctx))
 	backURL := r.Header.Get("Referer")
 	if backURL == "" {
 		backURL = "/browse"
@@ -891,7 +930,7 @@ func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	status := loadSyncStatus()
+	status := loadSyncStatus(i18n.LangFrom(ctx))
 	targets := s.syncTargetViews(ctx)
 	if err := syncStatusPage(status, targets).Render(ctx, w); err != nil {
 		s.logger.Error("render sync status", "err", err)
@@ -915,7 +954,7 @@ func (s *Server) handleEditForm(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "observation not found", http.StatusNotFound)
 		return
 	}
-	v := enrichObs(*obs)
+	v := enrichObs(*obs, i18n.LangFrom(ctx))
 	if err := editForm(v).Render(ctx, w); err != nil {
 		s.logger.Error("render edit form", "err", err)
 	}
@@ -1129,7 +1168,7 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 // children); ?k= and ?min= tune the kNN neighbor cap and similarity threshold.
 func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	syncStatus := loadSyncStatus()
+	syncStatus := loadSyncStatus(i18n.LangFrom(ctx))
 	projects := s.effectiveProjectNames(ctx, syncStatus)
 
 	q := r.URL.Query()
@@ -1146,7 +1185,14 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nodes, edges, err := s.sem.Graph(k, float32(minScore))
+	// H3 perf fix (audit obs #1484/#1488): scope the O(N^2) similarity scan to
+	// the selected project (+ group children, + alias raw names) in SQL,
+	// instead of scanning every project's embeddings on every /graph view
+	// regardless of the ?project filter. buildGraphView's own canon/allowed
+	// filtering below is left unchanged as a correctness safety net.
+	rawProjects := s.graphRawProjects(ctx, project)
+
+	nodes, edges, err := s.sem.Graph(rawProjects, k, float32(minScore))
 	if err != nil {
 		s.logger.Error("build semantic graph", "err", err)
 		view := GraphView{Available: false, Projects: projects, Project: project, K: k, Min: minScore}
@@ -1160,6 +1206,49 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 	if err := graphPage(view).Render(ctx, w); err != nil {
 		s.logger.Error("render graph", "err", err)
 	}
+}
+
+// graphRawProjects resolves the ?project= graph filter to the raw DB project
+// name variants the O(N^2) similarity scan should be scoped to: the project
+// itself (plus its group children when it is a group parent), expanded
+// through the project_groups + alias config exactly like browseFromDB does
+// for the structural DB (rawProjectsForCanonical / GroupIndex.groupRawNames)
+// — so the SQL scope change (H3) is a pure performance narrowing and never
+// silently drops a row the previous whole-store scan used to include.
+//
+// project == "" returns nil (whole-store, unscoped — unchanged behavior).
+// When raw-name resolution is unavailable (no structural DB) or yields
+// nothing, this degrades to the literal canonical name(s) so the SQL filter
+// still narrows the common (unaliased) case instead of failing closed.
+func (s *Server) graphRawProjects(ctx context.Context, project string) []string {
+	if project == "" {
+		return nil
+	}
+	fallback := []string{project}
+	if s.groups.IsParent(project) {
+		fallback = append(fallback, s.groups.Children(project)...)
+	}
+	if s.db == nil {
+		return fallback
+	}
+	rawAll, err := s.db.Projects(ctx)
+	if err != nil {
+		return fallback
+	}
+	rawAllNames := make([]string, len(rawAll))
+	for i, pc := range rawAll {
+		rawAllNames[i] = pc.Name
+	}
+	var rawNames []string
+	if s.groups.IsParent(project) {
+		rawNames = s.groups.groupRawNames(project, rawAllNames, s.cfg.ProjectAliases)
+	} else {
+		rawNames = rawProjectsForCanonical(project, rawAllNames, s.cfg.ProjectAliases)
+	}
+	if len(rawNames) == 0 {
+		return fallback
+	}
+	return rawNames
 }
 
 // resolveActor returns the provisional identity for an HTTP request.

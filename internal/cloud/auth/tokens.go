@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // Managed per-user tokens (OBL-01). A managed token is a high-entropy random

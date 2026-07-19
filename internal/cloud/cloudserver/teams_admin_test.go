@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	cloudauth "github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	cloudauth "github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // ─── Fake teamsAdminStore ─────────────────────────────────────────────────────
@@ -182,6 +182,45 @@ func (s *fakeTeamsStore) ListMembersOfTeam(_ context.Context, teamID string) ([]
 		out = append(out, m)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].AccountID < out[j].AccountID })
+	return out, nil
+}
+
+// ListTeamDerivedGrantsForAccount is the fake's account-keyed equivalent of
+// scanning s.teamMembers for every team, mirroring the real batched SQL join
+// (WHERE tm.account_id = $1) ordered the same way (project ASC, team ASC) so
+// tests asserting on Sources order match the production query.
+func (s *fakeTeamsStore) ListTeamDerivedGrantsForAccount(_ context.Context, accountID string) ([]cloudstore.TeamDerivedGrant, error) {
+	var out []cloudstore.TeamDerivedGrant
+	for teamID, members := range s.teamMembers {
+		profileID, isMember := members[accountID]
+		if !isMember {
+			continue
+		}
+		team, ok := s.teams[teamID]
+		if !ok {
+			continue
+		}
+		var perms int
+		var profileName string
+		if p, ok := s.profiles[profileID]; ok {
+			perms = p.Perms
+			profileName = p.Name
+		}
+		for project := range s.teamProjects[teamID] {
+			out = append(out, cloudstore.TeamDerivedGrant{
+				Team:    team.Name,
+				Project: project,
+				Profile: profileName,
+				Perms:   perms,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Project != out[j].Project {
+			return out[i].Project < out[j].Project
+		}
+		return out[i].Team < out[j].Team
+	})
 	return out, nil
 }
 
@@ -401,7 +440,7 @@ func TestRBACAuthorizerUsesEffectivePermsResolver(t *testing.T) {
 	ra := &rbacAuthorizer{store: ms, resolver: res}
 	claims := &cloudauth.AccountClaims{AccountID: "acct"}
 
-	if err := ra.AuthorizeAccountProject(claims, "proj", cloudauth.PermInsert); err != nil {
+	if err := ra.AuthorizeAccountProject(context.Background(), claims, "proj", cloudauth.PermInsert); err != nil {
 		t.Fatalf("resolver grants insert but authorize denied: %v", err)
 	}
 	if !res.called {
@@ -411,7 +450,7 @@ func TestRBACAuthorizerUsesEffectivePermsResolver(t *testing.T) {
 	// Resolver denies (0) → deny even though a flat membership grants read.
 	res2 := &stubResolver{perms: 0}
 	ra2 := &rbacAuthorizer{store: ms, resolver: res2}
-	if err := ra2.AuthorizeAccountProject(claims, "proj", cloudauth.PermRead); err == nil {
+	if err := ra2.AuthorizeAccountProject(context.Background(), claims, "proj", cloudauth.PermRead); err == nil {
 		t.Fatal("resolver denies but authorize allowed — deny-by-default broken")
 	}
 }
@@ -425,13 +464,13 @@ func TestRBACAuthorizerFallsBackToMembership(t *testing.T) {
 	ra := &rbacAuthorizer{store: ms} // resolver nil
 	claims := &cloudauth.AccountClaims{AccountID: "acct"}
 
-	if err := ra.AuthorizeAccountProject(claims, "proj", cloudauth.PermRead); err != nil {
+	if err := ra.AuthorizeAccountProject(context.Background(), claims, "proj", cloudauth.PermRead); err != nil {
 		t.Fatalf("membership grants read but denied: %v", err)
 	}
-	if err := ra.AuthorizeAccountProject(claims, "proj", cloudauth.PermInsert); err == nil {
+	if err := ra.AuthorizeAccountProject(context.Background(), claims, "proj", cloudauth.PermInsert); err == nil {
 		t.Fatal("membership is read-only but insert allowed")
 	}
-	if err := ra.AuthorizeAccountProject(claims, "other", cloudauth.PermRead); err == nil {
+	if err := ra.AuthorizeAccountProject(context.Background(), claims, "other", cloudauth.PermRead); err == nil {
 		t.Fatal("no membership on 'other' but read allowed — deny-by-default broken")
 	}
 }

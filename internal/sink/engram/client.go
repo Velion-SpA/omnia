@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/core"
+	"github.com/velion/omnia/internal/core"
 )
 
 const (

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/chunkcodec"
-	engramsync "github.com/Velion-SpA/omnia/internal/sync"
+	"github.com/velion/omnia/internal/cloud/chunkcodec"
+	engramsync "github.com/velion/omnia/internal/sync"
 )
 
 func TestReadManifestReturnsHTTPStatusErrorForAuthAndPolicyFailures(t *testing.T) {

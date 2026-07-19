@@ -18,12 +18,22 @@ type Scope struct {
 	// All grants visibility into every replicated project (server operator).
 	All bool
 
+	// AccountID is the authenticated account's identity, when known. It is the
+	// additional tenant boundary cloud_embeddings enforces (PR5 slice 3):
+	// cloud_embeddings' primary key is (account_id, project, sync_id), mirroring
+	// cloud_memberships/cloud_devices. Empty for the operator (All=true) and for
+	// the legacy no-RBAC path — cloud semantic search then degrades to no hits
+	// rather than guessing a tenant boundary (see clouddash's cloudSemanticIndex).
+	AccountID string
+
 	projects map[string]struct{}
 }
 
-// NewScope builds a Scope from the operator flag and the account's visible
-// project names. Blank names are dropped.
-func NewScope(all bool, projects []string) Scope {
+// NewScope builds a Scope from the operator flag, the account's visible
+// project names, and (for an authenticated account session) its account_id.
+// Blank names are dropped. accountID is normally "" for the operator/legacy
+// no-RBAC path.
+func NewScope(all bool, projects []string, accountID string) Scope {
 	set := make(map[string]struct{}, len(projects))
 	for _, p := range projects {
 		p = strings.TrimSpace(p)
@@ -31,7 +41,18 @@ func NewScope(all bool, projects []string) Scope {
 			set[p] = struct{}{}
 		}
 	}
-	return Scope{All: all, projects: set}
+	return Scope{All: all, projects: set, AccountID: strings.TrimSpace(accountID)}
+}
+
+// Names returns the explicit set of project names this scope grants (empty
+// for the operator scope, which grants visibility via All instead of an
+// enumerated list).
+func (s Scope) Names() []string {
+	out := make([]string, 0, len(s.projects))
+	for p := range s.projects {
+		out = append(out, p)
+	}
+	return out
 }
 
 // CanView reports whether this scope may see the given project. The operator may

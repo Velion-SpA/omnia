@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	repoOwner = "velion"
-	repoName  = "omnia"
+	repoOwner = "Gentleman-Programming"
+	repoName  = "engram"
 )
 
 var (
@@ -152,9 +152,9 @@ func updateInstructions() string {
 	case "darwin":
 		return "  brew update && brew upgrade omnia"
 	case "linux":
-		return "  brew update && brew upgrade omnia\n  or: go install github.com/Velion-SpA/omnia/cmd/omnia@latest"
+		return "  brew update && brew upgrade omnia\n  or: go install github.com/velion/omnia/cmd/omnia@latest"
 	default:
-		return "  go install github.com/Velion-SpA/omnia/cmd/omnia@latest\n  or: https://github.com/Velion-SpA/omnia/releases/latest"
+		return "  go install github.com/velion/omnia/cmd/omnia@latest\n  or: https://github.com/velion/omnia/releases/latest"
 	}
 }
 

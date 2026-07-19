@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/audit"
+	"github.com/velion/omnia/internal/audit"
 )
 
 func TestAppendAndRead(t *testing.T) {

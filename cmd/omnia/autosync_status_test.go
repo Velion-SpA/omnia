@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/autosync"
-	engramsrv "github.com/Velion-SpA/omnia/internal/server"
+	"github.com/velion/omnia/internal/cloud/autosync"
+	engramsrv "github.com/velion/omnia/internal/server"
 )
 
 // fakeStatusProvider implements server.SyncStatusProvider for fallback tests.

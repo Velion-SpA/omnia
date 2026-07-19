@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/config"
-	"github.com/Velion-SpA/omnia/internal/embed"
-	"github.com/Velion-SpA/omnia/internal/engramdb"
+	"github.com/velion/omnia/internal/config"
+	"github.com/velion/omnia/internal/embed"
+	"github.com/velion/omnia/internal/engramdb"
 )
 
 // cmdEmbed reconciles Omnia's own embeddings store with the live observations in

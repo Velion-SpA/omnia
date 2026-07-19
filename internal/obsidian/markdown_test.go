@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 func strPtr(s string) *string { return &s }

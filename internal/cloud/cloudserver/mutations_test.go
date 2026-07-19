@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
-	"github.com/Velion-SpA/omnia/internal/store"
-	engramsync "github.com/Velion-SpA/omnia/internal/sync"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/store"
+	engramsync "github.com/velion/omnia/internal/sync"
 )
 
 // ─── Fakes for mutation tests ─────────────────────────────────────────────────
@@ -45,7 +45,7 @@ func newFakeMutationStore() *fakeMutationStore {
 	}
 }
 
-func (s *fakeMutationStore) IsProjectSyncEnabled(project string) (bool, error) {
+func (s *fakeMutationStore) IsProjectSyncEnabled(_ context.Context, project string) (bool, error) {
 	if enabled, ok := s.syncEnabledMap[project]; ok {
 		return enabled, nil
 	}

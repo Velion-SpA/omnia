@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/store"
 )
 
 // deviceToucher is the store seam for stamping a device's last_seen_at on each

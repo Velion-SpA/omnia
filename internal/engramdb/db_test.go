@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/engramdb"
+	"github.com/velion/omnia/internal/engramdb"
 )
 
 // createTestDB builds a throwaway SQLite database in a temp dir with the same

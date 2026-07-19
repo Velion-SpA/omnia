@@ -26,7 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/envx"
+	"github.com/velion/omnia/internal/envx"
 )
 
 const (

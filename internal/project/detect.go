@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/velion/omnia/internal/projectname"
 )
 
 // ErrAmbiguousProject is returned when the working directory is a parent of
@@ -142,7 +144,10 @@ func DetectProjectFull(dir string) DetectionResult {
 			// Case 4: multiple children → ambiguous.
 			names := make([]string, len(children))
 			for i, c := range children {
-				names[i] = normalize(filepath.Base(c))
+				// Candidate names intentionally use normalizeCandidateName
+				// (lowercase+trim only), NOT normalize (which collapses
+				// separators). See normalizeCandidateName's doc comment.
+				names[i] = normalizeCandidateName(filepath.Base(c))
 			}
 			absDir, _ := filepath.Abs(dir)
 			// REQ-304: Project is empty on ambiguous (spec is authoritative).
@@ -360,15 +365,43 @@ func DetectProject(dir string) string {
 	return res.Project
 }
 
-// normalize applies canonical project name rules: lowercase + trim whitespace.
-// It mirrors the normalization applied by the store layer so that DetectProject
-// always returns a value that is consistent with stored project names.
+// normalize applies canonical project name rules by delegating to the
+// shared internal/projectname leaf package (lowercase + trim whitespace +
+// collapse consecutive hyphens/underscores), falling back to "unknown" for
+// empty input. This guarantees DetectProject always returns a value that is
+// consistent with the store and config normalization paths.
+//
+// Used for every FINAL resolved Project value (git_remote, git_root,
+// git_child auto-promote, dir_basename, explicit config). It is NOT used
+// for building the ambiguous-project AvailableProjects candidate list — see
+// normalizeCandidateName for why that needs a different rule.
 func normalize(name string) string {
-	n := strings.TrimSpace(strings.ToLower(name))
-	if n == "" {
-		return "unknown"
-	}
-	return n
+	return projectname.NormalizeOrUnknown(name)
+}
+
+// normalizeCandidateName lightly normalizes a directory basename for display
+// as an ambiguous-project candidate (DetectionResult.AvailableProjects):
+// lowercase + trim only, deliberately WITHOUT collapsing repeated "-"/"_"
+// separators the way normalize (and the canonical internal/projectname
+// leaf package) does.
+//
+// This is intentional, not a leftover divergence: when cwd contains sibling
+// git repos whose names only differ by separator repetition (e.g.
+// "foo--bar" vs "foo-bar"), the candidate list must keep them as distinct,
+// literal strings so:
+//  1. internal/mcp's exact-match requirement (containsProjectChoice) can
+//     reject a caller that guesses the collapsed form instead of picking a
+//     real candidate verbatim, and
+//  2. internal/mcp's collision guard (normalizedProjectCollisions /
+//     normalizedProjectCollisionError) can detect that two DISTINCT raw
+//     candidates would collapse into the same canonical store bucket, and
+//     refuse to write rather than silently guessing.
+//
+// If this collapsed separators like normalize does, both safeguards would
+// be defeated: the candidate list itself would already be pre-collapsed,
+// so a caller's collapsed guess would wrongly pass the exact-match check.
+func normalizeCandidateName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 // detectFromGitRemote attempts to determine the project name from the git

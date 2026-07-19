@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/engramdb"
+	"github.com/velion/omnia/internal/engramdb"
 )
 
 // createSyncTablesDB builds a throwaway DB with the sync tables CloudTargetKeys

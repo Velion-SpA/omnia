@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/setup"
-	"github.com/Velion-SpA/omnia/internal/store"
-	"github.com/Velion-SpA/omnia/internal/version"
+	"github.com/velion/omnia/internal/setup"
+	"github.com/velion/omnia/internal/store"
+	"github.com/velion/omnia/internal/version"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 )

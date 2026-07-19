@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 // ─── OSC 52 sequence generation ──────────────────────────────────────────────

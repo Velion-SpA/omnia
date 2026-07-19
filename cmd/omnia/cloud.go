@@ -12,16 +12,17 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/cloud"
-	"github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudserver"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
-	"github.com/Velion-SpA/omnia/internal/cloud/constants"
-	"github.com/Velion-SpA/omnia/internal/cloud/remote"
-	"github.com/Velion-SpA/omnia/internal/datadir"
-	"github.com/Velion-SpA/omnia/internal/envx"
-	"github.com/Velion-SpA/omnia/internal/store"
-	engramsync "github.com/Velion-SpA/omnia/internal/sync"
+	"github.com/velion/omnia/internal/cloud"
+	"github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudserver"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/cloud/constants"
+	"github.com/velion/omnia/internal/cloud/remote"
+	"github.com/velion/omnia/internal/datadir"
+	"github.com/velion/omnia/internal/embed"
+	"github.com/velion/omnia/internal/envx"
+	"github.com/velion/omnia/internal/store"
+	engramsync "github.com/velion/omnia/internal/sync"
 )
 
 type cloudServerRuntime interface {
@@ -80,9 +81,25 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
 			// Open signup is closed by default (OBL-02); reopen only via explicit env.
 			cloudserver.WithOpenSignup(envBool("OMNIA_CLOUD_OPEN_SIGNUP")),
+			// Cloud semantic parity (design D5, PR5 slice 3): disabled by
+			// default (D7 rollback guarantee, cloud side).
+			cloudserver.WithCloudSemantic(cfg.CloudSemanticEnabled, cloudSemanticQueryEmbedder(cfg)),
 		),
 		store: cs,
 	}, nil
+}
+
+// cloudSemanticQueryEmbedder builds the OPTIONAL query embedder for cloud
+// semantic search from cfg. Returns nil when no Ollama endpoint is
+// configured for the cloud host — interactive query embedding then degrades
+// cleanly (clouddash.cloudSemanticIndex.EmbedQuery), while corpus-side
+// search over vectors already synced in from devices that DO run Ollama
+// still works for any caller that supplies its own query vector.
+func cloudSemanticQueryEmbedder(cfg cloud.Config) embed.Embedder {
+	if strings.TrimSpace(cfg.CloudSemanticEmbedBaseURL) == "" {
+		return nil
+	}
+	return embed.New(cfg.CloudSemanticEmbedBaseURL, cfg.CloudSemanticEmbedModel, cfg.CloudSemanticEmbedDim)
 }
 
 func backfillAllowedProjectMutationChunks(ctx context.Context, cs *cloudstore.CloudStore, projects []string) error {

@@ -11,10 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
-	"github.com/Velion-SpA/omnia/internal/dashboard"
-	"github.com/Velion-SpA/omnia/internal/ui"
+	"github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/dashboard"
+	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
 )
 
 // Operator-only dashboard Admin section (OBL-13). These handlers render the Admin
@@ -35,10 +36,24 @@ type adminDashboardStore interface {
 	UpsertMembership(ctx context.Context, accountID, project string, perms int, role string) error
 	DeleteMembership(ctx context.Context, accountID, project string) error
 	ListManagedTokensForUser(ctx context.Context, userID string) ([]cloudstore.ManagedTokenView, error)
-	// OBL-16: account-level admin flag administration + the last-admin guard.
+	// OBL-16: account-level admin flag administration.
 	IsUserAdmin(ctx context.Context, accountID string) (bool, error)
 	SetUserAdmin(ctx context.Context, accountID string, admin bool) error
 	CountAdmins(ctx context.Context) (int, error)
+	// Security fix (Slice 1 review): DemoteUserAdminGuarded is the atomic,
+	// race-safe demote entry point (see cloudstore.lockAdminIDsForUpdate).
+	// Unlike SetUserAdmin (still used directly for promote, which never
+	// needs guarding), this folds the last-admin check and the write into
+	// one transaction.
+	DemoteUserAdminGuarded(ctx context.Context, accountID string) error
+	// Command Center v2, Slice 1: operator-facing user CRUD (create, edit,
+	// password reset, hard delete). Named with an Admin prefix on the store
+	// side (cloudstore.CloudStore) so they never collide with the plain
+	// CreateUser used by the self-service Signup path.
+	AdminCreateUser(ctx context.Context, username, email, passwordHash string) (string, error)
+	AdminUpdateUser(ctx context.Context, accountID, username, email string) error
+	AdminSetUserPassword(ctx context.Context, accountID, passwordHash string) error
+	AdminHardDeleteUser(ctx context.Context, accountID string) error
 }
 
 // Compile-time assertion: the concrete store must satisfy the admin seam.
@@ -74,9 +89,19 @@ func (s *CloudServer) requireOperator(w http.ResponseWriter, r *http.Request) bo
 // adminLayoutProps builds the shared shell props for an Admin page: the standard
 // dashboard nav plus the operator-only Admin entry, the operator identity and a
 // logout action.
-func (s *CloudServer) adminLayoutProps(title, active string) ui.LayoutProps {
+//
+// i18n Slice 3: takes ctx (every caller already has r.Context() on hand) so
+// it can run the SAME dashboard.TranslateShellProps pass the shared
+// dashboard's own layoutPropsForContext applies — translating the Nav item
+// labels (nav.<id> catalog keys), BrandSub and StatusText — which this
+// function never went through before (Admin pages build LayoutProps
+// directly, not via layoutPropsForContext). The "operator" identity itself
+// is translated separately since it isn't part of TranslateShellProps' scope
+// (it's Admin-specific hardcoded identity, not the account-session username
+// layoutPropsForContext handles).
+func (s *CloudServer) adminLayoutProps(ctx context.Context, title, active string) ui.LayoutProps {
 	nav := append(dashboard.BaseNavItems(), dashboard.AdminNavItem())
-	return ui.LayoutProps{
+	props := ui.LayoutProps{
 		Title:      title,
 		BrandTitle: "Omnia",
 		BrandSub:   "Unified Knowledge",
@@ -84,10 +109,12 @@ func (s *CloudServer) adminLayoutProps(title, active string) ui.LayoutProps {
 		Nav:        nav,
 		Active:     active,
 		StatusText: "Online",
-		User:       "operator",
+		User:       ui.T(ctx, "admin.operatorLabel"),
 		LogoutURL:  dashboardLogoutPath,
 		AssetBase:  "/static",
 	}
+	dashboard.TranslateShellProps(ctx, &props)
+	return props
 }
 
 // ─── view models ─────────────────────────────────────────────────────────────
@@ -120,33 +147,22 @@ type adminUsersView struct {
 type adminUserOption struct {
 	ID       string
 	Username string
+	Email    string
 	Selected bool
 }
 
-type adminMembershipRow struct {
-	Project   string
-	Read      bool
-	Insert    bool
-	Update    bool
-	Delete    bool
-	Role      string
-	Summary   string
-	DeleteURL string // pre-encoded DELETE /admin/memberships/{account_id}/{project}
-}
-
+// adminAccessView backs the Command Center v2, Slice 3 unified Access page:
+// ONE merged row per project (see mergeUnifiedAccessRows in
+// admin_access_unified.go) instead of the old two disconnected sections
+// (a per-project override list + a read-only "from teams" list below it).
 type adminAccessView struct {
-	Props        ui.LayoutProps
-	Users        []adminUserOption
-	SelectedID   string
-	SelectedName string
-	Memberships  []adminMembershipRow
-	Roles        []string
-	// Team-derived, read-only "from teams" section (OBL-15). Populated only when
-	// the store supports teams administration. Grouped by project classification.
-	HasTeams     bool
-	TeamPersonal []adminTeamPermRow
-	TeamWork     []adminTeamPermRow
-	TeamOther    []adminTeamPermRow
+	Props         ui.LayoutProps
+	Users         []adminUserOption
+	SelectedID    string
+	SelectedName  string
+	SelectedEmail string
+	Rows          []unifiedAccessRow
+	Roles         []string
 }
 
 // adminTeamPermRow is one project's team-derived effective perms for the selected
@@ -211,14 +227,15 @@ func (s *CloudServer) handleAdminUsersPage(w http.ResponseWriter, r *http.Reques
 		}
 		rows = append(rows, toAdminUserRow(u, tokens))
 	}
-	view := adminUsersView{Props: s.adminLayoutProps("Admin · Users", "admin"), Users: rows}
+	view := adminUsersView{Props: s.adminLayoutProps(r.Context(), "Admin · Users", "admin"), Users: rows}
 	if err := adminUsersPage(view).Render(r.Context(), w); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 	}
 }
 
-// handleAdminAccessPage renders GET /admin/access — the operator Access page for a
-// selected user's memberships.
+// handleAdminAccessPage renders GET /admin/access — the operator's unified
+// Access page for a selected account (Command Center v2, Slice 3): one merged
+// row per project instead of the old override list + read-only team section.
 func (s *CloudServer) handleAdminAccessPage(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperator(w, r) {
 		return
@@ -239,50 +256,120 @@ func (s *CloudServer) handleAdminAccessPage(w http.ResponseWriter, r *http.Reque
 	}
 
 	opts := make([]adminUserOption, 0, len(users))
-	selectedName := ""
+	selectedName, selectedEmail := "", ""
 	for _, u := range users {
 		isSel := u.ID == selected
 		if isSel {
 			selectedName = u.Username
+			selectedEmail = u.Email
 		}
-		opts = append(opts, adminUserOption{ID: u.ID, Username: u.Username, Selected: isSel})
+		opts = append(opts, adminUserOption{ID: u.ID, Username: u.Username, Email: u.Email, Selected: isSel})
 	}
 
-	var memRows []adminMembershipRow
-	overridden := map[string]bool{}
+	var rows []unifiedAccessRow
 	if selected != "" {
-		mems, merr := as.ListMembershipsForUser(r.Context(), selected)
-		if merr != nil {
-			http.Error(w, "could not list memberships", http.StatusInternalServerError)
+		rows, err = s.buildUnifiedAccessRows(r.Context(), as, selected)
+		if err != nil {
+			http.Error(w, "could not compute access", http.StatusInternalServerError)
 			return
-		}
-		memRows = make([]adminMembershipRow, 0, len(mems))
-		for _, m := range mems {
-			row := toAdminMembershipRow(m)
-			row.DeleteURL = adminMembershipDeletePath(selected, m.Project)
-			memRows = append(memRows, row)
-			overridden[m.Project] = true
 		}
 	}
 
 	view := adminAccessView{
-		Props:        s.adminLayoutProps("Admin · Access", "admin"),
-		Users:        opts,
-		SelectedID:   selected,
-		SelectedName: selectedName,
-		Memberships:  memRows,
-		Roles:        adminRoleOptions(),
-	}
-
-	// The read-only "from teams" section: the team-union perms per project for the
-	// selected account, shown BELOW the per-project overrides so the operator sees
-	// the full effective picture (override wins where present).
-	if ts, tok := s.teamsStore(); tok && selected != "" {
-		view.HasTeams = true
-		view.TeamPersonal, view.TeamWork, view.TeamOther = s.teamDerivedForAccount(r.Context(), ts, selected, overridden)
+		Props:         s.adminLayoutProps(r.Context(), "Admin · Access", "admin"),
+		Users:         opts,
+		SelectedID:    selected,
+		SelectedName:  selectedName,
+		SelectedEmail: selectedEmail,
+		Rows:          rows,
+		Roles:         adminRoleOptions(),
 	}
 
 	if err := adminAccessPage(view).Render(r.Context(), w); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+	}
+}
+
+// ─── unified Access row fragments (Command Center v2, Slice 3) ──────────────
+//
+// Pure view wiring, no store mutation — the same convention as the Slice 2
+// hard-delete confirm/cancel round trip (handleAdminUserDeleteConfirm/
+// -Cancel): every fragment recomputes buildUnifiedAccessRows (the SAME
+// view-model the full page renders) so a row's edit / revoke-confirm state
+// can never drift from what GET /admin/access shows. The actual mutations
+// they trigger are the PRE-EXISTING, operator-gated PUT/DELETE
+// /admin/memberships routes — nothing new is added to the write path.
+
+// loadAccessRow resolves the (account_id, project) path pair, requires the
+// operator, and returns the merged row for that pair. It writes the HTTP
+// error itself and returns ok=false on any failure (missing store support,
+// missing path params, or an unknown project for that account).
+func (s *CloudServer) loadAccessRow(w http.ResponseWriter, r *http.Request) (unifiedAccessRow, bool) {
+	if !s.requireOperator(w, r) {
+		return unifiedAccessRow{}, false
+	}
+	as, ok := s.adminStore()
+	if !ok {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "admin unavailable"})
+		return unifiedAccessRow{}, false
+	}
+	accountID := strings.TrimSpace(r.PathValue("account_id"))
+	project := strings.TrimSpace(r.PathValue("project"))
+	if accountID == "" || project == "" {
+		http.Error(w, "account_id and project are required", http.StatusBadRequest)
+		return unifiedAccessRow{}, false
+	}
+	rows, err := s.buildUnifiedAccessRows(r.Context(), as, accountID)
+	if err != nil {
+		http.Error(w, "could not compute access", http.StatusInternalServerError)
+		return unifiedAccessRow{}, false
+	}
+	for _, row := range rows {
+		if row.Project == project {
+			return row, true
+		}
+	}
+	http.Error(w, "project not found", http.StatusNotFound)
+	return unifiedAccessRow{}, false
+}
+
+// handleAdminAccessRowView handles GET /admin/access/rows/{account_id}/{project}
+// — the default (non-editing) state of one row, also the Cancel target for
+// both the edit form and the revoke-confirm dialog below.
+func (s *CloudServer) handleAdminAccessRowView(w http.ResponseWriter, r *http.Request) {
+	row, ok := s.loadAccessRow(w, r)
+	if !ok {
+		return
+	}
+	if err := adminAccessRowView(row).Render(r.Context(), w); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+	}
+}
+
+// handleAdminAccessRowEdit handles GET .../{project}/edit — swaps the row
+// into an inline form (role + R/W/U/D checkboxes) that PUTs to the existing
+// /admin/memberships route. Serves all three triggers ("Edit" on an override,
+// "Override…" on a team row, "Grant…" on a None row) since they differ only
+// in the form's pre-filled defaults, computed from the SAME row.
+func (s *CloudServer) handleAdminAccessRowEdit(w http.ResponseWriter, r *http.Request) {
+	row, ok := s.loadAccessRow(w, r)
+	if !ok {
+		return
+	}
+	if err := adminAccessRowEdit(adminRoleOptions(), row).Render(r.Context(), w); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+	}
+}
+
+// handleAdminAccessRowRevokeConfirm handles GET .../{project}/revoke — swaps
+// the row into the reused ui.ConfirmDialog (Slice 0), wired to the existing
+// DELETE /admin/memberships/{account_id}/{project} route.
+func (s *CloudServer) handleAdminAccessRowRevokeConfirm(w http.ResponseWriter, r *http.Request) {
+	row, ok := s.loadAccessRow(w, r)
+	if !ok {
+		return
+	}
+	if err := adminAccessRowRevokeConfirm(row).Render(r.Context(), w); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 	}
 }
@@ -473,34 +560,39 @@ func (s *CloudServer) setUserAdmin(w http.ResponseWriter, r *http.Request, admin
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "user id is required"})
 		return
 	}
+	if !isNumericID(userID) {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "user id must be numeric"})
+		return
+	}
 	// Last-admin guard: demoting the only remaining admin would lock every account
 	// admin out of the Admin section, so refuse it. The OMNIA_CLOUD_ADMIN recovery
 	// token still grants operator regardless — this only protects the account model
 	// from becoming unreachable through the UI.
-	if !admin {
-		isAdmin, err := as.IsUserAdmin(r.Context(), userID)
-		if err != nil {
-			jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not check admin status"})
-			return
-		}
-		if isAdmin {
-			count, err := as.CountAdmins(r.Context())
-			if err != nil {
-				jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not count admins"})
-				return
-			}
-			if count <= 1 {
-				jsonResponse(w, http.StatusConflict, map[string]string{"error": "cannot demote the last remaining admin"})
-				return
-			}
-		}
+	//
+	// SECURITY FIX (Slice 1 review): the guard used to be a separate
+	// IsUserAdmin + CountAdmins read followed by a SEPARATE SetUserAdmin
+	// write — a classic check-then-act TOCTOU where two concurrent demotes
+	// of DIFFERENT admins could each observe count > 1 before either write
+	// committed, leaving zero admins. DemoteUserAdminGuarded folds the check
+	// and the write into ONE transaction with row-level locking
+	// (lockAdminIDsForUpdate), making it race-safe. Promote never needs
+	// guarding (granting admin can't reduce the admin count), so it still
+	// calls the plain, unconditional SetUserAdmin.
+	var err error
+	if admin {
+		err = as.SetUserAdmin(r.Context(), userID, true)
+	} else {
+		err = as.DemoteUserAdminGuarded(r.Context(), userID)
 	}
-	if err := as.SetUserAdmin(r.Context(), userID, admin); err != nil {
-		if errors.Is(err, cloudstore.ErrManagedTokenUserNotFound) {
+	if err != nil {
+		switch {
+		case errors.Is(err, cloudstore.ErrLastAdmin):
+			jsonResponse(w, http.StatusConflict, map[string]string{"error": "cannot demote the last remaining admin"})
+		case errors.Is(err, cloudstore.ErrManagedTokenUserNotFound):
 			jsonResponse(w, http.StatusNotFound, map[string]string{"error": "user not found"})
-			return
+		default:
+			jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not update admin status"})
 		}
-		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "could not update admin status"})
 		return
 	}
 	status := "demoted"
@@ -520,6 +612,95 @@ func (s *CloudServer) setUserAdmin(w http.ResponseWriter, r *http.Request, admin
 		Metadata:    map[string]any{"user_id": userID},
 	})
 	s.writeOperatorMutationResult(w, r, http.StatusOK, map[string]string{"status": status, "user_id": userID})
+}
+
+// ─── hard-delete confirm/cancel fragments (Command Center v2, Slice 2) ──────
+//
+// These two handlers are pure view wiring: no store call, no business logic.
+// The username round-trips through the query string set by the trigger
+// button itself (adminUserDeleteConfirmPath/adminUserDeleteCancelPath), so
+// rendering the swap-in-place confirm step never needs a fresh ListUsers
+// lookup. They mirror internal/dashboard/detail.templ's
+// delete-confirm/delete-cancel round trip, just scoped to the Users row menu.
+
+// handleAdminUserDeleteConfirm handles GET /admin/users/{id}/delete-confirm —
+// swaps the row's "Delete…" trigger for the reused ui.ConfirmDialog.
+//
+// SECURITY FIX (Slice 2 review): this used to trust a `?username=` query
+// value verbatim, which any client could spoof independently of `id` — the
+// delete POST itself is safely bound to `id` alone, but the CONFIRM PROMPT
+// text could show an attacker-chosen name that didn't match the account
+// actually being deleted. The username is now always looked up from the
+// store by `id` and the query string is ignored entirely.
+func (s *CloudServer) handleAdminUserDeleteConfirm(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
+	as, ok := s.adminStore()
+	if !ok {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "admin unavailable"})
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" || !isNumericID(id) {
+		http.Error(w, "invalid user id", http.StatusBadRequest)
+		return
+	}
+	username, ok := s.lookupAdminUsername(r.Context(), as, id)
+	if !ok {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	u := adminUserRow{ID: id, Username: username}
+	if err := adminUserDeleteConfirmFragment(u).Render(r.Context(), w); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+	}
+}
+
+// handleAdminUserDeleteCancel handles GET /admin/users/{id}/delete-cancel —
+// restores the original "Delete…" trigger, undoing the confirm step above.
+// Same store lookup, same reason (see handleAdminUserDeleteConfirm).
+func (s *CloudServer) handleAdminUserDeleteCancel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
+	as, ok := s.adminStore()
+	if !ok {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "admin unavailable"})
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" || !isNumericID(id) {
+		http.Error(w, "invalid user id", http.StatusBadRequest)
+		return
+	}
+	username, ok := s.lookupAdminUsername(r.Context(), as, id)
+	if !ok {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	u := adminUserRow{ID: id, Username: username}
+	if err := adminUserDeleteTrigger(u).Render(r.Context(), w); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+	}
+}
+
+// lookupAdminUsername resolves the authoritative username for id straight
+// from the store (ListUsers — there is no single-record lookup on
+// adminDashboardStore), so the delete-confirm/cancel fragments can never
+// display a caller-supplied name that doesn't match the account being
+// deleted.
+func (s *CloudServer) lookupAdminUsername(ctx context.Context, as adminDashboardStore, id string) (string, bool) {
+	users, err := as.ListUsers(ctx)
+	if err != nil {
+		return "", false
+	}
+	for _, u := range users {
+		if u.ID == id {
+			return u.Username, true
+		}
+	}
+	return "", false
 }
 
 // ─── request parsing + response helpers ──────────────────────────────────────
@@ -630,43 +811,37 @@ func toAdminUserRow(u cloudstore.AdminUser, tokens []cloudstore.ManagedTokenView
 	}
 }
 
-func toAdminMembershipRow(m cloudstore.Membership) adminMembershipRow {
-	p := auth.Permission(m.Perms)
-	return adminMembershipRow{
-		Project: m.Project,
-		Read:    p.Has(auth.PermRead),
-		Insert:  p.Has(auth.PermInsert),
-		Update:  p.Has(auth.PermUpdate),
-		Delete:  p.Has(auth.PermDelete),
-		Role:    m.Role,
-		Summary: permSummary(m.Perms),
-	}
-}
-
 // permSummary renders a human-readable label for a perms bitfield.
-func permSummary(perms int) string {
+//
+// i18n Slice 3: takes lang so its ONE actual render call site
+// (handleAdminTeamDetailPage's memberRows loop, admin_teams_dashboard.go —
+// rendered as m.Summary in adminTeamMemberRowView) can localize it. Callers
+// resolve lang from r.Context() (a Go handler, not a templ file, so ctx
+// isn't implicit there).
+func permSummary(lang i18n.Lang, perms int) string {
 	p := auth.Permission(perms)
 	if perms == 0 {
-		return "no access"
+		return i18n.T(lang, "admin.perm.noAccess")
 	}
 	if p.Has(auth.PermAll) {
-		return "full (read+write+update+delete)"
+		return i18n.T(lang, "admin.perm.full")
 	}
+	readWord := i18n.T(lang, "admin.perm.read")
 	parts := make([]string, 0, 4)
 	if p.Has(auth.PermRead) {
-		parts = append(parts, "read")
+		parts = append(parts, readWord)
 	}
 	if p.Has(auth.PermInsert) {
-		parts = append(parts, "write")
+		parts = append(parts, i18n.T(lang, "admin.perm.write"))
 	}
 	if p.Has(auth.PermUpdate) {
-		parts = append(parts, "update")
+		parts = append(parts, i18n.T(lang, "admin.perm.update"))
 	}
 	if p.Has(auth.PermDelete) {
-		parts = append(parts, "delete")
+		parts = append(parts, i18n.T(lang, "admin.perm.delete"))
 	}
-	if len(parts) == 1 && parts[0] == "read" {
-		return "read-only"
+	if len(parts) == 1 && parts[0] == readWord {
+		return i18n.T(lang, "admin.perm.readOnly")
 	}
 	return strings.Join(parts, "+")
 }
@@ -675,6 +850,40 @@ func permSummary(perms int) string {
 // both segments so project names containing spaces or dots route correctly.
 func adminMembershipDeletePath(accountID, project string) string {
 	return "/admin/memberships/" + url.PathEscape(accountID) + "/" + url.PathEscape(project)
+}
+
+// adminUserCountLabel renders the Users toolbar's "N accounts · M admins"
+// summary (Command Center v2, Slice 2). i18n Slice 3: takes lang — called
+// from admin_ui.templ (adminUsersPage), so ctx is implicit there.
+func adminUserCountLabel(lang i18n.Lang, users []adminUserRow) string {
+	admins := 0
+	for _, u := range users {
+		if u.IsAdmin {
+			admins++
+		}
+	}
+	accountsWord := i18n.T(lang, "admin.users.countAccountPlural")
+	if len(users) == 1 {
+		accountsWord = i18n.T(lang, "admin.users.countAccountSingular")
+	}
+	adminsWord := i18n.T(lang, "admin.users.countAdminPlural")
+	if admins == 1 {
+		adminsWord = i18n.T(lang, "admin.users.countAdminSingular")
+	}
+	return fmt.Sprintf("%d %s · %d %s", len(users), accountsWord, admins, adminsWord)
+}
+
+// adminUserDeleteConfirmPath / adminUserDeleteCancelPath build the GET urls for
+// the inline hard-delete confirm swap (Slice 2). id is the only input — the
+// displayed username is looked up server-side from the store
+// (lookupAdminUsername), never trusted from the client, so no username needs
+// to round-trip through the URL at all.
+func adminUserDeleteConfirmPath(id string) string {
+	return "/admin/users/" + id + "/delete-confirm"
+}
+
+func adminUserDeleteCancelPath(id string) string {
+	return "/admin/users/" + id + "/delete-cancel"
 }
 
 func formatAdminTime(t *time.Time) string {
@@ -693,6 +902,9 @@ func rfc3339Ptr(t *time.Time) *string {
 }
 
 // tokenCountLabel renders the token-count summary shown in the Users table.
+// NOT translated (i18n Slice 3): "token"/"tokens" is the same word in both
+// supported languages (a standard tech loanword in professional Spanish), so
+// there is no copy difference to resolve through the catalog here.
 func tokenCountLabel(n int) string {
 	if n == 1 {
 		return "1 token"
@@ -700,11 +912,12 @@ func tokenCountLabel(n int) string {
 	return fmt.Sprintf("%d tokens", n)
 }
 
-// tokenLabel renders a token's label, defaulting to a placeholder for unlabeled
-// tokens.
-func tokenLabel(label string) string {
+// tokenLabel renders a token's label, defaulting to a placeholder for
+// unlabeled tokens. i18n Slice 3: takes lang — called from admin_ui.templ
+// (adminTokenList), so ctx is implicit there.
+func tokenLabel(lang i18n.Lang, label string) string {
 	if strings.TrimSpace(label) == "" {
-		return "(no label)"
+		return i18n.T(lang, "admin.users.noLabel")
 	}
 	return label
 }

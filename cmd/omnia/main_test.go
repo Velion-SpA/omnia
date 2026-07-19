@@ -11,12 +11,12 @@ import (
 	"time"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
-	"github.com/Velion-SpA/omnia/internal/mcp"
-	"github.com/Velion-SpA/omnia/internal/obsidian"
-	"github.com/Velion-SpA/omnia/internal/setup"
-	"github.com/Velion-SpA/omnia/internal/store"
-	engramsync "github.com/Velion-SpA/omnia/internal/sync"
-	versioncheck "github.com/Velion-SpA/omnia/internal/version"
+	"github.com/velion/omnia/internal/mcp"
+	"github.com/velion/omnia/internal/obsidian"
+	"github.com/velion/omnia/internal/setup"
+	"github.com/velion/omnia/internal/store"
+	engramsync "github.com/velion/omnia/internal/sync"
+	versioncheck "github.com/velion/omnia/internal/version"
 )
 
 func testConfig(t *testing.T) store.Config {
@@ -656,7 +656,7 @@ func TestMainPrintsUpdateFailuresAndUpdates(t *testing.T) {
 	version = "1.10.7"
 	t.Cleanup(func() { version = oldVersion })
 
-	t.Run("silences check failure", func(t *testing.T) {
+	t.Run("prints check failure", func(t *testing.T) {
 		stubCheckForUpdates(t, versioncheck.CheckResult{
 			Status:  versioncheck.StatusCheckFailed,
 			Message: "Could not check for updates: GitHub took too long to respond.",
@@ -667,8 +667,8 @@ func TestMainPrintsUpdateFailuresAndUpdates(t *testing.T) {
 		if !strings.Contains(stdout, "omnia 1.10.7") {
 			t.Fatalf("stdout = %q", stdout)
 		}
-		if strings.Contains(stderr, "Could not check for updates") {
-			t.Fatalf("check failures must stay silent, stderr = %q", stderr)
+		if !strings.Contains(stderr, "Could not check for updates") {
+			t.Fatalf("stderr = %q", stderr)
 		}
 	})
 

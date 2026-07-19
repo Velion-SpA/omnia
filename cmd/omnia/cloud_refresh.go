@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 // cmdCloudRefresh implements `omnia cloud refresh`.

@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
-	cloudauth "github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	cloudauth "github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // fakeAdminDashboardStore backs the OBL-13 admin dashboard endpoints. It embeds
@@ -22,6 +23,12 @@ type fakeAdminDashboardStore struct {
 	revoked  []string
 	disabled map[string]bool
 	admins   map[string]bool // OBL-16: account id → is_admin
+
+	// Command Center v2, Slice 1: user CRUD fake state. passwordHashes never
+	// stores plaintext — handlers only ever pass a bcrypt hash down to the
+	// store, mirroring the real CloudStore.
+	passwordHashes map[string]string
+	nextUserID     int
 }
 
 func newFakeAdminDashboardStore() *fakeAdminDashboardStore {
@@ -30,7 +37,95 @@ func newFakeAdminDashboardStore() *fakeAdminDashboardStore {
 		tokens:              map[string][]cloudstore.ManagedTokenView{},
 		disabled:            map[string]bool{},
 		admins:              map[string]bool{},
+		passwordHashes:      map[string]string{},
 	}
+}
+
+// findFakeUserIndex returns the index of the user with the given id, or -1.
+func (s *fakeAdminDashboardStore) findFakeUserIndex(id string) int {
+	for i, u := range s.users {
+		if u.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// AdminCreateUser fakes the store-level uniqueness check (username OR email
+// already used by ANOTHER row) that the real CloudStore enforces via Postgres
+// UNIQUE constraints.
+func (s *fakeAdminDashboardStore) AdminCreateUser(_ context.Context, username, email, passwordHash string) (string, error) {
+	for _, u := range s.users {
+		if u.Username == username || (email != "" && u.Email == email) {
+			return "", cloudstore.ErrUserExists
+		}
+	}
+	s.nextUserID++
+	id := strconv.Itoa(s.nextUserID)
+	s.users = append(s.users, cloudstore.AdminUser{ID: id, Username: username, Email: email})
+	s.passwordHashes[id] = passwordHash
+	return id, nil
+}
+
+// AdminUpdateUser fakes the same uniqueness check against every OTHER row (a
+// self-rename to the current value never conflicts).
+func (s *fakeAdminDashboardStore) AdminUpdateUser(_ context.Context, id, username, email string) error {
+	idx := s.findFakeUserIndex(id)
+	if idx == -1 {
+		return cloudstore.ErrManagedTokenUserNotFound
+	}
+	for i, u := range s.users {
+		if i == idx {
+			continue
+		}
+		if u.Username == username || (email != "" && u.Email == email) {
+			return cloudstore.ErrUserExists
+		}
+	}
+	s.users[idx].Username = username
+	s.users[idx].Email = email
+	return nil
+}
+
+// AdminSetUserPassword fakes replacing the stored hash.
+func (s *fakeAdminDashboardStore) AdminSetUserPassword(_ context.Context, id, passwordHash string) error {
+	if s.findFakeUserIndex(id) == -1 {
+		return cloudstore.ErrManagedTokenUserNotFound
+	}
+	s.passwordHashes[id] = passwordHash
+	return nil
+}
+
+// AdminHardDeleteUser fakes the cascading delete: the user row, its
+// memberships, its admin flag, and its disabled flag.
+func (s *fakeAdminDashboardStore) AdminHardDeleteUser(_ context.Context, id string) error {
+	idx := s.findFakeUserIndex(id)
+	if idx == -1 {
+		return cloudstore.ErrManagedTokenUserNotFound
+	}
+	// Last-admin guard, fake-mirroring the real cloudstore.AdminHardDeleteUser's
+	// atomic in-transaction check (lockAdminIDsForUpdate).
+	if s.admins[id] {
+		n := 0
+		for _, v := range s.admins {
+			if v {
+				n++
+			}
+		}
+		if n <= 1 {
+			return cloudstore.ErrLastAdmin
+		}
+	}
+	s.users = append(s.users[:idx], s.users[idx+1:]...)
+	delete(s.passwordHashes, id)
+	delete(s.admins, id)
+	delete(s.disabled, id)
+	for k, m := range s.memberships {
+		if m.AccountID == id {
+			delete(s.memberships, k)
+		}
+	}
+	return nil
 }
 
 // IsUserAdmin backs both the operator-promotion lookup (OBL-16) and the last-admin
@@ -55,6 +150,44 @@ func (s *fakeAdminDashboardStore) CountAdmins(context.Context) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// DemoteUserAdminGuarded fakes the atomic guard: refuses with
+// cloudstore.ErrLastAdmin when accountID is the only remaining admin. The
+// fake has no concurrency to protect against (Go test goroutines aside, each
+// test call is sequential), so this simply replicates the SAME observable
+// check-then-act semantics the real cloudstore.DemoteUserAdminGuarded
+// guarantees atomically against a live Postgres.
+func (s *fakeAdminDashboardStore) DemoteUserAdminGuarded(ctx context.Context, accountID string) error {
+	if s.admins[accountID] {
+		n := 0
+		for _, v := range s.admins {
+			if v {
+				n++
+			}
+		}
+		if n <= 1 {
+			return cloudstore.ErrLastAdmin
+		}
+	}
+	return s.SetUserAdmin(ctx, accountID, false)
+}
+
+// DeactivateUserGuarded fakes the atomic deactivate guard, mirroring
+// DemoteUserAdminGuarded above.
+func (s *fakeAdminDashboardStore) DeactivateUserGuarded(ctx context.Context, userID string) error {
+	if s.admins[userID] {
+		n := 0
+		for _, v := range s.admins {
+			if v {
+				n++
+			}
+		}
+		if n <= 1 {
+			return cloudstore.ErrLastAdmin
+		}
+	}
+	return s.SetUserDisabled(ctx, userID, true)
 }
 
 func (s *fakeAdminDashboardStore) ListUsers(context.Context) ([]cloudstore.AdminUser, error) {
@@ -170,13 +303,186 @@ func TestAdminUsersPageOperatorOnly(t *testing.T) {
 	}
 }
 
-// TestAdminAccessPageRendersForOperator exercises the Access page templ end to end
-// (user selector, the per-project override row with perm checkboxes + role select,
-// and the add-override form). Post OBL-15 the memberships section is relabeled as
-// per-project OVERRIDES that take precedence over team-derived perms.
-func TestAdminAccessPageRendersForOperator(t *testing.T) {
+// TestAdminUsersPageRendersToolbarAndMenu exercises the Command Center v2,
+// Slice 2 Users page markup: the search toolbar + count, the collapsed
+// per-row kebab menu (referencing every CRUD route from Slice 1), and the
+// three modals (create / edit / reset password).
+func TestAdminUsersPageRendersToolbarAndMenu(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.users = []cloudstore.AdminUser{{ID: "1", Username: "alice", Email: "alice@x.io", IsAdmin: true}}
+	store.admins["1"] = true
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, cookieRequest(http.MethodGet, "/admin", operatorCookie(t, authSvc), ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin: expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// Toolbar: search input + count + the "New user" trigger.
+	// i18n Slice 3: Spanish default, so the count summary is "1 cuenta · 1
+	// admin" now, not the English literal.
+	for _, want := range []string{
+		`id="admin-user-search"`,
+		`1 cuenta · 1 admin`,
+		`data-modal="admin-create-user-modal"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Users page missing toolbar element %q, body=%q", want, body)
+		}
+	}
+
+	// Row: one primary Access link + the kebab menu referencing every
+	// Slice-1 route plus the pre-existing promote/disable/token actions.
+	for _, want := range []string{
+		`href="/admin/access?user=1"`,
+		`data-action="edit-user"`,
+		`data-action="reset-password"`,
+		`data-action="toggle-token-form"`,
+		`hx-post="/admin/users/1/demote"`, // alice is seeded as admin above
+		`hx-post="/admin/users/1/disable"`,
+		`hx-confirm="¿Deshabilitar este usuario?`, // i18n Slice 3: Spanish default
+		`hx-get="/admin/users/1/delete-confirm"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Users row menu missing %q, body=%q", want, body)
+		}
+	}
+
+	// The three modals: create (JSON-composed create+promote), edit (generic
+	// data-admin-form JSON PUT), reset password.
+	for _, want := range []string{
+		`id="admin-create-user-modal"`,
+		`value="member" checked`,
+		`id="admin-edit-user-modal"`,
+		`data-url-template="/admin/users/{id}"`,
+		`id="admin-reset-password-modal"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Users page missing modal element %q, body=%q", want, body)
+		}
+	}
+
+	// The page-level error banner (fixes the previous hx-swap=none silent
+	// failure) and the admin.js script tag must both be present.
+	if !strings.Contains(body, `id="admin-error-banner"`) {
+		t.Fatalf("Users page missing the error banner, body=%q", body)
+	}
+	if !strings.Contains(body, `/static/admin.js`) {
+		t.Fatalf("Users page must load admin.js for the new modal/menu behavior, body=%q", body)
+	}
+}
+
+// TestAdminUserDeleteConfirmCancelRoundTrip exercises the swap-in-place
+// hard-delete confirm step: GET delete-confirm renders the reused
+// ui.ConfirmDialog (referencing the real Slice-1 delete route), and GET
+// delete-cancel restores the original trigger. Neither handler touches
+// anything but ListUsers (a read, for the username lookup) — no mutation.
+func TestAdminUserDeleteConfirmCancelRoundTrip(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.users = []cloudstore.AdminUser{{ID: "7", Username: "bob"}}
+
+	confirmRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(confirmRec, cookieRequest(http.MethodGet, "/admin/users/7/delete-confirm", operatorCookie(t, authSvc), ""))
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("GET delete-confirm: expected 200, got %d body=%q", confirmRec.Code, confirmRec.Body.String())
+	}
+	confirmBody := confirmRec.Body.String()
+	for _, want := range []string{
+		"bob",
+		`hx-post="/admin/users/7/delete?confirm=1"`,
+		`hx-get="/admin/users/7/delete-cancel"`,
+	} {
+		if !strings.Contains(confirmBody, want) {
+			t.Fatalf("delete-confirm fragment missing %q, body=%q", want, confirmBody)
+		}
+	}
+
+	cancelRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(cancelRec, cookieRequest(http.MethodGet, "/admin/users/7/delete-cancel", operatorCookie(t, authSvc), ""))
+	if cancelRec.Code != http.StatusOK {
+		t.Fatalf("GET delete-cancel: expected 200, got %d body=%q", cancelRec.Code, cancelRec.Body.String())
+	}
+	cancelBody := cancelRec.Body.String()
+	if !strings.Contains(cancelBody, `/admin/users/7/delete-confirm`) {
+		t.Fatalf("delete-cancel must restore the original trigger, body=%q", cancelBody)
+	}
+	if strings.Contains(cancelBody, "Delete permanently") {
+		t.Fatalf("delete-cancel must NOT still show the confirm dialog, body=%q", cancelBody)
+	}
+
+	// Non-numeric id is rejected before any render (defense in depth, same
+	// convention as every other /admin/users/{id}/* route).
+	badRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(badRec, cookieRequest(http.MethodGet, "/admin/users/abc/delete-confirm", operatorCookie(t, authSvc), ""))
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("GET delete-confirm non-numeric id: expected 400, got %d", badRec.Code)
+	}
+}
+
+// TestAdminUserDeleteConfirmIgnoresSpoofedUsername is the SECURITY FIX
+// regression guard (Slice 2 review, MUST-FIX 3): the confirm/cancel
+// fragments used to render whatever `?username=` said, letting a caller
+// spoof the displayed name independently of `id`. They must now ALWAYS show
+// the real username looked up from the store, and any `?username=` query
+// value — matching or not — must be silently ignored.
+func TestAdminUserDeleteConfirmIgnoresSpoofedUsername(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.users = []cloudstore.AdminUser{
+		{ID: "7", Username: "bob"},
+		{ID: "9", Username: "mallory"},
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, cookieRequest(http.MethodGet, "/admin/users/7/delete-confirm?username=mallory", operatorCookie(t, authSvc), ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET delete-confirm: expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "bob") {
+		t.Fatalf("delete-confirm must show the REAL username (bob) looked up by id, body=%q", body)
+	}
+	if strings.Contains(body, "mallory") {
+		t.Fatalf("delete-confirm must NOT trust the spoofed ?username= query value, body=%q", body)
+	}
+
+	// An id with no matching user (e.g. already deleted) is a clean 404, not
+	// a render with an empty/spoofed name.
+	missingRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(missingRec, cookieRequest(http.MethodGet, "/admin/users/404/delete-confirm?username=mallory", operatorCookie(t, authSvc), ""))
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("GET delete-confirm unknown id: expected 404, got %d body=%q", missingRec.Code, missingRec.Body.String())
+	}
+}
+
+// TestAdminUserDeleteConfirmRequiresOperator guards the two new fragment
+// routes with the SAME operator gate as the rest of the Admin section.
+func TestAdminUserDeleteConfirmRequiresOperator(t *testing.T) {
 	srv, store, authSvc := newAdminDashboardTestServer(t)
 	store.users = []cloudstore.AdminUser{{ID: "1", Username: "alice"}}
+
+	for _, url := range []string{
+		"/admin/users/1/delete-confirm",
+		"/admin/users/1/delete-cancel",
+	} {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, cookieRequest(http.MethodGet, url, accountCookie(t, authSvc, "1", "alice"), ""))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("non-operator GET %s: expected 403, got %d", url, rec.Code)
+		}
+	}
+}
+
+// TestAdminAccessPageRendersForOperator exercises the Command Center v2,
+// Slice 3 unified Access page end to end: the searchable account picker, and
+// ONE merged row per project showing its effective label + R/W/U/D chips,
+// its Override source badge, and the edit-in-place triggers (Edit/Revoke).
+// The actual mutation still lands on the pre-existing PUT/DELETE
+// /admin/memberships routes — only the Slice 3 view-only row fragments are
+// new (asserted separately in TestAdminAccessRowEditRevokeRoundTrip).
+func TestAdminAccessPageRendersForOperator(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.users = []cloudstore.AdminUser{{ID: "1", Username: "alice", Email: "alice@x.io"}}
 	store.grant("1", "lab", int(cloudauth.PermRead|cloudauth.PermInsert), "member")
 
 	rec := httptest.NewRecorder()
@@ -185,16 +491,83 @@ func TestAdminAccessPageRendersForOperator(t *testing.T) {
 		t.Fatalf("operator GET /admin/access: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "lab") || !strings.Contains(body, "ADD / UPDATE OVERRIDE") {
-		t.Fatalf("Access page missing override row or add form, body=%q", body)
+	for _, want := range []string{
+		"lab",
+		"badge-warn",
+		">Override<",
+		"Parcial", // i18n Slice 3: Spanish default for read+insert, no update/delete
+		`data-acct-select`,
+		`hx-get="/admin/access/rows/1/lab/edit"`,
+		`hx-get="/admin/access/rows/1/lab/revoke"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Access page missing %q, body=%q", want, body)
+		}
 	}
-	// The override add form must use the searchable project selector (no free text).
-	if !strings.Contains(body, "data-proj-select") {
-		t.Fatalf("Access page add-override must use the searchable project selector, body=%q", body)
+}
+
+// TestAdminAccessRowEditRevokeRoundTrip exercises the Slice 3 per-row
+// edit-in-place fragments: the default view shows the Override source, the
+// edit fragment PUTs to the pre-existing /admin/memberships route with a
+// Cancel back to the view fragment, and the revoke-confirm fragment reuses
+// ui.ConfirmDialog wired to the pre-existing DELETE route. An unknown project
+// for the account is a clean 404, and every route is operator-gated.
+func TestAdminAccessRowEditRevokeRoundTrip(t *testing.T) {
+	srv, store, authSvc := newAdminDashboardTestServer(t)
+	store.users = []cloudstore.AdminUser{{ID: "1", Username: "alice"}}
+	store.grant("1", "lab", int(cloudauth.PermRead), "member")
+
+	viewRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(viewRec, cookieRequest(http.MethodGet, "/admin/access/rows/1/lab", operatorCookie(t, authSvc), ""))
+	if viewRec.Code != http.StatusOK {
+		t.Fatalf("row view: expected 200, got %d body=%q", viewRec.Code, viewRec.Body.String())
 	}
-	// The revoke control must target the pre-encoded delete path for this membership.
-	if !strings.Contains(body, `hx-delete="/admin/memberships/1/lab"`) {
-		t.Fatalf("Access page missing revoke control for lab, body=%q", body)
+	if !strings.Contains(viewRec.Body.String(), ">Override<") {
+		t.Fatalf("row view must show the Override source, body=%q", viewRec.Body.String())
+	}
+
+	editRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(editRec, cookieRequest(http.MethodGet, "/admin/access/rows/1/lab/edit", operatorCookie(t, authSvc), ""))
+	if editRec.Code != http.StatusOK {
+		t.Fatalf("row edit: expected 200, got %d body=%q", editRec.Code, editRec.Body.String())
+	}
+	editBody := editRec.Body.String()
+	if !strings.Contains(editBody, `hx-put="/admin/memberships"`) {
+		t.Fatalf("row edit must PUT to the existing membership route, body=%q", editBody)
+	}
+	if !strings.Contains(editBody, `hx-get="/admin/access/rows/1/lab"`) {
+		t.Fatalf("row edit must have a Cancel back to the view fragment, body=%q", editBody)
+	}
+
+	confirmRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(confirmRec, cookieRequest(http.MethodGet, "/admin/access/rows/1/lab/revoke", operatorCookie(t, authSvc), ""))
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("row revoke-confirm: expected 200, got %d body=%q", confirmRec.Code, confirmRec.Body.String())
+	}
+	confirmBody := confirmRec.Body.String()
+	if !strings.Contains(confirmBody, `hx-delete="/admin/memberships/1/lab"`) {
+		t.Fatalf("revoke-confirm must wire the existing DELETE route, body=%q", confirmBody)
+	}
+	if !strings.Contains(confirmBody, `hx-get="/admin/access/rows/1/lab"`) {
+		t.Fatalf("revoke-confirm must have a Cancel back to the view fragment, body=%q", confirmBody)
+	}
+
+	missingRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(missingRec, cookieRequest(http.MethodGet, "/admin/access/rows/1/ghost", operatorCookie(t, authSvc), ""))
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("unknown project row: expected 404, got %d", missingRec.Code)
+	}
+
+	for _, url := range []string{
+		"/admin/access/rows/1/lab",
+		"/admin/access/rows/1/lab/edit",
+		"/admin/access/rows/1/lab/revoke",
+	} {
+		forbiddenRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(forbiddenRec, cookieRequest(http.MethodGet, url, accountCookie(t, authSvc, "1", "alice"), ""))
+		if forbiddenRec.Code != http.StatusForbidden {
+			t.Fatalf("non-operator GET %s: expected 403, got %d", url, forbiddenRec.Code)
+		}
 	}
 }
 
@@ -446,6 +819,26 @@ func TestDemoteLastAdminRefused(t *testing.T) {
 	}
 }
 
+// TestPromoteDemoteNonNumericID verifies a non-numeric {id} on promote/demote
+// is rejected with 400, not a raw store-error 500 (SHOULD-FIX 4, Slice 1
+// security review — applied consistently across every /admin/users/{id}/*
+// route, not just the new Slice 1 ones).
+func TestPromoteDemoteNonNumericID(t *testing.T) {
+	srv, _, authSvc := newAdminDashboardTestServer(t)
+
+	promoteRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(promoteRec, cookieRequest(http.MethodPost, "/admin/users/not-a-number/promote", operatorCookie(t, authSvc), ""))
+	if promoteRec.Code != http.StatusBadRequest {
+		t.Fatalf("promote: expected 400, got %d body=%q", promoteRec.Code, promoteRec.Body.String())
+	}
+
+	demoteRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(demoteRec, cookieRequest(http.MethodPost, "/admin/users/not-a-number/demote", operatorCookie(t, authSvc), ""))
+	if demoteRec.Code != http.StatusBadRequest {
+		t.Fatalf("demote: expected 400, got %d body=%q", demoteRec.Code, demoteRec.Body.String())
+	}
+}
+
 // TestAdminUpsertMembershipRoundTripsPerms verifies the operator can set a user's
 // permission on a project and that the perms bitfield round-trips (read-only →
 // read+write), with out-of-range bits masked.
@@ -586,6 +979,20 @@ func TestAdminEndpointsAllForbiddenForNonOperator(t *testing.T) {
 		{http.MethodPost, "/admin/users/1/disable", "", ""},
 		{http.MethodPost, "/admin/users/1/enable", "", ""},
 		{http.MethodPost, "/admin/tokens/9/revoke", "", ""},
+		// Command Center v2, Slice 1: operator-facing user CRUD.
+		{http.MethodPost, "/admin/users", `{"username":"x","email":"x@example.com"}`, "application/json"},
+		{http.MethodPut, "/admin/users/1", `{"username":"x","email":"x@example.com"}`, "application/json"},
+		{http.MethodPost, "/admin/users/1/password", `{}`, "application/json"},
+		{http.MethodPost, "/admin/users/1/delete?confirm=1", "", ""},
+		// Command Center v2, Slice 2: the Users page delete-confirm/cancel
+		// swap-in-place fragments.
+		{http.MethodGet, "/admin/users/1/delete-confirm", "", ""},
+		{http.MethodGet, "/admin/users/1/delete-cancel", "", ""},
+		// Command Center v2, Slice 3: the unified Access page's per-row
+		// edit-in-place fragments.
+		{http.MethodGet, "/admin/access/rows/1/lab", "", ""},
+		{http.MethodGet, "/admin/access/rows/1/lab/edit", "", ""},
+		{http.MethodGet, "/admin/access/rows/1/lab/revoke", "", ""},
 	}
 	for _, c := range cases {
 		rec := httptest.NewRecorder()

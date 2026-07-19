@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	cloudauth "github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	cloudauth "github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // ─── Fake projectSyncControlAdminStore ────────────────────────────────────────
@@ -68,6 +68,26 @@ func (s *fakeProjectSyncAdminStore) GetProjectSyncControl(project string) (*clou
 	return ctrl, nil
 }
 
+// ListProjectSyncControlsMap is the fake's batched equivalent of calling
+// GetProjectSyncControl per project: it builds the SAME map shape from the
+// SAME syncEnabledMap/pausedReason/updatedBy state, in one pass.
+func (s *fakeProjectSyncAdminStore) ListProjectSyncControlsMap(context.Context) (map[string]cloudstore.ProjectSyncControl, error) {
+	out := make(map[string]cloudstore.ProjectSyncControl, len(s.syncEnabledMap))
+	for project, enabled := range s.syncEnabledMap {
+		ctrl := cloudstore.ProjectSyncControl{Project: project, SyncEnabled: enabled}
+		if r, ok := s.pausedReason[project]; ok && r != "" {
+			rr := r
+			ctrl.PausedReason = &rr
+		}
+		if u, ok := s.updatedBy[project]; ok && u != "" {
+			uu := u
+			ctrl.UpdatedBy = &uu
+		}
+		out[project] = ctrl
+	}
+	return out, nil
+}
+
 func (s *fakeProjectSyncAdminStore) InsertAuditEntry(_ context.Context, entry cloudstore.AuditEntry) error {
 	s.auditCalls = append(s.auditCalls, entry)
 	return nil
@@ -101,7 +121,7 @@ func TestAdminPauseResumeRoutesOperatorOnly(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("non-operator pause: expected 403, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if enabled, err := store.IsProjectSyncEnabled("proj-x"); err != nil || !enabled {
+	if enabled, err := store.IsProjectSyncEnabled(context.Background(), "proj-x"); err != nil || !enabled {
 		t.Fatalf("non-operator pause must not change sync state: enabled=%v err=%v", enabled, err)
 	}
 	if len(store.auditCalls) != 0 {
@@ -114,7 +134,7 @@ func TestAdminPauseResumeRoutesOperatorOnly(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator pause: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if enabled, err := store.IsProjectSyncEnabled("proj-x"); err != nil || enabled {
+	if enabled, err := store.IsProjectSyncEnabled(context.Background(), "proj-x"); err != nil || enabled {
 		t.Fatalf("operator pause must disable sync: enabled=%v err=%v", enabled, err)
 	}
 
@@ -124,7 +144,7 @@ func TestAdminPauseResumeRoutesOperatorOnly(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator resume: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if enabled, err := store.IsProjectSyncEnabled("proj-x"); err != nil || !enabled {
+	if enabled, err := store.IsProjectSyncEnabled(context.Background(), "proj-x"); err != nil || !enabled {
 		t.Fatalf("operator resume must re-enable sync: enabled=%v err=%v", enabled, err)
 	}
 
@@ -151,7 +171,7 @@ func TestAdminPauseResumeRoutesViaAdminBearer(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin-bearer pause: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if enabled, _ := store.IsProjectSyncEnabled("proj-cli"); enabled {
+	if enabled, _ := store.IsProjectSyncEnabled(context.Background(), "proj-cli"); enabled {
 		t.Fatal("admin-bearer pause must disable sync")
 	}
 
@@ -163,7 +183,7 @@ func TestAdminPauseResumeRoutesViaAdminBearer(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("sync-token resume: expected 403, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if enabled, _ := store.IsProjectSyncEnabled("proj-cli"); enabled {
+	if enabled, _ := store.IsProjectSyncEnabled(context.Background(), "proj-cli"); enabled {
 		t.Fatal("rejected resume attempt must not change sync state")
 	}
 
@@ -174,7 +194,7 @@ func TestAdminPauseResumeRoutesViaAdminBearer(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin-bearer resume: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if enabled, _ := store.IsProjectSyncEnabled("proj-cli"); !enabled {
+	if enabled, _ := store.IsProjectSyncEnabled(context.Background(), "proj-cli"); !enabled {
 		t.Fatal("admin-bearer resume must re-enable sync")
 	}
 }
@@ -305,7 +325,11 @@ func TestAdminProjectsPageShowsPauseState(t *testing.T) {
 		t.Fatalf("GET /admin/projects: expected 200, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"proj-z", "sync enabled", "/admin/projects/proj-z/pause", "paused_reason"} {
+	// Command Center v2, Slice 4b: the enabled/paused badge text moved from
+	// "sync enabled"/"paused" to a compact "Sync"/"⏸ Paused" card footer badge,
+	// and the pause form moved from an inline row into the "•••" kebab menu
+	// (still present in the HTML, just behind a hidden .admin-menu wrapper).
+	for _, want := range []string{"proj-z", ">Sync<", "/admin/projects/proj-z/pause", "paused_reason"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Projects page (pre-pause) missing %q, body=%q", want, body)
 		}
@@ -323,8 +347,9 @@ func TestAdminProjectsPageShowsPauseState(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /admin/projects (paused): expected 200, got %d", rec.Code)
 	}
+	// i18n Slice 3: Spanish default ("Paused" → "Pausado").
 	body = rec.Body.String()
-	for _, want := range []string{"proj-z", "paused", "spam", "/admin/projects/proj-z/resume"} {
+	for _, want := range []string{"proj-z", "Pausado", "spam", "/admin/projects/proj-z/resume"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Projects page (paused) missing %q, body=%q", want, body)
 		}

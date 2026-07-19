@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/cloud"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/cloud"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // ─── Fakes for bootstrap-admin ───────────────────────────────────────────────

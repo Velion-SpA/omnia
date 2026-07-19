@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	cloudauth "github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	cloudauth "github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // fakeAdminAuth satisfies Authenticator + AccountService + managedTokenIssuer so
@@ -163,6 +163,30 @@ func TestRevokeAndDisableEndpointsRequireAdmin(t *testing.T) {
 	}
 	if store.disabled["7"] {
 		t.Fatalf("expected user 7 enabled, got %v", store.disabled)
+	}
+}
+
+// TestDisableEnableNonNumericID verifies a non-numeric {id} on disable/enable
+// is rejected with 400, not a raw store-error 500 (SHOULD-FIX 4, Slice 1
+// security review).
+func TestDisableEnableNonNumericID(t *testing.T) {
+	store := &fakeAdminStore{}
+	srv := newAdminTestServer(&fakeAdminAuth{issuedRaw: "omct_x"}, store)
+
+	disRec := httptest.NewRecorder()
+	disReq := httptest.NewRequest(http.MethodPost, "/admin/users/not-a-number/disable", nil)
+	disReq.Header.Set("Authorization", "Bearer admin-token")
+	srv.Handler().ServeHTTP(disRec, disReq)
+	if disRec.Code != http.StatusBadRequest {
+		t.Fatalf("disable: expected 400, got %d body=%q", disRec.Code, disRec.Body.String())
+	}
+
+	enRec := httptest.NewRecorder()
+	enReq := httptest.NewRequest(http.MethodPost, "/admin/users/not-a-number/enable", nil)
+	enReq.Header.Set("Authorization", "Bearer admin-token")
+	srv.Handler().ServeHTTP(enRec, enReq)
+	if enRec.Code != http.StatusBadRequest {
+		t.Fatalf("enable: expected 400, got %d body=%q", enRec.Code, enRec.Body.String())
 	}
 }
 

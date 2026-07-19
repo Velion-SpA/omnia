@@ -9,19 +9,21 @@
 				--border-2:      rgba(255,255,255,0.03);
 				--border-strong: rgba(255,255,255,0.10);
 				--border-accent: rgba(34,211,238,0.22);
-				/* Calypso accent */
+				/* Calypso accent — canonical is --calypso; --accent is a same-value
+				   alias kept because it already has ~40 existing usages (see DESIGN.md) */
 				--calypso:       #22d3ee;
 				--calypso-dim:   #0e7490;
-				--accent:        #22d3ee;
+				--accent:        var(--calypso);
 				--accent-dim:    rgba(34,211,238,0.10);
 				--accent-glow:   rgba(34,211,238,0.25);
 				--accent-mid:    rgba(34,211,238,0.45);
-				/* Text */
+				/* Text — canonical --text-2 / --text-faint; --text-dim / --text-3 are
+				   same-value aliases kept for their existing usages (see DESIGN.md) */
 				--text:          #dce6f0;
-				--text-dim:      #6b7f96;
 				--text-2:        #6b7f96;
+				--text-dim:      var(--text-2);
 				--text-faint:    #2d3a4a;
-				--text-3:        #2d3a4a;
+				--text-3:        var(--text-faint);
 				--silver:        #8a9ab5;
 				/* Semantic colours */
 				--ok:            #10b981;
@@ -35,6 +37,38 @@
 				--mono:          'JetBrains Mono', 'Courier New', monospace;
 				--display:       'Barlow Condensed', sans-serif;
 				--radius:        5px;
+				/* ── Scales added in the Command Center v2 foundation slice — see
+				   internal/ui/DESIGN.md. Additive only: nothing below is required by
+				   any existing rule yet, existing literals keep rendering unchanged. */
+				--fs-2xs:  8px;
+				--fs-xs:   9px;
+				--fs-sm:   10px;
+				--fs-base: 11px;
+				--fs-md:   13px;
+				--fs-lg:   15px;
+				--fs-xl:   18px;
+				--fs-2xl:  22px;
+				--fs-3xl:  28px;
+				--fs-4xl:  44px;
+				--space-1: 4px;
+				--space-2: 8px;
+				--space-3: 12px;
+				--space-4: 16px;
+				--space-5: 20px;
+				--space-6: 24px;
+				--space-8: 32px;
+				--radius-sm:   3px;
+				--radius-md:   8px;
+				--radius-lg:   12px;
+				--radius-pill: 9999px;
+				--shadow-sm: 0 8px 20px rgba(4,9,18,0.3);
+				--shadow-md: 0 12px 30px rgba(4,9,18,0.35);
+				--shadow-lg: 0 20px 60px rgba(0,0,0,0.5);
+				--ease-standard: cubic-bezier(0.16,1,0.3,1);
+				--dur-fast:   0.1s;
+				--dur-base:   0.15s;
+				--dur-slow:   0.3s;
+				--dur-reveal: 0.5s;
 			}
 
 			*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -276,13 +310,25 @@
 				font-weight: 500;
 			}
 
-			/* ── Cards ── */
+			/* ── Cards ──
+			   Single source of truth for .card — this used to be defined twice
+			   (here, and again near "Observation / prompt cards" below) with
+			   conflicting padding/box-shadow/transition. Merged to the winning
+			   (previously later-in-cascade) computed result: same background/
+			   border/radius, padding from the later block, box-shadow from this
+			   block (the later block never set one, so it was never overridden),
+			   plus the later block's hover transition and header/p/footer children
+			   (those stay where they are, just below — they never conflicted). */
 			.card {
 				background: var(--surface);
 				border: 1px solid var(--border);
 				border-radius: var(--radius);
-				padding: 1.25rem;
-				box-shadow: 0 12px 30px rgba(4,9,18,0.35);
+				padding: 14px 16px;
+				box-shadow: var(--shadow-md);
+				transition: border-color var(--dur-base);
+			}
+			.card:hover {
+				border-color: rgba(34, 211, 238, 0.30);
 			}
 
 			.card-elevated {
@@ -290,19 +336,19 @@
 				border: 1px solid var(--border-strong);
 				border-radius: var(--radius);
 				padding: 1rem;
-				box-shadow: 0 8px 20px rgba(4,9,18,0.3);
+				box-shadow: var(--shadow-sm);
 			}
 
 			/* ── Command-center PANEL ── */
 			.panel {
 				background: var(--surface);
 				border: 1px solid var(--border);
-				border-radius: 5px;
+				border-radius: var(--radius);
 				padding: 22px 24px;
 				position: relative;
 				overflow: hidden;
 				opacity: 0;
-				animation: reveal 0.5s cubic-bezier(0.16,1,0.3,1) forwards;
+				animation: reveal var(--dur-reveal) var(--ease-standard) forwards;
 			}
 
 			.panel.bracketed::before,
@@ -452,7 +498,7 @@
 				height: 100%;
 				border-radius: 2px;
 				width: 0;
-				transition: width 1.2s cubic-bezier(0.16,1,0.3,1);
+				transition: width 1.2s var(--ease-standard);
 			}
 
 			/* ── Project list rows ── */
@@ -667,18 +713,36 @@
 				font-variant-numeric: tabular-nums;
 			}
 
-			/* ── Pill buttons (legacy) ── */
+			/* ── Buttons — ONE system, two shapes ──────────────────────────────
+			   `.pill-btn*` (fully-rounded, local-dashboard content pages — Browse,
+			   Detail) and `.shell-button*` (rounded-rectangle, cloud Admin pages +
+			   login) are the two families actually used in markup. They share this
+			   base ruleset so primary/secondary/ghost/danger logic is authored once;
+			   each family below only carries what genuinely differs (shape/padding/
+			   type). A third family, `.btn`/`.btn-primary`/`.btn-danger`, used to
+			   live here too but had zero markup usages anywhere — deleted.
+			   Unifying the two SHAPES into one is a deliberate visual decision, not
+			   done here — see internal/ui/DESIGN.md. */
+			/* Shared base: the only two properties genuinely identical, at the same
+			   value, in both original definitions. Everything else (layout, shape,
+			   padding, type, transition timing) stays per-family below because the
+			   two families never actually matched on it — see the block comment
+			   above and internal/ui/DESIGN.md. */
+			.pill-btn,
+			.shell-button {
+				cursor: pointer;
+				border: none;
+			}
+
 			.pill-btn {
 				display: inline-flex;
 				align-items: center;
 				gap: 0.375rem;
 				padding: 0.375rem 1rem;
-				border-radius: 9999px;
+				border-radius: var(--radius-pill);
 				font-size: 13px;
 				font-weight: 600;
-				cursor: pointer;
-				border: none;
-				transition: opacity 0.15s, transform 0.1s;
+				transition: opacity var(--dur-base), transform var(--dur-fast);
 				font-family: inherit;
 			}
 			.pill-btn:active { transform: scale(0.97); }
@@ -689,25 +753,25 @@
 			.pill-btn-danger { background: transparent; color: var(--bad); border: 1px solid var(--bad); }
 			.pill-btn-danger:hover { background: rgba(251,113,133,0.1); text-decoration: none; }
 
-			/* Legacy .btn aliases */
-			.btn { display: inline-flex; align-items: center; gap: 6px; padding: 0.375rem 1rem; border-radius: 9999px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text); transition: opacity 0.15s, border-color 0.15s; font-family: inherit; }
-			.btn:hover { border-color: var(--calypso); color: var(--calypso); text-decoration: none; }
-			.btn-danger { border-color: var(--bad); color: var(--bad); background: transparent; }
-			.btn-danger:hover { background: rgba(251,113,133,0.1); }
-			.btn-primary { background: var(--calypso); color: #080a10; border-color: var(--calypso); }
-			.btn-primary:hover { opacity: 0.88; color: #080a10; }
-
-			/* ── Badges ── */
+			/* ── Badges ──
+			   Single source of truth for .badge — this used to be defined twice
+			   (here, and again near "── Badges ──" further below) with
+			   conflicting padding/border-radius/font-size. Merged to the winning
+			   (previously later-in-cascade) computed result; the badge-success/
+			   warning/danger/muted variants further below never conflicted and
+			   stay where they are. */
 			.badge {
 				display: inline-flex;
 				align-items: center;
 				gap: 4px;
-				padding: 2px 7px;
-				border-radius: 4px;
-				font-size: 11px;
+				padding: 2px 8px;
+				border-radius: var(--radius-pill);
+				font-size: 10px;
 				font-weight: 700;
 				letter-spacing: 0.06em;
 				text-transform: uppercase;
+				font-family: var(--mono);
+				white-space: nowrap;
 			}
 			.badge-ingested { background: rgba(34,211,238,0.08); color: var(--calypso); border: 1px solid rgba(34,211,238,0.18); }
 			.badge-curated  { background: var(--surface-2); color: var(--silver); border: 1px solid var(--border-strong); }
@@ -722,25 +786,37 @@
 			.badge-status-closed::before { content: "●"; color: rgba(251,113,133,0.45); margin-right: 3px; font-size: 9px; }
 			.badge-status-merged { background: rgba(34,211,238,0.08); color: var(--calypso); border: 1px solid rgba(34,211,238,0.18); }
 
-			/* ── Data table ── */
-			.data-table { width: 100%; border-collapse: collapse; }
+			/* ── Data table ──
+			   Single source of truth for .data-table — this used to be defined
+			   twice (here, and again near "── Data tables ──" further below)
+			   with conflicting th/td padding, td vertical-align and row-hover
+			   background. Merged to the winning (previously later-in-cascade)
+			   computed result; .data-table a and .table-scroll (only ever defined
+			   once, further below) stay where they are. */
+			.data-table {
+				width: 100%;
+				border-collapse: collapse;
+				font-family: var(--mono);
+				font-size: 11px;
+			}
 			.data-table th {
 				font-family: var(--mono);
 				font-size: 10px;
-				letter-spacing: 0.14em;
+				letter-spacing: 0.08em;
 				text-transform: uppercase;
 				color: var(--text-faint);
 				font-weight: 500;
-				padding: 0.5rem 1rem;
+				padding: 8px 12px;
 				text-align: left;
 				border-bottom: 1px solid var(--border);
 			}
 			.data-table td {
-				padding: 0.625rem 1rem;
-				border-bottom: 1px solid var(--border);
-				vertical-align: middle;
+				padding: 10px 12px;
+				border-bottom: 1px solid rgba(255,255,255,0.04);
+				color: var(--text);
+				vertical-align: top;
 			}
-			.data-table tbody tr:hover td { background: var(--surface-2); }
+			.data-table tbody tr:hover td { background: rgba(255,255,255,0.02); }
 			.data-table tbody tr:last-child td { border-bottom: none; }
 
 			/* ── KV rows ── */
@@ -882,7 +958,7 @@
 				border-radius: var(--radius);
 				padding: 1.5rem;
 				max-width: 480px; width: 100%;
-				box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+				box-shadow: var(--shadow-lg);
 			}
 
 			/* ── Divider ── */
@@ -941,6 +1017,8 @@
 			}
 			.filter-chip:hover { color: var(--silver); border-color: var(--border-strong); text-decoration: none; }
 			.filter-chip-active { color: var(--calypso) !important; border-color: rgba(34,211,238,0.25) !important; background: rgba(34,211,238,0.07) !important; }
+			/* Remove glyph on active-filter chips (browse results header). */
+			.chip-x { margin-left: 2px; opacity: 0.65; }
 
 			/* ── Sub-project tab nav ── */
 			.subproject-nav {
@@ -1015,75 +1093,95 @@
 			.density-btn:hover { color: var(--silver); background: var(--surface-2); }
 			.density-btn-active { color: var(--accent) !important; background: var(--accent-dim) !important; }
 
-			/* Feed container */
-			.memory-feed { padding: 12px 0 8px; }
+			/* Feed container — 2-col card grid on desktop, 1-col narrow (Slice 4a) */
+			.memory-feed {
+				display: grid;
+				grid-template-columns: 1fr;
+				gap: 10px;
+				padding: 12px 0 8px;
+			}
+			@media (min-width: 760px) {
+				.memory-feed { grid-template-columns: 1fr 1fr; }
+			}
+			.memory-feed.compact { gap: 8px; }
 
-			/* Card */
+			/* Card — bordered box, left stripe colored by observation type */
 			.memory-card {
-				display: flex;
-				align-items: stretch;
-				border-bottom: 1px solid var(--border-2);
-				transition: background 0.12s;
 				position: relative;
+				display: block;
+				background: var(--surface);
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				overflow: hidden;
 				text-decoration: none;
 				color: inherit;
+				transition: border-color 0.12s, background 0.12s;
 			}
-			.memory-card:last-child { border-bottom: none; }
-			.memory-card:hover { background: var(--surface-2); text-decoration: none; }
+			.memory-card:hover { border-color: var(--border-accent); text-decoration: none; }
 			.memory-card:hover .card-title { color: var(--text); }
 
-			/* Left accent bar encodes layer */
+			/* Left accent bar encodes observation type */
 			.card-accent-bar {
+				position: absolute;
+				left: 0;
+				top: 0;
+				bottom: 0;
 				width: 3px;
-				flex-shrink: 0;
-				margin: 12px 0;
-				border-radius: 0 2px 2px 0;
 			}
-			.card-accent-bar.ingested {
-				background: rgba(34,211,238,0.55);
-				box-shadow: 0 0 8px rgba(34,211,238,0.18);
-			}
-			.card-accent-bar.curated { background: rgba(138,154,181,0.22); }
+			.card-accent-bar.card-type-architecture { background: var(--calypso); }
+			.card-accent-bar.card-type-decision { background: var(--violet); }
+			.card-accent-bar.card-type-bugfix { background: var(--bad); }
+			.card-accent-bar.card-type-config { background: var(--warn); }
+			.card-accent-bar.card-type-discovery { background: var(--green); }
+			.card-accent-bar.card-type-pattern { background: var(--pink); }
+			.card-accent-bar.card-type-default { background: var(--text-faint); }
+			/* Ingested rows get a subtle glow in addition to their type hue. */
+			.card-accent-bar.ingested { box-shadow: 2px 0 8px rgba(255,255,255,0.10); }
 
 			/* Card body */
 			.card-body {
-				flex: 1;
-				padding: 16px 24px 14px 18px;
+				padding: 13px 15px 13px 17px;
 				min-width: 0;
 			}
-			.comfortable .card-body { padding: 18px 24px 16px 18px; }
-			.compact .card-body   { padding: 11px 24px 10px 18px; }
+			.compact .card-body { padding: 9px 13px 9px 15px; }
 
-			/* Title row */
-			.card-title-row {
-				display: flex;
-				align-items: flex-start;
-				gap: 9px;
-				margin-bottom: 6px;
-			}
-			.compact .card-title-row { margin-bottom: 4px; }
-
-			/* Type glyph */
-			.card-type-glyph {
-				flex-shrink: 0;
-				margin-top: 2px;
-				opacity: 0.45;
-				color: var(--silver);
-				display: flex;
+			/* Type badge row */
+			.card-type-row { margin-bottom: 6px; }
+			.compact .card-type-row { margin-bottom: 4px; }
+			.card-type-badge {
+				display: inline-flex;
 				align-items: center;
+				font-size: 9px;
+				font-weight: 600;
+				letter-spacing: 0.13em;
+				text-transform: uppercase;
+				color: var(--text-3);
+				padding: 2px 7px;
+				border: 1px solid var(--border-2);
+				border-radius: var(--radius-sm);
+				background: transparent;
+				white-space: nowrap;
 			}
+			.card-type-badge.card-type-architecture { color: var(--calypso); }
+			.card-type-badge.card-type-decision { color: var(--violet); }
+			.card-type-badge.card-type-bugfix { color: var(--bad); }
+			.card-type-badge.card-type-config { color: var(--warn); }
+			.card-type-badge.card-type-discovery { color: var(--green); }
+			.card-type-badge.card-type-pattern { color: var(--pink); }
 
 			/* Card title */
 			.card-title {
+				display: block;
 				font-family: var(--display);
 				font-weight: 700;
-				font-size: 15px;
-				letter-spacing: 0.04em;
+				font-size: 14.5px;
+				letter-spacing: 0.02em;
 				color: #c8d8e8;
-				line-height: 1.25;
+				line-height: 1.3;
+				margin-bottom: 5px;
 				transition: color 0.12s;
 			}
-			.compact .card-title { font-size: 13.5px; }
+			.compact .card-title { font-size: 13px; margin-bottom: 3px; }
 
 			/* Snippet */
 			.card-snippet {
@@ -1104,7 +1202,7 @@
 				font-size: 10.5px;
 			}
 
-			/* Meta line */
+			/* Footer: project chip · source · age */
 			.card-meta {
 				display: flex;
 				align-items: center;
@@ -1112,24 +1210,19 @@
 				flex-wrap: wrap;
 			}
 
-			/* Type badge */
-			.meta-type {
-				display: inline-flex;
-				align-items: center;
-				gap: 4px;
-				font-size: 8px;
+			/* Project chip */
+			.card-project-chip {
+				color: var(--calypso);
+				background: var(--calypso-dim);
+				padding: 1px 8px;
+				border-radius: var(--radius-pill);
+				font-size: 10px;
 				font-weight: 600;
-				letter-spacing: 0.16em;
-				text-transform: uppercase;
-				color: var(--text-3);
-				padding: 2px 7px;
-				border: 1px solid rgba(255,255,255,0.04);
-				border-radius: 2px;
-				background: var(--surface-3);
+				letter-spacing: 0.02em;
 				white-space: nowrap;
 			}
 
-			/* Source chip */
+			/* Source label */
 			.meta-source {
 				display: inline-flex;
 				align-items: center;
@@ -1140,48 +1233,6 @@
 				color: var(--text-2);
 				opacity: 0.7;
 				white-space: nowrap;
-			}
-
-			/* Layer badge */
-			.meta-layer {
-				display: inline-flex;
-				align-items: center;
-				gap: 4px;
-				font-size: 8px;
-				font-weight: 700;
-				letter-spacing: 0.16em;
-				text-transform: uppercase;
-				padding: 2px 7px;
-				border-radius: 2px;
-				white-space: nowrap;
-			}
-			.meta-layer.ingested {
-				color: var(--accent);
-				background: rgba(34,211,238,0.07);
-				border: 1px solid rgba(34,211,238,0.18);
-			}
-			.meta-layer.curated {
-				color: var(--silver);
-				background: rgba(138,154,181,0.06);
-				border: 1px solid rgba(138,154,181,0.12);
-			}
-
-			/* Meta pip (dot inside layer badge) */
-			.meta-pip {
-				width: 3px;
-				height: 3px;
-				border-radius: 50%;
-				background: currentColor;
-				flex-shrink: 0;
-			}
-
-			/* Dot separator */
-			.meta-dot {
-				width: 2px;
-				height: 2px;
-				border-radius: 50%;
-				background: var(--text-3);
-				flex-shrink: 0;
 			}
 
 			/* Relative time */
@@ -1343,6 +1394,8 @@
 	border-color: var(--calypso);
 }
 
+/* .shell-button shares its `cursor`/`border` base with .pill-btn — see the
+   "Buttons — ONE system, two shapes" comment near the top of this file. */
 .shell-button {
 	background: var(--calypso);
 	color: #080a10;
@@ -1355,7 +1408,7 @@
 	letter-spacing: 0.08em;
 	text-transform: uppercase;
 	cursor: pointer;
-	transition: opacity 0.15s;
+	transition: opacity var(--dur-base);
 }
 
 .shell-button:hover {
@@ -1521,33 +1574,9 @@
 
 /* ── Data tables ──────────────────────────────────────────────────── */
 
-.data-table {
-	width: 100%;
-	border-collapse: collapse;
-	font-family: var(--mono);
-	font-size: 11px;
-}
-
-.data-table th {
-	text-align: left;
-	font-size: 10px;
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
-	color: var(--text-3);
-	padding: 8px 12px;
-	border-bottom: 1px solid var(--border);
-}
-
-.data-table td {
-	padding: 10px 12px;
-	border-bottom: 1px solid rgba(255,255,255,0.04);
-	color: var(--text);
-	vertical-align: top;
-}
-
-.data-table tbody tr:hover td {
-	background: rgba(255,255,255,0.02);
-}
+/* .data-table (base/th/td/hover) is defined once, in "── Data table ──" near
+   the top of this file — see the comment there. Only .data-table a and
+   .table-scroll (never duplicated) live here. */
 
 .data-table a {
 	color: var(--calypso);
@@ -1572,17 +1601,8 @@
 	display: block;
 }
 
-.card {
-	background: var(--surface);
-	border: 1px solid var(--border);
-	border-radius: var(--radius);
-	padding: 14px 16px;
-	transition: border-color 0.15s;
-}
-
-.card:hover {
-	border-color: rgba(34, 211, 238, 0.30);
-}
+/* .card and .card:hover are defined once, in "── Cards ──" near the top of
+   this file — see the comment there. Only children/variants live here. */
 
 .card header {
 	display: flex;
@@ -1619,15 +1639,8 @@
 
 /* ── Badges ───────────────────────────────────────────────────────── */
 
-.badge {
-	font-family: var(--mono);
-	font-size: 10px;
-	letter-spacing: 0.06em;
-	text-transform: uppercase;
-	padding: 2px 8px;
-	border-radius: 100px;
-	white-space: nowrap;
-}
+/* .badge is defined once, in "── Badges ──" near the top of this file — see
+   the comment there. Only the variants below live here. */
 
 .badge-success {
 	background: rgba(34, 197, 94, 0.12);
@@ -2083,6 +2096,37 @@
 	border-color: var(--calypso);
 }
 
+/* ── Lang toggle (ES | EN) ────────────────────────────────────────── */
+
+.lang-toggle {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-family: var(--mono);
+	font-size: 10px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+}
+
+.lang-current {
+	color: var(--text);
+	font-weight: 700;
+}
+
+.lang-link {
+	color: var(--text-3);
+	text-decoration: none;
+	transition: color 0.15s;
+}
+
+.lang-link:hover {
+	color: var(--calypso);
+}
+
+.lang-sep {
+	color: var(--border-2);
+}
+
 /* ─── Admin section — searchable project selector + admin forms (OBL-15) ─────
    Scoped to the operator Admin pages. Extends the existing tokens; introduces no
    new framework. */
@@ -2167,8 +2211,702 @@
 	border: 1px solid var(--border-strong);
 }
 
+/* ── Admin Access page v2 (Command Center v2, Slice 3) ─────────────────────
+   ONE unified table (project → effective access), replacing the old
+   disconnected override list + read-only "from teams" section. Each row is a
+   CSS-grid div (matching the approved mockup's markup, not a <table>), edited
+   in place via the SAME swap-in-place convention as Slice 2's user-delete
+   slot: a stable #access-row-{slug} wrapper whose innerHTML swaps between
+   view / edit-form / ConfirmDialog states. */
+
+.access-head-row,
+.access-row {
+	display: grid;
+	grid-template-columns: 1.3fr 1.3fr 1.4fr auto;
+	gap: 0.75rem;
+	align-items: center;
+	padding: 0.7rem 1rem;
+	border-bottom: 1px solid var(--border);
+}
+
+.access-head-row:last-child,
+.access-row:last-child {
+	border-bottom: none;
+}
+
+.access-row:hover {
+	background: rgba(255, 255, 255, 0.015);
+}
+
+/* The reused ui.ConfirmDialog (.card) swaps into a row's innerHTML for the
+   revoke step — span the full row instead of being squeezed into one column. */
+.access-row .card {
+	grid-column: 1 / -1;
+	margin: 0;
+}
+
+.access-proj {
+	font-family: var(--mono);
+	font-size: 13px;
+	color: var(--text);
+	font-weight: 500;
+}
+
+.access-perm {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+}
+
+.access-lvl {
+	font-size: 11.5px;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--text);
+}
+
+.access-lvl-none {
+	color: var(--text-faint);
+}
+
+.access-chips {
+	display: inline-flex;
+	gap: 3px;
+}
+
+.access-chip {
+	width: 20px;
+	height: 20px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 10px;
+	font-weight: 700;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--border-strong);
+	color: var(--text-faint);
+}
+
+.access-chip.on {
+	background: var(--accent-dim);
+	border-color: var(--border-accent);
+	color: var(--calypso);
+}
+
+.access-src-detail {
+	color: var(--text-faint);
+	font-size: 11.5px;
+}
+
+.access-edit {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	justify-content: flex-end;
+}
+
+.access-sep {
+	color: var(--text-faint);
+}
+
+.access-danger {
+	color: var(--bad);
+}
+
+.access-danger:hover {
+	color: var(--bad);
+	opacity: 0.8;
+}
+
+.badge-team {
+	background: rgba(129, 140, 248, 0.10);
+	color: var(--violet);
+	border: 1px solid rgba(129, 140, 248, 0.28);
+}
+
+/* A minimal text/icon-free link-styled control — used for the Access row's
+   Edit/Override…/Grant…/Revoke/Cancel triggers. Always a <button> (never a
+   bare <a href>) so an htmx GET trigger never risks a real navigation. */
+.linkish {
+	background: none;
+	border: none;
+	padding: 0;
+	color: var(--text-faint);
+	font-family: var(--mono);
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.linkish:hover {
+	color: var(--calypso);
+}
+
+/* ── Searchable account combobox (Command Center v2, Slice 3) ──────────────
+   Reuses .proj-list/.proj-opt (above) for the dropdown; only the input/host
+   need their own rules since the account picker isn't a form control. */
+
+.acct-select {
+	position: relative;
+	max-width: 380px;
+}
+
+.acct-select-input {
+	width: 100%;
+	padding: 0.5rem 0.65rem;
+	font-size: 13px;
+	background: var(--surface-2);
+	border: 1px solid var(--border);
+	border-radius: 0.4rem;
+	color: var(--text);
+}
+
+.acct-select-input:focus {
+	outline: none;
+	border-color: var(--accent);
+}
+
+.acct-opt-email {
+	margin-left: auto;
+	font-size: 11px;
+	color: var(--text-dim);
+}
+
 .admin-form-error {
 	color: var(--bad);
 	font-size: 12px;
 	margin-top: 0.45rem;
+}
+
+/* ── Admin Users v2 (Slice 2, Command Center v2) ──────────────────────
+   New surface only: a toolbar (search + primary action), a collapsed
+   per-row kebab menu, a shared modal shell (header/body/footer around the
+   existing .modal/.modal-backdrop from Slice 0), a segmented role toggle,
+   a reveal-once password box, and a page-level error banner. Every rule
+   here reuses Slice-0 tokens (var(--surface-2), var(--border), var(--radius),
+   var(--calypso), etc.) — no new color literals, no new button family
+   (actions still use .shell-button / .shell-button-ghost). */
+
+.admin-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 0.75rem;
+	flex-wrap: wrap;
+	margin-bottom: 0.85rem;
+}
+
+.admin-search {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	flex: 1;
+	min-width: 200px;
+	max-width: 340px;
+	background: var(--surface-2);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	padding: 0.4rem 0.7rem;
+	color: var(--text-faint);
+}
+
+.admin-search svg {
+	flex: none;
+	color: var(--text-faint);
+}
+
+.admin-search input[type="search"] {
+	background: transparent;
+	border: none;
+	padding: 0;
+	flex: 1;
+	color: var(--text);
+	font-size: 12.5px;
+}
+
+.admin-search input[type="search"]:focus {
+	box-shadow: none;
+}
+
+.admin-count {
+	font-size: 11px;
+	color: var(--text-faint);
+	letter-spacing: 0.04em;
+	white-space: nowrap;
+}
+
+.admin-toolbar .shell-button {
+	margin-left: auto;
+}
+
+.admin-error-banner {
+	margin-bottom: 1rem;
+	padding: 0.6rem 0.9rem;
+	background: rgba(251, 113, 133, 0.08);
+	border: 1px solid rgba(251, 113, 133, 0.3);
+	border-radius: var(--radius);
+	color: var(--bad);
+	font-size: 12.5px;
+}
+
+/* ── Row actions: one primary link + a kebab overflow menu ── */
+
+.admin-rowact {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	justify-content: flex-end;
+}
+
+.admin-menu-wrap {
+	position: relative;
+	display: inline-flex;
+}
+
+.admin-kebab {
+	width: 30px;
+	height: 30px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--silver);
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	letter-spacing: 2px;
+	font-size: 13px;
+	transition: border-color var(--dur-base), color var(--dur-base);
+}
+
+.admin-kebab:hover,
+.admin-kebab[aria-expanded="true"] {
+	border-color: var(--calypso);
+	color: var(--calypso);
+}
+
+.admin-menu {
+	position: absolute;
+	right: 0;
+	top: 36px;
+	z-index: 20;
+	width: 230px;
+	background: var(--surface-3, var(--surface-2));
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	padding: 5px;
+	box-shadow: var(--shadow-lg);
+}
+
+.admin-menu button,
+.admin-menu a {
+	width: 100%;
+	text-align: left;
+	background: transparent;
+	border: none;
+	color: var(--text);
+	font-family: var(--mono);
+	font-size: 12.5px;
+	padding: 8px 10px;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	text-decoration: none;
+}
+
+.admin-menu button:hover,
+.admin-menu a:hover {
+	background: rgba(255, 255, 255, 0.05);
+	color: var(--text);
+	text-decoration: none;
+}
+
+.admin-menu button .ic,
+.admin-menu a .ic {
+	color: var(--text-faint);
+	width: 14px;
+	text-align: center;
+	flex: none;
+}
+
+.admin-menu .admin-menu-sep {
+	height: 1px;
+	background: var(--border);
+	margin: 5px 2px;
+}
+
+.admin-menu button.danger {
+	color: var(--bad);
+}
+
+.admin-menu button.danger:hover {
+	background: rgba(251, 113, 133, 0.08);
+}
+
+/* The reused ui.ConfirmDialog (.card) swaps in place of the "Delete…" trigger
+   for the hard-delete step — compact padding so it fits the 230px menu. */
+.admin-menu .card {
+	padding: 0.65rem 0.6rem;
+	margin: 3px 2px;
+	border-radius: var(--radius-sm);
+}
+
+.admin-menu-token-form {
+	display: flex;
+	gap: 0.35rem;
+	align-items: center;
+	padding: 6px 8px 4px;
+}
+
+.admin-menu-token-form input[type="text"] {
+	flex: 1;
+	min-width: 0;
+	padding: 0.3rem 0.5rem;
+	font-size: 12px;
+}
+
+/* ── Modal shell (extends the existing .modal / .modal-backdrop) ── */
+
+.admin-modal-backdrop {
+	z-index: 60;
+}
+
+.admin-modal {
+	max-width: 420px;
+	padding: 0;
+	overflow: hidden;
+}
+
+.admin-modal-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0.9rem 1.1rem;
+	border-bottom: 1px solid var(--border);
+}
+
+.admin-modal-head h3 {
+	font-family: var(--display);
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	font-size: 15px;
+	margin: 0;
+	color: var(--text);
+}
+
+.admin-modal-close {
+	background: transparent;
+	border: none;
+	color: var(--text-faint);
+	cursor: pointer;
+	font-size: 13px;
+	padding: 0.2rem;
+	line-height: 1;
+}
+
+.admin-modal-close:hover {
+	color: var(--calypso);
+}
+
+.admin-modal-body {
+	padding: 1.1rem;
+}
+
+.admin-modal-foot {
+	padding: 0.85rem 1.1rem;
+	border-top: 1px solid var(--border);
+	display: flex;
+	justify-content: flex-end;
+	gap: 0.6rem;
+}
+
+.admin-field {
+	margin-bottom: 0.9rem;
+}
+
+.admin-field label {
+	display: block;
+	font-size: 10px;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--text-faint);
+	margin-bottom: 0.35rem;
+}
+
+.admin-field input[type="text"],
+.admin-field input[type="email"],
+.admin-field input[type="password"] {
+	width: 100%;
+}
+
+.admin-hint {
+	font-size: 11px;
+	color: var(--text-faint);
+	margin: 0.3rem 0 0;
+}
+
+/* ── Role segmented toggle (a form control, not a new button family) ── */
+
+.admin-seg {
+	display: inline-flex;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	overflow: hidden;
+}
+
+.admin-seg-opt {
+	padding: 0.4rem 0.9rem;
+	font-size: 12px;
+	letter-spacing: 0.04em;
+	color: var(--text-2);
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+	margin: 0;
+}
+
+.admin-seg-opt input {
+	position: absolute;
+	opacity: 0;
+	width: 0;
+	height: 0;
+}
+
+.admin-seg-opt:has(input:checked),
+.admin-seg-opt.on {
+	background: rgba(34, 211, 238, 0.1);
+	color: var(--calypso);
+}
+
+/* ── Reveal-once password box ── */
+
+.admin-pwbox {
+	margin-top: 0.5rem;
+	background: #0a1418;
+	border: 1px solid var(--border-accent);
+	border-radius: var(--radius-sm);
+	padding: 0.75rem 0.9rem;
+}
+
+.admin-pwbox-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 0.5rem;
+}
+
+.admin-pwbox-copy {
+	background: transparent;
+	border: none;
+	color: var(--calypso);
+	cursor: pointer;
+	font-size: 11px;
+	font-family: var(--mono);
+	padding: 0;
+}
+
+.admin-pwval {
+	font-family: var(--mono);
+	font-size: 16px;
+	letter-spacing: 0.05em;
+	color: var(--text);
+	user-select: all;
+	word-break: break-all;
+}
+
+.admin-pwwarn {
+	margin-top: 0.5rem;
+	font-size: 11px;
+	color: var(--warn);
+	display: flex;
+	align-items: flex-start;
+	gap: 0.4rem;
+}
+
+/* ── Admin Projects cards (Command Center v2, Slice 4b) ─────────────────────
+   Cards replace the old dense config rows. Every token here is reused from
+   Slice 0 (var(--surface), var(--border), var(--radius), var(--display),
+   var(--calypso), etc.) — no new color literals. The kebab menu itself reuses
+   .admin-kebab/.admin-menu (Slice 2) verbatim; only .admin-menu-form is new,
+   for the rename/classify + pause-sync controls now living inside it. */
+
+.projgrid {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 12px;
+}
+
+@media (min-width: 720px) {
+	.projgrid {
+		grid-template-columns: 1fr 1fr;
+	}
+}
+
+@media (min-width: 1040px) {
+	.projgrid {
+		grid-template-columns: 1fr 1fr 1fr;
+	}
+}
+
+/* Command Center v2, Slice 5b: parent/child grouping. A group spans every
+   grid column (grid-column: 1 / -1) so its children can render indented
+   directly beneath the parent card, instead of scattered at their own
+   alphabetical position in the flat .projgrid. */
+.projgroup {
+	grid-column: 1 / -1;
+}
+
+.projgroup-children {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 12px;
+	margin-top: 12px;
+	margin-left: 24px;
+	padding-left: 16px;
+	border-left: 2px solid var(--border-accent);
+}
+
+@media (min-width: 720px) {
+	.projgroup-children {
+		grid-template-columns: 1fr 1fr;
+	}
+}
+
+@media (min-width: 1040px) {
+	.projgroup-children {
+		grid-template-columns: 1fr 1fr 1fr;
+	}
+}
+
+.projcard {
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	padding: 15px;
+}
+
+.projcard:hover {
+	border-color: var(--border-accent);
+}
+
+.projcard .ph {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 8px;
+	margin-bottom: 12px;
+}
+
+.projcard .ph .pn {
+	font-family: var(--display);
+	font-weight: 700;
+	font-size: 15px;
+	color: var(--text);
+}
+
+.projcard .ph .pn small {
+	display: block;
+	color: var(--text-faint);
+	font-size: 10.5px;
+	font-weight: 400;
+	font-family: var(--mono);
+	letter-spacing: 0.02em;
+	margin-top: 2px;
+}
+
+.pstats {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 10px 8px;
+	margin-bottom: 10px;
+}
+
+.pstat {
+	text-align: left;
+}
+
+.pstat .v {
+	font-family: var(--display);
+	font-weight: 800;
+	font-size: 20px;
+	color: var(--text);
+	line-height: 1;
+}
+
+.pstat .l {
+	font-size: 9.5px;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+	color: var(--text-faint);
+	margin-top: 3px;
+}
+
+/* The "With access" stat is the only clickable one (lazily expands the
+   reverse-access fragment) — styled identically to the other three read-only
+   stats so it doesn't look like an unrelated button. */
+.pstat-access {
+	background: none;
+	border: none;
+	padding: 0;
+	cursor: pointer;
+	text-align: left;
+	font: inherit;
+}
+
+.pstat-access:hover .v {
+	color: var(--calypso);
+}
+
+.proj-access-list {
+	margin-bottom: 10px;
+	padding-top: 8px;
+	border-top: 1px dashed var(--border);
+}
+
+.proj-access-row {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.3rem 0;
+	font-size: 12px;
+}
+
+.proj-access-user {
+	font-family: var(--mono);
+	color: var(--text);
+	margin-right: auto;
+}
+
+.pfoot {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding-top: 11px;
+	border-top: 1px solid var(--border);
+}
+
+/* Compact field stack for the rename/classify + pause-sync controls folded
+   into the Projects card's kebab menu (mirrors .admin-menu-token-form's
+   compact-padding intent, but stacked instead of inline — these carry more
+   fields than a one-line token label). */
+.admin-menu-form {
+	display: flex;
+	flex-direction: column;
+	gap: 0.4rem;
+	padding: 0.3rem 0.6rem 0.5rem;
+	margin: 0;
+}
+
+.admin-menu-form input[type="text"],
+.admin-menu-form select {
+	width: 100%;
+	padding: 0.35rem 0.5rem;
+	font-size: 12px;
+	background: var(--surface-2);
+	border: 1px solid var(--border);
+	border-radius: 0.4rem;
+	color: var(--text);
+	font-family: var(--mono);
 }

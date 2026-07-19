@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/llm"
+	"github.com/velion/omnia/internal/llm"
 )
 
 // ─── A.3 tests ────────────────────────────────────────────────────────────────

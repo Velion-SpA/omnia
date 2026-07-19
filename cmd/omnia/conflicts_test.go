@@ -17,8 +17,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/store"
-	versioncheck "github.com/Velion-SpA/omnia/internal/version"
+	"github.com/velion/omnia/internal/store"
+	versioncheck "github.com/velion/omnia/internal/version"
 	_ "modernc.org/sqlite"
 )
 

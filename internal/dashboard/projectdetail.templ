@@ -1,0 +1,96 @@
+package dashboard
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/velion/omnia/internal/ui"
+	"github.com/velion/omnia/internal/ui/i18n"
+)
+
+// projectDetailPage renders the project-detail landing page (Command Center
+// v2, Slice 4c — mockup view ⑥ "Entrar a un proyecto"/"Project detail").
+// Reuses the shared page shell (layout) and the Slice 4a memory-card grid
+// (ui.MemoryFeed/ui.Card) verbatim. Slice 5b adds an OPTIONAL parent
+// breadcrumb and a "Sub-projects" children section, both driven entirely by
+// data.ParentProject/data.Children (nil/empty on the local dashboard, which
+// has no SubProjectResolver — see Server.subProjects). Deliberately does NOT
+// render a "who has access" panel (cloud-RBAC-only, already covered by the
+// Slice 4b Admin Projects page) nor any memory-grid rollup for a parent's
+// children (that stays admin-only, see Slice 5b's cloudserver changes) —
+// both are explicitly out of scope for this page.
+templ projectDetailPage(data ProjectDetailData) {
+	@layout("browse", projectDetailTitle(ctx, data)) {
+		<div style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.85rem; flex-wrap: wrap;">
+			<a href={ templ.SafeURL("/") } style="color: var(--text-faint); font-size: 11px; text-decoration: none; letter-spacing: 0.04em;">← { ui.T(ctx, "nav.overview") }</a>
+			if data.ParentProject != "" {
+				<a href={ templ.SafeURL(data.ParentProjectURL) } class="project-parent-link" style="color: var(--text-faint); font-size: 11px; text-decoration: none; letter-spacing: 0.04em;">← { data.ParentProject }</a>
+			}
+		</div>
+		if !data.Found {
+			@emptyState(i18n.Tf(i18n.LangFrom(ctx), "projectDetail.notFound", ui.T(ctx, "nav.overview"), ui.T(ctx, "nav.browse")))
+		} else {
+			<div style="margin-bottom: 1.5rem;">
+				<h1 style="font-size: 20px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; margin: 0 0 0.75rem 0;">{ data.Name }</h1>
+				<div style="display: flex; gap: 2.5rem; flex-wrap: wrap;">
+					@projectDetailStat(ui.T(ctx, "projectDetail.memories"), fmt.Sprintf("%d", data.Stats.Total))
+					@projectDetailStat(ui.T(ctx, "overview.sources"), fmt.Sprintf("%d", data.SourceCount))
+					@projectDetailStat(ui.T(ctx, "projectDetail.lastActivity"), projectLastActivityLabel(data))
+				</div>
+			</div>
+			if len(data.Children) > 0 {
+				@projectDetailChildren(data.Children)
+			}
+			<div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
+				<span class="micro-label">{ ui.Tf(ctx, "projectDetail.recentCount", len(data.Memories)) }</span>
+				<a href={ templ.SafeURL(data.BrowseURL) } class="pill-btn pill-btn-primary">{ ui.T(ctx, "projectDetail.viewAllBrowse") }</a>
+			</div>
+			@ui.MemoryFeed(toUICards(data.Memories))
+		}
+	}
+}
+
+// projectDetailChildren renders the "Sub-projects" section (Command Center
+// v2, Slice 5b): a project that is itself a parent lists its direct linked
+// children as simple navigational chips to their own detail pages. Display
+// only — this is identity/navigation, never a memory-grid rollup (that stays
+// out of scope, see ProjectDetailData's doc comment).
+templ projectDetailChildren(children []ProjectDetailChildLink) {
+	<div class="project-children-section" style="margin-bottom: 1.5rem;">
+		<span class="micro-label" style="display: block; margin-bottom: 0.5rem;">{ ui.T(ctx, "projectDetail.subProjects") }</span>
+		<div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+			for _, child := range children {
+				<a href={ templ.SafeURL(child.URL) } class="badge badge-source">{ child.Name }</a>
+			}
+		</div>
+	</div>
+}
+
+// projectDetailStat renders one header metric (value + label), matching the
+// existing tile-value/tile-label visual language from the Overview bento
+// grid (see overview.templ's "panel accented" tiles) at a smaller scale
+// appropriate for a page sub-header rather than a full tile.
+templ projectDetailStat(label, value string) {
+	<div>
+		<div style="font-family: var(--display); font-size: 22px; font-weight: 700; color: var(--text);">{ value }</div>
+		<div class="micro-label" style="color: var(--text-faint);">{ label }</div>
+	</div>
+}
+
+// projectDetailTitle returns the page title: the project name when
+// resolved, or a neutral fallback for the empty-state path.
+func projectDetailTitle(ctx context.Context, data ProjectDetailData) string {
+	if !data.Found {
+		return ui.T(ctx, "projectDetail.fallbackTitle")
+	}
+	return data.Name
+}
+
+// projectLastActivityLabel returns "—" when there is no last-activity
+// timestamp (e.g. a project with zero memories) instead of an empty string.
+func projectLastActivityLabel(data ProjectDetailData) string {
+	if data.LastActivity == "" {
+		return "—"
+	}
+	return data.LastActivity
+}

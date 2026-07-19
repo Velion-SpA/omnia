@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/constants"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/cloud/constants"
+	"github.com/velion/omnia/internal/store"
 )
 
 const (

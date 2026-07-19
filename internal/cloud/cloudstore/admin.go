@@ -163,6 +163,11 @@ func (cs *CloudStore) DeleteMembership(ctx context.Context, accountID, project s
 // is_admin=true is treated as operator, exactly as OBL-01 validates a managed
 // token against the DB on each request. An unknown id resolves to false (never an
 // error), so callers fail-closed to "not admin".
+//
+// C1 (disabled_at enforcement): the query folds `AND disabled_at IS NULL`, so a
+// disabled admin resolves to is_admin=false and its still-live dashboard session is
+// never re-promoted to operator on the next request — neutralizing the disabled
+// admin at zero added cost (this lookup already runs every request).
 func (cs *CloudStore) IsUserAdmin(ctx context.Context, accountID string) (bool, error) {
 	if cs == nil || cs.db == nil {
 		return false, fmt.Errorf("cloudstore: not initialized")
@@ -172,7 +177,7 @@ func (cs *CloudStore) IsUserAdmin(ctx context.Context, accountID string) (bool, 
 		return false, fmt.Errorf("cloudstore: account_id is required")
 	}
 	var isAdmin bool
-	err := cs.db.QueryRowContext(ctx, `SELECT is_admin FROM cloud_users WHERE id = $1::bigint`, accountID).Scan(&isAdmin)
+	err := cs.db.QueryRowContext(ctx, `SELECT is_admin FROM cloud_users WHERE id = $1::bigint AND disabled_at IS NULL`, accountID).Scan(&isAdmin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -180,6 +185,31 @@ func (cs *CloudStore) IsUserAdmin(ctx context.Context, accountID string) (bool, 
 		return false, fmt.Errorf("cloudstore: is user admin: %w", err)
 	}
 	return isAdmin, nil
+}
+
+// IsAccountDisabled reports whether the account is deactivated (C1). It is a single
+// PK-indexed EXISTS probe (never a scan), the cheap runtime gate the sync data-plane
+// RBAC path checks BEFORE resolving perms so a disabled account with live
+// memberships/teams still resolves to deny on /sync/push, /sync/pull and
+// /sync/mutations/push|pull — mirroring the managed-token UserDisabled rejection.
+// An unknown id resolves to false (no row ⇒ not disabled); perms resolution then
+// denies it by default anyway.
+func (cs *CloudStore) IsAccountDisabled(ctx context.Context, accountID string) (bool, error) {
+	if cs == nil || cs.db == nil {
+		return false, fmt.Errorf("cloudstore: not initialized")
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return false, nil
+	}
+	var disabled bool
+	err := cs.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM cloud_users WHERE id = $1::bigint AND disabled_at IS NOT NULL)`,
+		accountID).Scan(&disabled)
+	if err != nil {
+		return false, fmt.Errorf("cloudstore: is account disabled: %w", err)
+	}
+	return disabled, nil
 }
 
 // SetUserAdmin grants or revokes an account's admin flag (OBL-16). Returns

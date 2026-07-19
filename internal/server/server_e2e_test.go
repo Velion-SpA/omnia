@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 func newE2EServer(t *testing.T) (*store.Store, *httptest.Server) {

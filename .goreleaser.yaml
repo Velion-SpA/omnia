@@ -12,8 +12,9 @@ builds:
     env:
       - CGO_ENABLED=0
     goos:
-      - darwin
       - linux
+      - darwin
+      - windows
     goarch:
       - amd64
       - arm64
@@ -27,6 +28,10 @@ archives:
   - formats:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
 
 checksum:
   name_template: "checksums.txt"
@@ -41,19 +46,12 @@ changelog:
 
 brews:
   - repository:
-      owner: Velion-SpA
+      owner: Gentleman-Programming
       name: homebrew-tap
-      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
-    # TODO: flip to false once the TAP_GITHUB_TOKEN secret (PAT with contents:write
-    # on Velion-SpA/homebrew-tap) is configured — until then the formula is updated
-    # manually and the release must not depend on the secret.
-    skip_upload: true
     name: omnia
-    homepage: "https://github.com/Velion-SpA/omnia"
-    description: "Persistent memory for AI coding agents — local-first with self-hosted multi-tenant cloud sync"
+    homepage: "https://github.com/velion/omnia"
+    description: "Persistent memory for AI coding agents. Agent-agnostic, single binary, zero dependencies."
     license: "MIT"
-    commit_author:
-      name: Benjamin Arratia
-      email: benjamin.arratia.santibanez@gmail.com
     commit_msg_template: "chore: update omnia formula to {{ .Tag }}"

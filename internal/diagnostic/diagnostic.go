@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 const (

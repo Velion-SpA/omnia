@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/meta"
+	"github.com/velion/omnia/internal/meta"
 )
 
 // TestFormatIssueSingleChunk verifies that a short issue produces exactly one item

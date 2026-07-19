@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/config"
-	"github.com/Velion-SpA/omnia/internal/core"
-	"github.com/Velion-SpA/omnia/internal/enrich"
-	"github.com/Velion-SpA/omnia/internal/meta"
+	"github.com/velion/omnia/internal/config"
+	"github.com/velion/omnia/internal/core"
+	"github.com/velion/omnia/internal/enrich"
+	"github.com/velion/omnia/internal/meta"
 )
 
 const (

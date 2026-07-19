@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
 )
 

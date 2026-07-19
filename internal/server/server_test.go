@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 	_ "modernc.org/sqlite"
 )
 

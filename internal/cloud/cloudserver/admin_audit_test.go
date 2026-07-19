@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
 )
 
 // TestAdminAuditPageOperatorOnly verifies GET /admin/audit is gated exactly
@@ -20,8 +20,8 @@ func TestAdminAuditPageOperatorOnly(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator GET /admin/audit: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "AUDIT LOG") {
-		t.Fatalf("expected Audit page body, got %q", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "REGISTRO DE AUDITORÍA") {
+		t.Fatalf("expected Audit page body (Spanish default), got %q", rec.Body.String())
 	}
 
 	forbidden := httptest.NewRecorder()

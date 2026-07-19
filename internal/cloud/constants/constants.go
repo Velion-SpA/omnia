@@ -1,6 +1,6 @@
 package constants
 
-import "github.com/Velion-SpA/omnia/internal/store"
+import "github.com/velion/omnia/internal/store"
 
 const (
 	TargetKeyCloud = store.DefaultSyncTargetKey

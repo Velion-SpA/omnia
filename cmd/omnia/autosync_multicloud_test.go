@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/autosync"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/cloud/autosync"
+	"github.com/velion/omnia/internal/store"
 )
 
 // fakeCloudMutationServer is a minimal /sync/mutations/push+pull stub used to

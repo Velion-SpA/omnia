@@ -2,19 +2,22 @@ package cloudserver
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
-	"github.com/Velion-SpA/omnia/internal/cloud/constants"
-	"github.com/Velion-SpA/omnia/internal/project"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/cloud/constants"
+	"github.com/velion/omnia/internal/project"
+	"github.com/velion/omnia/internal/store"
 )
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -41,12 +44,27 @@ type StoredMutation = cloudstore.StoredMutation
 type MutationStore interface {
 	InsertMutationBatch(ctx context.Context, batch []cloudstore.MutationEntry) ([]int64, error)
 	ListMutationsSince(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string) ([]cloudstore.StoredMutation, bool, int64, error)
-	IsProjectSyncEnabled(project string) (bool, error)
+	IsProjectSyncEnabled(ctx context.Context, project string) (bool, error)
 }
 
 // Compile-time assertion: *cloudstore.CloudStore must satisfy MutationStore.
 // This prevents future regressions where cloudstore changes break the interface contract.
 var _ MutationStore = (*cloudstore.CloudStore)(nil)
+
+// EmbeddingMutationStore is an optional extension of MutationStore for cloud
+// stores that also materialize embedding mutations into cloud_embeddings
+// (human-like-memory PR5 slice 2, cloud semantic parity — consumed by slice
+// 3's clouddash.Source.Semantic()). Implemented by *cloudstore.CloudStore via
+// slice 1's UpsertEmbedding. Test fakes that don't implement it simply skip
+// materialization — the mutation still lands in cloud_mutations via
+// InsertMutationBatch either way, so nothing is lost; only the
+// cloud_embeddings query index is not populated for that fake.
+type EmbeddingMutationStore interface {
+	UpsertEmbedding(ctx context.Context, row cloudstore.EmbeddingRow) error
+}
+
+// Compile-time assertion: *cloudstore.CloudStore must satisfy EmbeddingMutationStore.
+var _ EmbeddingMutationStore = (*cloudstore.CloudStore)(nil)
 
 // EnrolledProjectsProvider is an optional extension of ProjectAuthorizer
 // that returns the list of enrolled projects for the authenticated caller.
@@ -164,7 +182,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	// Check sync pause per project (REQ-203 + BW9: use writeActionableError for 409).
 	for _, entry := range req.Entries {
 		proj := strings.TrimSpace(entry.Project)
-		enabled, err := ms.IsProjectSyncEnabled(proj)
+		enabled, err := ms.IsProjectSyncEnabled(r.Context(), proj)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("check project sync: %v", err), http.StatusInternalServerError)
 			return
@@ -206,8 +224,9 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	}
 
 	// REQ-006 / REQ-008: Validate each entry's payload before storage.
-	// Relation entries are strictly validated (all required fields).
-	// Legacy entities (session, observation, prompt) use the lenient floor only.
+	// Relation and embedding entries are strictly validated (all required
+	// fields, plus a decodable vector for embeddings). Legacy entities
+	// (session, observation, prompt) use the lenient floor only.
 	// Any failure rejects the ENTIRE batch (atomic — no partial inserts).
 	var invalid []map[string]any
 	for i, entry := range req.Entries {
@@ -221,7 +240,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	}
 	if len(invalid) > 0 {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{
-			"error":       "invalid relation payload",
+			"error":       "invalid mutation payload",
 			"reason_code": "validation_error",
 			"invalid":     invalid,
 		})
@@ -233,6 +252,11 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		http.Error(w, fmt.Sprintf("insert mutations: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	// human-like-memory PR5 slice 2: best-effort materialize any
+	// SyncEntityEmbedding entries into cloud_embeddings. Never fails the
+	// push — the mutations are already durably stored above.
+	s.materializeEmbeddingMutations(r.Context(), req.Entries)
 
 	// REQ-414: include project envelope in 200 response.
 	jsonResponse(w, http.StatusOK, map[string]any{
@@ -280,17 +304,31 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 			// *rbacAuthorizer — never leave allowedProjects nil ("allow all").
 			allowedProjects = []string{}
 			if ms, ok := s.accountProjectAuth.(*rbacAuthorizer); ok {
-				memberships, err := ms.store.ListMembershipsForAccount(claims.AccountID)
-				if err != nil {
-					http.Error(w, fmt.Sprintf("list memberships: %v", err), http.StatusInternalServerError)
-					return
+				// C1: a disabled account pulls nothing. This path does NOT go through
+				// authorizeProjectOp/AuthorizeAccountProject, so the disabled gate must
+				// be applied here too (deny-by-default: allowedProjects stays empty).
+				accountDisabled := false
+				if ms.disabled != nil {
+					disabled, err := ms.disabled.IsAccountDisabled(r.Context(), claims.AccountID)
+					if err != nil {
+						http.Error(w, fmt.Sprintf("check account status: %v", err), http.StatusInternalServerError)
+						return
+					}
+					accountDisabled = disabled
 				}
-				allowedProjects = enrolledProjectsFromMemberships(memberships)
-				// Phase 4: a device-bound token additionally narrows the
-				// readable set to the device's scope, so e.g. a personal
-				// laptop never pulls work projects via mutation pull.
-				if claims.DeviceID != "" && s.deviceStore != nil {
-					allowedProjects = s.intersectDeviceScope(claims.DeviceID, allowedProjects)
+				if !accountDisabled {
+					memberships, err := ms.store.ListMembershipsForAccount(claims.AccountID)
+					if err != nil {
+						http.Error(w, fmt.Sprintf("list memberships: %v", err), http.StatusInternalServerError)
+						return
+					}
+					allowedProjects = enrolledProjectsFromMemberships(memberships)
+					// Phase 4: a device-bound token additionally narrows the
+					// readable set to the device's scope, so e.g. a personal
+					// laptop never pulls work projects via mutation pull.
+					if claims.DeviceID != "" && s.deviceStore != nil {
+						allowedProjects = s.intersectDeviceScope(claims.DeviceID, allowedProjects)
+					}
 				}
 			} else {
 				log.Printf("[cloudserver] WARNING: accountProjectAuth (%T) is not *rbacAuthorizer; mutation pull returns empty to prevent cross-tenant leak", s.accountProjectAuth)
@@ -407,15 +445,172 @@ func validateLegacyPayload(_ string, _ json.RawMessage) (string, bool) {
 	return "", true
 }
 
+// embeddingRequiredFields lists the fields that MUST be present and non-empty
+// in every embedding mutation payload. CRITICAL bugfix (human-like-memory
+// PR5, found by adversarial review): before this validator existed,
+// validateMutationEntry had NO case for "embedding" and fell through to the
+// lenient validateLegacyPayload no-op, so a malformed embedding payload
+// (missing sync_id/project/vector, or an undecodable vector) could enter the
+// shared cloud_mutations journal at push time and poison every peer that
+// later pulls it — see applyEmbeddingUpsertTx / ApplyPulledMutation on the
+// pull side, which now marks such a mutation dead+ACKed rather than halting,
+// but the correct fix is to reject it here BEFORE it is ever stored.
+var embeddingRequiredFields = []string{
+	"sync_id",
+	"project",
+	"vector",
+}
+
+// validateEmbeddingPayload checks that all required embedding fields are
+// present and non-empty, and that the vector field decodes to a valid,
+// non-empty, 4-byte-aligned little-endian float32 BLOB (mirrors
+// validateRelationPayload's contract). Returns (missingField, false) on
+// failure, ("", true) on success.
+func validateEmbeddingPayload(payload json.RawMessage) (string, bool) {
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		// Malformed JSON: treat sync_id as missing (first required field).
+		return "sync_id", false
+	}
+	for _, field := range embeddingRequiredFields {
+		v, ok := fields[field]
+		if !ok {
+			return field, false
+		}
+		s, isStr := v.(string)
+		if !isStr || strings.TrimSpace(s) == "" {
+			return field, false
+		}
+	}
+	var p syncEmbeddingMutationPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return "vector", false
+	}
+	if _, err := decodeEmbeddingMutationVector(p.Vector); err != nil {
+		return "vector", false
+	}
+	return "", true
+}
+
 // validateMutationEntry dispatches to the correct validator for the entry's
 // entity type. Returns (missingField, false) on validation failure.
 func validateMutationEntry(entry MutationEntry) (string, bool) {
 	switch entry.Entity {
 	case "relation":
 		return validateRelationPayload(entry.Payload)
+	case store.SyncEntityEmbedding:
+		return validateEmbeddingPayload(entry.Payload)
 	default:
 		return validateLegacyPayload(entry.Entity, entry.Payload)
 	}
+}
+
+// ─── human-like-memory PR5 slice 2: embedding mutation materialization ──────
+
+// materializeEmbeddingMutations best-effort upserts every SyncEntityEmbedding
+// entry in the batch into cloud_embeddings, so cloud-side semantic search
+// (PR5 slice 3) can query them directly instead of decoding raw
+// cloud_mutations rows. It never fails the push: a materialization problem
+// is logged and the entry is skipped — the mutation is already durably
+// stored in cloud_mutations by InsertMutationBatch, so nothing is lost, and
+// the next push for the same sync_id retries materialization.
+//
+// AccountID is resolved from the RBAC account context
+// (auth.AccountFromContext) because cloud_embeddings' primary key is
+// (account_id, project, sync_id) — the same multi-tenant boundary as
+// cloud_memberships/cloud_devices. Legacy shared-token deployments (no
+// account claims) have no account boundary to scope by, so materialization
+// is intentionally skipped for those requests; the mutation still reaches
+// cloud_mutations and every pull-based consumer works unchanged.
+func (s *CloudServer) materializeEmbeddingMutations(ctx context.Context, entries []MutationEntry) {
+	es, ok := s.store.(EmbeddingMutationStore)
+	if !ok {
+		return
+	}
+	claims, hasAccount := auth.AccountFromContext(ctx)
+	if !hasAccount || claims == nil || strings.TrimSpace(claims.AccountID) == "" {
+		return
+	}
+	accountID := strings.TrimSpace(claims.AccountID)
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.Entity) != store.SyncEntityEmbedding {
+			continue
+		}
+		row, err := decodeEmbeddingMutationEntry(accountID, entry)
+		if err != nil {
+			log.Printf("cloudserver: skip malformed embedding mutation entity_key=%s: %v", entry.EntityKey, err)
+			continue
+		}
+		if err := es.UpsertEmbedding(ctx, row); err != nil {
+			log.Printf("cloudserver: materialize embedding %s failed: %v", entry.EntityKey, err)
+		}
+	}
+}
+
+// syncEmbeddingMutationPayload mirrors internal/store's unexported
+// syncEmbeddingPayload wire format (sync_id, project, type, model, dim,
+// vector, content_hash, updated_at) — duplicated here, not imported, per the
+// same no-cross-import precedent cloudstore/embeddings.go already set for its
+// own vector encode/decode pair.
+type syncEmbeddingMutationPayload struct {
+	SyncID      string `json:"sync_id"`
+	Project     string `json:"project"`
+	Type        string `json:"type"`
+	Model       string `json:"model"`
+	Dim         int    `json:"dim"`
+	Vector      []byte `json:"vector"`
+	ContentHash string `json:"content_hash"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+// decodeEmbeddingMutationEntry decodes a pushed MutationEntry's payload into a
+// cloudstore.EmbeddingRow scoped to accountID. Falls back to entry.Project
+// when the payload's own project field is empty (defensive; the push path
+// always populates both).
+func decodeEmbeddingMutationEntry(accountID string, entry MutationEntry) (cloudstore.EmbeddingRow, error) {
+	var p syncEmbeddingMutationPayload
+	if err := json.Unmarshal(entry.Payload, &p); err != nil {
+		return cloudstore.EmbeddingRow{}, fmt.Errorf("decode payload: %w", err)
+	}
+	if strings.TrimSpace(p.SyncID) == "" || len(p.Vector) == 0 {
+		return cloudstore.EmbeddingRow{}, fmt.Errorf("missing sync_id or vector")
+	}
+	vec, err := decodeEmbeddingMutationVector(p.Vector)
+	if err != nil {
+		return cloudstore.EmbeddingRow{}, fmt.Errorf("decode vector: %w", err)
+	}
+	project := strings.TrimSpace(p.Project)
+	if project == "" {
+		project = strings.TrimSpace(entry.Project)
+	}
+	row := cloudstore.EmbeddingRow{
+		AccountID:   accountID,
+		Project:     project,
+		SyncID:      strings.TrimSpace(p.SyncID),
+		Type:        strings.TrimSpace(p.Type),
+		Vector:      vec,
+		Model:       strings.TrimSpace(p.Model),
+		Dim:         p.Dim,
+		ContentHash: strings.TrimSpace(p.ContentHash),
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05", strings.TrimSpace(p.UpdatedAt)); err == nil {
+		row.UpdatedAt = t
+	}
+	return row, nil
+}
+
+// decodeEmbeddingMutationVector reverses the little-endian float32 encoding
+// internal/embed and internal/store use for the wire BLOB — duplicated here,
+// not imported, per the same no-cross-import precedent noted above.
+func decodeEmbeddingMutationVector(b []byte) ([]float32, error) {
+	if len(b) == 0 || len(b)%4 != 0 {
+		return nil, fmt.Errorf("bad vector blob length %d", len(b))
+	}
+	out := make([]float32, len(b)/4)
+	for i := range out {
+		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return out, nil
 }
 
 // ─── Cloudstore mutation queries ──────────────────────────────────────────────

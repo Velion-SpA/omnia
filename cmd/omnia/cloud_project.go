@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -9,8 +10,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/envx"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/envx"
+	"github.com/velion/omnia/internal/store"
 )
 
 // cmdCloudProject implements `omnia cloud project <pause|resume> <project> [options]`.
@@ -32,6 +33,8 @@ func cmdCloudProject(cfg store.Config) {
 	case "--help", "-h", "help":
 		printCloudProjectUsage(os.Stdout)
 		return
+	case "list":
+		cmdCloudProjectList(cfg)
 	case "pause":
 		cmdCloudProjectSetSync(cfg, false)
 	case "resume":
@@ -44,12 +47,76 @@ func cmdCloudProject(cfg store.Config) {
 }
 
 func printCloudProjectUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: omnia cloud project <pause|resume> <project> [options]")
+	fmt.Fprintln(w, "usage: omnia cloud project <list|pause|resume> [project] [options]")
+	fmt.Fprintln(w, "  list                               list the projects this account can read")
 	fmt.Fprintln(w, "  pause <project> [--reason \"...\"]  pause sync for a project (pushes are rejected with 409 until resumed)")
 	fmt.Fprintln(w, "  resume <project>                   resume sync for a paused project")
 	fmt.Fprintln(w, "options: --cloud-name <alias>  --server <url>  --admin-token <token>")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "requires the operator admin credential: --admin-token, or OMNIA_CLOUD_ADMIN in the environment")
+	fmt.Fprintln(w, "note: list authenticates with the account token stored in cloud.json (like `omnia cloud")
+	fmt.Fprintln(w, "      devices list`). pause/resume require the operator admin credential: --admin-token,")
+	fmt.Fprintln(w, "      or OMNIA_CLOUD_ADMIN in the environment.")
+}
+
+// cmdCloudProjectList implements `omnia cloud project list`.
+//
+// Unlike pause/resume (operator-only actions gated on OMNIA_CLOUD_ADMIN), list
+// is an account-facing lookup: it authenticates with the account bearer token
+// stored in cloud.json — the same resolution devices list uses via
+// resolveDeviceTarget — and calls GET /projects to return exactly the
+// projects the logged-in account itself has read access to.
+func cmdCloudProjectList(cfg store.Config) {
+	fs := flag.NewFlagSet("omnia cloud project list", flag.ContinueOnError)
+	server := fs.String("server", "", "cloud server URL (overrides cloud.json)")
+	cloudAlias := bindCloudNameFlag(fs, "cloud alias (default: default cloud)")
+	if err := fs.Parse(os.Args[4:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		exitFunc(1)
+		return
+	}
+
+	serverURL, token, err := resolveDeviceTarget(cfg, *server, strings.TrimSpace(*cloudAlias))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		exitFunc(1)
+		return
+	}
+
+	resp, err := doAuthedCloudRequest(http.MethodGet, serverURL+"/projects", token, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "list projects request failed: %v\n", err)
+		exitFunc(1)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var out struct {
+			Projects []string `json:"projects"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			fmt.Fprintf(os.Stderr, "could not parse projects response: %v\n", err)
+			exitFunc(1)
+			return
+		}
+		if len(out.Projects) == 0 {
+			fmt.Fprintln(os.Stderr, "(no readable projects)")
+			return
+		}
+		for _, p := range out.Projects {
+			fmt.Println(p)
+		}
+	case http.StatusUnauthorized:
+		fmt.Fprintln(os.Stderr, "error: unauthorized; the stored account token is invalid or expired; run `omnia cloud login` again")
+		exitFunc(1)
+	case http.StatusForbidden:
+		fmt.Fprintln(os.Stderr, "error: forbidden; account authentication is required")
+		exitFunc(1)
+	default:
+		fmt.Fprintf(os.Stderr, "list projects failed (%d): %s\n", resp.StatusCode, serverError(body))
+		exitFunc(1)
+	}
 }
 
 // cmdCloudProjectSetSync implements both `pause` (enabled=false) and `resume`

@@ -24,7 +24,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/mcp"
+	"github.com/velion/omnia/internal/mcp"
 )
 
 var (

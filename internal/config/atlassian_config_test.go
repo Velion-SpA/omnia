@@ -3,7 +3,7 @@ package config_test
 import (
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/config"
+	"github.com/velion/omnia/internal/config"
 )
 
 func TestAtlassian_DefaultsProjectFallsBackToEngramDefault(t *testing.T) {

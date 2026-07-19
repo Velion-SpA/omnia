@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud"
+	"github.com/velion/omnia/internal/cloud"
 )
 
 // newBDTestStore spins a CloudStore against an isolated throwaway Postgres schema.

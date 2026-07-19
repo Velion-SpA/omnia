@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 
-	"github.com/Velion-SpA/omnia/internal/envx"
-	"github.com/Velion-SpA/omnia/internal/llm"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/envx"
+	"github.com/velion/omnia/internal/llm"
+	"github.com/velion/omnia/internal/store"
 )
 
 // ─── agentRunnerFactory default ───────────────────────────────────────────────

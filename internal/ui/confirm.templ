@@ -1,0 +1,79 @@
+package ui
+
+// ConfirmAction is one action button inside a ConfirmDialog (e.g. "Soft
+// delete", "Hard delete", "Revoke").
+type ConfirmAction struct {
+	Label   string // button text
+	Method  string // "delete" | "put" | "post" — selects the htmx verb; defaults to post
+	URL     string
+	Danger  bool   // true = danger-styled (pill-btn-danger); false = secondary
+	Confirm string // optional extra native confirm() text for irreversible actions
+}
+
+// ConfirmDialogProps configures a reusable inline confirm card — generalizing
+// the swap-in-place confirm pattern already proven by the observation delete
+// flow (internal/dashboard/detail.templ's deleteButton/deleteConfirm). Later
+// slices (Users/Access/Projects) can adopt this instead of hand-rolling their
+// own confirm card per destructive action.
+type ConfirmDialogProps struct {
+	Title     string
+	Message   string // primary message, e.g. the item being acted on
+	Note      string // optional secondary note (smaller, muted)
+	CancelURL string // hx-get URL that restores the pre-confirm state
+	Target    string // htmx hx-target for cancel/action responses, e.g. "#delete-section"
+	Actions   []ConfirmAction
+}
+
+// ConfirmDialog renders an inline confirm step: a card with a cancel button
+// and one or more action buttons, swapped into Target by the caller's
+// trigger button (see ConfirmTrigger). It intentionally reuses the SAME
+// inline-swap convention as the existing detail-page delete flow rather than
+// introducing a competing overlay-modal pattern.
+templ ConfirmDialog(p ConfirmDialogProps) {
+	<div class="card" style="border-color: rgba(251,113,133,0.3);">
+		<h3 style="font-size: 13px; font-weight: 600; color: var(--bad); margin: 0 0 0.625rem 0;">{ p.Title }</h3>
+		if p.Message != "" {
+			<p style="font-size: 13px; color: var(--text-2); margin: 0 0 1rem 0;">
+				<strong style="color: var(--text);">{ p.Message }</strong>
+			</p>
+		}
+		if p.Note != "" {
+			<p style="font-size: 12px; color: var(--text-faint); margin: 0 0 1rem 0;">{ p.Note }</p>
+		}
+		<div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+			<button
+				type="button"
+				class="pill-btn pill-btn-secondary"
+				hx-get={ p.CancelURL }
+				hx-target={ p.Target }
+				hx-swap="innerHTML"
+			>{ T(ctx, "common.cancel") }</button>
+			for _, a := range p.Actions {
+				@confirmActionButton(a, p.Target)
+			}
+		</div>
+	</div>
+}
+
+templ confirmActionButton(a ConfirmAction, target string) {
+	<button
+		type="button"
+		class={ "pill-btn", templ.KV("pill-btn-danger", a.Danger), templ.KV("pill-btn-secondary", !a.Danger) }
+		hx-target={ target }
+		hx-swap="innerHTML"
+		hx-disabled-elt="this"
+		if a.Confirm != "" {
+			hx-confirm={ a.Confirm }
+		}
+		if a.Method == "delete" {
+			hx-delete={ a.URL }
+		} else if a.Method == "put" {
+			hx-put={ a.URL }
+		} else {
+			hx-post={ a.URL }
+		}
+	>
+		<span class="htmx-indicator spinner"></span>
+		{ a.Label }
+	</button>
+}

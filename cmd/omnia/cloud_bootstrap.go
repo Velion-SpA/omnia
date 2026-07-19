@@ -8,11 +8,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/cloud"
-	"github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
-	"github.com/Velion-SpA/omnia/internal/envx"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/cloud"
+	"github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/envx"
+	"github.com/velion/omnia/internal/store"
 )
 
 // errBootstrapAdminExists is returned when a first-admin bootstrap is attempted

@@ -1,13 +1,14 @@
 package cloudserver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/auth"
-	"github.com/Velion-SpA/omnia/internal/cloud/cloudstore"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/cloudstore"
+	"github.com/velion/omnia/internal/store"
 )
 
 // membershipManager is the subset of cloudstore.CloudStore needed to claim a
@@ -19,6 +20,10 @@ type membershipManager interface {
 	GrantMembership(accountID, project string, perms int, role string) error
 	RevokeMembership(accountID, project string) error
 	GetMembership(accountID, project string) (*cloudstore.Membership, error)
+	// ClaimProjectOwnership atomically grants (accountID, perms, role) as the
+	// sole owner of project IFF project has no existing members yet — see
+	// cloudstore.ClaimProjectOwnership for the full race-closing contract.
+	ClaimProjectOwnership(ctx context.Context, accountID, project string, perms int, role string) (bool, error)
 }
 
 // Compile-time assertion: *cloudstore.CloudStore must satisfy membershipManager.
@@ -43,17 +48,39 @@ func (s *CloudServer) memberManager() (membershipManager, bool) {
 }
 
 // claimOrphanProject makes the first account to touch a brand-new project its
-// owner. If an account is present in the request context AND the project has no
-// members yet, the account is granted PermAll + RoleOwner.
+// owner. If an account is present in the request context AND the project has
+// no members yet, the account is atomically granted PermAll + RoleOwner.
 //
 // It is called from the chunk-push and mutation-push handlers BEFORE the
 // per-operation authorization check, so the first push to a fresh project
 // succeeds (the pusher becomes owner and therefore has PermInsert).
 //
-// KNOWN GAP (Phase 5): project names are assumed globally unique. Two different
-// accounts pushing the SAME project name would let whichever pushes first claim
-// ownership of the other's namespace. Cross-account same-name collision handling
-// (per-account project namespacing) is deferred to Phase 5.
+// The claim itself is atomic and serialized (cloudstore.ClaimProjectOwnership
+// wraps the check-then-act in one transaction behind a per-project
+// pg_advisory_xact_lock), so at most ONE account can ever win the race for a
+// given fresh project name — even when several different accounts push it
+// concurrently for the first time. The loser is left with NO membership at
+// all (not a reduced one), so its own subsequent push is correctly denied by
+// the per-operation authorization check that runs right after this returns.
+//
+// This closes a CRITICAL cross-tenant race: before this fix,
+// ListProjectMembers-then-GrantMembership was check-then-act with no lock
+// between the read and the write, and cloud_memberships' unique key is
+// (account_id, project) — a COMPOSITE key — so nothing stopped two DIFFERENT
+// accounts from each becoming full owner of the SAME project when they raced
+// its first push. The claim contract stays best-effort from this caller's
+// point of view: it returns nil on every non-error path regardless of
+// whether THIS account won or lost the race, and lets the downstream
+// per-operation authz decide (a loser simply has no perms => denied).
+//
+// KNOWN GAP (Phase 5): project names are assumed globally unique, and the
+// FIRST account to ever push a given project name claims it — permanently
+// and exclusively, now that the claim itself is race-free. Cross-account
+// same-name NAMESPACING (letting two unrelated tenants each have their own
+// independent "marketing" project instead of racing for one shared
+// namespace) remains a deferred Phase-5 product decision — this fix closes
+// the concurrent-race security hole, it does not change who "should" own a
+// given name in a multi-tenant namespace model.
 func (s *CloudServer) claimOrphanProject(r *http.Request, project string) error {
 	project = strings.TrimSpace(project)
 	if project == "" {
@@ -69,15 +96,8 @@ func (s *CloudServer) claimOrphanProject(r *http.Request, project string) error 
 		// Store does not support membership management — nothing to claim.
 		return nil
 	}
-	members, err := mm.ListProjectMembers(project)
-	if err != nil {
-		return err
-	}
-	if len(members) > 0 {
-		// Already owned/claimed — do not touch existing membership.
-		return nil
-	}
-	return mm.GrantMembership(claims.AccountID, project, int(auth.PermAll), auth.RoleOwner)
+	_, err := mm.ClaimProjectOwnership(r.Context(), claims.AccountID, project, int(auth.PermAll), auth.RoleOwner)
+	return err
 }
 
 // ─── Member-management endpoints ──────────────────────────────────────────────

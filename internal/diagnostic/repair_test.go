@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 func TestBuildRepairPlanDirectoryMismatchUsesTrustedEvidence(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/Velion-SpA/omnia/internal/timeutil"
-	"github.com/Velion-SpA/omnia/internal/version"
+	"github.com/velion/omnia/internal/timeutil"
+	"github.com/velion/omnia/internal/version"
 )
 
 // ─── Logo ────────────────────────────────────────────────────────────────────
@@ -106,10 +106,13 @@ func (m Model) viewDashboard() string {
 	b.WriteString(renderLogo(m.Version))
 	b.WriteString("\n")
 
-	// Update notification. Check failures (offline, GitHub rate limits/403,
-	// timeouts) stay silent by design — only a real update is worth a banner.
-	if m.UpdateStatus == version.StatusUpdateAvailable && m.UpdateMsg != "" {
-		b.WriteString(updateBannerStyle.Render(m.UpdateMsg))
+	// Update notification
+	if m.UpdateMsg != "" {
+		bannerStyle := updateBannerStyle
+		if m.UpdateStatus == version.StatusCheckFailed {
+			bannerStyle = errorStyle
+		}
+		b.WriteString(bannerStyle.Render(m.UpdateMsg))
 		b.WriteString("\n\n")
 	}
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	_ "modernc.org/sqlite" // register "sqlite" driver
 )
@@ -153,8 +154,43 @@ func (s *Store) Count(ctx context.Context) (int, error) {
 // vector and the query are unit-normalized, cosine == dot product. Rows whose
 // stored dimension differs from the query's are skipped defensively (e.g. a
 // half-migrated store after a model change). k <= 0 returns all ranked hits.
+//
+// This is a brute-force scan over EVERY project's vectors — callers that need
+// the top-k WITHIN a single project (recall's semantic leg; see
+// recall.Service.semanticHits) must use SearchScoped instead, otherwise a
+// project that is a small fraction of the store can be crowded out of this
+// global top-k by other, larger projects before any caller-side filter runs
+// (engram obs #1436's root-cause analysis).
 func (s *Store) Search(ctx context.Context, query []float32, k int) ([]Hit, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT sync_id, obs_id, vector FROM embeddings`)
+	return s.search(ctx, query, k, "")
+}
+
+// SearchScoped is Search restricted to project via a SQL WHERE clause,
+// mirroring cloudstore.SearchEmbeddings' account+project scoping
+// (internal/cloud/cloudstore/embeddings.go). project == "" behaves exactly
+// like Search — no WHERE clause is added, so unscoped callers (the dashboard
+// browse semantic search, memory-conflict-semantic's future FindCandidates)
+// are byte-for-byte unaffected by this addition.
+//
+// Scoping at the SQL level (rather than filtering Search's global top-k
+// after the fact) is the fix for the crowding-out bug: computing the top-k
+// WITHIN project means a project's valid matches can never be pushed out of
+// the result set by other projects' higher-scoring vectors.
+func (s *Store) SearchScoped(ctx context.Context, query []float32, k int, project string) ([]Hit, error) {
+	return s.search(ctx, query, k, project)
+}
+
+// search is the shared brute-force cosine scan behind Search and
+// SearchScoped. project == "" scans every row (Search's behavior); a
+// non-empty project restricts the scan to that project's rows via WHERE.
+func (s *Store) search(ctx context.Context, query []float32, k int, project string) ([]Hit, error) {
+	q := `SELECT sync_id, obs_id, vector FROM embeddings`
+	var args []any
+	if project != "" {
+		q += ` WHERE project = ?`
+		args = append(args, project)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("embed: Search: %w", err)
 	}
@@ -222,11 +258,41 @@ type GraphEdge struct {
 // Every stored node is returned, including those with degree 0 (no neighbor met
 // the threshold), so callers can report total vs. connected counts and decide
 // whether to render isolated nodes.
+//
+// Graph is a thin wrapper over GraphScoped with no project filter, preserved
+// for existing whole-store callers.
 func (s *Store) Graph(k int, minScore float32) ([]GraphNode, []GraphEdge, error) {
-	rows, err := s.db.QueryContext(context.Background(),
-		`SELECT sync_id, obs_id, COALESCE(project,''), COALESCE(type,''), COALESCE(title,''), vector FROM embeddings`)
+	return s.GraphScoped(nil, k, minScore)
+}
+
+// GraphScoped is Graph restricted to a SET of projects via a SQL WHERE...IN
+// clause, mirroring SearchScoped's project-scoping fix (engram obs #1436) but
+// generalized to a project SET so a group-parent graph view (parent +
+// children) can be scoped in ONE query instead of scanning the whole store.
+//
+// The O(N^2) pairwise scan below only ever runs over the rows this WHERE
+// clause returns: for a project that is a small fraction of a large shared
+// store, this is the difference between a sub-second query and a full-store
+// scan on every /graph page load regardless of the requested project (audit
+// finding H3 — engram obs #1484/#1488).
+//
+// projects == nil or empty behaves exactly like Graph — no WHERE clause is
+// added, so the whole-store view is byte-for-byte unaffected by this
+// addition.
+func (s *Store) GraphScoped(projects []string, k int, minScore float32) ([]GraphNode, []GraphEdge, error) {
+	q := `SELECT sync_id, obs_id, COALESCE(project,''), COALESCE(type,''), COALESCE(title,''), vector FROM embeddings`
+	var args []any
+	if len(projects) > 0 {
+		placeholders := make([]string, len(projects))
+		for i, p := range projects {
+			placeholders[i] = "?"
+			args = append(args, p)
+		}
+		q += ` WHERE project IN (` + strings.Join(placeholders, ", ") + `)`
+	}
+	rows, err := s.db.QueryContext(context.Background(), q, args...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("embed: Graph: %w", err)
+		return nil, nil, fmt.Errorf("embed: GraphScoped: %w", err)
 	}
 	defer rows.Close()
 
@@ -239,7 +305,7 @@ func (s *Store) Graph(k int, minScore float32) ([]GraphNode, []GraphEdge, error)
 		var n GraphNode
 		var blob []byte // never sql.RawBytes — that buffer is reused per Next()
 		if err := rows.Scan(&n.SyncID, &n.ObsID, &n.Project, &n.Type, &n.Title, &blob); err != nil {
-			return nil, nil, fmt.Errorf("embed: Graph scan: %w", err)
+			return nil, nil, fmt.Errorf("embed: GraphScoped scan: %w", err)
 		}
 		vec, derr := decodeVector(blob)
 		if derr != nil {

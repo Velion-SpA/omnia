@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/cloud/chunkcodec"
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/cloud/chunkcodec"
+	"github.com/velion/omnia/internal/store"
 )
 
 func newTestStore(t *testing.T) *store.Store {

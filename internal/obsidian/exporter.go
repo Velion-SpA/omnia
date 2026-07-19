@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/store"
+	"github.com/velion/omnia/internal/store"
 )
 
 // ExportConfig holds all CLI flags for the obsidian-export command.

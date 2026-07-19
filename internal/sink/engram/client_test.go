@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Velion-SpA/omnia/internal/core"
-	engram "github.com/Velion-SpA/omnia/internal/sink/engram"
+	"github.com/velion/omnia/internal/core"
+	engram "github.com/velion/omnia/internal/sink/engram"
 )
 
 func TestClientWrite(t *testing.T) {
