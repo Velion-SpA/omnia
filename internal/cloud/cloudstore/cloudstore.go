@@ -32,6 +32,26 @@ type CloudStore struct {
 var ErrChunkNotFound = errors.New("cloudstore: chunk not found")
 var ErrChunkConflict = errors.New("cloudstore: chunk id conflict")
 
+// maxPostgresQueryParams matches PostgreSQL's hard limit on bind parameters in
+// a single statement (the wire protocol's parameter count field is uint16).
+// H4 (perf): batch INSERT helpers below chunk their VALUES lists into
+// sub-batches when a single multi-row INSERT would exceed it.
+const maxPostgresQueryParams = 65535
+
+// maxInsertRowsPerStatement returns how many rows of a multi-row INSERT fit
+// in one statement given how many bind parameters each row consumes, while
+// staying under maxPostgresQueryParams.
+func maxInsertRowsPerStatement(paramsPerRow int) int {
+	if paramsPerRow <= 0 {
+		return 1
+	}
+	n := maxPostgresQueryParams / paramsPerRow
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
 // ErrUserExists is returned by CreateUser when the username (or email) is already
 // taken. Unlike the previous ON CONFLICT DO UPDATE behaviour, a conflicting signup
 // no longer mutates the existing row — it fails cleanly so callers can surface an
@@ -383,12 +403,39 @@ func (cs *CloudStore) indexChunkSessionsWith(ctx context.Context, execer chunkSe
 	if len(sessionIDs) == 0 {
 		return nil
 	}
+	ids := make([]string, 0, len(sessionIDs))
 	for sessionID := range sessionIDs {
-		if _, err := execer.ExecContext(ctx,
-			`INSERT INTO cloud_project_sessions (project_name, session_id) VALUES ($1, $2) ON CONFLICT (project_name, session_id) DO NOTHING`,
-			project, sessionID,
-		); err != nil {
-			return fmt.Errorf("cloudstore: index session %q: %w", sessionID, err)
+		ids = append(ids, sessionID)
+	}
+
+	// H4 (perf): a single multi-row INSERT instead of one round trip per
+	// session id. ON CONFLICT (project_name, session_id) DO NOTHING is
+	// preserved per row; sessionIDs is already a deduplicated set (map keys),
+	// so no row can conflict with another row in the same VALUES list.
+	const paramsPerRow = 2
+	rowsPerStmt := maxInsertRowsPerStatement(paramsPerRow)
+	for start := 0; start < len(ids); start += rowsPerStmt {
+		end := start + rowsPerStmt
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+
+		var b strings.Builder
+		b.WriteString("INSERT INTO cloud_project_sessions (project_name, session_id) VALUES ")
+		args := make([]any, 0, len(batch)*paramsPerRow)
+		for i, sessionID := range batch {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			p1 := i*paramsPerRow + 1
+			fmt.Fprintf(&b, "($%d, $%d)", p1, p1+1)
+			args = append(args, project, sessionID)
+		}
+		b.WriteString(" ON CONFLICT (project_name, session_id) DO NOTHING")
+
+		if _, err := execer.ExecContext(ctx, b.String(), args...); err != nil {
+			return fmt.Errorf("cloudstore: index session batch (project %q, %d ids): %w", project, len(batch), err)
 		}
 	}
 	return nil
@@ -438,18 +485,46 @@ func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]M
 }
 
 func insertMaterializedMutations(ctx context.Context, tx *sql.Tx, entries []MutationEntry) error {
-	for _, entry := range entries {
-		payload := entry.Payload
-		if len(payload) == 0 {
-			payload = json.RawMessage("{}")
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// H4 (perf): a single multi-row INSERT instead of one round trip per
+	// materialized session/observation/prompt. Plain insert, no ON CONFLICT
+	// clause to preserve (matches the pre-batch behavior exactly).
+	const paramsPerRow = 5
+	rowsPerStmt := maxInsertRowsPerStatement(paramsPerRow)
+	for start := 0; start < len(entries); start += rowsPerStmt {
+		end := start + rowsPerStmt
+		if end > len(entries) {
+			end = len(entries)
 		}
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO cloud_mutations (project, entity, entity_key, op, payload)
-			VALUES ($1, $2, $3, $4, $5)`,
-			strings.TrimSpace(entry.Project), strings.TrimSpace(entry.Entity), strings.TrimSpace(entry.EntityKey), strings.TrimSpace(entry.Op), payload,
-		)
-		if err != nil {
-			return fmt.Errorf("cloudstore: insert materialized chunk mutation %s/%s/%s: %w", entry.Project, entry.Entity, entry.EntityKey, err)
+		batch := entries[start:end]
+
+		var b strings.Builder
+		b.WriteString("INSERT INTO cloud_mutations (project, entity, entity_key, op, payload) VALUES ")
+		args := make([]any, 0, len(batch)*paramsPerRow)
+		for i, entry := range batch {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			base := i * paramsPerRow
+			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5)
+			payload := entry.Payload
+			if len(payload) == 0 {
+				payload = json.RawMessage("{}")
+			}
+			args = append(args,
+				strings.TrimSpace(entry.Project),
+				strings.TrimSpace(entry.Entity),
+				strings.TrimSpace(entry.EntityKey),
+				strings.TrimSpace(entry.Op),
+				payload,
+			)
+		}
+
+		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
+			return fmt.Errorf("cloudstore: insert materialized chunk mutation batch (%d entries): %w", len(batch), err)
 		}
 	}
 	return nil
@@ -902,37 +977,14 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 		}
 	}()
 
-	seqs := make([]int64, 0, len(batch))
-	for _, entry := range batch {
-		project := strings.TrimSpace(entry.Project)
-		entity := strings.TrimSpace(entry.Entity)
-		entityKey := strings.TrimSpace(entry.EntityKey)
-		op := strings.TrimSpace(entry.Op)
-		payload := entry.Payload
-		if len(payload) == 0 {
-			payload = json.RawMessage("{}")
-		}
-		var seq int64
-		err := tx.QueryRowContext(ctx, `
-			INSERT INTO cloud_mutations (project, entity, entity_key, op, payload)
-			VALUES ($1, $2, $3, $4, $5)
-			RETURNING seq`,
-			project, entity, entityKey, op, payload,
-		).Scan(&seq)
-		if err != nil {
-			return nil, fmt.Errorf("cloudstore: insert mutation: %w", err)
-		}
-		seqs = append(seqs, seq)
+	seqs, err := insertMutationBatchEntries(ctx, tx, batch)
+	if err != nil {
+		return nil, err
+	}
+	if err := insertMaterializedMutationBatchChunks(ctx, tx, chunks); err != nil {
+		return nil, err
 	}
 	for _, chunk := range chunks {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload, sessions_count, observations_count, prompts_count)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (project_name, chunk_id) DO NOTHING`,
-			chunk.project, chunk.id, "mutation-push", chunk.payload, chunk.counts.sessions, chunk.counts.observations, chunk.counts.prompts,
-		); err != nil {
-			return nil, fmt.Errorf("cloudstore: materialize mutation batch chunk: %w", err)
-		}
 		if err := cs.indexChunkSessionsWith(ctx, tx, chunk.project, chunk.payload); err != nil {
 			return nil, err
 		}
@@ -946,6 +998,127 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 		cs.invalidateDashboardReadModel()
 	}
 	return seqs, nil
+}
+
+// insertMutationBatchEntries inserts every entry in batch into cloud_mutations
+// and returns the assigned seq for each entry, in the same order as batch.
+//
+// H4 (perf): batched into a single multi-row `INSERT ... RETURNING seq`
+// (chunked further if batch exceeds maxPostgresQueryParams) instead of one
+// round trip per entry. PostgreSQL does not formally document the row order
+// of a RETURNING clause, so we do not rely on it: cloud_mutations.seq is a
+// monotonically increasing sequence assigned in VALUES-list order for a
+// single INSERT statement (nextval() is invoked per row, in the order rows
+// are listed — INSERT is never parallelized in PostgreSQL), so sorting the
+// returned seqs ascending within each sub-batch deterministically recovers
+// the input order regardless of the order RETURNING happens to hand rows
+// back in.
+func insertMutationBatchEntries(ctx context.Context, tx *sql.Tx, batch []MutationEntry) ([]int64, error) {
+	if len(batch) == 0 {
+		return []int64{}, nil
+	}
+
+	const paramsPerRow = 5
+	rowsPerStmt := maxInsertRowsPerStatement(paramsPerRow)
+	seqs := make([]int64, 0, len(batch))
+	for start := 0; start < len(batch); start += rowsPerStmt {
+		end := start + rowsPerStmt
+		if end > len(batch) {
+			end = len(batch)
+		}
+		sub := batch[start:end]
+
+		var b strings.Builder
+		b.WriteString("INSERT INTO cloud_mutations (project, entity, entity_key, op, payload) VALUES ")
+		args := make([]any, 0, len(sub)*paramsPerRow)
+		for i, entry := range sub {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			base := i * paramsPerRow
+			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5)
+			payload := entry.Payload
+			if len(payload) == 0 {
+				payload = json.RawMessage("{}")
+			}
+			args = append(args,
+				strings.TrimSpace(entry.Project),
+				strings.TrimSpace(entry.Entity),
+				strings.TrimSpace(entry.EntityKey),
+				strings.TrimSpace(entry.Op),
+				payload,
+			)
+		}
+		b.WriteString(" RETURNING seq")
+
+		rows, err := tx.QueryContext(ctx, b.String(), args...)
+		if err != nil {
+			return nil, fmt.Errorf("cloudstore: insert mutation batch (%d entries): %w", len(sub), err)
+		}
+		subSeqs := make([]int64, 0, len(sub))
+		for rows.Next() {
+			var seq int64
+			if err := rows.Scan(&seq); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("cloudstore: scan inserted mutation seq: %w", err)
+			}
+			subSeqs = append(subSeqs, seq)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("cloudstore: iterate inserted mutation seqs: %w", err)
+		}
+		rows.Close()
+		if len(subSeqs) != len(sub) {
+			return nil, fmt.Errorf("cloudstore: insert mutation batch: expected %d seqs, got %d", len(sub), len(subSeqs))
+		}
+		sort.Slice(subSeqs, func(i, j int) bool { return subSeqs[i] < subSeqs[j] })
+		seqs = append(seqs, subSeqs...)
+	}
+	return seqs, nil
+}
+
+// insertMaterializedMutationBatchChunks writes the materialized cloud_chunks
+// rows derived from a mutation batch (grouped one-per-distinct-project by
+// materializedMutationBatchChunks).
+//
+// H4 (perf): batched into a single multi-row `INSERT ... ON CONFLICT (project_name,
+// chunk_id) DO NOTHING` instead of one round trip per chunk. chunks always
+// carries at most one entry per distinct project (see
+// materializedMutationBatchChunks), so no two rows in the same VALUES list
+// can target the same conflict key.
+func insertMaterializedMutationBatchChunks(ctx context.Context, tx *sql.Tx, chunks []materializedMutationChunk) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	const paramsPerRow = 7
+	rowsPerStmt := maxInsertRowsPerStatement(paramsPerRow)
+	for start := 0; start < len(chunks); start += rowsPerStmt {
+		end := start + rowsPerStmt
+		if end > len(chunks) {
+			end = len(chunks)
+		}
+		sub := chunks[start:end]
+
+		var b strings.Builder
+		b.WriteString("INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload, sessions_count, observations_count, prompts_count) VALUES ")
+		args := make([]any, 0, len(sub)*paramsPerRow)
+		for i, chunk := range sub {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			base := i * paramsPerRow
+			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5, base+6, base+7)
+			args = append(args, chunk.project, chunk.id, "mutation-push", chunk.payload, chunk.counts.sessions, chunk.counts.observations, chunk.counts.prompts)
+		}
+		b.WriteString(" ON CONFLICT (project_name, chunk_id) DO NOTHING")
+
+		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
+			return fmt.Errorf("cloudstore: materialize mutation batch chunk batch (%d chunks): %w", len(sub), err)
+		}
+	}
+	return nil
 }
 
 const mutationBackfillChunkSize = 100
