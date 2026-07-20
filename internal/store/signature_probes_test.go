@@ -180,3 +180,101 @@ func TestErrorSignatureProbes_CapsAtSixteen(t *testing.T) {
 		t.Fatalf("expected first probe %q, got %q", wantFirst, got[0])
 	}
 }
+
+// ─── ErrorSignatureProbesMulti (issue #84: noise-robust query matching) ─────
+//
+// A single fixed n-gram size is fragile to even one inserted/reordered
+// token landing inside every window that would otherwise span the shared
+// error core. ErrorSignatureProbesMulti unions probes across several sizes
+// so a smaller window can still land on an intact slice of the core even
+// when the largest size straddles a mismatch.
+
+func TestErrorSignatureProbesMulti_EmptyInputReturnsNil(t *testing.T) {
+	if got := ErrorSignatureProbesMulti("", []int{2, 3, 4}); got != nil {
+		t.Fatalf("expected nil for empty input, got %#v", got)
+	}
+}
+
+// TestErrorSignatureProbesMulti_SmallerWindowSurvivesWhenLargerStraddles is
+// the exact issue #84 regression: a token inserted between two distinctive
+// words breaks every 4-token window that spans it, but a 3-token window
+// starting earlier stays entirely on the intact side.
+func TestErrorSignatureProbesMulti_SmallerWindowSurvivesWhenLargerStraddles(t *testing.T) {
+	// "signal" sits between "dereference" and "sigsegv" — every 4-token
+	// window either includes both (and thus the gap) or excludes one of
+	// them entirely.
+	sig := "nil pointer dereference signal sigsegv segmentation violation"
+
+	only4 := ErrorSignatureProbes(sig, 4)
+	for _, p := range only4 {
+		if p == "nil pointer dereference" {
+			t.Fatalf("test assumption violated: ngram=4 alone should NOT produce the 3-word probe, got %#v", only4)
+		}
+	}
+
+	multi := ErrorSignatureProbesMulti(sig, []int{2, 3, 4})
+	found := false
+	for _, p := range multi {
+		if p == "nil pointer dereference" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected ErrorSignatureProbesMulti with sizes [2,3,4] to include the smaller-window probe \"nil pointer dereference\", got %#v", multi)
+	}
+}
+
+// TestErrorSignatureProbesMulti_DedupesAcrossSizes verifies a probe
+// produced identically by two different window sizes (e.g. the
+// len(tokens)<=ngram whole-signature path firing for both 3 and 4 on a
+// 3-token signature) appears only once in the combined result.
+func TestErrorSignatureProbesMulti_DedupesAcrossSizes(t *testing.T) {
+	sig := "connection refused upstream"
+	got := ErrorSignatureProbesMulti(sig, []int{3, 4})
+
+	count := 0
+	for _, p := range got {
+		if p == sig {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected the whole-signature probe to appear exactly once across sizes [3,4], got %d occurrences in %#v", count, got)
+	}
+}
+
+// TestErrorSignatureProbesMulti_AllGenericAtEverySizeReturnsNil is the
+// precision guard: widening the set of window sizes tried must never widen
+// what counts as distinctive. A generic-only signature (issue #84's
+// `panic: runtime error` case) must produce zero probes at every size.
+func TestErrorSignatureProbesMulti_AllGenericAtEverySizeReturnsNil(t *testing.T) {
+	got := ErrorSignatureProbesMulti("panic runtime error", []int{2, 3, 4})
+	if got != nil {
+		t.Fatalf("expected nil for an all-generic signature at every window size, got %#v", got)
+	}
+}
+
+// TestErrorSignatureProbesMulti_CapsAtMaxSignatureProbesMulti verifies the
+// combined result across sizes never exceeds maxSignatureProbesMulti, even
+// though each individual size could otherwise contribute up to its own
+// per-size cap.
+func TestErrorSignatureProbesMulti_CapsAtMaxSignatureProbesMulti(t *testing.T) {
+	tokens := []string{
+		"wordaa", "wordbb", "wordcc", "wordde", "wordee", "wordff", "wordgg", "wordhh",
+		"wordii", "wordjj", "wordkk", "wordll", "wordmm", "wordnn", "wordoo", "wordpp",
+		"wordqq", "wordrr", "wordss", "wordtt", "wordxx", "wordyy", "wordzz", "wordab",
+		"wordac", "wordad", "wordae", "wordaf", "wordag", "wordah",
+	}
+	sig := ""
+	for i, tok := range tokens {
+		if i > 0 {
+			sig += " "
+		}
+		sig += tok
+	}
+
+	got := ErrorSignatureProbesMulti(sig, []int{2, 3, 4})
+	if len(got) != maxSignatureProbesMulti {
+		t.Fatalf("expected exactly %d probes (capped), got %d", maxSignatureProbesMulti, len(got))
+	}
+}
