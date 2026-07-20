@@ -51,22 +51,33 @@ type FuseParams struct {
 	RRFK        int                // RRF k constant (D1 default: 60)
 	DenseK      int                // "many strong hits" threshold (D2 default: 5)
 	MaxResults  int                // cap on the final fused result count (D2 default: 50); <= 0 disables the cap
-	StrongFloor float32            // "precise" score threshold (D2 default: 0.65)
-	BaseFloor   float32            // "widen" score threshold (D2 default: 0.55)
+	StrongFloor float32            // "precise" score threshold (D2 default: 0.35, jina-calibrated — see below)
+	BaseFloor   float32            // "widen" score threshold (D2 default: 0.25, jina-calibrated — see below)
 	Weights     map[string]float32 // optional per-list weight override (keys: WeightLexical/WeightSemantic); default 1
 }
 
 // DefaultFuseParams returns the design-approved defaults (D1: rrf_k=60; D2:
-// strong_floor=0.65, base_floor=0.55, dense_k=5, max_results=50). PR3 wires
+// strong_floor=0.35, base_floor=0.25, dense_k=5, max_results=50). PR3 wires
 // these into RecallConfig; PR2 keeps them here as the single source of
 // truth so tests never duplicate magic numbers.
+//
+// StrongFloor/BaseFloor were originally 0.65/0.55, tuned against a
+// different embedding model's cosine-similarity distribution. Omnia's
+// default model is jina/jina-embeddings-v2-base-es, whose similarity
+// scores run lower — those constants starved recall even with embeddings
+// enabled on a fresh install. 0.35/0.25 is the jina-calibrated value the
+// live instance was empirically tuned to (issue #83; engram/omnia memory
+// #1434), now shipped as the default everywhere this function is the
+// source of truth (internal/config.applyDefaults duplicates it for
+// config.yaml's recall.strong_floor/base_floor; internal/cloud/clouddash
+// calls this function directly for the cloud dashboard's semantic fusion).
 func DefaultFuseParams() FuseParams {
 	return FuseParams{
 		RRFK:        60,
 		DenseK:      5,
 		MaxResults:  50,
-		StrongFloor: 0.65,
-		BaseFloor:   0.55,
+		StrongFloor: 0.35,
+		BaseFloor:   0.25,
 	}
 }
 

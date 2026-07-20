@@ -26,15 +26,75 @@ func TestRecall_DefaultsDisabled(t *testing.T) {
 	if cfg.Recall.DenseK != 5 {
 		t.Errorf("DenseK default: got %d, want 5", cfg.Recall.DenseK)
 	}
-	if cfg.Recall.StrongFloor != 0.65 {
-		t.Errorf("StrongFloor default: got %v, want 0.65", cfg.Recall.StrongFloor)
+	// jina-calibrated floors (issue #83): 0.35/0.25, not the original
+	// 0.65/0.55 D2 constants (those were tuned for a different model and
+	// starved recall for the default jina/jina-embeddings-v2-base-es model).
+	if cfg.Recall.StrongFloor != 0.35 {
+		t.Errorf("StrongFloor default: got %v, want 0.35 (jina-calibrated)", cfg.Recall.StrongFloor)
 	}
-	if cfg.Recall.BaseFloor != 0.55 {
-		t.Errorf("BaseFloor default: got %v, want 0.55", cfg.Recall.BaseFloor)
+	if cfg.Recall.BaseFloor != 0.25 {
+		t.Errorf("BaseFloor default: got %v, want 0.25 (jina-calibrated)", cfg.Recall.BaseFloor)
 	}
 	if cfg.Recall.MaxResults != 50 {
 		t.Errorf("MaxResults default: got %d, want 50", cfg.Recall.MaxResults)
 	}
+	if cfg.RecallEnabledExplicit {
+		t.Error("RecallEnabledExplicit: got true, want false — the config has no recall section at all")
+	}
+}
+
+// TestRecall_EnabledExplicitTracksPresenceNotValue proves
+// Config.RecallEnabledExplicit distinguishes "recall.enabled explicitly set"
+// from "never mentioned," independently of which value was set — this is
+// the signal issue #83's Ollama auto-detect needs to avoid ever overriding
+// an operator's explicit choice (including an explicit `false`).
+func TestRecall_EnabledExplicitTracksPresenceNotValue(t *testing.T) {
+	t.Run("explicit true", func(t *testing.T) {
+		path := writeTempConfig(t, "recall:\n  enabled: true\n")
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.RecallEnabledExplicit {
+			t.Error("RecallEnabledExplicit: got false, want true (enabled: true was set)")
+		}
+	})
+
+	t.Run("explicit false", func(t *testing.T) {
+		path := writeTempConfig(t, "recall:\n  enabled: false\n")
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.RecallEnabledExplicit {
+			t.Error("RecallEnabledExplicit: got false, want true (enabled: false was still explicitly set)")
+		}
+		if cfg.Recall.Enabled {
+			t.Error("Recall.Enabled: got true, want false")
+		}
+	})
+
+	t.Run("recall section present but enabled key absent", func(t *testing.T) {
+		path := writeTempConfig(t, "recall:\n  rrf_k: 30\n")
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.RecallEnabledExplicit {
+			t.Error("RecallEnabledExplicit: got true, want false — only rrf_k was set, not enabled")
+		}
+	})
+
+	t.Run("no recall section at all", func(t *testing.T) {
+		path := writeTempConfig(t, "engram:\n  base_url: http://127.0.0.1:7437\n")
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.RecallEnabledExplicit {
+			t.Error("RecallEnabledExplicit: got true, want false — no recall section exists")
+		}
+	})
 }
 
 func TestRecall_ParsesEnabled(t *testing.T) {
