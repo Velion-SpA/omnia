@@ -20,7 +20,7 @@ import (
 // adminAssets loads the Admin progressive-enhancement script (searchable selector
 // + admin form submission). Cloud-only pages, so the /static prefix is fixed.
 templ adminAssets() {
-	<script src="/static/admin.js" defer></script>
+	<script src={ "/static/admin.js?v=" + ui.AssetVersion } defer></script>
 }
 
 // projectSelector is the reusable type-to-filter project picker. The visible input
