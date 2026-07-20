@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "engram": {
-      "command": "engram",
+    "omnia": {
+      "command": "omnia",
       "args": ["mcp", "--tools=agent"]
     }
   }
