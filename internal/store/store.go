@@ -3266,6 +3266,13 @@ const (
 	// specific real error phrases ("connection refused", "nil pointer").
 	minSignatureLength = 12
 	minSignatureTokens = 2
+
+	// signatureNGramSize is the window size ErrorSignatureProbes uses to
+	// split the query signature into distinctive contiguous-token probes
+	// (see signature.go). 4 tokens is long enough to be distinctive (not
+	// just "cannot read") while short enough to still match when the
+	// error recurs in a different file/variable/prose context.
+	signatureNGramSize = 4
 )
 
 func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error) {
@@ -3337,16 +3344,22 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	// look like topic keys, and this lane must work standalone — it has no
 	// dependency on recall.enabled/semantic recall, which defaults to false.
 	//
-	// Containment, not equality: a stored signature is derived from a
-	// specific occurrence's error-shaped LINE(S) (extractErrorText), which
-	// may carry a little extra leading/trailing context (e.g. "**Learned**:
-	// <error> happening in fooItems()"), while a query is often the BARE
-	// error text alone. Requiring exact equality here would mean the
-	// signature lane almost never fires for the actual recurring-bug use
-	// case. Instead we check two-way containment: the stored signature
-	// contains the query's signature (query is the bare error, stored has
-	// extra context), OR the query contains the stored signature (query has
-	// extra context, stored is the bare error). LIKE '%...%' can't use
+	// Shared distinctive n-gram, not full-string containment: a stored
+	// signature is derived from a specific occurrence's error-shaped
+	// LINE(S) (extractErrorText), which may carry a little extra
+	// leading/trailing context (e.g. "**Learned**: <error> happening in
+	// fooItems()"), while a query is often the BARE error text alone —
+	// AND the primary recurring-bug use case is the SAME error recurring
+	// in a DIFFERENT file/variable, where neither signature is a full
+	// substring of the other at all. Requiring one whole signature to be
+	// contained in the other misses that case entirely. Instead: the
+	// stored signature must contain at least one distinctive contiguous
+	// n-gram probe drawn from the query's signature (ErrorSignatureProbes,
+	// signature.go) — this fires even when the surrounding tokens differ
+	// completely, as long as the distinctive error CORE is shared. The
+	// reverse containment direction (query contains a short bare stored
+	// signature) is kept as a fallback for the "stored is the bare error,
+	// query has extra context" shape. LIKE '%...%' can't use
 	// idx_obs_error_signature (this is a full scan of non-null signatures),
 	// which is acceptable for a personal/team memory store's data volumes.
 	//
@@ -3356,10 +3369,27 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	// the query side, but a short STORED signature is just as capable of
 	// producing false positives via the reverse containment direction, so
 	// the length guard applies to error_signature in SQL too (see
-	// TestSearch_SignatureLaneIgnoresTooShortStoredSignature).
+	// TestSearch_SignatureLaneIgnoresTooShortStoredSignature). Each n-gram
+	// probe is independently filtered for distinctiveness/length by
+	// ErrorSignatureProbes before it ever reaches SQL.
 	var signatureResults []SearchResult
 	querySig := NormalizeErrorSignature(query)
 	if len(querySig) >= minSignatureLength && len(strings.Fields(querySig)) >= minSignatureTokens {
+		probes := ErrorSignatureProbes(querySig, signatureNGramSize)
+
+		// Build one "error_signature LIKE '%'||?||'%'" clause per probe,
+		// plus the reverse-direction fallback clause, so the OR group
+		// still runs (reverse-only) even when no probe survives the
+		// distinctiveness guards.
+		orClauses := make([]string, 0, len(probes)+1)
+		sigArgs := []any{minSignatureLength}
+		for _, probe := range probes {
+			orClauses = append(orClauses, "error_signature LIKE '%' || ? || '%'")
+			sigArgs = append(sigArgs, probe)
+		}
+		orClauses = append(orClauses, "? LIKE '%' || error_signature || '%'")
+		sigArgs = append(sigArgs, querySig)
+
 		sigSQL := `
 			SELECT ` + observationSelectColumns + `
 			FROM observations
@@ -3367,10 +3397,8 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			  AND error_signature != ''
 			  AND LENGTH(error_signature) >= ?
 			  AND deleted_at IS NULL
-			  AND ( error_signature LIKE '%' || ? || '%'
-			        OR ? LIKE '%' || error_signature || '%' )
+			  AND ( ` + strings.Join(orClauses, "\n			        OR ") + ` )
 		`
-		sigArgs := []any{minSignatureLength, querySig, querySig}
 
 		if opts.Type != "" {
 			sigSQL += " AND type = ?"
