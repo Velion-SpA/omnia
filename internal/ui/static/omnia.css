@@ -2924,14 +2924,20 @@
 }
 
 .projcard {
-	background: var(--surface);
-	border: 1px solid var(--border);
+	/* All cards share the "parent" treatment (subtle gradient + stronger
+	   border) — a uniform look the user preferred over the plainer leaf card.
+	   A parent is still distinguished structurally by its .childstrip. */
+	background: linear-gradient(180deg, var(--surface-2), var(--surface));
+	border: 1px solid var(--border-strong);
 	border-radius: var(--radius);
 	padding: 15px;
+	transition: border-color var(--dur-base) var(--ease-standard),
+		box-shadow var(--dur-base) var(--ease-standard);
 }
 
 .projcard:hover {
 	border-color: var(--border-accent);
+	box-shadow: 0 0 0 1px var(--calypso-dim);
 }
 
 .projcard .ph {
@@ -3084,7 +3090,8 @@
 }
 
 .pdetail {
-	padding: 2px;
+	/* Comfortable inner gutters so header/stats/rows aren't flush to the edge. */
+	padding: 22px 26px;
 }
 
 .dhead {
