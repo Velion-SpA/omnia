@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Omnia local HTTP API daemon (omnia serve) — keeps 127.0.0.1:7437 alive across
+  reboots and upgrades so local HTTP consumers (e.g. voice assistants) always
+  have the memory API available, plus opt-in cloud autosync.
+
+  Install:
+    1. Edit the paths below for your user, and replace __OMNIA_CLOUD_TOKEN__
+       (leave OMNIA_CLOUD_* out entirely for a local-only, no-sync daemon).
+    2. cp deploy/com.velion.omnia.serve.plist ~/Library/LaunchAgents/
+    3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.velion.omnia.serve.plist
+    4. curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7437/health   # -> 200
+
+  Uses the Homebrew binary (brew install velion-spa/tap/omnia). Data dir resolves
+  to ~/.omnia (falls back to ~/.engram for un-migrated installs; run `omnia migrate`).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.velion.omnia.serve</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/omnia</string>
+        <string>serve</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/USERNAME</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>OMNIA_DATA_DIR</key>
+        <string>/Users/USERNAME/.omnia</string>
+        <key>OMNIA_CLOUD_AUTOSYNC</key>
+        <string>1</string>
+        <key>OMNIA_CLOUD_SERVER</key>
+        <string>https://omnia.velioncorp.cl</string>
+        <key>OMNIA_CLOUD_TOKEN</key>
+        <string>__OMNIA_CLOUD_TOKEN__</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/USERNAME/.omnia/serve.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USERNAME/.omnia/serve.err.log</string>
+</dict>
+</plist>
