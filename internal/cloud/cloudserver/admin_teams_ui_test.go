@@ -125,31 +125,44 @@ func TestAdminTeamsPageAndDetail(t *testing.T) {
 }
 
 // TestAdminProjectsPageShowsCards verifies the Command Center v2, Slice 4b
-// Projects page: known projects render as cards (not the old Personal/Work/
+// Projects page renders known projects as cards (not the old Personal/Work/
 // Unclassified sections — superseded by this test, formerly
-// TestAdminProjectsPageSplit), each carrying its own classification badge
-// (kindBadge) and a reclassify control folded into its "•••" menu.
+// TestAdminProjectsPageSplit). Admin projects redesign (issue #93): the
+// work/personal classification is no longer surfaced in the UI at all (no
+// kindBadge, no visible kind select) — each card's rename form round-trips
+// its CURRENT kind via a hidden input instead, so reclassifying never
+// silently resets it (see cloudstore.UpsertProjectMeta's full-upsert
+// semantics). Each card also links to its own detail page and carries the
+// search/filter data attributes the toolbar's client-side JS reads.
 func TestAdminProjectsPageShowsCards(t *testing.T) {
 	srv, store, authSvc := newTeamsAdminTestServer(t)
 	ctx := context.Background()
 	_ = store.UpsertProjectMeta(ctx, "homelab", "personal", "Home Lab")
 	_ = store.UpsertProjectMeta(ctx, "workly", "work", "")
-	store.grant("1", "unclass", 1, "member") // classified nowhere → "unclassified" badge
+	store.grant("1", "unclass", 1, "member") // classified nowhere → kind ""
 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, htmlPageRequest(http.MethodGet, "/admin/projects", operatorCookie(t, authSvc)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("operator GET /admin/projects (html): expected 200, got %d", rec.Code)
 	}
-	// i18n Slice 3: kindBadge renders translated text now (">personal<" is
-	// unchanged, same word in both langs; "work"/"unclassified" differ).
 	body := rec.Body.String()
 	for _, want := range []string{
 		"projcard", "homelab", "workly", "unclass", "/admin/projects/homelab/meta",
-		">personal<", ">laboral<", ">sin clasificar<", // per-card kindBadge, not section headers
+		"/admin/projects/homelab",                            // detail-page link (DetailURL)
+		`<input type="hidden" name="kind" value="personal">`, // preserved, not editable
+		`<input type="hidden" name="kind" value="work">`,
+		"admin-project-search", "chip-filters", // search + filter toolbar present
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Projects page missing %q, body=%q", want, body)
+		}
+	}
+	// The work/personal classification must never be surfaced as a visible
+	// badge or select anymore.
+	for _, unwanted := range []string{`<select name="kind"`, "sin clasificar"} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("Projects page still renders removed kind UI %q, body=%q", unwanted, body)
 		}
 	}
 }

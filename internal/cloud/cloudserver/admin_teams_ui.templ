@@ -2,6 +2,7 @@ package cloudserver
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/velion/omnia/internal/cloud/cloudstore"
 	"github.com/velion/omnia/internal/ui"
@@ -271,20 +272,24 @@ templ adminProjectsPage(view adminProjectsView) {
 			@adminProjectSuggestions(view.Suggestions)
 		}
 		<div class="card">
-			<div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.85rem;">
-				<span class="micro-label">{ ui.T(ctx, "admin.tabs.projects") }</span>
-				<span class="micro-label" style="margin-left: auto; color: var(--text-dim);">{ adminProjectsCountLabel(i18n.LangFrom(ctx), view.Projects) }</span>
+			<div class="admin-toolbar">
+				<div class="admin-search">
+					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
+					<input type="search" id="admin-project-search" placeholder={ ui.T(ctx, "admin.projects.searchPlaceholder") } autocomplete="off"/>
+				</div>
+				<div class="chip-filters" id="admin-project-filters" data-active-filter="all">
+					<button type="button" class="chip on" data-action="filter-projects" data-filter="all">{ ui.T(ctx, "admin.projects.filterAll") } <span class="c">{ strconv.Itoa(len(view.Groups)) }</span></button>
+					<button type="button" class="chip" data-action="filter-projects" data-filter="sub">{ ui.T(ctx, "admin.projects.filterSub") } <span class="c">{ strconv.Itoa(projectsWithChildrenCount(view.Groups)) }</span></button>
+					<button type="button" class="chip" data-action="filter-projects" data-filter="paused">{ ui.T(ctx, "admin.projects.filterPaused") } <span class="c">{ strconv.Itoa(pausedProjectsCount(view.Projects)) }</span></button>
+				</div>
+				<span class="admin-count">{ adminProjectsCountLabel(i18n.LangFrom(ctx), view.Projects) }</span>
 			</div>
 			if len(view.Projects) == 0 {
 				<p style="color: var(--text-dim); font-size: 13px; margin: 0;">{ ui.T(ctx, "admin.projects.noneKnownYet") }</p>
 			} else {
-				<div class="projgrid">
+				<div class="projgrid" id="admin-projects-grid">
 					for _, entry := range view.Groups {
-						if len(entry.Children) > 0 {
-							@adminProjectGroup(entry)
-						} else {
-							@adminProjectCard(entry.Row)
-						}
+						@adminProjectCard(entry.Row, entry.Children)
 					}
 				</div>
 			}
@@ -320,29 +325,25 @@ templ adminProjectSuggestions(rows []adminProjectSuggestionRow) {
 	</div>
 }
 
-// adminProjectGroup renders a parent project card together with its direct
-// linked children (Command Center v2, Slice 5b): the group spans the full
-// grid width so children can render indented directly beneath their parent,
-// instead of scattered at their own alphabetical position in the flat grid.
-// The parent card itself already shows ROLLED-UP stats — own + direct
-// children — see handleAdminProjectsPage/projectRollupStats; each child
-// card still shows its own individual (unrolled) stats, unchanged.
-templ adminProjectGroup(entry adminProjectGroupEntry) {
-	<div class="projgroup">
-		@adminProjectCard(entry.Row)
-		<div class="projgroup-children">
-			for _, child := range entry.Children {
-				@adminProjectCard(child)
-			}
-		</div>
-	</div>
-}
-
-templ adminProjectCard(row adminProjectRow) {
-	<div class="projcard">
+// adminProjectCard renders one project as a SINGLE-COLUMN card (Admin
+// projects redesign, issue #93) — replacing the old adminProjectGroup's
+// grid-column:1/-1 full-width span + nested mini-grid of full-size child
+// cards, which broke the grid's rhythm. A parent (children non-empty) is the
+// SAME card width as any standalone project, just taller: its direct linked
+// children stack as compact rows INSIDE it via adminProjectChildStrip. The
+// card itself already shows ROLLED-UP stats — own + direct children — see
+// handleAdminProjectsPage/projectRollupStats; each child row in the strip
+// still reflects its own individual (unrolled) stats, unchanged.
+templ adminProjectCard(row adminProjectRow, children []adminProjectRow) {
+	<div
+		class={ "projcard", templ.KV("parent", len(children) > 0) }
+		data-proj-search={ strings.ToLower(row.Project + " " + row.DisplayName) }
+		data-has-children={ strconv.FormatBool(len(children) > 0) }
+		data-paused={ strconv.FormatBool(!row.SyncEnabled) }
+	>
 		<div class="ph">
 			<div class="pn">
-				{ projectCardTitle(row) }
+				<a href={ templ.SafeURL(row.DetailURL) } class="pn-link">{ projectCardTitle(row) }</a>
 				<small>{ row.Project }</small>
 			</div>
 			<div class="admin-menu-wrap">
@@ -351,7 +352,13 @@ templ adminProjectCard(row adminProjectRow) {
 					<span class="micro-label" style="display: block; padding: 0.4rem 0.6rem 0.2rem;">{ ui.T(ctx, "admin.projects.renameClassify") }</span>
 					<form data-admin-form data-method="PUT" data-url-template={ row.MetaURL } data-body="json" class="admin-menu-form">
 						<input type="text" name="display_name" value={ row.DisplayName } placeholder={ ui.T(ctx, "admin.projects.displayNamePlaceholder") }/>
-						@adminKindSelect(row.Kind)
+						<!-- Admin projects redesign: work/personal classification is no longer
+						     surfaced in the UI (clouds already separate work vs personal — a
+						     second dimension was redundant). This hidden field round-trips the
+						     project's CURRENT kind unchanged so a rename never silently resets
+						     an existing classification back to UpsertProjectMeta's "work"
+						     default — see cloudstore.UpsertProjectMeta's full-upsert semantics. -->
+						<input type="hidden" name="kind" value={ row.Kind }/>
 						<button type="submit" class="shell-button" style="padding: 0.3rem 0.6rem; font-size: 12px;">{ ui.T(ctx, "admin.projects.save") }</button>
 						<div class="admin-form-error" data-form-error hidden></div>
 					</form>
@@ -374,8 +381,10 @@ templ adminProjectCard(row adminProjectRow) {
 			@adminProjectStat(rollupLastActivityLabel(row), ui.T(ctx, "admin.projects.statLast"))
 		</div>
 		<div id={ "proj-access-" + row.Slug }></div>
+		if len(children) > 0 {
+			@adminProjectChildStrip(row, children)
+		}
 		<div class="pfoot">
-			@kindBadge(row.Kind)
 			if row.SyncEnabled {
 				<span class="badge badge-ok">{ ui.T(ctx, "admin.projects.sync") }</span>
 			} else {
@@ -384,8 +393,36 @@ templ adminProjectCard(row adminProjectRow) {
 			if row.ParentProject != "" {
 				<span class="badge">{ ui.Tf(ctx, "admin.projects.subProjectOf", row.ParentProject) }</span>
 			}
-			if row.SubProjectCount > 0 {
-				<span class="badge">{ subProjectCountLabel(i18n.LangFrom(ctx), row.SubProjectCount) }</span>
+		</div>
+	</div>
+}
+
+// adminProjectChildStrip renders a parent's direct linked children as
+// compact rows STACKED INSIDE its own single-column card (Admin projects
+// redesign, issue #93 — replaces the old full-width .projgroup-children
+// nesting). Collapsible via the ▾ chevron (client-side only, admin.js
+// toggle-childstrip); shows the first 3 children + a "ver todos" link to the
+// parent's own detail page when there are more, so the card never stretches
+// to fit an arbitrarily long list.
+templ adminProjectChildStrip(parent adminProjectRow, children []adminProjectRow) {
+	<div class="childstrip">
+		<div class="cs-head" data-action="toggle-childstrip">
+			<span class="chev">▾</span>
+			{ subProjectCountLabel(i18n.LangFrom(ctx), len(children)) }
+		</div>
+		<div class="cs-body">
+			for i, child := range children {
+				if i < 3 {
+					<a href={ templ.SafeURL(child.DetailURL) } class="crow">
+						<span class="tg">└</span>
+						<span class="cn">{ projectCardTitle(child) }</span>
+						<span class="cm">{ strconv.Itoa(child.RollupMemoryCount) } · { rollupLastActivityLabel(child) }</span>
+						<span class={ "sdot", templ.KV("pause", !child.SyncEnabled) }></span>
+					</a>
+				}
+			}
+			if len(children) > 3 {
+				<a href={ templ.SafeURL(parent.DetailURL) } class="cs-more">{ ui.Tf(ctx, "admin.projects.childstripMore", strconv.Itoa(len(children)-3)) }</a>
 			}
 		</div>
 	</div>

@@ -460,6 +460,62 @@
     });
   }
 
+  // ── Admin Projects: search box + filter chips (Admin projects redesign,
+  // issue #93). Both operate over the SAME rendered #admin-projects-grid —
+  // no re-fetch, no server round trip. Each top-level .projcard already
+  // carries data-proj-search/data-has-children/data-paused (see
+  // adminProjectCard), so filtering is a plain attribute scan, exactly like
+  // filterAdminUsers above. Wired via addEventListener/data-action (never an
+  // inline onclick/oninput attribute), since an inline HTML event handler
+  // resolves identifiers against the GLOBAL scope, not this file's closure —
+  // a bare `function foo(){}` declared in here is not reachable that way. ──
+  function filterAdminProjects() {
+    var grid = document.getElementById("admin-projects-grid");
+    if (!grid) return;
+    var searchInput = document.getElementById("admin-project-search");
+    var q = ((searchInput && searchInput.value) || "").trim().toLowerCase();
+    var filterBar = document.getElementById("admin-project-filters");
+    var activeFilter = (filterBar && filterBar.getAttribute("data-active-filter")) || "all";
+    Array.prototype.forEach.call(grid.children, function (card) {
+      if (!card.classList || !card.classList.contains("projcard")) return;
+      var matchesSearch = !q || (card.getAttribute("data-proj-search") || "").indexOf(q) !== -1;
+      var matchesFilter =
+        activeFilter === "all" ||
+        (activeFilter === "sub" && card.getAttribute("data-has-children") === "true") ||
+        (activeFilter === "paused" && card.getAttribute("data-paused") === "true");
+      card.hidden = !(matchesSearch && matchesFilter);
+    });
+  }
+
+  function setAdminProjectFilter(filterBar, filter) {
+    filterBar.setAttribute("data-active-filter", filter);
+    filterBar.querySelectorAll(".chip").forEach(function (chip) {
+      chip.classList.toggle("on", chip.getAttribute("data-filter") === filter);
+    });
+    filterAdminProjects();
+  }
+
+  // ── Admin project-detail page: Memorias/Acceso/Actividad tab switch
+  // (Admin projects redesign, issue #93). Scoped to the closest .pdetail so
+  // the SAME markup pattern could host more than one tab strip if needed. ──
+  function switchAdminDetailTab(tabEl) {
+    var container = tabEl.closest(".pdetail") || document;
+    var paneID = tabEl.getAttribute("data-pane");
+    if (!paneID) return;
+    container.querySelectorAll(".tab").forEach(function (t) { t.classList.remove("on"); });
+    container.querySelectorAll(".pane").forEach(function (p) { p.classList.remove("on"); });
+    // The "Gestionar acceso" header button also carries data-action="switch-tab"
+    // but lives OUTSIDE .pdetail (in .dactions) and isn't itself a .tab — only
+    // toggle "on" for elements that actually are one.
+    if (tabEl.classList.contains("tab")) tabEl.classList.add("on");
+    else {
+      var matchingTab = container.querySelector('.tab[data-pane="' + paneID + '"]');
+      if (matchingTab) matchingTab.classList.add("on");
+    }
+    var pane = document.getElementById(paneID);
+    if (pane) pane.classList.add("on");
+  }
+
   // ── Password reveal box (shared markup for create + reset-password) ──
   function passwordBoxHTML(password) {
     return (
@@ -680,6 +736,13 @@
         if (box) box.hidden = !box.hidden;
       } else if (action === "copy-password") {
         copyAdminPassword(actionEl);
+      } else if (action === "filter-projects") {
+        var filterBar = actionEl.closest("[data-active-filter]");
+        if (filterBar) setAdminProjectFilter(filterBar, actionEl.getAttribute("data-filter") || "all");
+      } else if (action === "toggle-childstrip") {
+        actionEl.classList.toggle("closed");
+      } else if (action === "switch-tab") {
+        switchAdminDetailTab(actionEl);
       }
       return;
     }
@@ -716,6 +779,11 @@
     // / openResetPasswordModal() on every open, since both replace their
     // modal body's innerHTML with the captured template first.
     captureAdminTemplates();
+    // Admin Projects search box (Admin projects redesign, issue #93) — a real
+    // listener, not an inline oninput, so it reaches filterAdminProjects()
+    // (see that function's doc comment for why inline attributes can't).
+    var projectSearch = (scope || document).querySelector ? (scope || document).querySelector("#admin-project-search") : null;
+    if (projectSearch) projectSearch.addEventListener("input", filterAdminProjects);
   }
 
   if (document.readyState === "loading") {

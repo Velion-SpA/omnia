@@ -145,6 +145,7 @@ type adminProjectRow struct {
 	DisplayName  string
 	Kind         string
 	MetaURL      string // PUT /admin/projects/{project}/meta
+	DetailURL    string // GET /admin/projects/{project} (Admin projects redesign, own detail page)
 	SyncEnabled  bool   // OBL-04: false when the project's sync is paused
 	PausedReason string // set only when SyncEnabled is false
 	PauseURL     string // POST /admin/projects/{project}/pause
@@ -479,6 +480,7 @@ func (s *CloudServer) handleAdminProjectsPage(w http.ResponseWriter, r *http.Req
 			DisplayName:    k.DisplayName,
 			Kind:           k.Kind,
 			MetaURL:        "/admin/projects/" + escProject + "/meta",
+			DetailURL:      "/admin/projects/" + escProject,
 			SyncEnabled:    true, // OBL-04 default: absent control row = enabled
 			PauseURL:       "/admin/projects/" + escProject + "/pause",
 			ResumeURL:      "/admin/projects/" + escProject + "/resume",
@@ -556,6 +558,16 @@ func projectRollupStats(own cloudstore.ProjectChunkStats, children []cloudstore.
 		out.SourceCount += c.SourceCount
 		if c.LastActivity.After(out.LastActivity) {
 			out.LastActivity = c.LastActivity
+		}
+		// FirstActivity: the admin project-detail page's "created ~X ago"
+		// label rolls up to the EARLIEST activity across own + children (a
+		// parent "exists" as far back as its oldest sub-project's first
+		// synced chunk), mirroring LastActivity's max but inverted. A zero
+		// own.FirstActivity (no own chunks yet) must not win as "earliest"
+		// over a real child timestamp — only compare when own is already set,
+		// otherwise adopt the first child's value outright.
+		if !c.FirstActivity.IsZero() && (out.FirstActivity.IsZero() || c.FirstActivity.Before(out.FirstActivity)) {
+			out.FirstActivity = c.FirstActivity
 		}
 	}
 	return out
@@ -755,4 +767,29 @@ func adminProjectsCountLabel(lang i18n.Lang, rows []adminProjectRow) string {
 		word = i18n.T(lang, "admin.projects.countSingular")
 	}
 	return fmt.Sprintf("%d %s · %d %s", len(rows), word, total, i18n.T(lang, "admin.projects.memories"))
+}
+
+// projectsWithChildrenCount counts the top-level grid entries that render a
+// childstrip (Admin projects redesign) — backs the "Con sub-proyectos" filter
+// chip's count. Counts GROUPS (one per parent card), not raw child rows.
+func projectsWithChildrenCount(groups []adminProjectGroupEntry) int {
+	n := 0
+	for _, g := range groups {
+		if len(g.Children) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// pausedProjectsCount counts every known project whose sync is currently
+// paused — backs the "Pausados" filter chip's count.
+func pausedProjectsCount(rows []adminProjectRow) int {
+	n := 0
+	for _, r := range rows {
+		if !r.SyncEnabled {
+			n++
+		}
+	}
+	return n
 }

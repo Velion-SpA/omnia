@@ -68,6 +68,39 @@ func TestProjectRollupStats_OwnLastActivityWinsWhenNewerThanChildren(t *testing.
 	}
 }
 
+// FirstActivity rollup (Admin projects redesign, issue #93): the detail
+// page's "created ~X ago" label rolls up to the EARLIEST activity across own
+// + children — the inverse of LastActivity's max.
+
+func TestProjectRollupStats_FirstActivityIsMinAcrossOwnAndChildren(t *testing.T) {
+	own := cloudstore.ProjectChunkStats{FirstActivity: time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)}
+	oldestChild := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	children := []cloudstore.ProjectChunkStats{
+		{FirstActivity: oldestChild},
+		{FirstActivity: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)},
+	}
+
+	got := projectRollupStats(own, children)
+
+	if !got.FirstActivity.Equal(oldestChild) {
+		t.Fatalf("FirstActivity = %v, want min (oldest child) %v", got.FirstActivity, oldestChild)
+	}
+}
+
+func TestProjectRollupStats_FirstActivityAdoptsChildWhenOwnIsZero(t *testing.T) {
+	// A parent with no own chunks yet (never directly synced, only classified)
+	// must still get a "created" label from its children, not stay zero.
+	own := cloudstore.ProjectChunkStats{}
+	childFirst := time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC)
+	children := []cloudstore.ProjectChunkStats{{FirstActivity: childFirst}}
+
+	got := projectRollupStats(own, children)
+
+	if !got.FirstActivity.Equal(childFirst) {
+		t.Fatalf("FirstActivity = %v, want the child's (own was zero) %v", got.FirstActivity, childFirst)
+	}
+}
+
 // ─── Pure function tests: buildProjectGroups ─────────────────────────────────
 
 func TestBuildProjectGroups_NestsChildrenUnderParentInOrder(t *testing.T) {
@@ -217,10 +250,12 @@ func TestHandleAdminProjectsPage_ParentCardShowsRolledUpStats(t *testing.T) {
 			t.Errorf("expected parent card to show rolled-up stat %q, got: %s", want, body)
 		}
 	}
-	// Children must still show their OWN individual stats, not the rollup.
-	for _, want := range []string{">55<", ">33<"} {
+	// Children no longer render as their own top-level card (Admin projects
+	// redesign, issue #93) — they stack as compact .crow rows INSIDE the
+	// parent's card instead, still showing their OWN (unrolled) stats there.
+	for _, want := range []string{"55 · —", "33 · —"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("expected a child card to show its own (unrolled) stat %q, got: %s", want, body)
+			t.Errorf("expected a childstrip row to show its own (unrolled) stat %q, got: %s", want, body)
 		}
 	}
 }
@@ -253,10 +288,20 @@ func TestHandleAdminProjectsPage_GroupingRendersChildrenNested(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `class="projgroup"`) {
-		t.Errorf("expected a projgroup wrapper for the parent+child group, got: %s", body)
+	// Admin projects redesign (issue #93): the parent renders as a
+	// SINGLE-COLUMN card (the "parent" modifier, not a full-width projgroup
+	// span) with its child stacked as a compact .crow row INSIDE it via
+	// .childstrip — replacing the old .projgroup/.projgroup-children nesting.
+	if !strings.Contains(body, `class="projcard parent"`) {
+		t.Errorf("expected the parent to render as a single-column '.projcard parent' card, got: %s", body)
 	}
-	if !strings.Contains(body, `class="projgroup-children"`) {
-		t.Errorf("expected a projgroup-children wrapper nesting the child card, got: %s", body)
+	if !strings.Contains(body, `class="childstrip"`) {
+		t.Errorf("expected a childstrip nesting the child row, got: %s", body)
+	}
+	if !strings.Contains(body, `class="crow"`) {
+		t.Errorf("expected the child to render as a compact .crow row, got: %s", body)
+	}
+	if strings.Contains(body, `class="projgroup"`) || strings.Contains(body, `class="projgroup-children"`) {
+		t.Errorf("did not expect the old full-width projgroup nesting to still render, got: %s", body)
 	}
 }
