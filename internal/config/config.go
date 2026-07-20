@@ -341,7 +341,8 @@ func legacyEmbeddingsDBPath() string {
 //     the escape hatch for anyone who wants a fixed, shared, or otherwise
 //     custom location regardless of data dir.
 //  2. otherwise, when dataDir is the canonical, no-override data directory
-//     (what datadir.Resolve("") returns with no env/flag override) —
+//     (datadir.HomeDefault(), computed independently of OMNIA_DATA_DIR so an
+//     alternate data dir set via env is NOT mistaken for the home default) —
 //     legacyEmbeddingsDBPath(), the historic global default. This keeps
 //     every existing install byte-for-byte unaffected: no relocation, no
 //     forced re-embed, after upgrading to this fix.
@@ -360,7 +361,7 @@ func ResolveEmbeddingsDBPath(explicit, dataDir string) string {
 	if strings.TrimSpace(explicit) != "" {
 		return explicit
 	}
-	if dataDir == "" || dataDir == datadir.Resolve("") {
+	if dataDir == "" || dataDir == datadir.HomeDefault() {
 		return legacyEmbeddingsDBPath()
 	}
 	return filepath.Join(dataDir, "embeddings.db")

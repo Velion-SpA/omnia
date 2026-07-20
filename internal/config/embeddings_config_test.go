@@ -106,10 +106,16 @@ func TestResolveEmbeddingsDBPath_CanonicalDataDirUsesLegacyGlobalPath(t *testing
 func TestResolveEmbeddingsDBPath_AlternateDataDirGetsScopedStore(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("OMNIA_DATA_DIR", "")
 	t.Setenv("ENGRAM_DATA_DIR", "")
 
 	altDataDir := filepath.Join(t.TempDir(), "alt-instance")
+	// Reproduce the REAL #82 footgun: OMNIA_DATA_DIR is set process-wide to the
+	// alternate dir — exactly what an `omnia embed` run against an alt data dir
+	// creates. Resolution must NOT be fooled into returning the shared legacy
+	// path. (The earlier regression test cleared OMNIA_DATA_DIR, so it never
+	// reproduced the bug and passed even against the broken implementation.)
+	t.Setenv("OMNIA_DATA_DIR", altDataDir)
+
 	got := config.ResolveEmbeddingsDBPath("", altDataDir)
 	want := filepath.Join(altDataDir, "embeddings.db")
 	if got != want {
@@ -119,5 +125,24 @@ func TestResolveEmbeddingsDBPath_AlternateDataDirGetsScopedStore(t *testing.T) {
 	legacy := filepath.Join(home, ".local", "share", "omnia", "embeddings.db")
 	if got == legacy {
 		t.Fatalf("alt data dir resolved to the shared legacy embeddings path %q — this is exactly the #82 bug (an alternate-data-dir `omnia embed` run pruning the primary instance's vectors)", legacy)
+	}
+}
+
+// TestResolveEmbeddingsDBPath_HomeDefaultViaEnvStaysLegacy proves the fix does
+// NOT over-scope: when OMNIA_DATA_DIR is explicitly set to the home-default
+// data dir (the same instance a bare run would use), embeddings still resolve
+// to the legacy global path — no needless relocation for existing installs.
+func TestResolveEmbeddingsDBPath_HomeDefaultViaEnvStaysLegacy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ENGRAM_DATA_DIR", "")
+
+	homeDefault := datadir.HomeDefault()
+	t.Setenv("OMNIA_DATA_DIR", homeDefault)
+
+	got := config.ResolveEmbeddingsDBPath("", homeDefault)
+	want := filepath.Join(home, ".local", "share", "omnia", "embeddings.db")
+	if got != want {
+		t.Errorf("got %q, want %q (home-default dir must stay on the legacy global path even when set via OMNIA_DATA_DIR)", got, want)
 	}
 }
