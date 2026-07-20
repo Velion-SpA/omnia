@@ -2,46 +2,37 @@
 # Omnia — PostToolUseFailure hook: forced-activation bugfix recall (#1399 slice 2)
 #
 # Design (obs #1498 / audit #1497): Omnia's Go server has NO visibility into
-# tool-call outcomes — only Claude Code hooks see them. This hook closes
-# that gap for RECURRING bugs: on a real tool error, it force-injects a
-# compact recall of any past PROVEN fix for the same normalized error
-# signature, so the agent never has to remember to search.
+# tool-call outcomes — only Claude Code hooks see them. On a real tool error
+# this hook force-injects a compact recall of any past PROVEN fix for the SAME
+# normalized error signature, so the agent never has to remember to search.
 #
-# EVENT: PostToolUseFailure (NOT PostToolUse — PostToolUse fires only on
-# tool SUCCESS per code.claude.com/docs/en/hooks.md, so it can never see a
-# tool error; PostToolUseFailure fires only when a tool call FAILS, which
-# is exactly the event this hook exists for). Because the event only fires
-# on failure, there is no separate "does this look like an error" gate
-# here — the error is guaranteed present in `tool_error`.
+# EVENT: PostToolUseFailure — fires when a tool call FAILS, including a Bash
+# command that exits non-zero (a failing test/build/linter), which is exactly
+# the recurring-bug case this hook exists for. Because it only fires on
+# failure, there is no separate "does this look like an error" gate.
 #
-# Flow:
-#   1. Read `tool_error.message` / `.stderr` / `.stdout` from stdin (the
-#      guaranteed-present error payload for this event) and combine them
-#      into one error text. If that combined text is empty (defensive only
-#      — shouldn't happen on a real PostToolUseFailure), exit 0 silently.
-#   2. Pipe the error text to `omnia recall-fix`, which re-derives the
-#      exact same error-shaped-line extraction used at save time
-#      (store.ExtractErrorText) and returns ONLY signature-lane hits
-#      (SignatureMatch==true) — never loose BM25 text hits. Empty output
-#      there means "no proven prior fix" and this hook injects nothing.
+# PAYLOAD SHAPE (verified against the live runtime, 2026-07): this build
+# delivers a top-level `.error` STRING (the "Exit code N" line plus the
+# command's stderr/stdout combined). Other/older builds instead use a
+# `.tool_error` OBJECT (message/stderr/stdout, sometimes nested under
+# .details) or an `.error` object. This script reads EVERY known shape so the
+# real error text always reaches `omnia recall-fix` regardless of version.
 #
-# Dedup: once an observation id has been surfaced in this session, it is
-# not re-injected on every later occurrence of the same recurring error — a
-# lightweight per-session marker file (keyed by session_id + obs id) tracks
-# what has already been shown.
+# SCOPE: searches ALL projects (no --project filter). Recurring bugs reappear
+# across different projects/migrations; the signature-lane match is specific
+# enough on its own, so scoping to the current project would MISS the exact
+# cross-migration recurrence this hook is for.
 #
-# FAIL-QUIET + FAST: any problem here (malformed hook JSON, `omnia` missing
-# from PATH, a slow/unreachable local DB) exits 0 with no output. This hook
-# must NEVER block or slow down the agent — worst case it just doesn't
-# inject a hint this one time. `timeout` bounds the one call that does real
-# work (the omnia subprocess) so a stuck/slow invocation can't stall the
-# tool loop.
+# FAIL-QUIET + FAST: any problem (bad JSON, `omnia` missing, slow DB) exits 0
+# with no output. `timeout` bounds the one real-work call so it can never stall
+# the tool loop. Relies on omnia's own datadir resolution (~/.omnia, falling
+# back to ~/.engram) — deliberately does NOT hardcode OMNIA_DATA_DIR.
 #
-# ── Manual self-check (no Claude Code needed) ───────────────────────────────
-#   echo '{"tool_name":"Bash","session_id":"manual-test","cwd":"'"$PWD"'","hook_event_name":"PostToolUseFailure","tool_error":{"message":"panic: runtime error: index out of range [7] with length 2","exit_code":1,"stdout":"","stderr":"\tat main.go:42"}}' \
+# Manual self-check (no Claude Code needed):
+#   echo '{"session_id":"t","hook_event_name":"PostToolUseFailure","error":"Exit code 1\npanic: runtime error: index out of range [7] with length 2\n\tat main.go:42"}' \
 #     | ./post-tool-error-recall.sh | jq .
-#   # No matching prior fix (or omnia unavailable) should produce NO output and exit 0:
-#   echo '{"tool_name":"Bash","session_id":"manual-test","cwd":"'"$PWD"'","hook_event_name":"PostToolUseFailure","tool_error":{"message":"","exit_code":1,"stdout":"","stderr":""}}' \
+#   # No matching prior fix (or omnia unavailable) → NO output, exit 0:
+#   echo '{"session_id":"t","hook_event_name":"PostToolUseFailure","error":""}' \
 #     | ./post-tool-error-recall.sh; echo "exit=$?"
 
 set -u
@@ -49,52 +40,44 @@ set -u
 OMNIA_BIN="${OMNIA_BIN:-omnia}"
 RECALL_TIMEOUT_SECS="${OMNIA_RECALL_TIMEOUT_SECS:-3}"
 
-# Load shared helpers (detect_project)
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "${SCRIPT_DIR}/_helpers.sh"
-
-# Read hook input from stdin
 INPUT=$(cat)
 
-# Fail-quiet: if stdin wasn't valid JSON, every jq lookup below yields ""
-# (via `// empty`), which naturally falls through to "no injection" instead
-# of erroring.
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
-CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
 
-# PostToolUseFailure's guaranteed-present error payload (confirmed against
-# code.claude.com/docs/en/hooks.md): tool_error.message/.exit_code/.stderr/
-# .stdout. Combine message+stderr+stdout as the error source fed to
-# `omnia recall-fix` — this event only fires on a real failure, so no
-# separate "looks like an error" heuristic gate is needed here.
-ERR_MESSAGE=$(printf '%s' "$INPUT" | jq -r '.tool_error.message // empty' 2>/dev/null)
-ERR_STDERR=$(printf '%s' "$INPUT" | jq -r '.tool_error.stderr // empty' 2>/dev/null)
-ERR_STDOUT=$(printf '%s' "$INPUT" | jq -r '.tool_error.stdout // empty' 2>/dev/null)
+# Read every known error-payload shape and concatenate whatever is present.
+# `.error` may be a string (this runtime) or an object; `.tool_error` may be an
+# object (older/other builds), possibly with stderr/stdout nested under
+# .details. jq's `strings`/`objects` filters make each branch a no-op when the
+# field is absent or the wrong type, so this is safe across all shapes.
+ERROR_TEXT=$(printf '%s' "$INPUT" | jq -r '
+  [
+    (.error | strings),
+    (.error | objects | (.message, .stderr, .stdout, .details.stderr, .details.stdout)),
+    (.tool_error | objects | (.message, .stderr, .stdout, .details.stderr, .details.stdout))
+  ] | flatten | map(select(. != null and . != "")) | join("\n")
+' 2>/dev/null)
 
-ERROR_TEXT="${ERR_MESSAGE}
-${ERR_STDERR}
-${ERR_STDOUT}"
-
-# Tiny guard: nothing to recall from an empty error payload.
+# Nothing to recall from an empty error payload.
 if [ -z "$(printf '%s' "$ERROR_TEXT" | tr -d '[:space:]')" ]; then
   exit 0
 fi
 
-# ── Authoritative Go gate: signature-lane recall only ───────────────────────
+# omnia must be on PATH; otherwise fail quiet.
 command -v "$OMNIA_BIN" >/dev/null 2>&1 || exit 0
 
-PROJECT=$(detect_project "$CWD")
-
+# Authoritative Go gate: recall-fix returns ONLY signature-lane hits (proven
+# recurring-error matches), never loose BM25 text hits. No --project → all
+# projects (cross-migration recurrence is the point).
 RECALL_BLOCK=""
 if command -v timeout >/dev/null 2>&1; then
-  RECALL_BLOCK=$(printf '%s' "$ERROR_TEXT" | timeout "${RECALL_TIMEOUT_SECS}s" "$OMNIA_BIN" recall-fix --project "$PROJECT" 2>/dev/null)
+  RECALL_BLOCK=$(printf '%s' "$ERROR_TEXT" | timeout "${RECALL_TIMEOUT_SECS}s" "$OMNIA_BIN" recall-fix 2>/dev/null)
 else
-  RECALL_BLOCK=$(printf '%s' "$ERROR_TEXT" | "$OMNIA_BIN" recall-fix --project "$PROJECT" 2>/dev/null)
+  RECALL_BLOCK=$(printf '%s' "$ERROR_TEXT" | "$OMNIA_BIN" recall-fix 2>/dev/null)
 fi
 
 [ -z "$RECALL_BLOCK" ] && exit 0
 
-# ── Dedup: skip re-injecting ids already surfaced earlier this session ─────
+# Dedup: skip re-injecting obs ids already surfaced earlier this session.
 STATE_DIR="${TMPDIR:-/tmp}"
 SESSION_KEY="${SESSION_ID:-nosession}"
 OBS_IDS=$(printf '%s' "$RECALL_BLOCK" | grep -oE 'obs #[0-9]+' | sed 's/obs #//')
@@ -102,14 +85,9 @@ OBS_IDS=$(printf '%s' "$RECALL_BLOCK" | grep -oE 'obs #[0-9]+' | sed 's/obs #//'
 ANY_NEW=0
 for OBS_ID in $OBS_IDS; do
   MARKER="${STATE_DIR}/omnia-recall-seen-${SESSION_KEY}-${OBS_ID}"
-  if [ ! -f "$MARKER" ]; then
-    ANY_NEW=1
-  fi
+  [ ! -f "$MARKER" ] && ANY_NEW=1
 done
-
-if [ "$ANY_NEW" -eq 0 ]; then
-  exit 0
-fi
+[ "$ANY_NEW" -eq 0 ] && exit 0
 
 for OBS_ID in $OBS_IDS; do
   MARKER="${STATE_DIR}/omnia-recall-seen-${SESSION_KEY}-${OBS_ID}"
