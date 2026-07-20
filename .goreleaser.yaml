@@ -46,12 +46,16 @@ changelog:
 
 brews:
   - repository:
-      owner: Gentleman-Programming
+      owner: Velion-SpA
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    # Auto-push to the tap needs a HOMEBREW_TAP_TOKEN secret with write access to
+    # Velion-SpA/homebrew-tap. Until that secret exists, skip the push (goreleaser
+    # still generates the formula); the tap formula is updated out of band.
+    skip_upload: "true"
     directory: Formula
     name: omnia
-    homepage: "https://github.com/velion/omnia"
+    homepage: "https://github.com/Velion-SpA/omnia"
     description: "Persistent memory for AI coding agents. Agent-agnostic, single binary, zero dependencies."
     license: "MIT"
     commit_msg_template: "chore: update omnia formula to {{ .Tag }}"
