@@ -506,3 +506,97 @@ func TestSearch_SignatureLaneIgnoresTooShortStoredSignature(t *testing.T) {
 		}
 	}
 }
+
+// ─── Shared n-gram matching (recall #1399: recurring error, different location) ─
+//
+// RED (matches the primary real-world use case the two-way full-string
+// containment check misses): obs #1332's stored error_signature is
+// prose-polluted (derived from a memory paragraph quoting the error deep
+// inside unrelated sentences), and a FRESH occurrence of the same
+// underlying error happens in a different file/variable. Neither
+// signature is a full substring of the other, so the old containment-only
+// check returns nothing — but they share the distinctive error core
+// "cannot read properties of", which ErrorSignatureProbes must surface as
+// a matching n-gram.
+const obs1332ErrorSignature = "root cause from hermes logs typeerror cannot read properties of null reading results at searchengram engram search returns json null not or when a query matches nothing common with garbled voice transcriptions e g alexa transcribed a request as query workly dime falta poder venderlo project null the code did array isarray data data data"
+
+func TestSearch_SignatureLane_MatchesSameErrorDifferentLocation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	fixID, err := s.AddObservation(AddObservationParams{
+		SessionID:      "s1",
+		Type:           "bugfix",
+		Title:          "Root cause: Engram search returns JSON null instead of empty results",
+		Content:        "Root cause from Hermes logs: TypeError: Cannot read properties of null (reading 'results') at searchEngram. Engram search returns JSON null (not []) when a query matches nothing, common with garbled voice transcriptions.",
+		Project:        "engram",
+		Scope:          "project",
+		ErrorSignature: obs1332ErrorSignature,
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	// A fresh occurrence of the SAME underlying error in a completely
+	// different file/variable ("value" vs "results", "ProductForm" vs
+	// "searchEngram") — neither signature is a full substring of the
+	// other, but they share the distinctive core "cannot read properties
+	// of".
+	newOccurrence := "Uncaught TypeError: Cannot read properties of null (reading 'value') at ProductForm (/src/modules/inventory/ProductForm.vue:88:14)"
+
+	results, err := s.Search(newOccurrence, SearchOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	var found *SearchResult
+	for i := range results {
+		if results[i].ID == fixID {
+			found = &results[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected the recurring error (same core, different file/variable) to surface via the signature lane, got %d results: %+v", len(results), results)
+	}
+	if !found.SignatureMatch {
+		t.Fatalf("expected SignatureMatch=true, got %+v", found)
+	}
+	if found.Rank != signatureMatchRank {
+		t.Fatalf("expected rank=%v (signature lane tier), got %v", signatureMatchRank, found.Rank)
+	}
+}
+
+func TestSearch_SignatureLane_DoesNotMatchUnrelatedError(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	fixID, err := s.AddObservation(AddObservationParams{
+		SessionID:      "s1",
+		Type:           "bugfix",
+		Title:          "Root cause: Engram search returns JSON null instead of empty results",
+		Content:        "Root cause from Hermes logs: TypeError: Cannot read properties of null (reading 'results') at searchEngram. Engram search returns JSON null (not []) when a query matches nothing, common with garbled voice transcriptions.",
+		Project:        "engram",
+		Scope:          "project",
+		ErrorSignature: obs1332ErrorSignature,
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	// A totally unrelated error — shares no distinctive n-gram with the
+	// stored signature, and must NOT be surfaced by the signature lane.
+	results, err := s.Search("dial tcp 127.0.0.1:5432: connect: connection refused", SearchOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	for _, r := range results {
+		if r.ID == fixID && r.SignatureMatch {
+			t.Fatalf("expected NO signature-lane match for an unrelated error, but id=%d matched", fixID)
+		}
+	}
+}

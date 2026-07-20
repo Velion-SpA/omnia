@@ -187,6 +187,93 @@ var (
 	reWhitespace = regexp.MustCompile(`\s+`)
 )
 
+// signatureGenericProbeTokens is the MINIMAL set of overly-generic
+// error-shaped words that must not, by themselves, count as "distinctive"
+// enough to justify an n-gram probe (see ErrorSignatureProbes). Kept
+// deliberately small: a broader generic list would start rejecting probes
+// that ARE distinctive in context (e.g. "properties", "reading", "cannot"
+// all carry real signal for a "cannot read properties of null" style
+// error and must NOT be treated as generic).
+var signatureGenericProbeTokens = map[string]bool{
+	"error":     true,
+	"failed":    true,
+	"fatal":     true,
+	"panic":     true,
+	"runtime":   true,
+	"exception": true,
+}
+
+// isDistinctiveSignatureProbe reports whether probe is specific enough to
+// be worth matching against stored error_signature values: it must meet
+// the same minimum length floor as the outer signature-lane guard
+// (minSignatureLength), AND contain at least one token of length >= 5 that
+// is NOT in signatureGenericProbeTokens. This blocks over-matching on
+// generic runs like "error failed to load" (every token >=5 chars is
+// generic) while still admitting short-but-specific phrases like "cannot
+// read properties of" ("properties" alone already qualifies).
+func isDistinctiveSignatureProbe(probe string) bool {
+	if len(probe) < minSignatureLength {
+		return false
+	}
+	for _, tok := range strings.Fields(probe) {
+		if len(tok) >= 5 && !signatureGenericProbeTokens[tok] {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrorSignatureProbes splits a normalized error signature into
+// distinctive contiguous n-token windows ("probes") that Store.Search's
+// signature lane can OR together against error_signature. This is the fix
+// for the two-way full-string containment check's biggest blind spot: the
+// SAME error recurring in a DIFFERENT file/variable/prose context, where
+// neither signature is a full substring of the other but they clearly
+// share a distinctive error core (e.g. "cannot read properties of").
+//
+// When normalizedSig has ngram tokens or fewer, the whole signature is
+// returned as a single probe (if it passes isDistinctiveSignatureProbe) —
+// windowing a signature shorter than the window size would be a no-op
+// anyway. Otherwise every contiguous ngram-token window is a probe
+// candidate, filtered by isDistinctiveSignatureProbe, deduplicated in
+// first-seen order, and capped at 16 probes so a very long signature can't
+// blow up the number of OR'd LIKE clauses in a single query.
+//
+// Returns nil when normalizedSig is empty or no candidate probe survives
+// the guards.
+func ErrorSignatureProbes(normalizedSig string, ngram int) []string {
+	tokens := strings.Fields(normalizedSig)
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	if len(tokens) <= ngram {
+		if isDistinctiveSignatureProbe(normalizedSig) {
+			return []string{normalizedSig}
+		}
+		return nil
+	}
+
+	const maxSignatureProbes = 16
+	seen := make(map[string]bool)
+	var probes []string
+	for i := 0; i+ngram <= len(tokens); i++ {
+		probe := strings.Join(tokens[i:i+ngram], " ")
+		if !isDistinctiveSignatureProbe(probe) {
+			continue
+		}
+		if seen[probe] {
+			continue
+		}
+		seen[probe] = true
+		probes = append(probes, probe)
+		if len(probes) >= maxSignatureProbes {
+			break
+		}
+	}
+	return probes
+}
+
 // NormalizeErrorSignature deterministically reduces raw error text (a Go
 // panic, a JS/TS stack trace, a log line, or a plain search query) to a
 // stable signature string. Two occurrences of the SAME underlying bug —
