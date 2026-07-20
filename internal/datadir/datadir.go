@@ -79,6 +79,26 @@ func resolveWithHome(explicit, home string) string {
 	if env := strings.TrimSpace(envx.Get(DataDirEnv)); env != "" {
 		return env
 	}
+	return homeDefault(home)
+}
+
+// HomeDefault returns the data directory Omnia uses when there is NO explicit
+// override and NO OMNIA_DATA_DIR/ENGRAM_DATA_DIR env set — the canonical
+// ~/.omnia, or the legacy ~/.engram when only it exists. Unlike Resolve(""),
+// it deliberately IGNORES the environment. Callers use it to tell whether an
+// active data dir is the natural home default or an explicit override
+// (see internal/config.ResolveEmbeddingsDBPath / #82).
+func HomeDefault() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	return homeDefault(home)
+}
+
+// homeDefault is the env-independent, testable core shared by resolveWithHome
+// and HomeDefault.
+func homeDefault(home string) string {
 	if home == "" {
 		return DirName
 	}

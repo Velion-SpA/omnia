@@ -133,6 +133,19 @@ func TestResolveEnvOverride(t *testing.T) {
 	}
 }
 
+// TestHomeDefaultIgnoresEnv locks the property ResolveEmbeddingsDBPath relies
+// on (#82): HomeDefault reports the home-based data dir REGARDLESS of an
+// OMNIA_DATA_DIR override, so an alternate data dir set via env can be told
+// apart from the natural home default.
+func TestHomeDefaultIgnoresEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OMNIA_DATA_DIR", filepath.Join(t.TempDir(), "somewhere-else"))
+	if got, want := HomeDefault(), filepath.Join(home, ".omnia"); got != want {
+		t.Errorf("HomeDefault() = %q, want %q (must ignore OMNIA_DATA_DIR)", got, want)
+	}
+}
+
 func TestResolveLegacyEnvFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("ENGRAM_DATA_DIR", "/tmp/legacy-pinned")

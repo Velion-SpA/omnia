@@ -857,7 +857,7 @@ func cmdServe(cfg store.Config) {
 	// can Stop() it (graceful drain) before the process exits.
 	var autoEmbedWorker *embed.Worker
 	if appCfg, cfgErr := config.Load(config.DefaultPath()); cfgErr == nil {
-		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s); worker != nil {
+		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s, cfg.DataDir); worker != nil {
 			worker.Start(ctx)
 			srv.SetAutoEmbed(worker)
 			autoEmbedWorker = worker
@@ -1119,11 +1119,11 @@ func cmdMCP(cfg store.Config) {
 		// flip appCfg.Recall.Enabled to true before buildRecallService reads
 		// it below.
 		maybeAutoDetectRecall(appCfg)
-		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings)
+		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir)
 		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
 		// enabled, run the worker on the same ctx cancelled at shutdown so
 		// mem_save embeds new memories out-of-band. nil when disabled.
-		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s); worker != nil {
+		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s, cfg.DataDir); worker != nil {
 			worker.Start(ctx)
 			mcpCfg.AutoEmbed = worker
 			autoEmbedWorker = worker

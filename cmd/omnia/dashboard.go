@@ -9,6 +9,7 @@ import (
 
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/dashboard"
+	"github.com/velion/omnia/internal/datadir"
 )
 
 // cmdDashboard starts the unified Omnia web UI dashboard (localhost only).
@@ -64,6 +65,13 @@ func cmdDashboard(args []string) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
+	// Resolve the embeddings store path against the SAME active data
+	// directory EngramDataDir uses (fixes #82: a --data-dir/OMNIA_DATA_DIR
+	// override must never resolve to the canonical instance's shared global
+	// embeddings.db).
+	resolvedDataDir := datadir.Resolve(*dataDir)
+	embeddingsDBPath := config.ResolveEmbeddingsDBPath(embCfg.DBPath, resolvedDataDir)
+
 	srv := dashboard.NewServer(dashboard.Config{
 		Port:              *port,
 		EngramURL:         resolvedDaemon,
@@ -78,7 +86,7 @@ func cmdDashboard(args []string) {
 		EmbeddingsBaseURL: embCfg.BaseURL,
 		EmbeddingsModel:   embCfg.Model,
 		EmbeddingsDim:     embCfg.Dim,
-		EmbeddingsDBPath:  embCfg.DBPath,
+		EmbeddingsDBPath:  embeddingsDBPath,
 	}, logger)
 
 	if err := srv.Start(context.Background()); err != nil {

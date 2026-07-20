@@ -1,4 +1,4 @@
-// Package version checks for newer engram releases on GitHub.
+// Package version checks for newer omnia releases on GitHub.
 package version
 
 import (
@@ -14,9 +14,13 @@ import (
 )
 
 const (
-	repoOwner = "Gentleman-Programming"
-	repoName  = "engram"
+	repoOwner = "Velion-SpA"
+	repoName  = "omnia"
 )
+
+// noUpdateCheckEnv, when set to a non-empty value, disables the update check
+// entirely (no network call, no message). Useful for scripts and CI.
+const noUpdateCheckEnv = "OMNIA_NO_UPDATE_CHECK"
 
 var (
 	checkTimeout           = 2 * time.Second
@@ -45,6 +49,10 @@ type githubRelease struct {
 // CheckLatest compares the running version against the latest GitHub release.
 // It distinguishes between up-to-date, update available, and check failures.
 func CheckLatest(current string) CheckResult {
+	if strings.TrimSpace(os.Getenv(noUpdateCheckEnv)) != "" {
+		return CheckResult{Status: StatusUpToDate}
+	}
+
 	switch current {
 	case "":
 		return checkFailed("Could not check for updates: current version is unknown.")
