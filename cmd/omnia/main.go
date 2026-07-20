@@ -1113,6 +1113,12 @@ func cmdMCP(cfg store.Config) {
 	// silently (mcpCfg.Recall stays nil), matching every other `omnia`
 	// subcommand's config.Load graceful-degradation convention.
 	if appCfg, cfgErr := config.Load(config.DefaultPath()); cfgErr == nil {
+		// Ollama auto-detect (issue #83): only runs when the operator never
+		// set recall.enabled at all AND embeddings are enabled — see
+		// maybeAutoDetectRecall's doc for the full gating rationale. May
+		// flip appCfg.Recall.Enabled to true before buildRecallService reads
+		// it below.
+		maybeAutoDetectRecall(appCfg)
 		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir)
 		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
 		// enabled, run the worker on the same ctx cancelled at shutdown so

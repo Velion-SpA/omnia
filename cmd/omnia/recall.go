@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"log"
+	"net/http"
+	"strings"
+	"time"
 
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/embed"
@@ -9,6 +13,73 @@ import (
 	"github.com/velion/omnia/internal/recall"
 	"github.com/velion/omnia/internal/store"
 )
+
+// ollamaProbeTimeout bounds the Ollama reachability probe
+// maybeAutoDetectRecall runs at startup. Short and non-configurable on
+// purpose: this only ever runs once per `omnia serve`/`omnia mcp` startup,
+// never per-request, so a slow/absent Ollama should fail fast rather than
+// delay startup noticeably.
+const ollamaProbeTimeout = 300 * time.Millisecond
+
+// maybeAutoDetectRecall implements issue #83's Ollama auto-detect: when the
+// operator never expressed an opinion on `recall.enabled` at all (Config.
+// RecallEnabledExplicit is false) AND embeddings are enabled, it probes
+// Ollama once and decides the default — enabling recall if reachable,
+// leaving it FTS-only (with one clear stderr note) otherwise.
+//
+// It deliberately does NOT hard-default recall.enabled to true globally:
+// that would break/slow every install without Ollama running, including
+// ones that never opted into embeddings at all. The two gates below keep
+// this scoped to exactly the case issue #83 describes:
+//
+//   - cfg.RecallEnabledExplicit: an explicit `enabled: true` or `enabled:
+//     false` in config.yaml is a deliberate operator choice and is NEVER
+//     overridden — the probe only runs when the key was never mentioned.
+//   - cfg.Embeddings.Enabled: embeddings are opt-in and disabled by
+//     default (EmbeddingsConfig's doc); a fresh install that hasn't
+//     touched embeddings.enabled at all gets zero network calls and zero
+//     new stderr output from this function — byte-for-byte the pre-#83
+//     silent default.
+//
+// The probe itself (ollamaReachable) is cheap (a single short-timeout GET)
+// and never fails the caller: any error, timeout, or non-2xx response is
+// treated as "not reachable," logged once, and recall stays off.
+func maybeAutoDetectRecall(cfg *config.Config) {
+	if cfg.RecallEnabledExplicit || !cfg.Embeddings.Enabled {
+		return
+	}
+	if ollamaReachable(cfg.Embeddings.BaseURL, ollamaProbeTimeout) {
+		cfg.Recall.Enabled = true
+		log.Printf("[recall] semantic recall auto-enabled: Ollama reachable at %s (set recall.enabled: false in config.yaml to opt out)", cfg.Embeddings.BaseURL)
+		return
+	}
+	log.Printf("[recall] semantic recall disabled: Ollama not reachable at %s (mem_search stays FTS5-only; set recall.enabled: true in config.yaml to force it on once Ollama is running)", cfg.Embeddings.BaseURL)
+}
+
+// ollamaReachable reports whether the Ollama server at baseURL answers a
+// GET to its /api/tags endpoint (the standard "list local models" route)
+// within timeout. Any transport error, timeout, or non-2xx status is
+// treated as unreachable — this is a best-effort liveness probe, not a
+// model-availability check.
+func ollamaReachable(baseURL string, timeout time.Duration) bool {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/tags", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
 
 // buildRecallService constructs the recall.Service wired into
 // mcp.MCPConfig.Recall for `omnia mcp` (human-like-memory PR3, design

@@ -40,6 +40,17 @@ type Config struct {
 	// off reproduces today's FTS5-only store.Search path byte-for-byte, so
 	// enabling it is a pure config flip with zero engram.db migration (D7).
 	Recall RecallConfig `yaml:"recall"`
+	// RecallEnabledExplicit reports whether `recall.enabled` was present in
+	// the loaded YAML (true or false), as opposed to Recall.Enabled's zero
+	// value (false) meaning "never mentioned." Recall.Enabled is a plain
+	// bool, so on its own it cannot distinguish "operator explicitly
+	// disabled recall" from "operator never touched recall at all" — a
+	// distinction issue #83's Ollama auto-detect needs: the auto-probe must
+	// only decide the default when the operator never expressed an opinion,
+	// and must never override an explicit `enabled: true` OR `enabled:
+	// false`. Computed by Load; not itself part of the YAML schema
+	// (yaml:"-").
+	RecallEnabledExplicit bool `yaml:"-"`
 }
 
 type EngramConfig struct {
@@ -67,14 +78,26 @@ type EmbeddingsConfig struct {
 
 // RecallConfig configures Omnia's hybrid (lexical+semantic) recall fusion
 // (design D1: reciprocal rank fusion; D2: adaptive relevance floor). Enabled
-// defaults to false — off, mem_search calls store.Search directly, exactly
-// as it always has (D7 rollback guarantee: byte-for-byte today's FTS5-only
-// path, zero engram.db migration). RRFK/DenseK/StrongFloor/BaseFloor/
-// MaxResults default to the same values internal/recall.DefaultFuseParams()
-// already uses as the single source of truth (PR2) — duplicated here (not
-// imported) so this package stays a plain config leaf, mirroring how
-// EmbeddingsConfig's Dim default duplicates the embed package's convention
-// rather than importing it.
+// defaults to false when the operator explicitly sets `recall.enabled:
+// false`, OR when embeddings are disabled/unreachable — mem_search then
+// calls store.Search directly, exactly as it always has (D7 rollback
+// guarantee: byte-for-byte today's FTS5-only path, zero engram.db
+// migration). When `recall.enabled` is never mentioned at all AND
+// embeddings are enabled, callers should run a lightweight Ollama
+// reachability probe (see Config.RecallEnabledExplicit) and enable recall
+// only if Ollama answers — this is composition-root logic (cmd/omnia), not
+// this leaf package's concern, since it involves a network call.
+// RRFK/DenseK/StrongFloor/BaseFloor/MaxResults default to the same values
+// internal/recall.DefaultFuseParams() already uses as the single source of
+// truth (PR2) — duplicated here (not imported) so this package stays a
+// plain config leaf, mirroring how EmbeddingsConfig's Dim default
+// duplicates the embed package's convention rather than importing it.
+// StrongFloor/BaseFloor are calibrated for the default embedding model,
+// jina/jina-embeddings-v2-base-es: the original D2 constants (0.65/0.55)
+// were tuned for a different model's score distribution and were
+// empirically too high for jina, starving recall on a fresh install even
+// with embeddings enabled (issue #83; see engram/omnia memory #1434 for the
+// live-instance tuning that found 0.25/0.35 worked).
 type RecallConfig struct {
 	Enabled     bool    `yaml:"enabled"`
 	RRFK        int     `yaml:"rrf_k"`
@@ -250,8 +273,32 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	cfg.RecallEnabledExplicit = recallEnabledKeyPresent(data)
 	applyDefaults(&cfg)
 	return &cfg, nil
+}
+
+// recallEnabledKeyPresent reports whether the loaded YAML explicitly set
+// `recall.enabled` (to either true or false), as opposed to the section or
+// key being entirely absent. Uses a pointer field in a throwaway struct so
+// "absent" and "false" are distinguishable — Config.Recall.Enabled itself
+// stays a plain bool (its zero value IS the documented D7 default), so this
+// second, best-effort unmarshal is the only way to recover the distinction
+// without changing that field's type. The re-parse operates on already
+// validated data (Load's own yaml.Unmarshal above already succeeded), so a
+// failure here is not expected; if it somehow occurs, treat the key as
+// absent (safest: falls through to the D7-preserving off-by-default path
+// rather than risking a false positive that would auto-enable recall).
+func recallEnabledKeyPresent(data []byte) bool {
+	var probe struct {
+		Recall struct {
+			Enabled *bool `yaml:"enabled"`
+		} `yaml:"recall"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	return probe.Recall.Enabled != nil
 }
 
 func applyDefaults(cfg *Config) {
@@ -306,11 +353,17 @@ func applyDefaults(cfg *Config) {
 	if cfg.Recall.DenseK == 0 {
 		cfg.Recall.DenseK = 5
 	}
+	// jina-calibrated floors (issue #83): the original 0.65/0.55 D2 constants
+	// starved recall for the default model, jina/jina-embeddings-v2-base-es,
+	// whose cosine-similarity distribution runs lower than what those
+	// constants assumed. 0.35/0.25 is the value the live instance was
+	// empirically tuned to (engram/omnia memory #1434) and is now the
+	// shipped default for every fresh install, not just a manual tweak.
 	if cfg.Recall.StrongFloor == 0 {
-		cfg.Recall.StrongFloor = 0.65
+		cfg.Recall.StrongFloor = 0.35
 	}
 	if cfg.Recall.BaseFloor == 0 {
-		cfg.Recall.BaseFloor = 0.55
+		cfg.Recall.BaseFloor = 0.25
 	}
 	if cfg.Recall.MaxResults == 0 {
 		cfg.Recall.MaxResults = 50
