@@ -33,11 +33,19 @@ import (
 // imports internal/store — this composition root supplies the hook
 // (architecture-guardrails: keep embed a leaf package). A nil s (not expected
 // from real callers, but defensive) simply skips wiring the hook.
-func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig, s *store.Store) *embed.Worker {
+//
+// dataDir is the active data directory the caller already resolved (e.g.
+// store.Config.DataDir). It is only consulted when embCfg.DBPath is unset,
+// to scope the embeddings store consistently with the #82 fix — an
+// alternate OMNIA_DATA_DIR must never resolve to the same embeddings.db as
+// the canonical instance. Pass "" when the caller has no data dir opinion
+// (tests that always set an explicit DBPath are unaffected either way).
+func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig, s *store.Store, dataDir string) *embed.Worker {
 	if !embCfg.Enabled {
 		return nil
 	}
-	embStore, err := embed.OpenStore(embCfg.DBPath)
+	dbPath := config.ResolveEmbeddingsDBPath(embCfg.DBPath, dataDir)
+	embStore, err := embed.OpenStore(dbPath)
 	if err != nil {
 		// Fail closed: the periodic `omnia embed`/Reconcile run still catches
 		// anything saved meanwhile. A missing vector store must never make a

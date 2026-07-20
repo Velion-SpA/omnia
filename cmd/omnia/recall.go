@@ -28,12 +28,20 @@ import (
 // startup), recall.Service.Search already degrades to lexical-only
 // automatically (internal/recall/service.go) — that degrade path is
 // exercised by the PR3 wiring tests and needs no duplicate coverage here.
-func buildRecallService(s *store.Store, recallCfg config.RecallConfig, embCfg config.EmbeddingsConfig) *recall.Service {
+//
+// dataDir is the active data directory the caller already resolved (e.g.
+// store.Config.DataDir). It is only consulted when embCfg.DBPath is unset,
+// to scope the embeddings store consistently with the #82 fix — an
+// alternate OMNIA_DATA_DIR must never resolve to the same embeddings.db as
+// the canonical instance. Pass "" when the caller has no data dir opinion
+// (tests that always set an explicit DBPath are unaffected either way).
+func buildRecallService(s *store.Store, recallCfg config.RecallConfig, embCfg config.EmbeddingsConfig, dataDir string) *recall.Service {
 	if !recallCfg.Enabled {
 		return nil
 	}
 
-	embStore, err := embed.OpenStore(embCfg.DBPath)
+	dbPath := config.ResolveEmbeddingsDBPath(embCfg.DBPath, dataDir)
+	embStore, err := embed.OpenStore(dbPath)
 	if err != nil {
 		// The embeddings store is Omnia's own file, not the read-only
 		// engram.db. If it can't even be opened, fail closed to the

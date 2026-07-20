@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/velion/omnia/internal/datadir"
 	"github.com/velion/omnia/internal/projectname"
 	"gopkg.in/yaml.v3"
 )
@@ -54,7 +55,14 @@ type EmbeddingsConfig struct {
 	BaseURL string `yaml:"base_url"` // Ollama base URL, e.g. http://localhost:11434
 	Model   string `yaml:"model"`    // e.g. jina/jina-embeddings-v2-base-es (default), bge-m3
 	Dim     int    `yaml:"dim"`      // embedding dimension, e.g. 768 for jina-v2-es, 1024 for bge-m3
-	DBPath  string `yaml:"db_path"`  // path to Omnia's own embeddings SQLite file
+	// DBPath is the path to Omnia's own embeddings SQLite file. Left EMPTY by
+	// Load/applyDefaults on purpose (unlike every other Embeddings* field):
+	// the right default depends on the active data directory, which Load
+	// does not know. Callers resolve the effective path via
+	// ResolveEmbeddingsDBPath(cfg.Embeddings.DBPath, activeDataDir) instead
+	// of reading this field directly. An explicit value here (set in
+	// config.yaml) always wins regardless of data dir (see #82).
+	DBPath string `yaml:"db_path"`
 }
 
 // RecallConfig configures Omnia's hybrid (lexical+semantic) recall fusion
@@ -280,10 +288,14 @@ func applyDefaults(cfg *Config) {
 	if cfg.Embeddings.Dim == 0 {
 		cfg.Embeddings.Dim = 768
 	}
-	if cfg.Embeddings.DBPath == "" {
-		home, _ := os.UserHomeDir()
-		cfg.Embeddings.DBPath = filepath.Join(home, ".local", "share", "omnia", "embeddings.db")
-	}
+	// Embeddings.DBPath intentionally gets NO default here (unlike BaseURL/
+	// Model/Dim above): the right default depends on the active data
+	// directory (OMNIA_DATA_DIR / --data-dir), which Load has no visibility
+	// into. It stays "" unless the operator sets it explicitly; callers must
+	// resolve the effective path via ResolveEmbeddingsDBPath (see #82 — a
+	// single eagerly-defaulted global path is exactly what let `omnia embed`
+	// prune the wrong instance's vectors when run under an alternate data
+	// dir).
 	// Recall.Enabled intentionally has NO default override — its zero value
 	// (false) IS the default (D7: off = today's FTS5-only path). Only the
 	// fusion params get defaults, so an operator who opts in by setting only
@@ -303,4 +315,54 @@ func applyDefaults(cfg *Config) {
 	if cfg.Recall.MaxResults == 0 {
 		cfg.Recall.MaxResults = 50
 	}
+}
+
+// legacyEmbeddingsDBPath is the historic global default for Omnia's own
+// embeddings vector store, unchanged since before per-data-dir scoping
+// existed. It stays the default for the canonical (no-override) data
+// directory so upgrading to this fix never relocates or invalidates an
+// existing install's embeddings.
+func legacyEmbeddingsDBPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "omnia", "embeddings.db")
+}
+
+// ResolveEmbeddingsDBPath returns the file path Omnia should use for its own
+// embeddings vector store, given an optional explicit override (typically
+// EmbeddingsConfig.DBPath as loaded from config.yaml) and the ACTIVE data
+// directory this run resolved (e.g. via datadir.Resolve or
+// engramdb.ResolveDataDir — same OMNIA_DATA_DIR/--data-dir precedence used
+// to open the memory database).
+//
+// Resolution order:
+//
+//  1. explicit, if non-empty — an operator-set db_path always wins,
+//     unconditionally, exactly as before this function existed. This is
+//     the escape hatch for anyone who wants a fixed, shared, or otherwise
+//     custom location regardless of data dir.
+//  2. otherwise, when dataDir is the canonical, no-override data directory
+//     (datadir.HomeDefault(), computed independently of OMNIA_DATA_DIR so an
+//     alternate data dir set via env is NOT mistaken for the home default) —
+//     legacyEmbeddingsDBPath(), the historic global default. This keeps
+//     every existing install byte-for-byte unaffected: no relocation, no
+//     forced re-embed, after upgrading to this fix.
+//  3. otherwise (dataDir is an alternate directory — OMNIA_DATA_DIR or
+//     --data-dir pointing elsewhere, e.g. an eval harness or a second
+//     instance) — <dataDir>/embeddings.db, so that instance gets its OWN
+//     vector store. This is the fix for #82: `omnia embed` run with an
+//     alternate OMNIA_DATA_DIR used to reconcile against the SAME shared
+//     global embeddings.db as the primary instance, and its prune step
+//     (internal/embed.Reconcile → Store.Prune) deleted every vector not in
+//     the tiny alt corpus's live set — silently wiping the primary
+//     instance's real embeddings. Scoping the alt instance's store to its
+//     own data dir makes that impossible: the two instances never touch
+//     the same file.
+func ResolveEmbeddingsDBPath(explicit, dataDir string) string {
+	if strings.TrimSpace(explicit) != "" {
+		return explicit
+	}
+	if dataDir == "" || dataDir == datadir.HomeDefault() {
+		return legacyEmbeddingsDBPath()
+	}
+	return filepath.Join(dataDir, "embeddings.db")
 }
