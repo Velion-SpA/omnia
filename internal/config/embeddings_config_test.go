@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/velion/omnia/internal/config"
+	"github.com/velion/omnia/internal/datadir"
 )
 
 func writeTempConfig(t *testing.T, body string) string {
@@ -41,8 +42,12 @@ func TestEmbeddings_DefaultsDisabled(t *testing.T) {
 	if cfg.Embeddings.Dim != 768 {
 		t.Errorf("Dim default: got %d, want 768", cfg.Embeddings.Dim)
 	}
-	if cfg.Embeddings.DBPath == "" {
-		t.Error("DBPath default: got empty")
+	// DBPath gets NO eager default from Load/applyDefaults (see #82): the
+	// right default depends on the active data directory, which Load does
+	// not know. It must stay empty here; callers resolve the effective path
+	// via config.ResolveEmbeddingsDBPath(cfg.Embeddings.DBPath, activeDataDir).
+	if cfg.Embeddings.DBPath != "" {
+		t.Errorf("DBPath default: got %q, want empty (resolution is deferred to ResolveEmbeddingsDBPath)", cfg.Embeddings.DBPath)
 	}
 }
 
@@ -60,5 +65,59 @@ func TestEmbeddings_ParsesEnabled(t *testing.T) {
 	}
 	if cfg.Embeddings.Dim != 1024 {
 		t.Errorf("Dim: got %d, want 1024", cfg.Embeddings.Dim)
+	}
+}
+
+// TestResolveEmbeddingsDBPath_ExplicitAlwaysWins locks the escape hatch: an
+// operator-set db_path must be returned unchanged regardless of the active
+// data directory, exactly as it behaved before per-data-dir scoping existed.
+func TestResolveEmbeddingsDBPath_ExplicitAlwaysWins(t *testing.T) {
+	got := config.ResolveEmbeddingsDBPath("/explicit/path/embeddings.db", "/some/alt/data/dir")
+	if got != "/explicit/path/embeddings.db" {
+		t.Errorf("got %q, want the explicit path unchanged", got)
+	}
+}
+
+// TestResolveEmbeddingsDBPath_CanonicalDataDirUsesLegacyGlobalPath proves
+// backward compatibility: the canonical (no-override) data directory must
+// still resolve to the historic global default, so upgrading to the #82 fix
+// never relocates or invalidates an existing install's embeddings.
+func TestResolveEmbeddingsDBPath_CanonicalDataDirUsesLegacyGlobalPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OMNIA_DATA_DIR", "")
+	t.Setenv("ENGRAM_DATA_DIR", "")
+
+	canonical := datadir.Resolve("")
+	got := config.ResolveEmbeddingsDBPath("", canonical)
+	want := filepath.Join(home, ".local", "share", "omnia", "embeddings.db")
+	if got != want {
+		t.Errorf("got %q, want %q (legacy global default, unchanged for existing installs)", got, want)
+	}
+}
+
+// TestResolveEmbeddingsDBPath_AlternateDataDirGetsScopedStore is the
+// regression test for #82: `omnia embed` run with an alternate
+// OMNIA_DATA_DIR must resolve to a vector store file SCOPED to that data
+// dir, never to the shared legacy global path a real/primary instance
+// would be using. That's what makes the reconcile prune step incapable of
+// deleting the primary instance's embeddings — the two runs never open the
+// same file.
+func TestResolveEmbeddingsDBPath_AlternateDataDirGetsScopedStore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OMNIA_DATA_DIR", "")
+	t.Setenv("ENGRAM_DATA_DIR", "")
+
+	altDataDir := filepath.Join(t.TempDir(), "alt-instance")
+	got := config.ResolveEmbeddingsDBPath("", altDataDir)
+	want := filepath.Join(altDataDir, "embeddings.db")
+	if got != want {
+		t.Errorf("got %q, want %q (scoped to the alt data dir)", got, want)
+	}
+
+	legacy := filepath.Join(home, ".local", "share", "omnia", "embeddings.db")
+	if got == legacy {
+		t.Fatalf("alt data dir resolved to the shared legacy embeddings path %q — this is exactly the #82 bug (an alternate-data-dir `omnia embed` run pruning the primary instance's vectors)", legacy)
 	}
 }

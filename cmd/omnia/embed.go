@@ -45,7 +45,18 @@ func cmdEmbed(args []string) {
 	}
 	defer reader.Close()
 
-	store, err := embed.OpenStore(cfg.Embeddings.DBPath)
+	// Scope the embeddings vector store to the SAME active data directory the
+	// reader above just resolved (fixes #82). Previously this always opened
+	// cfg.Embeddings.DBPath's single global default
+	// (~/.local/share/omnia/embeddings.db) regardless of OMNIA_DATA_DIR, so
+	// running `embed` against an alternate data dir reconciled a tiny alt
+	// corpus against the REAL global store and pruned every vector that
+	// wasn't in that alt corpus — silently wiping the primary instance's
+	// embeddings. Resolving per-data-dir means an alt run gets its own store
+	// file and can never prune the primary instance's vectors.
+	dataDir := engramdb.ResolveDataDir("")
+	dbPath := config.ResolveEmbeddingsDBPath(cfg.Embeddings.DBPath, dataDir)
+	store, err := embed.OpenStore(dbPath)
 	if err != nil {
 		fatal(fmt.Errorf("open embeddings store: %w", err))
 	}

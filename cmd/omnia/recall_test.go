@@ -19,7 +19,7 @@ func TestBuildRecallService_DisabledReturnsNil(t *testing.T) {
 	}
 	defer s.Close()
 
-	got := buildRecallService(s, config.RecallConfig{Enabled: false}, config.EmbeddingsConfig{})
+	got := buildRecallService(s, config.RecallConfig{Enabled: false}, config.EmbeddingsConfig{}, "")
 	if got != nil {
 		t.Fatalf("buildRecallService(disabled) = %v, want nil (recall.enabled=false must not construct a Service)", got)
 	}
@@ -50,7 +50,7 @@ func TestBuildRecallService_EnabledBuildsWiredService(t *testing.T) {
 		MaxResults:  50,
 	}
 
-	got := buildRecallService(s, recallCfg, embCfg)
+	got := buildRecallService(s, recallCfg, embCfg, "")
 	if got == nil {
 		t.Fatal("buildRecallService(enabled) = nil, want a non-nil *recall.Service")
 	}
@@ -90,7 +90,7 @@ func TestBuildRecallService_EnabledButStoreUnavailableReturnsNil(t *testing.T) {
 
 	got := buildRecallService(s, config.RecallConfig{Enabled: true}, config.EmbeddingsConfig{
 		DBPath: filepath.Join(blocker, "embeddings.db"),
-	})
+	}, "")
 	if got != nil {
 		t.Fatal("buildRecallService: expected nil when the embeddings store cannot be opened")
 	}

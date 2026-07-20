@@ -17,7 +17,7 @@ import (
 // ever opens the embeddings store or constructs an Ollama HTTP client on
 // the default path.
 func TestBuildAutoEmbedWorker_DisabledReturnsNil(t *testing.T) {
-	got := buildAutoEmbedWorker(config.EmbeddingsConfig{Enabled: false}, nil)
+	got := buildAutoEmbedWorker(config.EmbeddingsConfig{Enabled: false}, nil, "")
 	if got != nil {
 		t.Fatalf("buildAutoEmbedWorker(disabled) = %v, want nil (embeddings.enabled=false must not construct a Worker)", got)
 	}
@@ -35,7 +35,7 @@ func TestBuildAutoEmbedWorker_EnabledBuildsWorker(t *testing.T) {
 		DBPath:  filepath.Join(t.TempDir(), "embeddings.db"),
 	}
 
-	got := buildAutoEmbedWorker(embCfg, nil)
+	got := buildAutoEmbedWorker(embCfg, nil, "")
 	if got == nil {
 		t.Fatal("buildAutoEmbedWorker(enabled) = nil, want a non-nil *embed.Worker")
 	}
@@ -57,7 +57,7 @@ func TestBuildAutoEmbedWorker_EnabledButStoreUnavailableReturnsNil(t *testing.T)
 	got := buildAutoEmbedWorker(config.EmbeddingsConfig{
 		Enabled: true,
 		DBPath:  filepath.Join(blocker, "embeddings.db"),
-	}, nil)
+	}, nil, "")
 	if got != nil {
 		t.Fatal("buildAutoEmbedWorker: expected nil when the embeddings store cannot be opened")
 	}
@@ -88,7 +88,7 @@ func TestBuildAutoEmbedWorker_WithStoreStillBuildsWorker(t *testing.T) {
 		Dim:     3,
 		DBPath:  filepath.Join(t.TempDir(), "embeddings.db"),
 	}
-	worker := buildAutoEmbedWorker(embCfg, s)
+	worker := buildAutoEmbedWorker(embCfg, s, "")
 	if worker == nil {
 		t.Fatal("buildAutoEmbedWorker: expected a non-nil *embed.Worker")
 	}
