@@ -80,7 +80,7 @@ func TestPluginAssetsDoNotLeakSpanishTriggers(t *testing.T) {
 }
 
 // marketplaceJSON is the minimal structure of .claude-plugin/marketplace.json
-// needed to extract the version declared for the engram plugin entry.
+// needed to extract the version declared for the omnia plugin entry.
 type marketplaceJSON struct {
 	Plugins []struct {
 		Name    string `json:"name"`
@@ -125,16 +125,16 @@ func TestPluginVersionsMatch(t *testing.T) {
 		t.Fatalf("cannot parse plugin.json: %v", err)
 	}
 
-	// Find the engram plugin entry in marketplace.json
+	// Find the omnia plugin entry in marketplace.json
 	var marketplaceVersion string
 	for _, p := range marketplace.Plugins {
-		if p.Name == "engram" {
+		if p.Name == "omnia" {
 			marketplaceVersion = p.Version
 			break
 		}
 	}
 	if marketplaceVersion == "" {
-		t.Fatal("marketplace.json contains no plugin entry named 'engram'")
+		t.Fatal("marketplace.json contains no plugin entry named 'omnia'")
 	}
 
 	if marketplaceVersion != plugin.Version {
