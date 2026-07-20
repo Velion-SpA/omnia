@@ -3266,14 +3266,23 @@ const (
 	// specific real error phrases ("connection refused", "nil pointer").
 	minSignatureLength = 12
 	minSignatureTokens = 2
-
-	// signatureNGramSize is the window size ErrorSignatureProbes uses to
-	// split the query signature into distinctive contiguous-token probes
-	// (see signature.go). 4 tokens is long enough to be distinctive (not
-	// just "cannot read") while short enough to still match when the
-	// error recurs in a different file/variable/prose context.
-	signatureNGramSize = 4
 )
+
+// signatureNGramSizes are the window sizes ErrorSignatureProbesMulti tries
+// to split the query signature into distinctive contiguous-token probes
+// (see signature.go). Multiple sizes, not just one, is the issue #84 fix:
+// a single fixed window is fragile to even one inserted/reordered token
+// landing inside every window that would otherwise span the shared error
+// core (e.g. a noisy query with extra trailing tokens, or a stored
+// signature with one extra word threaded through the middle of the
+// distinctive phrase). Smaller windows (2, 3) stay intact on the
+// unaffected side of such an insertion even when the largest window (4,
+// the original #1399 slice-1 size — long enough to be distinctive, not
+// just "cannot read") straddles it. Every window at every size still goes
+// through isDistinctiveSignatureProbe's length/non-generic-token guard
+// independently, so this adds recall without adding false positives: a
+// window made entirely of generic tokens is rejected at any size.
+var signatureNGramSizes = []int{2, 3, 4}
 
 func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error) {
 	// Normalize project filter so "Engram" finds records stored as "engram"
@@ -3354,7 +3363,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	// substring of the other at all. Requiring one whole signature to be
 	// contained in the other misses that case entirely. Instead: the
 	// stored signature must contain at least one distinctive contiguous
-	// n-gram probe drawn from the query's signature (ErrorSignatureProbes,
+	// n-gram probe drawn from the query's signature (ErrorSignatureProbesMulti,
 	// signature.go) — this fires even when the surrounding tokens differ
 	// completely, as long as the distinctive error CORE is shared. The
 	// reverse containment direction (query contains a short bare stored
@@ -3363,6 +3372,16 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	// idx_obs_error_signature (this is a full scan of non-null signatures),
 	// which is acceptable for a personal/team memory store's data volumes.
 	//
+	// Probes are generated at MULTIPLE n-gram sizes (signatureNGramSizes),
+	// not just one (issue #84): a noisy query with extra tokens appended, or
+	// a stored signature with one extra word threaded through the middle of
+	// the distinctive phrase, can make every window AT A SINGLE size
+	// straddle the mismatch, losing a match that's obviously the same
+	// underlying error to a human. Smaller windows give the match more
+	// chances to land on a still-contiguous, unaffected slice of the shared
+	// error core, without weakening precision — every window at every size
+	// still passes through the same distinctiveness/length guard below.
+	//
 	// minSignatureLength/minSignatureTokens guard BOTH sides against trivial
 	// short signatures (e.g. a lone "failed") turning into a substring that
 	// matches almost anything: the literal design only specified a guard on
@@ -3370,12 +3389,12 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	// producing false positives via the reverse containment direction, so
 	// the length guard applies to error_signature in SQL too (see
 	// TestSearch_SignatureLaneIgnoresTooShortStoredSignature). Each n-gram
-	// probe is independently filtered for distinctiveness/length by
-	// ErrorSignatureProbes before it ever reaches SQL.
+	// probe, at every size, is independently filtered for distinctiveness/
+	// length by ErrorSignatureProbes before it ever reaches SQL.
 	var signatureResults []SearchResult
 	querySig := NormalizeErrorSignature(query)
 	if len(querySig) >= minSignatureLength && len(strings.Fields(querySig)) >= minSignatureTokens {
-		probes := ErrorSignatureProbes(querySig, signatureNGramSize)
+		probes := ErrorSignatureProbesMulti(querySig, signatureNGramSizes)
 
 		// Build one "error_signature LIKE '%'||?||'%'" clause per probe,
 		// plus the reverse-direction fallback clause, so the OR group

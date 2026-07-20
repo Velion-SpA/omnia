@@ -274,6 +274,58 @@ func ErrorSignatureProbes(normalizedSig string, ngram int) []string {
 	return probes
 }
 
+// maxSignatureProbesMulti bounds ErrorSignatureProbesMulti's combined
+// output across every n-gram size it tries, so a very long, noisy query
+// can't blow up the number of OR'd LIKE clauses Store.Search builds. Each
+// individual size is already capped by ErrorSignatureProbes' own limit
+// (maxSignatureProbes, 16); this is the ceiling on the UNION across sizes.
+const maxSignatureProbesMulti = 24
+
+// ErrorSignatureProbesMulti generalizes ErrorSignatureProbes over several
+// n-gram window sizes, unioned and deduplicated (smallest size first,
+// first-seen order preserved within and across sizes, same as
+// ErrorSignatureProbes' own dedup contract).
+//
+// This is the fix for issue #84 (recall-fix's noise sensitivity): a
+// SINGLE fixed window size is fragile to even one inserted/reordered
+// token landing inside every window that would otherwise span the shared
+// error core. For example, a stored signature "...nil pointer dereference
+// SIGNAL sigsegv..." (the word "signal" is part of the ORIGINAL panic
+// text, e.g. "[signal SIGSEGV: ...]") versus a caller's query "nil
+// pointer dereference SIGSEGV in handleRequest": with only 4-token
+// windows, every window either straddles the "signal" insertion or pulls
+// in the caller's own extra tokens ("in handleRequest"), so none of them
+// is a literal substring of the stored signature and the match is lost —
+// even though "nil pointer dereference" is right there, fully intact, in
+// both. A smaller window (e.g. size 3: "nil pointer dereference") stays
+// entirely on the intact side of the insertion and matches directly.
+//
+// Trying multiple sizes costs a few more OR'd LIKE clauses in Search but
+// does NOT weaken precision: every probe, at every size, still has to
+// independently pass isDistinctiveSignatureProbe (the same length +
+// non-generic-token guards ErrorSignatureProbes already enforces per
+// window). A window built entirely from generic tokens (e.g. any 2/3/4-
+// token slice of "panic runtime error") is rejected regardless of window
+// size — that is what keeps a generic-only query (issue #84's `panic:
+// runtime error` case) a non-match after this change, exactly as before.
+func ErrorSignatureProbesMulti(normalizedSig string, ngramSizes []int) []string {
+	seen := make(map[string]bool)
+	var probes []string
+	for _, n := range ngramSizes {
+		for _, p := range ErrorSignatureProbes(normalizedSig, n) {
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			probes = append(probes, p)
+			if len(probes) >= maxSignatureProbesMulti {
+				return probes
+			}
+		}
+	}
+	return probes
+}
+
 // NormalizeErrorSignature deterministically reduces raw error text (a Go
 // panic, a JS/TS stack trace, a log line, or a plain search query) to a
 // stable signature string. Two occurrences of the SAME underlying bug —
