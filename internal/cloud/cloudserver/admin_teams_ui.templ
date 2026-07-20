@@ -292,6 +292,7 @@ templ adminProjectsPage(view adminProjectsView) {
 						@adminProjectCard(entry.Row, entry.Children)
 					}
 				</div>
+				<div id="admin-projects-empty" hidden style="color: var(--text-dim); font-size: 13px; padding: 24px 4px; text-align: center;">{ ui.T(ctx, "admin.projects.noResults") }</div>
 			}
 		</div>
 		@adminAssets()

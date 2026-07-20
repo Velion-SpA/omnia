@@ -476,6 +476,7 @@
     var q = ((searchInput && searchInput.value) || "").trim().toLowerCase();
     var filterBar = document.getElementById("admin-project-filters");
     var activeFilter = (filterBar && filterBar.getAttribute("data-active-filter")) || "all";
+    var visible = 0;
     Array.prototype.forEach.call(grid.children, function (card) {
       if (!card.classList || !card.classList.contains("projcard")) return;
       var matchesSearch = !q || (card.getAttribute("data-proj-search") || "").indexOf(q) !== -1;
@@ -484,7 +485,12 @@
         (activeFilter === "sub" && card.getAttribute("data-has-children") === "true") ||
         (activeFilter === "paused" && card.getAttribute("data-paused") === "true");
       card.hidden = !(matchesSearch && matchesFilter);
+      if (!card.hidden) visible++;
     });
+    // Empty state: when a search/filter combination matches no cards, surface
+    // the (server-translated) "no results" element instead of a silent grid.
+    var empty = document.getElementById("admin-projects-empty");
+    if (empty) empty.hidden = visible !== 0;
   }
 
   function setAdminProjectFilter(filterBar, filter) {

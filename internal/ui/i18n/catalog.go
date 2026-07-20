@@ -319,6 +319,7 @@ var messages = map[string]map[Lang]string{
 	// Admin > Projects page
 	"admin.projects.subtitle":               {LangES: "Proyectos: contenido, clasificación y sincronización. Solo para operadores.", LangEN: "Projects: content, classification, and sync. Operator-only."},
 	"admin.projects.noneKnownYet":           {LangES: "Aún no hay proyectos conocidos.", LangEN: "No projects known yet."},
+	"admin.projects.noResults":              {LangES: "Ningún proyecto coincide con la búsqueda o el filtro.", LangEN: "No projects match the search or filter."},
 	"admin.projects.suggestedLinks":         {LangES: "ENLACES SUGERIDOS", LangEN: "SUGGESTED LINKS"},
 	"admin.projects.suggestedPrefix":        {LangES: "Sugerido: enlazar", LangEN: "Suggested: link"},
 	"admin.projects.suggestedUnder":         {LangES: "bajo", LangEN: "under"},
