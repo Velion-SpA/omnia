@@ -1,11 +1,11 @@
 {
-  "name": "engram",
+  "name": "omnia",
   "description": "Persistent memory for AI coding agents. Survives across sessions and compactions.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": {
-    "name": "Gentleman Programming"
+    "name": "Velion"
   },
-  "homepage": "https://github.com/Gentleman-Programming/engram",
-  "repository": "https://github.com/Gentleman-Programming/engram",
+  "homepage": "https://github.com/Velion-SpA/omnia",
+  "repository": "https://github.com/Velion-SpA/omnia",
   "license": "MIT"
 }
