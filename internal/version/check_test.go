@@ -108,6 +108,21 @@ func TestCheckLatest(t *testing.T) {
 		}
 	})
 
+	t.Run("OMNIA_NO_UPDATE_CHECK disables the check", func(t *testing.T) {
+		withCheckServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Fatal("update check must not hit the network when OMNIA_NO_UPDATE_CHECK is set")
+		}))
+		t.Setenv("OMNIA_NO_UPDATE_CHECK", "1")
+
+		result := CheckLatest("1.10.7")
+		if result.Status != StatusUpToDate {
+			t.Fatalf("status = %q, want %q", result.Status, StatusUpToDate)
+		}
+		if result.Message != "" {
+			t.Fatalf("message = %q, want empty", result.Message)
+		}
+	})
+
 	t.Run("non-200 becomes check failed", func(t *testing.T) {
 		withCheckServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "rate limited", http.StatusForbidden)
