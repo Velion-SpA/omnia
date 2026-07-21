@@ -131,10 +131,19 @@ templ adminProjectDetailMemoriesPane(view adminProjectDetailView) {
 	} else if len(view.Memories) == 0 {
 		<p class="pdetail-empty">{ ui.T(ctx, "admin.projects.memoriesNone") }</p>
 	} else {
+		if view.IsParent {
+			<div class="mem-scope" data-own-count={ strconv.Itoa(view.MemoriesOwnTotal) } data-all-count={ strconv.Itoa(view.MemoriesTotal) }>
+				<span class="chip on" data-action="mem-scope" data-scope="all">{ ui.T(ctx, "admin.projects.memScopeAll") }</span>
+				<span class="chip" data-action="mem-scope" data-scope="own">{ ui.T(ctx, "admin.projects.memScopeOwn") }</span>
+			</div>
+		}
 		for _, m := range view.Memories {
-			<div class="mrow">
+			<div class="mrow" data-own={ strconv.FormatBool(m.IsOwn) }>
 				<span class={ "card-type-badge", m.Class }>{ m.Type }</span>
 				<span class="mtitle">{ m.Title }</span>
+				if !m.IsOwn {
+					<span class="badge badge-team">{ m.SourceProject }</span>
+				}
 				<span class="mmeta">{ m.Age }</span>
 			</div>
 		}

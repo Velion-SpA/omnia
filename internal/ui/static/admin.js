@@ -707,6 +707,29 @@
     openAdminModal("admin-reset-password-modal");
   }
 
+  // ── Admin project-detail: "Memorias" scope toggle. On a PARENT project the
+  // memories list rolls up its children's memories too (each row tagged
+  // data-own). This filters to own-only / all and syncs the tab count. ──
+  function setDetailMemScope(chipEl) {
+    var bar = chipEl.parentElement;
+    if (!bar) return;
+    var scope = chipEl.getAttribute("data-scope");
+    bar.querySelectorAll(".chip").forEach(function (c) {
+      c.classList.toggle("on", c === chipEl);
+    });
+    var pane = chipEl.closest(".pane");
+    if (pane) {
+      pane.querySelectorAll(".mrow").forEach(function (row) {
+        row.hidden = scope === "own" && row.getAttribute("data-own") !== "true";
+      });
+    }
+    var tabCount = document.querySelector('[data-pane="pdetail-mem"] .n');
+    if (tabCount) {
+      var val = scope === "own" ? bar.getAttribute("data-own-count") : bar.getAttribute("data-all-count");
+      if (val !== null) tabCount.textContent = val;
+    }
+  }
+
   // ── One delegated click handler for every data-action control: kebab
   // toggles, menu items, modal open/close, and the password copy button. ──
   function handleAdminActionClick(e) {
@@ -749,6 +772,8 @@
         actionEl.classList.toggle("closed");
       } else if (action === "switch-tab") {
         switchAdminDetailTab(actionEl);
+      } else if (action === "mem-scope") {
+        setDetailMemScope(actionEl);
       }
       return;
     }

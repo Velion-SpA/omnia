@@ -55,10 +55,12 @@ const adminProjectDetailActivityLimit = 20
 // title, and a relative age — see the doc comment above for why per-memory
 // titles are available on the cloud (plain JSONB payload, not encrypted).
 type adminProjectDetailMemoryRow struct {
-	Type  string
-	Class string // CSS modifier (mirrors internal/ui's unexported cardTypeAccentClass)
-	Title string
-	Age   string
+	Type          string
+	Class         string // CSS modifier (mirrors internal/ui's unexported cardTypeAccentClass)
+	Title         string
+	Age           string
+	SourceProject string // display name of the project this memory belongs to
+	IsOwn         bool   // true = this (parent) project's own; false = a child's, rolled up
 }
 
 // adminProjectSubTile is one "Sub-proyectos" violet tile on a PARENT's
@@ -119,6 +121,7 @@ type adminProjectDetailView struct {
 	MemoriesSupported bool
 	Memories          []adminProjectDetailMemoryRow
 	MemoriesTotal     int
+	MemoriesOwnTotal  int // count of rolled-up rows that are THIS project's own
 
 	Access []adminProjectAccessRow
 
@@ -251,16 +254,50 @@ func (s *CloudServer) handleAdminProjectDetailPage(w http.ResponseWriter, r *htt
 
 	if pms, ok := s.projectMemoriesStore(); ok {
 		view.MemoriesSupported = true
-		if rows, merr := pms.ListRecentObservations(project, "", adminProjectDetailMemoriesLimit); merr == nil {
-			view.Memories = make([]adminProjectDetailMemoryRow, 0, len(rows))
-			for _, row := range rows {
-				view.Memories = append(view.Memories, adminProjectDetailMemoryRow{
-					Type:  row.Type,
-					Class: projectDetailObsTypeClass(row.Type),
-					Title: row.Title,
-					Age:   projectDetailEngramAge(row.CreatedAt, lang),
-				})
+		// Roll up the parent's own memories together with its direct children's,
+		// so the list matches the rolled-up stat strip — the parent is the
+		// umbrella. Each row keeps its source project (a chip in the UI) and an
+		// isOwn flag, so the "solo este proyecto" toggle can filter to own-only.
+		type detailObs struct {
+			row     cloudstore.DashboardObservationRow
+			display string
+			isOwn   bool
+		}
+		var collected []detailObs
+		gather := func(proj, display string, isOwn bool) {
+			rows, merr := pms.ListRecentObservations(proj, "", adminProjectDetailMemoriesLimit)
+			if merr != nil {
+				return
 			}
+			for _, row := range rows {
+				collected = append(collected, detailObs{row: row, display: display, isOwn: isOwn})
+			}
+		}
+		gather(project, view.DisplayName, true)
+		for _, child := range childrenNames {
+			gather(child, knownProjectDisplayOrRaw(knownByProject[child]), false)
+		}
+		// CreatedAt is a fixed-width "YYYY-MM-DD HH:MM:SS" string, so a plain
+		// descending lexicographic sort orders newest-first across projects.
+		sort.SliceStable(collected, func(i, j int) bool {
+			return collected[i].row.CreatedAt > collected[j].row.CreatedAt
+		})
+		if len(collected) > adminProjectDetailMemoriesLimit {
+			collected = collected[:adminProjectDetailMemoriesLimit]
+		}
+		view.Memories = make([]adminProjectDetailMemoryRow, 0, len(collected))
+		for _, c := range collected {
+			if c.isOwn {
+				view.MemoriesOwnTotal++
+			}
+			view.Memories = append(view.Memories, adminProjectDetailMemoryRow{
+				Type:          c.row.Type,
+				Class:         projectDetailObsTypeClass(c.row.Type),
+				Title:         c.row.Title,
+				Age:           projectDetailEngramAge(c.row.CreatedAt, lang),
+				SourceProject: c.display,
+				IsOwn:         c.isOwn,
+			})
 		}
 		view.MemoriesTotal = len(view.Memories)
 	}

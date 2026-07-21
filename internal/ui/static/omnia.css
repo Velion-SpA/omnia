@@ -3094,6 +3094,13 @@
 	padding: 22px 26px;
 }
 
+/* Memorias-tab scope toggle (parent rolls up children's memories). */
+.mem-scope {
+	display: flex;
+	gap: 6px;
+	margin-bottom: 12px;
+}
+
 .dhead {
 	display: flex;
 	align-items: flex-start;
