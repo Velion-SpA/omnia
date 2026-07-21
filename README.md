@@ -1,195 +1,218 @@
-# Omnia
+<p align="center">
+  <img src="assets/branding/omnia-banner.png" alt="Omnia — persistent memory for AI coding agents" width="100%">
+</p>
 
-Omnia is Velion's knowledge ingestor. It pulls content from external sources (Discord, GitHub; WhatsApp and Jira coming) and writes it into [Engram](https://github.com/velion/engram), the local persistent-memory daemon used by AI agents.
+<h1 align="center">Omnia</h1>
 
-The goal: every meaningful piece of company knowledge — discussions, issues, decisions — flows nightly into the agent's memory so it knows context without being told.
+<p align="center">
+  <strong>Persistent memory for AI coding agents</strong> — local-first, one binary, with an optional self-hosted multi-tenant cloud.
+</p>
 
-## Quickstart
+<p align="center">
+  <a href="https://github.com/Velion-SpA/omnia/releases"><img src="https://img.shields.io/github/v/release/Velion-SpA/omnia?color=22d3ee&label=release" alt="Release"></a>
+  <img src="https://img.shields.io/badge/license-MIT-22d3ee" alt="License: MIT">
+  <img src="https://img.shields.io/badge/go-1.26-00ADD8" alt="Go 1.26">
+  <img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-6b7890" alt="Platforms">
+</p>
 
-### Prerequisites
+---
 
-- Go 1.23+
-- [Engram](https://github.com/velion/engram) daemon running (`omnia serve`)
-- A GitHub token (or `gh` CLI authenticated)
+Your AI agent forgets everything between sessions. Omnia gives it a memory that
+survives — decisions, bug fixes, conventions, and context — so it stops asking
+you the same questions and starts working from what your team already knows.
 
-### Install
+It's a single Go binary that stores memories in local SQLite and exposes them to
+any agent over **MCP** (`mem_save`, `mem_search`, …). Turn on the optional cloud
+and those memories sync across machines and teammates, with per-project access
+control and an admin dashboard.
+
+> Omnia is the evolution of **Engram** — same local-first core, now one unified
+> binary and brand.
+
+## Features
+
+- 🧠 **Memory that persists across sessions.** `mem_save` / `mem_search` and a
+  handful of companion tools, wired into Claude Code and any MCP-speaking agent
+  with one command.
+- 🔎 **Recall that actually finds things.** Hybrid lexical + semantic search
+  (Reciprocal Rank Fusion over FTS5 and local embeddings), plus a **signature
+  lane** that re-surfaces the proven fix for a recurring error — even when you
+  describe it in different words.
+- 💻 **Local-first, one binary.** SQLite is the source of truth. `brew install`,
+  run `omnia tui`, done. No services required for solo use.
+- ☁️ **Self-hosted multi-tenant cloud (optional).** Sync memories across your
+  machines and team. Teams, permission profiles, per-project access, sync
+  pause/resume, and an operator dashboard — all on infra you control.
+- 🔌 **Ingestion connectors.** Flow company knowledge into memory from GitHub and
+  Discord (Jira, Confluence and Outlook in progress), so context lands before
+  anyone asks for it.
+- 🔒 **Yours end to end.** No SaaS lock-in: your data lives in your SQLite file
+  and, if you enable it, your own cloud.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/tui-dashboard.png" alt="Terminal UI — dashboard"><br><sub><b>Terminal UI</b> — <code>omnia tui</code></sub></td>
+    <td width="50%"><img src="assets/cloud/cloud-overview.png" alt="Cloud dashboard — overview"><br><sub><b>Cloud dashboard</b> — overview</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/cloud/cloud-admin-teams.png" alt="Cloud admin — teams & access"><br><sub><b>Teams &amp; access</b> — profiles and per-project permissions</sub></td>
+    <td width="50%"><img src="assets/agent-save.png" alt="An agent saving a memory"><br><sub><b>An agent remembering</b> — <code>mem_save</code> in Claude Code</sub></td>
+  </tr>
+</table>
+
+## Install
 
 ```sh
+# Homebrew (macOS / Linux)
+brew install velion-spa/tap/omnia
+
+# or with Go
 go install github.com/velion/omnia/cmd/omnia@latest
-```
 
-Or build from source:
-
-```sh
-git clone https://github.com/velion/omnia
-cd omnia
+# or from source
+git clone https://github.com/Velion-SpA/omnia && cd omnia
 go build -o bin/omnia ./cmd/omnia
 ```
 
-### Configure
+## Quickstart
+
+### Give your agent a memory
 
 ```sh
-mkdir -p ~/.config/omnia
-cp config.example.yaml ~/.config/omnia/config.yaml
-# Edit ~/.config/omnia/config.yaml to add your repos and tokens
+# Wire Omnia's memory tools into your agent (claude-code, opencode, pi, gemini-cli, codex)
+omnia setup claude-code
 ```
 
-### Sync GitHub
+That's it. Your agent can now call `mem_save`, `mem_search`, `mem_context`, and
+friends. Memories are stored locally and recalled automatically across sessions.
 
-> **Note:** Global flags (`--source`, `--dry-run`, `--since`, `--config`) must come
-> **before** the subcommand, e.g. `omnia --source github sync`.
-> Flags placed after the subcommand are treated as arguments and silently ignored.
+### Browse and search from the terminal
 
 ```sh
-# Uses GITHUB_TOKEN env var, or gh auth token fallback
+omnia tui                 # interactive terminal UI
+omnia search "auth bug"   # one-shot search
+omnia save "Fixed N+1 in UserList" "wrapped the query in a JOIN" --type bugfix
+```
+
+### Run the HTTP API (for the dashboard, sync, or integrations)
+
+```sh
+omnia serve               # HTTP API on 127.0.0.1:7437
+```
+
+## Recall & semantic search
+
+Recall fuses lexical (FTS5) and semantic (embedding) hits with Reciprocal Rank
+Fusion. Embeddings run locally through [Ollama](https://ollama.com) — no data
+leaves your machine.
+
+```yaml
+embeddings:
+  enabled: true
+  base_url: http://localhost:11434
+  model: jina/jina-embeddings-v2-base-es   # ES↔EN shared space, 768-dim
+recall:
+  enabled: true
+  strong_floor: 0.35   # jina-calibrated; the 0.65 default is tuned for other models
+  base_floor: 0.25
+```
+
+Both default to **off** — disabled reproduces the FTS5-only path byte-for-byte,
+so enabling them is a pure config flip with zero database migration. When
+`recall.enabled` is unset and Ollama is reachable, Omnia auto-detects it.
+
+## Omnia Cloud (optional)
+
+Omnia is local-first: your local SQLite is always the source of truth. The cloud
+is optional replication + shared access, and you host it yourself.
+
+```sh
+omnia cloud config --server https://omnia.example.com
+omnia cloud enroll my-project
+omnia cloud serve         # run the multi-tenant server + dashboard
+```
+
+The operator dashboard manages **users, teams, permission profiles, and
+per-project access**, with a project view that shows each project's memories,
+who can read it, sub-projects, and sync state. Access is a per-project bitfield
+(read / insert / update / delete), resolved as membership overrides unioned with
+team-derived profiles.
+
+## Ingestion connectors
+
+Pull external knowledge into memory so agents have context without being told.
+Items are routed to a project and upserted (no duplicates, just revisions).
+
+```sh
 export GITHUB_TOKEN=$(gh auth token)
-omnia --source github sync
+omnia --source github sync           # issues, PRs, discussions
+omnia --source github --dry-run sync # preview without writing
 
-# Dry run (preview without writing)
-omnia --source github --dry-run sync
-
-# Sync only issues updated in the last 7 days
-omnia --source github --since $(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ) sync
-```
-
-**Note on incremental sync:** After the first run, per-repo cursors are stored in
-`~/.local/state/omnia/state.json`. On each subsequent run omnia reads these cursors
-and passes the latest `updated_at` timestamp to the GitHub API as the `since` parameter,
-so only items updated after the last sync are fetched. The cursor is only advanced after
-all sink writes succeed — if a write fails, omnia exits non-zero and does **not** move
-the cursor forward. Re-running is safe because Engram upserts on `topic_key+project`
-(no duplicates, just a revision bump).
-
-### Sync Discord
-
-```sh
 export DISCORD_BOT_TOKEN=your_bot_token
 omnia --source discord sync
 ```
 
-### Check status
+> Global flags (`--source`, `--dry-run`, `--since`, `--config`) go **before** the
+> subcommand: `omnia --source github sync`.
 
-```sh
-omnia status
-```
-
-## Per-project routing
-
-By default, Omnia routes GitHub items to the repo name (without owner) as the Engram project, and Discord items to the guild slug. You can override this with the `routes` map:
+**Per-project routing.** GitHub items route to the repo name, Discord to the
+guild slug, overridable via a `routes` map — so a PR from `owner/saluvita` lands
+in the same `saluvita` project the agent detects when you open that repo.
 
 ```yaml
 routes:
-  github/arratiabenjamin/saluvita: saluvita   # explicit override
-  # discord/123456789: saluvita
+  github/owner/saluvita: saluvita
 ```
 
-Resolution order per item: `routes` map → default derivation (repo name / guild slug) → `engram.default_project`. Project names are normalized to lowercase. This means a PR from `arratiabenjamin/saluvita` lands in the `saluvita` project — the same project Engram detects when a developer opens that repo in Claude Code.
-
-## Structured metadata (omnia-meta)
-
-Every observation Omnia writes ends with a fenced `omnia-meta` block containing structured metadata: source, kind, project, author, participants, URL, timestamps, and chunk info. The block is machine-facing and appended to every chunk so each chunk is independently parseable. It is the foundation for the future Omnia index (vector search + structured filters).
-
-See [docs/METADATA.md](docs/METADATA.md) for the full field reference and versioning policy.
+Every observation ends with a machine-readable `omnia-meta` block (source, kind,
+project, author, URL, timestamps). See [docs/METADATA.md](docs/METADATA.md).
 
 ## Config reference
 
+Config lives at `~/.config/omnia/config.yaml` (`cp config.example.yaml` to start).
+
 | Key | Default | Description |
 |-----|---------|-------------|
-| `engram.base_url` | `http://127.0.0.1:7437` | Engram daemon URL |
-| `engram.default_project` | `omnia` | Default Engram project (last-resort fallback) |
+| `engram.base_url` | `http://127.0.0.1:7437` | Local daemon URL (section name kept for compatibility) |
+| `engram.default_project` | `omnia` | Last-resort project fallback |
 | `routes` | `{}` | Per-origin project routing map |
 | `sources.github.enabled` | `false` | Enable GitHub ingestion |
 | `sources.github.repos` | `[]` | List of `owner/repo` strings |
 | `sources.discord.enabled` | `false` | Enable Discord ingestion |
-| `sources.discord.channels` | `[]` | List of `{id, name, guild}` |
 | `backfill_days` | `30` | Days to look back on first run |
-| `embeddings.enabled` | `false` | Enable Omnia's own local semantic-search index |
-| `embeddings.base_url` | `http://localhost:11434` | Ollama base URL |
+| `embeddings.enabled` | `false` | Enable the local semantic index |
 | `embeddings.model` | `jina/jina-embeddings-v2-base-es` | Embedding model (also `bge-m3`) |
-| `embeddings.dim` | `768` | Embedding dimension (must match the model) |
-| `recall.enabled` | `false` | Enable hybrid (lexical+semantic) recall fusion for `mem_search` |
-| `recall.rrf_k` | `60` | Reciprocal-rank-fusion `k` constant |
-| `recall.dense_k` | `5` | "Many strong hits" threshold for the adaptive relevance floor |
-| `recall.strong_floor` | `0.65` | Cosine floor once `dense_k` strong hits are present |
-| `recall.base_floor` | `0.55` | Cosine floor otherwise (widen when hits are sparse) |
-| `recall.max_results` | `50` | Cap on the final fused result count |
+| `recall.enabled` | `false` | Enable hybrid lexical+semantic recall for `mem_search` |
+| `recall.strong_floor` / `recall.base_floor` | `0.65` / `0.55` | Cosine relevance floors (tune to ~`0.35`/`0.25` for jina) |
 
-Both `embeddings` and `recall` default to disabled: off reproduces today's FTS5-only `mem_search` path byte-for-byte, so turning them on is a pure config flip with zero `engram.db` migration.
-
-## Omnia Cloud (optional)
-
-Omnia is local-first: local SQLite is the source of truth; cloud features are optional replication/shared access.
-
-To set up cloud replication:
-
-```bash
-omnia cloud config --server http://127.0.0.1:18080
-omnia cloud enroll smoke-project
-omnia cloud upgrade doctor --project smoke-project
-omnia cloud upgrade repair --project smoke-project --dry-run
-omnia cloud upgrade repair --project smoke-project --apply
-omnia cloud upgrade bootstrap --project smoke-project
-omnia cloud upgrade status --project smoke-project
-omnia cloud serve
-```
-
-Cloud env vars: `ENGRAM_CLOUD_TOKEN` (bearer token), `ENGRAM_JWT_SECRET` (required in auth mode), `ENGRAM_CLOUD_ADMIN` (optional admin token).
-Dashboard routes: `/dashboard/login`, `/dashboard/contributors`.
-
-### Cloud semantic parity (optional)
-
-The cloud dashboard's search matches the local hybrid (lexical+semantic) recall quality once cloud semantic parity is enabled. Disabled by default: off reproduces the cloud dashboard's original substring-only search byte-for-byte — zero migration risk, since `cloud_embeddings` is an additive-only table.
-
-| Env var | Default | Description |
-|---------|---------|-------------|
-| `OMNIA_CLOUD_SEMANTIC_ENABLED` | `false` | Enable cloud semantic search (fuses substring + `cloud_embeddings` cosine hits via `recall.Fuse`) |
-| `OMNIA_CLOUD_SEMANTIC_EMBED_BASE_URL` | `""` | OPTIONAL Ollama base URL for embedding interactive dashboard search queries. The cloud has no Ollama instance by default; set this only when one is reachable from the cloud host (e.g. the same homelab LAN). Empty disables interactive query embedding cleanly — vectors already synced in from devices that DO run Ollama stay searchable via any caller that supplies its own query vector. |
-| `OMNIA_CLOUD_SEMANTIC_EMBED_MODEL` | `jina/jina-embeddings-v2-base-es` | Query embedding model (mirrors `embeddings.model`'s default) |
-| `OMNIA_CLOUD_SEMANTIC_EMBED_DIM` | `768` | Query embedding dimension (must match the model and the vectors devices sync in) |
-
-Every `OMNIA_CLOUD_*` var also accepts its legacy `ENGRAM_CLOUD_*` name.
+Cloud env vars use the `OMNIA_CLOUD_*` prefix (legacy `ENGRAM_CLOUD_*` also accepted).
 
 ## Architecture
 
 ```
-cmd/omnia/           CLI (sync, status)
-internal/core/       Domain model + ports + pipeline
-internal/config/     YAML config loader
-internal/state/      Cursor persistence (JSON)
-internal/enrich/     Normalization, chunking, keywords
-internal/source/     Source adapters (github, discord)
-internal/sink/       Sink adapters (engram)
+cmd/omnia/          CLI (serve, mcp, tui, search, save, recall-fix, cloud, sync, setup…)
+internal/store/     SQLite memory store + FTS5
+internal/recall/    Hybrid lexical+semantic fusion (RRF) + signature lane
+internal/embed/     Local embeddings (Ollama) + vector store
+internal/mcp/       MCP server — the mem_* tools agents call
+internal/cloud/     Multi-tenant server, cloudstore, and the admin dashboard
+internal/ui/        Shared "Command Center" design system (templ + one CSS)
+internal/source/    Ingestion adapters (github, discord)
 ```
 
-## Adding a new source
-
-1. Create `internal/source/<name>/<name>.go`
-2. Implement the `core.Source` interface (`Name() string`, `Fetch(ctx, since) ([]Item, error)`)
-3. Wire it up in `cmd/omnia/main.go` under `runSync`
-4. Add config fields to `internal/config/config.go`
-
-See `docs/WHATSAPP.md` and `docs/JIRA.md` for in-progress source plans.
-
-## Scheduled runs (macOS)
-
-Copy and edit the launchd plist:
+## Scheduled ingestion (macOS)
 
 ```sh
-# 1. Build and install the binary first
-go build -o /usr/local/bin/omnia ./cmd/omnia
-
-# 2. Copy the plist and replace the token placeholders
 cp deploy/com.velion.omnia.plist ~/Library/LaunchAgents/
-# Open the plist and replace REPLACE_WITH_YOUR_GITHUB_TOKEN and
-# REPLACE_WITH_YOUR_DISCORD_BOT_TOKEN with real values before loading.
-
-# 3. Load the agent
+# replace the token placeholders in the plist, then:
 launchctl load ~/Library/LaunchAgents/com.velion.omnia.plist
 ```
 
-This runs `omnia sync` every night at 2am.
+Runs `omnia sync` nightly. If a run fails, sync cursors are not advanced, so the
+next run safely re-fetches and re-upserts the same window.
 
-**Failure behavior:** If omnia exits non-zero (e.g. Engram is unreachable or a write fails),
-the state cursors are not advanced. The next scheduled run will re-fetch the same window
-and attempt to write again. Because Engram upserts by `topic_key+project`, re-ingesting
-the same items is always safe.
+## License
+
+MIT © Velion SpA
