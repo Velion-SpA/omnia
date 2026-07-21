@@ -20,6 +20,7 @@ import (
 	"github.com/velion/omnia/internal/cloud/autosync"
 	"github.com/velion/omnia/internal/cloud/constants"
 	"github.com/velion/omnia/internal/cloud/remote"
+	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/mcp"
 	engramsrv "github.com/velion/omnia/internal/server"
 	"github.com/velion/omnia/internal/setup"
@@ -129,6 +130,7 @@ func stubRuntimeHooks(t *testing.T) {
 	oldSetupInstallAgent := setupInstallAgent
 	oldScanInputLine := scanInputLine
 	oldStoreSearch := storeSearch
+	oldLoadAppConfigWithRecallAutodetect := loadAppConfigWithRecallAutodetect
 	oldStoreAddObservation := storeAddObservation
 	oldStoreTimeline := storeTimeline
 	oldStoreFormatContext := storeFormatContext
@@ -160,6 +162,17 @@ func stubRuntimeHooks(t *testing.T) {
 	scanInputLine = fmt.Scanln
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 		return s.Search(query, opts)
+	}
+	// Issue #86: keep cmdSearch/cmdServe's recall wiring off by default across
+	// this shared test harness, exactly like every other real-dependency seam
+	// above (newHTTPServer, newMCPServer, ...) — this dev/CI machine's real
+	// ~/.config/omnia/config.yaml must never leak live recall.Service wiring
+	// (and its real embeddings.db/Ollama calls) into hermetic tests that
+	// exercise storeSearch's plain FTS5 seam. Tests that specifically want to
+	// exercise the recall-enabled path set loadAppConfigWithRecallAutodetect
+	// themselves (see TestCmdSearchAndServe_RecallWiring in recall_test.go).
+	loadAppConfigWithRecallAutodetect = func() (*config.Config, error) {
+		return nil, errors.New("recall disabled for test (stubRuntimeHooks)")
 	}
 	storeAddObservation = func(s *store.Store, p store.AddObservationParams) (int64, error) {
 		return s.AddObservation(p)
@@ -202,6 +215,7 @@ func stubRuntimeHooks(t *testing.T) {
 		setupInstallAgent = oldSetupInstallAgent
 		scanInputLine = oldScanInputLine
 		storeSearch = oldStoreSearch
+		loadAppConfigWithRecallAutodetect = oldLoadAppConfigWithRecallAutodetect
 		storeAddObservation = oldStoreAddObservation
 		storeTimeline = oldStoreTimeline
 		storeFormatContext = oldStoreFormatContext

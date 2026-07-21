@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/subtle"
 	"database/sql"
@@ -64,6 +65,20 @@ type SemanticRunnerFactory func(name string) (store.SemanticRunner, error)
 // snippets. Injected from cmd/omnia/main.go alongside SemanticRunnerFactory.
 type SemanticPromptBuilder func(a, b store.ObservationSnippet) string
 
+// SearchFunc performs a memory search and returns results in the same shape
+// GET /search has always returned ([]store.SearchResult). Injected from
+// cmd/omnia (SetSearch) so internal/server never has to import
+// internal/recall or internal/mcp directly — mirroring the
+// SemanticRunnerFactory/SemanticPromptBuilder precedent above for
+// internal/llm (issue #86: cmd/omnia is the one place that knows how to
+// build the optional hybrid lexical+semantic recall.Service; this package
+// only needs to call whatever search function it was handed).
+//
+// When unset (s.search == nil, e.g. in tests that don't call SetSearch),
+// handleSearch falls back to calling s.store.Search directly — today's exact
+// FTS5-only behavior, unchanged.
+type SearchFunc func(ctx context.Context, query string, opts store.SearchOptions) ([]store.SearchResult, error)
+
 type Server struct {
 	store      *store.Store
 	mux        *http.ServeMux
@@ -86,6 +101,11 @@ type Server struct {
 	// disabled — the save path stays byte-for-byte today's. Enqueue is
 	// non-blocking, so a save never waits on the embedding.
 	autoEmbed *embed.Worker
+
+	// search, when non-nil, backs GET /search (issue #86). nil means
+	// SetSearch was never called — handleSearch then calls s.store.Search
+	// directly, byte-for-byte today's FTS5-only behavior.
+	search SearchFunc
 }
 
 func New(s *store.Store, port int) *Server {
@@ -116,6 +136,11 @@ func (s *Server) SetRunnerFactory(fn SemanticRunnerFactory) {
 // out-of-band after they are saved via POST /observations. nil disables it
 // (the save path then stays byte-for-byte today's).
 func (s *Server) SetAutoEmbed(w *embed.Worker) { s.autoEmbed = w }
+
+// SetSearch configures the search function backing GET /search (issue #86).
+// Pass nil (or never call this) to keep GET /search on the legacy
+// s.store.Search-only path.
+func (s *Server) SetSearch(fn SearchFunc) { s.search = fn }
 
 // enqueueAutoEmbed schedules an out-of-band embedding for a just-saved memory
 // (non-blocking). It is a no-op when the worker is disabled. A fetch or
@@ -446,12 +471,27 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.store.Search(query, store.SearchOptions{
+	opts := store.SearchOptions{
 		Type:    r.URL.Query().Get("type"),
 		Project: r.URL.Query().Get("project"),
 		Scope:   r.URL.Query().Get("scope"),
 		Limit:   queryInt(r, "limit", 10),
-	})
+	}
+
+	// Issue #86: when cmd/omnia wired a SearchFunc via SetSearch, it routes
+	// through the same hybrid lexical+semantic recall.Service mem_search
+	// uses (with its own graceful fallback to FTS5 baked in). Unset (s.search
+	// == nil, e.g. tests that never call SetSearch) keeps this byte-for-byte
+	// the legacy s.store.Search-only path — the JSON response shape
+	// ([]store.SearchResult) is identical either way.
+	search := s.store.Search
+	if s.search != nil {
+		search = func(query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+			return s.search(r.Context(), query, opts)
+		}
+	}
+
+	results, err := search(query, opts)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return

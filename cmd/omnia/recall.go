@@ -81,6 +81,95 @@ func ollamaReachable(baseURL string, timeout time.Duration) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
+// loadAppConfigWithRecallAutodetect loads config.yaml (config.DefaultPath())
+// and runs the Ollama auto-detect (issue #83, maybeAutoDetectRecall) so the
+// returned Config already reflects any auto-enabled recall.enabled. It is a
+// var (not a plain func), matching this file's storeNew/newHTTPServer
+// injection convention, so tests can stub it instead of touching the real
+// config file on disk.
+//
+// This is the single shared "read config + auto-detect" seam issue #86 asks
+// for: cmdMCP, cmdServe, and cmdSearch all call this exact function before
+// building their recall.Service via buildRecallService, so all three of
+// Omnia's search surfaces (MCP mem_search, HTTP GET /search, `omnia search`)
+// stay wired identically and can never silently diverge on how recall gets
+// enabled. Returns (nil, err) when the config file is missing/unparseable —
+// callers degrade to FTS5-only search / no auto-embed, exactly like every
+// other `omnia` subcommand's config.Load graceful-degradation convention.
+var loadAppConfigWithRecallAutodetect = func() (*config.Config, error) {
+	appCfg, err := config.Load(config.DefaultPath())
+	if err != nil {
+		return nil, err
+	}
+	maybeAutoDetectRecall(appCfg)
+	return appCfg, nil
+}
+
+// buildRecallServiceForCLI is the cmdSearch/cmdServe counterpart of cmdMCP's
+// inline recall wiring (main.go's cmdMCP, ~L1109-1131): it loads config via
+// loadAppConfigWithRecallAutodetect and builds the recall.Service through the
+// same buildRecallService used by MCP, so `omnia search` and HTTP GET
+// /search see the exact same recall.enabled/embeddings gating mem_search
+// does (issue #86). Returns nil on any graceful-degradation path — missing
+// config, recall disabled, or an unavailable embeddings store — never an
+// error, so callers can unconditionally fall back to the FTS5-only search
+// path when this returns nil.
+func buildRecallServiceForCLI(s *store.Store, dataDir string) *recall.Service {
+	appCfg, err := loadAppConfigWithRecallAutodetect()
+	if err != nil {
+		return nil
+	}
+	return buildRecallService(s, appCfg.Recall, appCfg.Embeddings, dataDir)
+}
+
+// recallOrFTSSearch is the shared search-routing seam between `omnia search`
+// (cmdSearch) and `omnia serve`'s HTTP GET /search (internal/server.Server,
+// wired via SetSearch in cmdServe) — issue #86's "avoid divergence" ask.
+//
+// When recallSvc is non-nil, the query is routed through recall.Service.Search
+// (the same hybrid lexical+semantic fusion mem_search uses) and the fused,
+// ranked ID list is hydrated back into full store.SearchResult rows via
+// mcp.HydrateFusedResults/mcp.RecallFetchLimit/mcp.RecallScopeFilter — the
+// exact same "rank then hydrate" glue the MCP path uses, reused here instead
+// of re-implemented, so the two paths can't drift apart.
+//
+// Graceful fallback (never crashes, never hangs): a nil recallSvc (recall
+// disabled, config missing, Ollama unreachable at startup, or the
+// embeddings store unavailable — all handled upstream by
+// buildRecallServiceForCLI) falls back to storeSearch immediately. A
+// recallSvc.Search error (the lexical leg failing, e.g. a malformed FTS5
+// query) also falls back to storeSearch, which will surface the same
+// underlying error — matching pre-existing FTS-only error behavior exactly.
+// Ollama being unreachable AT QUERY TIME (as opposed to startup) is already
+// handled inside recall.Service itself (semanticHits swallows the error and
+// degrades to lexical-only) — no extra timeout/hang handling is needed here
+// beyond what mem_search already relies on.
+func recallOrFTSSearch(ctx context.Context, s *store.Store, recallSvc *recall.Service, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+	if recallSvc == nil {
+		return storeSearch(s, query, opts)
+	}
+
+	fused, err := recallSvc.Search(ctx, query, recall.LexicalSearchOptions{
+		Type:    opts.Type,
+		Project: opts.Project,
+		Scope:   opts.Scope,
+		Limit:   mcp.RecallFetchLimit(opts.Limit),
+	})
+	if err != nil {
+		return storeSearch(s, query, opts)
+	}
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	return mcp.HydrateFusedResults(s, fused, limit, mcp.RecallScopeFilter{
+		Type:    opts.Type,
+		Project: opts.Project,
+		Scope:   opts.Scope,
+	}), nil
+}
+
 // buildRecallService constructs the recall.Service wired into
 // mcp.MCPConfig.Recall for `omnia mcp` (human-like-memory PR3, design
 // D6/D7).

@@ -727,6 +727,108 @@ func TestHandleStatsReturnsInternalServerErrorOnLoaderError(t *testing.T) {
 	}
 }
 
+// ─── GET /search tests (issue #86: SearchFunc/SetSearch wiring) ────────────
+
+// TestHandleSearchFallsBackToStoreSearchWhenSetSearchNotCalled is the
+// flag-OFF regression pin: when cmd/omnia never calls SetSearch (s.search ==
+// nil, the zero value), GET /search must behave exactly as it always has —
+// s.store.Search called directly, no dependency on any injected SearchFunc.
+func TestHandleSearchFallsBackToStoreSearchWhenSetSearchNotCalled(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	if err := st.CreateSession("s-search-legacy", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "s-search-legacy", Type: "bugfix", Title: "Fix panic", Content: "Fix panic in parser",
+		Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=panic&project=engram&scope=project", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var results []store.SearchResult
+	if err := json.NewDecoder(rec.Body).Decode(&results); err != nil {
+		t.Fatalf("decode search response: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Fix panic" {
+		t.Fatalf("expected legacy store.Search result, got %+v", results)
+	}
+}
+
+// TestHandleSearchUsesInjectedSearchFunc proves GET /search routes through
+// whatever SearchFunc cmd/omnia wired via SetSearch (issue #86) — the seam
+// cmdServe uses to hand handleSearch the hybrid lexical+semantic
+// recall.Service path, without internal/server importing internal/recall or
+// internal/mcp directly (mirrors SetRunnerFactory/SetPromptBuilder's
+// existing precedent for internal/llm).
+func TestHandleSearchUsesInjectedSearchFunc(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	var gotQuery string
+	var gotOpts store.SearchOptions
+	sentinel := []store.SearchResult{{Observation: store.Observation{ID: 4242, Title: "from injected SearchFunc"}}}
+	srv.SetSearch(func(ctx context.Context, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+		gotQuery = query
+		gotOpts = opts
+		return sentinel, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=hello&project=engram&type=bugfix&scope=project&limit=3", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotQuery != "hello" {
+		t.Fatalf("expected injected SearchFunc to receive query %q, got %q", "hello", gotQuery)
+	}
+	if gotOpts.Project != "engram" || gotOpts.Type != "bugfix" || gotOpts.Scope != "project" || gotOpts.Limit != 3 {
+		t.Fatalf("expected query params forwarded into SearchOptions, got %+v", gotOpts)
+	}
+
+	var results []store.SearchResult
+	if err := json.NewDecoder(rec.Body).Decode(&results); err != nil {
+		t.Fatalf("decode search response: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != 4242 || results[0].Title != "from injected SearchFunc" {
+		t.Fatalf("expected the injected SearchFunc's own results to be returned verbatim, got %+v", results)
+	}
+}
+
+// TestHandleSearchSurfacesInjectedSearchFuncError proves an error from the
+// injected SearchFunc (e.g. cmd/omnia's recallOrFTSSearch bubbling up a
+// storeSearch failure after its own graceful recall fallback) still reaches
+// the client as a 500, exactly like a s.store.Search error always has.
+func TestHandleSearchSurfacesInjectedSearchFuncError(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	srv.SetSearch(func(ctx context.Context, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+		return nil, errors.New("forced search func error")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=hello", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // ─── DELETE /sessions/{id} tests ─────────────────────────────────────────────
 
 func TestHandleDeleteSession_Success(t *testing.T) {
