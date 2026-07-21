@@ -15,15 +15,9 @@
 
 ## How It Works
 
-<p align="center">
-  <img src="../assets/agent-save.png" alt="Agent saving a memory via mem_save" width="800" />
-  <br />
-  <em>The agent proactively calls <code>mem_save</code> after significant work — structured, searchable, no noise.</em>
-</p>
+Omnia trusts the **agent** to decide what's worth remembering — not a firehose of raw tool calls.
 
-Engram trusts the **agent** to decide what's worth remembering — not a firehose of raw tool calls.
-
-### The Agent Saves, Engram Stores
+### The Agent Saves, Omnia Stores
 
 ```
 1. Agent completes significant work (bugfix, architecture decision, etc.)
@@ -31,7 +25,7 @@ Engram trusts the **agent** to decide what's worth remembering — not a firehos
    - title: "Fixed N+1 query in user list"
    - type: "bugfix"
    - content: What/Why/Where/Learned format
-3. Engram persists to SQLite with FTS5 indexing
+3. Omnia persists to SQLite with FTS5 indexing
 4. Next session: agent searches memory, gets relevant context
 ```
 
@@ -195,8 +189,8 @@ Topic keys are not pruned automatically. An observation updated via upsert keeps
 `topic_key` upsert is scoped to `project + scope + topic_key`. The same key used with different scopes creates independent observations:
 
 ```
-project=engram, scope=project, topic_key=architecture/auth-model  → observation A
-project=engram, scope=personal, topic_key=architecture/auth-model → observation B (independent)
+project=myapp, scope=project, topic_key=architecture/auth-model  → observation A
+project=myapp, scope=personal, topic_key=architecture/auth-model → observation B (independent)
 ```
 
 This means a `personal` note on the same topic does not overwrite the shared `project` observation.
@@ -206,7 +200,7 @@ This means a `personal` note on the same topic does not overwrite the shared `pr
 ## Project Structure
 
 ```
-engram/
+omnia/
 ├── cmd/omnia/main.go              # CLI entrypoint
 ├── internal/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
@@ -254,17 +248,17 @@ omnia mcp                Start MCP server (stdio transport)
 omnia tui                Launch interactive terminal UI
 omnia search <query>     Search memories
 omnia save <title> <msg> Save a memory
-engram delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
-engram delete session <id>
+omnia delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
+omnia delete session <id>
                           Delete a session by ID (session must have no observations)
-engram delete prompt <id>
+omnia delete prompt <id>
                           Delete a prompt by ID (permanent)
-engram delete project <name> [--hard]
+omnia delete project <name> [--hard]
                           Cascade-delete a project: soft-deletes observations (or hard-deletes
                           with --hard, which also removes sessions); always removes prompts
-engram timeline <obs_id>  Chronological context around an observation
+omnia timeline <obs_id>  Chronological context around an observation
 omnia context [project]  Recent context from previous sessions
-engram stats              Memory statistics
+omnia stats              Memory statistics
 omnia export [file]      Export all memories to JSON
 omnia import <file>      Import memories from JSON
 omnia sync               Export new memories as compressed chunk to .engram/
@@ -285,7 +279,7 @@ omnia cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>
 omnia projects list      Show all projects with obs/session/prompt counts
 omnia projects consolidate  Interactive merge of similar project names [--all] [--dry-run]
 omnia projects prune     Remove projects with 0 observations [--dry-run]
-engram obsidian-export    Export memories to Obsidian vault (beta)
+omnia obsidian-export    Export memories to Obsidian vault (beta)
 omnia version            Show version
 ```
 
@@ -402,6 +396,6 @@ Both require `Authorization: Bearer <token>`. Push enforces the project-level sy
 
 ## Next Steps
 
-- [Agent Setup](AGENT-SETUP.md) — connect your agent to Engram
+- [Agent Setup](AGENT-SETUP.md) — connect your agent to Omnia
 - [Plugins](PLUGINS.md) — what the OpenCode and Claude Code plugins add
 - [Obsidian Brain](beta/obsidian-brain.md) — visualize memories as a knowledge graph (beta)
