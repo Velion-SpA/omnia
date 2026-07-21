@@ -126,11 +126,18 @@ so enabling them is a pure config flip with zero database migration. When
 ## Omnia Cloud (optional)
 
 Omnia is local-first: your local SQLite is always the source of truth. The cloud
-is optional replication + shared access, and you host it yourself.
+is optional replication/shared access, and you host it yourself.
 
 ```sh
 omnia cloud config --server https://omnia.example.com
 omnia cloud enroll my-project
+
+# One-time per-project upgrade flow (doctor -> repair -> bootstrap -> status/rollback):
+omnia cloud upgrade doctor --project my-project
+omnia cloud upgrade repair --project my-project --apply
+omnia cloud upgrade bootstrap --project my-project
+omnia cloud upgrade status --project my-project
+
 omnia cloud serve         # run the multi-tenant server + dashboard
 ```
 
