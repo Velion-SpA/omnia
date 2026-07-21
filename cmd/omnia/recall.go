@@ -144,12 +144,28 @@ func buildRecallServiceForCLI(s *store.Store, dataDir string) *recall.Service {
 // handled inside recall.Service itself (semanticHits swallows the error and
 // degrades to lexical-only) — no extra timeout/hang handling is needed here
 // beyond what mem_search already relies on.
+// recallQueryTimeout bounds a single recall query. A query-time embedding call
+// goes to Ollama (60s client ceiling); without this bound a reachable-but-stalled
+// Ollama could block a synchronous caller (e.g. GET /search) for up to a minute.
+// A normal query embed is sub-second, so this only ever trips on a real stall,
+// after which we fall back to FTS.
+const recallQueryTimeout = 5 * time.Second
+
 func recallOrFTSSearch(ctx context.Context, s *store.Store, recallSvc *recall.Service, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 	if recallSvc == nil {
 		return storeSearch(s, query, opts)
 	}
 
-	fused, err := recallSvc.Search(ctx, query, recall.LexicalSearchOptions{
+	// Normalize the project exactly like the store does (mcp.go does this too):
+	// the semantic leg exact-matches on the normalized project name stored in the
+	// embeddings table, so a differently-cased --project value would silently drop
+	// semantic hits without this. Idempotent for the FTS fallback below.
+	opts.Project, _ = store.NormalizeProject(opts.Project)
+
+	sctx, cancel := context.WithTimeout(ctx, recallQueryTimeout)
+	defer cancel()
+
+	fused, err := recallSvc.Search(sctx, query, recall.LexicalSearchOptions{
 		Type:    opts.Type,
 		Project: opts.Project,
 		Scope:   opts.Scope,
