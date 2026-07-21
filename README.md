@@ -53,12 +53,11 @@ control and an admin dashboard.
 
 <table>
   <tr>
-    <td width="50%"><img src="assets/tui-dashboard.png" alt="Terminal UI — dashboard"><br><sub><b>Terminal UI</b> — <code>omnia tui</code></sub></td>
-    <td width="50%"><img src="assets/cloud/cloud-overview.png" alt="Cloud dashboard — overview"><br><sub><b>Cloud dashboard</b> — overview</sub></td>
+    <td colspan="2"><img src="assets/cloud/cloud-overview.png" alt="Omnia Cloud dashboard — overview"><br><sub><b>Cloud dashboard</b> — overview: projects, memory-type breakdown, connected sources</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="assets/cloud/cloud-admin-teams.png" alt="Cloud admin — teams & access"><br><sub><b>Teams &amp; access</b> — profiles and per-project permissions</sub></td>
-    <td width="50%"><img src="assets/agent-save.png" alt="An agent saving a memory"><br><sub><b>An agent remembering</b> — <code>mem_save</code> in Claude Code</sub></td>
+    <td width="50%"><img src="assets/cloud/cloud-admin-teams.png" alt="Omnia Cloud admin — teams"><br><sub><b>Teams</b> — group projects and grant a profile's permissions to members</sub></td>
+    <td width="50%"><img src="assets/cloud/cloud-admin-users.png" alt="Omnia Cloud admin — users and access"><br><sub><b>Users &amp; access</b> — accounts, tokens, and per-project permissions</sub></td>
   </tr>
 </table>
 
