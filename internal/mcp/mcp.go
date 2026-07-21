@@ -1072,21 +1072,21 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		// FTS5-only store.Search call, unchanged, so rollback is always safe.
 		var results []store.SearchResult
 		if cfg.Recall != nil {
-			// recallFetchLimit over-fetches candidates (beyond the caller's
-			// real limit) so hydrateFusedResults's project/scope/type
+			// RecallFetchLimit over-fetches candidates (beyond the caller's
+			// real limit) so HydrateFusedResults's project/scope/type
 			// re-check below has enough headroom to still fill up to limit
 			// valid results after filtering out any cross-project semantic
-			// noise (bugfix: see recallScopeFilter's doc in recall_adapter.go).
+			// noise (bugfix: see RecallScopeFilter's doc in recall_adapter.go).
 			fused, ferr := cfg.Recall.Search(ctx, query, recall.LexicalSearchOptions{
 				Type:    typ,
 				Project: searchProject,
 				Scope:   scope,
-				Limit:   recallFetchLimit(limit),
+				Limit:   RecallFetchLimit(limit),
 			})
 			if ferr != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", ferr)), nil
 			}
-			results = hydrateFusedResults(s, fused, limit, recallScopeFilter{
+			results = HydrateFusedResults(s, fused, limit, RecallScopeFilter{
 				Type:    typ,
 				Project: searchProject,
 				Scope:   scope,

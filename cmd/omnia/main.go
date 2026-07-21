@@ -32,7 +32,6 @@ import (
 	"github.com/velion/omnia/internal/cloud/constants"
 	"github.com/velion/omnia/internal/cloud/remote"
 	"github.com/velion/omnia/internal/cloud/syncguidance"
-	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/datadir"
 	"github.com/velion/omnia/internal/diagnostic"
 	"github.com/velion/omnia/internal/embed"
@@ -855,13 +854,24 @@ func cmdServe(cfg store.Config) {
 	// memories out-of-band. nil (disabled) leaves the save path byte-for-byte
 	// today's. Hoisted to function scope so the SIGINT/SIGTERM handler below
 	// can Stop() it (graceful drain) before the process exits.
+	//
+	// Also builds the recall.Service for GET /search (issue #86) from the
+	// same config load — loadAppConfigWithRecallAutodetect runs the Ollama
+	// auto-detect exactly once at startup here, never per-request, matching
+	// cmdMCP's wiring. A missing/unparseable config file degrades both to
+	// their pre-#86/pre-PR4 defaults (no auto-embed, FTS5-only /search).
 	var autoEmbedWorker *embed.Worker
-	if appCfg, cfgErr := config.Load(config.DefaultPath()); cfgErr == nil {
+	if appCfg, cfgErr := loadAppConfigWithRecallAutodetect(); cfgErr == nil {
 		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s, cfg.DataDir); worker != nil {
 			worker.Start(ctx)
 			srv.SetAutoEmbed(worker)
 			autoEmbedWorker = worker
 		}
+
+		recallSvc := buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir)
+		srv.SetSearch(func(ctx context.Context, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+			return recallOrFTSSearch(ctx, s, recallSvc, query, opts)
+		})
 	}
 
 	// Try to start autosync (opt-in via ENGRAM_CLOUD_AUTOSYNC=1).
@@ -1107,18 +1117,17 @@ func cmdMCP(cfg store.Config) {
 	defer stopAutosync()
 
 	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride}
-	// Recall wiring (design D6/D7, human-like-memory PR3): only constructs
-	// the embeddings store/Ollama client/recall.Service when recall.enabled
-	// is true in config.yaml. A missing/unparseable config file degrades
+	// Recall wiring (design D6/D7, human-like-memory PR3; unified across
+	// cmdMCP/cmdServe/cmdSearch by issue #86): only constructs the
+	// embeddings store/Ollama client/recall.Service when recall.enabled is
+	// true in config.yaml. A missing/unparseable config file degrades
 	// silently (mcpCfg.Recall stays nil), matching every other `omnia`
 	// subcommand's config.Load graceful-degradation convention.
-	if appCfg, cfgErr := config.Load(config.DefaultPath()); cfgErr == nil {
-		// Ollama auto-detect (issue #83): only runs when the operator never
-		// set recall.enabled at all AND embeddings are enabled — see
-		// maybeAutoDetectRecall's doc for the full gating rationale. May
-		// flip appCfg.Recall.Enabled to true before buildRecallService reads
-		// it below.
-		maybeAutoDetectRecall(appCfg)
+	// loadAppConfigWithRecallAutodetect (shared with cmdServe/cmdSearch) runs
+	// the Ollama auto-detect (issue #83) — see its doc for the full gating
+	// rationale — which may flip appCfg.Recall.Enabled to true before
+	// buildRecallService reads it below.
+	if appCfg, cfgErr := loadAppConfigWithRecallAutodetect(); cfgErr == nil {
 		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir)
 		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
 		// enabled, run the worker on the same ctx cancelled at shutdown so
@@ -1204,7 +1213,13 @@ func cmdSearch(cfg store.Config) {
 	}
 	defer s.Close()
 
-	results, err := storeSearch(s, query, opts)
+	// Issue #86: route through the same hybrid lexical+semantic recall
+	// engine MCP mem_search uses (buildRecallServiceForCLI mirrors cmdMCP's
+	// wiring exactly), falling back to the plain FTS5 storeSearch below
+	// whenever recall is disabled, unconfigured, or unavailable —
+	// recallOrFTSSearch never crashes or hangs on a degraded recall service.
+	recallSvc := buildRecallServiceForCLI(s, cfg.DataDir)
+	results, err := recallOrFTSSearch(context.Background(), s, recallSvc, query, opts)
 	if err != nil {
 		fatal(err)
 		return
