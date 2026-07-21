@@ -354,6 +354,11 @@ func (s *CloudServer) routes() {
 			// searchable selector's fetch and API callers.
 			s.mux.HandleFunc("PUT /admin/projects/{project}/meta", s.handleAdminSetProjectMeta)
 			s.mux.HandleFunc("GET /admin/projects", s.handleAdminProjectsRoute)
+			// Admin projects redesign (issue #93): the project's own detail
+			// page. No JSON API shares this exact path, so unlike the routes
+			// above it is registered directly (no content-negotiation
+			// dispatcher needed) — see handleAdminProjectDetailPage.
+			s.mux.HandleFunc("GET /admin/projects/{project}", s.handleAdminProjectDetailPage)
 		}
 		// Project sync pause/resume controls (OBL-04). SetProjectSyncEnabled has been
 		// implemented since project_controls.go landed but had no caller — these are

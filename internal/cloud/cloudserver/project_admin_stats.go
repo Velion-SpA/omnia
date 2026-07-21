@@ -96,16 +96,30 @@ func (s *CloudServer) handleAdminProjectAccessFragment(w http.ResponseWriter, r 
 		return
 	}
 
+	view := s.buildAdminProjectAccessRows(r.Context(), rows)
+
+	if err := adminProjectAccessFragment(project, view).Render(r.Context(), w); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+	}
+}
+
+// buildAdminProjectAccessRows resolves raw ProjectAccessRow store rows into
+// the fragment's view rows: a resolved username (falling back to the raw
+// account id), the effective-permission label, and the override/team source.
+// Extracted so the Admin project-DETAIL page's Acceso tab (Admin projects
+// redesign) can render the SAME full member list this fragment shows,
+// without duplicating the username-lookup + sort logic.
+func (s *CloudServer) buildAdminProjectAccessRows(ctx context.Context, rows []cloudstore.ProjectAccessRow) []adminProjectAccessRow {
 	usernames := map[string]string{}
 	if as, aok := s.adminStore(); aok {
-		if users, uerr := as.ListUsers(r.Context()); uerr == nil {
+		if users, uerr := as.ListUsers(ctx); uerr == nil {
 			for _, u := range users {
 				usernames[u.ID] = u.Username
 			}
 		}
 	}
 
-	lang := i18n.LangFrom(r.Context())
+	lang := i18n.LangFrom(ctx)
 	view := make([]adminProjectAccessRow, 0, len(rows))
 	for _, row := range rows {
 		name := usernames[row.AccountID]
@@ -120,8 +134,5 @@ func (s *CloudServer) handleAdminProjectAccessFragment(w http.ResponseWriter, r 
 		})
 	}
 	sort.Slice(view, func(i, j int) bool { return view[i].Username < view[j].Username })
-
-	if err := adminProjectAccessFragment(project, view).Render(r.Context(), w); err != nil {
-		http.Error(w, "render error", http.StatusInternalServerError)
-	}
+	return view
 }

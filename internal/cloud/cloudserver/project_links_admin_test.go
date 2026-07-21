@@ -199,6 +199,13 @@ func TestHandleAdminClearProjectParent_IdempotentOnNeverLinked(t *testing.T) {
 
 // ─── Projects page: badges, sub-count, suggestion banner ────────────────────
 
+// TestHandleAdminProjectsPage_RendersParentBadgeAndSubCount verifies the
+// parent's childstrip (Admin projects redesign, issue #93): the child no
+// longer renders as its own top-level card with a "sub-proyecto de {parent}"
+// footer badge (that info now lives on the CHILD's own detail page instead,
+// via ParentProject/ParentProjectURL — see project_detail_admin_test.go) —
+// on the LIST page, the parent's card shows a childstrip naming the child
+// and its own count.
 func TestHandleAdminProjectsPage_RendersParentBadgeAndSubCount(t *testing.T) {
 	srv, store, authSvc := newProjectLinksTestServer(t)
 	store.projectMeta["workly"] = &cloudstore.ProjectMeta{Project: "workly", Kind: "work"}
@@ -210,13 +217,16 @@ func TestHandleAdminProjectsPage_RendersParentBadgeAndSubCount(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	// i18n Slice 3: Spanish default ("sub-project of %s" → "sub-proyecto de %s").
+	// i18n Slice 3: Spanish default ("1 sub-project" → "1 sub-proyecto").
 	body := rec.Body.String()
-	if !strings.Contains(body, "sub-proyecto de workly") {
-		t.Fatalf("expected a child badge referencing its parent, got: %s", body)
+	if !strings.Contains(body, `class="projcard parent"`) {
+		t.Fatalf("expected workly to render as a parent card, got: %s", body)
 	}
-	if !strings.Contains(body, "sub-proyecto") || !strings.Contains(body, "workly") {
-		t.Fatalf("expected the parent card to show a sub-project count, got: %s", body)
+	if !strings.Contains(body, "1 sub-proyecto") {
+		t.Fatalf("expected the childstrip header to show the sub-project count, got: %s", body)
+	}
+	if !strings.Contains(body, `class="crow"`) || !strings.Contains(body, "workly-marketing") {
+		t.Fatalf("expected the child to render as a named .crow row in the childstrip, got: %s", body)
 	}
 }
 

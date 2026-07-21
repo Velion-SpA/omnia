@@ -319,6 +319,9 @@ var messages = map[string]map[Lang]string{
 	// Admin > Projects page
 	"admin.projects.subtitle":               {LangES: "Proyectos: contenido, clasificación y sincronización. Solo para operadores.", LangEN: "Projects: content, classification, and sync. Operator-only."},
 	"admin.projects.noneKnownYet":           {LangES: "Aún no hay proyectos conocidos.", LangEN: "No projects known yet."},
+	"admin.projects.noResults":              {LangES: "Ningún proyecto coincide con la búsqueda o el filtro.", LangEN: "No projects match the search or filter."},
+	"admin.projects.memScopeAll":            {LangES: "Incluir sub-proyectos", LangEN: "Include sub-projects"},
+	"admin.projects.memScopeOwn":            {LangES: "Solo este proyecto", LangEN: "This project only"},
 	"admin.projects.suggestedLinks":         {LangES: "ENLACES SUGERIDOS", LangEN: "SUGGESTED LINKS"},
 	"admin.projects.suggestedPrefix":        {LangES: "Sugerido: enlazar", LangEN: "Suggested: link"},
 	"admin.projects.suggestedUnder":         {LangES: "bajo", LangEN: "under"},
@@ -348,6 +351,29 @@ var messages = map[string]map[Lang]string{
 	"admin.projects.resumeSync":             {LangES: "Reanudar sincronización", LangEN: "Resume sync"},
 	"admin.projects.whoHasAccess":           {LangES: "QUIÉN TIENE ACCESO", LangEN: "WHO HAS ACCESS"},
 	"admin.projects.noAccountsWithAccess":   {LangES: "Ninguna cuenta tiene acceso todavía.", LangEN: "No accounts have access yet."},
+
+	// Admin > Projects: search + filter toolbar, list card link (Admin
+	// projects redesign, issue #93)
+	"admin.projects.searchPlaceholder": {LangES: "Buscar proyecto…", LangEN: "Search project…"},
+	"admin.projects.filterAll":         {LangES: "Todos", LangEN: "All"},
+	"admin.projects.filterSub":         {LangES: "Con sub-proyectos", LangEN: "With sub-projects"},
+	"admin.projects.filterPaused":      {LangES: "Pausados", LangEN: "Paused"},
+	"admin.projects.childstripMore":    {LangES: "+ %s más · ver todos →", LangEN: "+ %s more · view all →"},
+	"admin.projects.allProjects":       {LangES: "← Todos los proyectos", LangEN: "← All projects"},
+
+	// Admin > Project DETAIL page (Admin projects redesign, issue #93)
+	"admin.projects.detailSubtitle":      {LangES: "Detalle del proyecto. Solo para operadores.", LangEN: "Project detail. Operator-only."},
+	"admin.projects.detailNotFound":      {LangES: "Proyecto no encontrado.", LangEN: "Project not found."},
+	"admin.projects.createdAgo":          {LangES: "creado %s", LangEN: "created %s"},
+	"admin.projects.manageAccess":        {LangES: "Gestionar acceso", LangEN: "Manage access"},
+	"admin.projects.subProjectsHeading":  {LangES: "Sub-proyectos", LangEN: "Sub-projects"},
+	"admin.projects.tabMemories":         {LangES: "Memorias", LangEN: "Memories"},
+	"admin.projects.tabAccess":           {LangES: "Acceso", LangEN: "Access"},
+	"admin.projects.tabActivity":         {LangES: "Actividad", LangEN: "Activity"},
+	"admin.projects.memoriesUnavailable": {LangES: "El almacén actual no soporta el listado de memorias individuales.", LangEN: "The current store doesn't support listing individual memories."},
+	"admin.projects.memoriesNone":        {LangES: "Este proyecto aún no tiene memorias sincronizadas.", LangEN: "This project has no synced memories yet."},
+	"admin.projects.activityUnavailable": {LangES: "El almacén actual no soporta el registro de auditoría.", LangEN: "The current store doesn't support the audit trail."},
+	"admin.projects.activityNone":        {LangES: "Sin actividad registrada todavía.", LangEN: "No recorded activity yet."},
 
 	// Kind badges (kindBadge/adminKindSelect — admin_teams_ui.templ)
 	"admin.kind.work":         {LangES: "laboral", LangEN: "work"},

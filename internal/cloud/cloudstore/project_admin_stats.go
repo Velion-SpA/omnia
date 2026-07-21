@@ -40,6 +40,11 @@ type ProjectChunkStats struct {
 	// no chunks (never the case for a project returned by this query, since
 	// GROUP BY only yields projects with at least one row).
 	LastActivity time.Time
+	// FirstActivity is MIN(created_at) — the project's earliest synced chunk,
+	// used by the Admin project-detail page (Command Center v2, admin
+	// projects redesign) to render a "created ~X ago" label. Same zero-value
+	// guarantee as LastActivity.
+	FirstActivity time.Time
 }
 
 // ListProjectChunkStats aggregates cloud_chunks per project_name in ONE
@@ -55,7 +60,8 @@ func (cs *CloudStore) ListProjectChunkStats(ctx context.Context) (map[string]Pro
 		SELECT project_name,
 		       COALESCE(SUM(observations_count), 0),
 		       COUNT(DISTINCT created_by),
-		       MAX(created_at)
+		       MAX(created_at),
+		       MIN(created_at)
 		FROM cloud_chunks
 		GROUP BY project_name`
 	rows, err := cs.db.QueryContext(ctx, q)
@@ -67,14 +73,18 @@ func (cs *CloudStore) ListProjectChunkStats(ctx context.Context) (map[string]Pro
 	out := make(map[string]ProjectChunkStats)
 	for rows.Next() {
 		var (
-			s            ProjectChunkStats
-			lastActivity sql.NullTime
+			s             ProjectChunkStats
+			lastActivity  sql.NullTime
+			firstActivity sql.NullTime
 		)
-		if err := rows.Scan(&s.Project, &s.MemoryCount, &s.SourceCount, &lastActivity); err != nil {
+		if err := rows.Scan(&s.Project, &s.MemoryCount, &s.SourceCount, &lastActivity, &firstActivity); err != nil {
 			return nil, fmt.Errorf("cloudstore: scan project chunk stats: %w", err)
 		}
 		if lastActivity.Valid {
 			s.LastActivity = lastActivity.Time
+		}
+		if firstActivity.Valid {
+			s.FirstActivity = firstActivity.Time
 		}
 		out[s.Project] = s
 	}
