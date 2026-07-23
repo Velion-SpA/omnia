@@ -535,6 +535,27 @@ Inspect or replay the `sync_apply_deferred` queue.
 - `--inspect <sync_id>`: print full decoded payload for one row; exits non-zero when not found.
 - `--replay`: call `ReplayDeferred()` and print retried/succeeded/failed/dead counts.
 
+### Eval Harness CLI (admin)
+
+`omnia eval` runs the memory-quality eval harness (spec `sdd/omnia-eval-harness`): a token-cost-normalized measuring stick over a corpus of real, dogfooded memory cases, segmented by capability (Recall, Causal, State-Update/Staleness, State-Abstraction) and by query language (EN/ES), plus a distinct retrieval-only recall@k section. It is NOT for end users — it is a maintainer/CI tool for judging embedding-model and recall-config changes.
+
+```
+omnia eval [--mode advisory|blocking] [--runs N] [--threshold F] [--baseline F]
+           [--corpus PATH] [--ab-pairs PATH] [--config PATH]
+```
+
+- `--runs N` (default `3`, must be 3-5): the harness always repeats the full pass 3-5 times and reports **mean ± standard deviation** per capability, per language, and overall — a single run's number is never used for a gate decision (fewer than 3 runs is refused outright).
+- `--corpus PATH` (default `internal/eval/testdata/cases.json`): the eval corpus JSON. Loading enforces a hard 50-150 case-count floor; the starter corpus ships with 11 real cases and is below that floor by design — full corpus authoring is a tracked follow-up, so `omnia eval` will refuse to run against it until it grows.
+- `--ab-pairs PATH` (default `internal/embed/testdata/ab_pairs.json`): the bilingual AB-pair set backing the retrieval-only recall@k section. This section is attached best-effort — it is skipped (not fatal) when `embeddings.enabled` is false in config or the embedding host is unreachable.
+- `--config PATH` (default: standard config path): read for `embeddings.*` (base URL, model, dim) to build the retrieval-only section's embedder, and for `OMNIA_AGENT_CLI` (env, not config) to build the LLM judge Causal/State-Abstraction cases require. If the corpus contains any `causal` or `state_abstraction` cases, `OMNIA_AGENT_CLI` must be set — unlike the retrieval-only section's graceful degrade, an unconfigured judge on those cases is a hard per-case scoring error that fails the run, not a silent skip.
+
+**Release gate** (spec EVAL-8) — only evaluated when `--baseline` is supplied (baseline overall accuracy to compare against; values `<= 0` — including the `0` default — skip the gate entirely and only print the report):
+
+- `--mode advisory` (default): a regression past `--threshold` (default `0.05`) is detected and printed, but the command never exits non-zero for it.
+- `--mode blocking`: a regression past `--threshold` exits `1`.
+
+`.goreleaser.yaml`'s `before.hooks` documents (commented out, not active) how to wire `omnia eval --mode advisory` as a release step once the corpus reaches its 50-case production floor — see the comment block there for the exact command and the reasoning for keeping it off until then.
+
 ### Cloud CLI (opt-in)
 
 - `omnia cloud status` — show current cloud config state plus auth/sync readiness without mutating local state. When cloud is configured, also probes the local `omnia serve` daemon at `127.0.0.1:7437` (respects `ENGRAM_PORT`) and prints a `Local daemon:` line (`running` / `not running` / `unreachable`) so you can detect a silently dead autosync. Exit code is unaffected; the line is informational
