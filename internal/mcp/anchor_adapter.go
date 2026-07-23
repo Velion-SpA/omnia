@@ -10,6 +10,126 @@ import (
 	"github.com/velion/omnia/internal/store"
 )
 
+// ─── Stale-anchor recall downrank (omnia-structural-forgetting PR2) ─────────
+//
+// The functions below are the ONLY place memory-structural-forgetting's
+// Requirement 6 ("Retrieval Downranks Stale Memories") is implemented. They
+// are pure — no I/O, no git, no store access — living in internal/mcp so
+// internal/recall and internal/store stay untouched leaves (design D6,
+// mirrored from recall_ranking.go's own wiring-boundary placement). mcp.go's
+// handleSearch is the only caller that batch-loads memory_anchors rows (via
+// store.GetAnchorsForObservations) and feeds them into these functions.
+
+// DefaultStalenessPenalty is the fixed score-breakdown deduction applied to
+// a memory carrying at least one stale anchor. It is a plain constant (not
+// proportional to how many anchors are stale, or how long ago they staled)
+// — a single deterministic downrank fraction, mirroring ComputeRecency's
+// "never hard-filter" contract: a stale memory always ranks below an
+// equally-relevant fresh one, but is never excluded outright.
+const DefaultStalenessPenalty = 0.5
+
+// StalenessPenaltyFor scans anchors — every memory_anchors row linked to one
+// observation, of ANY status (see store.GetAnchorsForObservations, which
+// deliberately returns stale rows too, unlike ListActiveAnchors) — and
+// returns DefaultStalenessPenalty if any row is anchor_status=stale, else 0.
+// A memory with no anchors at all (the overwhelming majority) always gets 0
+// (Regression: memory with no anchor unaffected).
+func StalenessPenaltyFor(anchors []store.MemoryAnchor) float64 {
+	for _, a := range anchors {
+		if a.AnchorStatus == store.AnchorStatusStale {
+			return DefaultStalenessPenalty
+		}
+	}
+	return 0
+}
+
+// firstStaleAnchor returns the first stale-status row in anchors, if any.
+func firstStaleAnchor(anchors []store.MemoryAnchor) (store.MemoryAnchor, bool) {
+	for _, a := range anchors {
+		if a.AnchorStatus == store.AnchorStatusStale {
+			return a, true
+		}
+	}
+	return store.MemoryAnchor{}, false
+}
+
+// BuildStaleReceipt renders Requirement 6's receipt line — "anchor
+// <file>:<lines> changed <old->new sha>" — for a single stale anchor.
+// Returns "" when a is not stale; callers must treat empty as "no receipt to
+// show," never render a broken/partial line. new_blame_sha (the SHA
+// discovered by ScanProject{Source:anchor}'s staling pass, persisted via
+// store.UpdateAnchorStaleReceipt) supplies the "new" half; when it was never
+// recorded (e.g. an anchor staled directly via MarkAnchorStale outside a
+// scan), the originally-captured BlameSHA is shown on both sides rather than
+// fabricating a value.
+func BuildStaleReceipt(a store.MemoryAnchor) string {
+	if a.AnchorStatus != store.AnchorStatusStale {
+		return ""
+	}
+	oldSHA := a.BlameSHA
+	newSHA := oldSHA
+	if a.NewBlameSHA != nil && strings.TrimSpace(*a.NewBlameSHA) != "" {
+		newSHA = *a.NewBlameSHA
+	}
+	return fmt.Sprintf("anchor %s:%d-%d changed %s->%s", a.FilePath, a.LineStart, a.LineEnd, shortSHA(oldSHA), shortSHA(newSHA))
+}
+
+// shortSHA renders a git SHA's first 8 hex characters for a compact receipt
+// line, falling back to the full (possibly empty) value when it is shorter
+// than that.
+func shortSHA(sha string) string {
+	if sha == "" {
+		return "unknown"
+	}
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
+}
+
+// ApplyStalenessDownrank stable-partitions results so any row with at least
+// one stale anchor sinks after every non-stale row, preserving each group's
+// relative order (mirrors RankResults' own preempted/rest stable-partition
+// shape in recall_ranking.go — a re-sort, never a full re-score). The
+// topic_key exact-match sentinel and signature-match rows are pre-empted
+// exactly like RankResults pre-empts them from ranking: a stale sentinel or
+// signature-match row still surfaces first, since Requirement 6 is about
+// relative ordering among otherwise-competing candidates, not about
+// defeating an exact match.
+//
+// anchorsByObs is keyed by observation sync_id (store.GetAnchorsForObservations'
+// shape). A result with no entry — no anchors captured at all, the
+// overwhelming majority of memories — is treated as non-stale, so this is a
+// complete no-op when structural forgetting has never captured an anchor for
+// this project (Regression: memory with no anchor unaffected).
+func ApplyStalenessDownrank(results []store.SearchResult, anchorsByObs map[string][]store.MemoryAnchor) []store.SearchResult {
+	if len(anchorsByObs) == 0 || len(results) == 0 {
+		return results
+	}
+
+	var preempted, fresh, stale []store.SearchResult
+	for _, r := range results {
+		if r.Rank == exactSentinelRank || r.SignatureMatch {
+			preempted = append(preempted, r)
+			continue
+		}
+		if StalenessPenaltyFor(anchorsByObs[r.SyncID]) > 0 {
+			stale = append(stale, r)
+		} else {
+			fresh = append(fresh, r)
+		}
+	}
+	if len(stale) == 0 {
+		return results
+	}
+
+	out := make([]store.SearchResult, 0, len(results))
+	out = append(out, preempted...)
+	out = append(out, fresh...)
+	out = append(out, stale...)
+	return out
+}
+
 // AnchorCapturer is the subset of *anchor.Probe's behavior
 // AnchorCaptureAdapter needs. Declaring it as an interface — rather than
 // depending on the concrete *anchor.Probe type directly — lets tests in this

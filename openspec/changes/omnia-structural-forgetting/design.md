@@ -152,7 +152,7 @@ type CandidateSource int // SourceFTS (default) | SourceEmbedding | SourceAnchor
 
 ## Migration / Rollout
 
-Additive `CREATE TABLE IF NOT EXISTS memory_anchors` in `migrate()`; no backfill, no schema break. Feature is opt-in on both ends: anchors only exist if `mem_save` supplies `code_anchors`; staleness only runs on explicit `omnia forget-scan`. Flag `structural_forgetting.enabled` (default true, no-op without anchors) gates the recall downrank. Rollout order: (1) `internal/anchor` shell-out leaf; (2) `memory_anchors` table + store methods; (3) `mem_save` capture; (4) `ScanProject` anchor source + `forget-scan`; (5) recall downrank + receipt. Each lands GREEN independently.
+Additive `CREATE TABLE IF NOT EXISTS memory_anchors` in `migrate()`; no backfill, no schema break. Feature is opt-in on both ends: anchors only exist if `mem_save` supplies `code_anchors`; staleness only runs on explicit `omnia forget-scan`. Flag `structural_forgetting.enabled` (default false, no-op without anchors) gates the recall downrank. Rollout order: (1) `internal/anchor` shell-out leaf; (2) `memory_anchors` table + store methods; (3) `mem_save` capture; (4) `ScanProject` anchor source + `forget-scan`; (5) recall downrank + receipt. Each lands GREEN independently.
 
 ---
 

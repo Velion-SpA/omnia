@@ -305,7 +305,7 @@ func floatPtr(v float64) *float64 { return &v }
 // receipt must surface lexical, semantic, fusion, recency, importance,
 // final, and staleness_penalty all at once.
 func TestBuildReceipt_FullBreakdown(t *testing.T) {
-	receipt := BuildReceipt(floatPtr(-2.5), false, floatPtr(0.87), floatPtr(0.031), floatPtr(0.6), floatPtr(1.0), floatPtr(0.74))
+	receipt := BuildReceipt(floatPtr(-2.5), false, floatPtr(0.87), floatPtr(0.031), floatPtr(0.6), floatPtr(1.0), floatPtr(0.74), 0)
 
 	lexical, ok := receipt["lexical"].(map[string]any)
 	if !ok {
@@ -345,7 +345,7 @@ func TestBuildReceipt_OmittedByDefault(t *testing.T) {
 	// A receipt built with every component nil must still return a map (the
 	// caller decides whether to attach it at all) with every nullable
 	// component actually null.
-	receipt := BuildReceipt(nil, false, nil, nil, nil, nil, nil)
+	receipt := BuildReceipt(nil, false, nil, nil, nil, nil, nil, 0)
 	lexical, ok := receipt["lexical"].(map[string]any)
 	if !ok {
 		t.Fatalf("receipt[lexical] missing or wrong type: %#v", receipt["lexical"])
@@ -364,7 +364,7 @@ func TestBuildReceipt_OmittedByDefault(t *testing.T) {
 // recall disabled entirely) must still populate lexical/recency/importance/
 // final while semantic (and fusion, since no RRF fusion ran) stay null.
 func TestBuildReceipt_SemanticNullWhenDisabled(t *testing.T) {
-	receipt := BuildReceipt(floatPtr(-1.2), false, nil, nil, floatPtr(0.4), floatPtr(0.33), floatPtr(0.6))
+	receipt := BuildReceipt(floatPtr(-1.2), false, nil, nil, floatPtr(0.4), floatPtr(0.33), floatPtr(0.6), 0)
 	if receipt["semantic"] != nil {
 		t.Errorf("receipt[semantic] = %v, want nil (semantic recall disabled)", receipt["semantic"])
 	}
@@ -386,18 +386,21 @@ func TestBuildReceipt_SemanticNullWhenDisabled(t *testing.T) {
 	}
 }
 
-// TestBuildReceipt_StalenessPenaltyReservedZero: staleness_penalty is always
-// 0 this slice — reserved forward-compat slot for
-// memory-structural-forgetting (obs #1595 Requirement 6) to populate later
-// without a schema change, regardless of what other components are set.
+// TestBuildReceipt_StalenessPenaltyReservedZero: staleness_penalty passes
+// through whatever the caller supplies — 0 when the caller has no anchor
+// lookup wired (or the memory has no stale anchor), never fabricated.
+// omnia-structural-forgetting PR2 turned this from an always-0 reserved slot
+// into a real passthrough (see TestBuildReceipt_StalenessPenaltyPassthrough
+// in anchor_downrank_test.go for the non-zero case); this test now pins the
+// zero-input case only.
 func TestBuildReceipt_StalenessPenaltyReservedZero(t *testing.T) {
-	receipt := BuildReceipt(floatPtr(-1), true, floatPtr(0.5), floatPtr(0.02), floatPtr(0.9), floatPtr(1.0), floatPtr(0.95))
-	if receipt["staleness_penalty"] != 0 {
-		t.Errorf("receipt[staleness_penalty] = %v, want 0 (reserved this slice)", receipt["staleness_penalty"])
+	receipt := BuildReceipt(floatPtr(-1), true, floatPtr(0.5), floatPtr(0.02), floatPtr(0.9), floatPtr(1.0), floatPtr(0.95), 0)
+	if receipt["staleness_penalty"] != float64(0) {
+		t.Errorf("receipt[staleness_penalty] = %v, want 0 (no staleness supplied)", receipt["staleness_penalty"])
 	}
 
-	receiptEmpty := BuildReceipt(nil, false, nil, nil, nil, nil, nil)
-	if receiptEmpty["staleness_penalty"] != 0 {
+	receiptEmpty := BuildReceipt(nil, false, nil, nil, nil, nil, nil, 0)
+	if receiptEmpty["staleness_penalty"] != float64(0) {
 		t.Errorf("receipt[staleness_penalty] (empty inputs) = %v, want 0", receiptEmpty["staleness_penalty"])
 	}
 }
@@ -421,7 +424,7 @@ func TestBuildResultReceipt_SignatureMatchTreatedAsMaximallyRelevant(t *testing.
 	normalizedRelevance := map[int64]float64{}
 	cfg := config.RankingConfig{Weights: config.RankingWeights{Recency: 1, Importance: 1, Relevance: 1}, RecencyHalfLifeDays: 14}
 
-	receipt := BuildResultReceipt(r, false, cfg, relevance, normalizedRelevance, now)
+	receipt := BuildResultReceipt(r, false, cfg, relevance, normalizedRelevance, now, 0)
 
 	lexical, ok := receipt["lexical"].(map[string]any)
 	if !ok {

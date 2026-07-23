@@ -247,10 +247,15 @@ func MinMaxNormalizeRelevance(results []store.SearchResult, relevance map[int64]
 // BuildReceipt nulls/omits it rather than guessing (Requirement: Ranking and
 // Explain Degrade Gracefully).
 //
-// staleness_penalty is always 0 this slice — a reserved, forward-compatible
-// slot for memory-structural-forgetting's downrank (obs #1595, Requirement
-// 6) to populate later without a schema change here.
-func BuildReceipt(lexicalRank *float64, exactMatch bool, semanticScore, fusionScore, recency, importance, final *float64) map[string]any {
+// stalenessPenalty is memory-structural-forgetting's downrank (obs #1595,
+// Requirement 6) — anchor_adapter.go's StalenessPenaltyFor computes it from
+// a memory's memory_anchors rows. It is a plain float64, not a pointer:
+// unlike the other components here, "no stale anchor" is a real, always-
+// computable answer (0), never a "could not be determined" case, so there is
+// no null state to represent. Callers that have not wired anchor lookups at
+// all (or have structural_forgetting.enabled=false) simply pass 0, which is
+// exactly this slot's pre-PR2 reserved default.
+func BuildReceipt(lexicalRank *float64, exactMatch bool, semanticScore, fusionScore, recency, importance, final *float64, stalenessPenalty float64) map[string]any {
 	return map[string]any{
 		"lexical":           lexicalComponent(lexicalRank, exactMatch),
 		"semantic":          nullableFloat(semanticScore),
@@ -258,7 +263,7 @@ func BuildReceipt(lexicalRank *float64, exactMatch bool, semanticScore, fusionSc
 		"recency":           nullableFloat(recency),
 		"importance":        nullableFloat(importance),
 		"final":             nullableFloat(final),
-		"staleness_penalty": 0,
+		"staleness_penalty": stalenessPenalty,
 	}
 }
 
@@ -304,7 +309,14 @@ func BuildReceipt(lexicalRank *float64, exactMatch bool, semanticScore, fusionSc
 // hand-rolling its own copy that can silently drift out of sync — hence
 // fusionRan/rankingCfg are plain primitives rather than the internal/mcp-only
 // MCPConfig type, so the CLI (which has no MCPConfig) can call this directly.
-func BuildResultReceipt(r store.SearchResult, fusionRan bool, rankingCfg config.RankingConfig, relevance, normalizedRelevance map[int64]float64, now time.Time) map[string]any {
+//
+// stalenessPenalty (omnia-structural-forgetting PR2, Requirement 6) is
+// computed by the caller — handleSearch via StalenessPenaltyFor over a
+// batch-loaded memory_anchors map — and simply passed through into the
+// returned receipt's "staleness_penalty" key. Callers with no anchor lookup
+// wired (currently `omnia search --explain`) pass 0, preserving this slot's
+// pre-PR2 reserved default exactly.
+func BuildResultReceipt(r store.SearchResult, fusionRan bool, rankingCfg config.RankingConfig, relevance, normalizedRelevance map[int64]float64, now time.Time, stalenessPenalty float64) map[string]any {
 	exact := r.Rank == exactSentinelRank
 	preempted := exact || r.SignatureMatch
 
@@ -337,7 +349,7 @@ func BuildResultReceipt(r store.SearchResult, fusionRan bool, rankingCfg config.
 	}
 	final := RankScore(normRel, recencyForScore, importance, rankingCfg.Weights)
 
-	return BuildReceipt(lexicalRank, exact, nil, fusionScore, recencyPtr, &importance, &final)
+	return BuildReceipt(lexicalRank, exact, nil, fusionScore, recencyPtr, &importance, &final, stalenessPenalty)
 }
 
 func lexicalComponent(rank *float64, exact bool) map[string]any {

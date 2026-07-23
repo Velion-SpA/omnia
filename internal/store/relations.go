@@ -21,18 +21,22 @@ var ErrSemanticRunnerRequired = errors.New("semantic scan requires a non-nil Run
 // ScanOptions.Semantic is true but ScanOptions.BuildPrompt is nil.
 var ErrSemanticPromptBuilderRequired = errors.New("semantic scan requires a non-nil BuildPrompt function")
 
+// ErrAnchorProviderRequired is returned by ScanProject when
+// ScanOptions.Source is SourceAnchor but ScanOptions.AnchorProvider is nil.
+var ErrAnchorProviderRequired = errors.New("anchor scan requires a non-nil AnchorProvider")
+
 // ─── Relation vocabulary (locked) ─────────────────────────────────────────────
 
 // Valid relation type values. Type compatibility is NOT enforced in Phase 1;
 // the agent does that judgment.
 const (
-	RelationPending      = "pending"
-	RelationRelated      = "related"
-	RelationCompatible   = "compatible"
-	RelationScoped       = "scoped"
+	RelationPending       = "pending"
+	RelationRelated       = "related"
+	RelationCompatible    = "compatible"
+	RelationScoped        = "scoped"
 	RelationConflictsWith = "conflicts_with"
-	RelationSupersedes   = "supersedes"
-	RelationNotConflict  = "not_conflict"
+	RelationSupersedes    = "supersedes"
+	RelationNotConflict   = "not_conflict"
 )
 
 // Valid judgment_status values.
@@ -118,11 +122,11 @@ type RelationListItem struct {
 
 // RelationStats holds aggregate counts of relations for a project.
 type RelationStats struct {
-	Project         string         `json:"project"`
-	ByRelation      map[string]int `json:"by_relation"`
+	Project          string         `json:"project"`
+	ByRelation       map[string]int `json:"by_relation"`
 	ByJudgmentStatus map[string]int `json:"by_judgment_status"`
-	DeferredCount   int            `json:"deferred"`
-	DeadCount       int            `json:"dead"`
+	DeferredCount    int            `json:"deferred"`
+	DeadCount        int            `json:"dead"`
 }
 
 // DeferredRow represents a row in sync_apply_deferred with the payload decoded.
@@ -141,19 +145,32 @@ type DeferredRow struct {
 
 // ScanResult holds the output of a ScanProject call.
 type ScanResult struct {
-	Project            string `json:"project"`
-	Inspected          int    `json:"inspected"`
-	CandidatesFound    int    `json:"candidates_found"`
-	AlreadyRelated     int    `json:"already_related"`
-	RelationsInserted  int    `json:"inserted"`
-	Capped             bool   `json:"capped"`
-	DryRun             bool   `json:"dry_run"`
+	Project           string `json:"project"`
+	Inspected         int    `json:"inspected"`
+	CandidatesFound   int    `json:"candidates_found"`
+	AlreadyRelated    int    `json:"already_related"`
+	RelationsInserted int    `json:"inserted"`
+	Capped            bool   `json:"capped"`
+	DryRun            bool   `json:"dry_run"`
 
 	// Semantic counters — populated only when ScanOptions.Semantic is true.
 	// Zero-value is safe for existing JSON consumers.
 	SemanticJudged  int `json:"semantic_judged"`
 	SemanticSkipped int `json:"semantic_skipped"`
 	SemanticErrors  int `json:"semantic_errors"`
+
+	// Anchor counters (omnia-structural-forgetting PR2) — populated only
+	// when ScanOptions.Source == SourceAnchor. Zero-value is safe for
+	// existing JSON consumers (every pre-existing caller uses Source=="").
+	AnchorsChecked  int `json:"anchors_checked"`
+	AnchorsTraveled int `json:"anchors_traveled"`
+	AnchorsStaled   int `json:"anchors_staled"`
+	// AnchorsErrors counts anchors whose AnchorProvider.Recheck call errored
+	// or panicked (mirrors SemanticErrors' role in the Phase 4 pass above).
+	// An errored anchor is NEVER also counted in AnchorsChecked — a git
+	// error is not "confirmed unchanged" and must stay distinguishable from
+	// it in this counter, not silently folded into checked/traveled/staled.
+	AnchorsErrors int `json:"anchors_errors"`
 }
 
 // ObservationSnippet carries the fields needed by BuildPrompt to construct an
@@ -166,16 +183,14 @@ type ObservationSnippet struct {
 	Content string
 }
 
-// ─── AnchorProvider (structural forgetting, reserved seam) ───────────────────
+// ─── AnchorProvider (structural forgetting) ──────────────────────────────────
 //
-// AnchorRecheckResult and AnchorProvider are declared here now (PR1 of
-// omnia-structural-forgetting) so the port shape exists, but are NOT YET
-// wired into ScanOptions/ScanProject — that wiring (CandidateSource enum,
-// ScanOptions.Source/AnchorProvider fields, ScanResult counters, and the
-// travel-before-staling classification logic) is a later slice (design obs
-// #1594 rollout step 4). Declaring the port ahead of that wiring lets
-// internal/mcp's adapter (a later slice) start satisfying it without a
-// follow-up store-package change.
+// AnchorRecheckResult and AnchorProvider were declared in PR1 of
+// omnia-structural-forgetting as a reserved seam. PR2 (this slice) wires them
+// into ScanOptions/ScanProject: CandidateSource enum, ScanOptions.Source/
+// AnchorProvider/Repo fields, ScanResult counters, and the travel-before-
+// staling classification logic (design obs #1594 rollout step 4; spec obs
+// #1595 REQ-003/REQ-004/REQ-005/REQ-008). See scanProjectAnchors below.
 
 // AnchorRecheckResult is the result of re-blaming a single memory_anchors
 // row. It mirrors internal/anchor.Anchor's essential fields but lives in
@@ -203,6 +218,25 @@ type AnchorRecheckResult struct {
 type AnchorProvider interface {
 	Recheck(ctx context.Context, a MemoryAnchor) (AnchorRecheckResult, error)
 }
+
+// CandidateSource selects which candidate-generation pass ScanProject runs.
+// The zero value ("") behaves exactly like SourceFTS, preserving Phase 3/4
+// behavior unchanged for every existing caller that never sets Source.
+type CandidateSource string
+
+const (
+	// SourceFTS is the default FTS5 candidate pass (Phase 3) plus its
+	// optional Semantic worker-pool extension (Phase 4). This is the
+	// zero-value behavior.
+	SourceFTS CandidateSource = "fts"
+	// SourceEmbedding is reserved for a future embedding-based candidate
+	// pass; not implemented by ScanProject yet.
+	SourceEmbedding CandidateSource = "embedding"
+	// SourceAnchor runs the structural-forgetting anchor re-check pass
+	// (omnia-structural-forgetting PR2): ListActiveAnchors + AnchorProvider,
+	// entirely independent of the FTS5/semantic candidate logic below.
+	SourceAnchor CandidateSource = "anchor"
+)
 
 // ScanOptions controls a ScanProject call.
 type ScanOptions struct {
@@ -232,6 +266,20 @@ type ScanOptions struct {
 	// BuildPrompt constructs the LLM prompt for a given (a, b) pair.
 	// Required when Semantic=true.
 	BuildPrompt func(a, b ObservationSnippet) string
+
+	// Source selects the candidate-generation pass (omnia-structural-
+	// forgetting PR2). The zero value ("") is treated identically to
+	// SourceFTS — every existing caller that never sets this field keeps
+	// today's exact Phase 3/4 behavior.
+	Source CandidateSource
+	// AnchorProvider re-checks each active memory_anchors row against the
+	// live git working tree. Required when Source==SourceAnchor.
+	AnchorProvider AnchorProvider
+	// Repo optionally restricts the anchor re-check pass to anchors whose
+	// stored RepoRoot equals Repo exactly. Empty means no filter (all
+	// active anchors for Project, regardless of repo root). Only consulted
+	// when Source==SourceAnchor.
+	Repo string
 }
 
 // JudgeBySemanticParams holds the inputs for JudgeBySemantic.
@@ -282,31 +330,31 @@ type Candidate struct {
 
 // Relation represents a row in memory_relations.
 type Relation struct {
-	ID                    int64    `json:"id"`
-	SyncID                string   `json:"sync_id"`
-	SourceID              string   `json:"source_id"`
-	TargetID              string   `json:"target_id"`
-	Relation              string   `json:"relation"`
-	Reason                *string  `json:"reason,omitempty"`
-	Evidence              *string  `json:"evidence,omitempty"`
-	Confidence            *float64 `json:"confidence,omitempty"`
-	JudgmentStatus        string   `json:"judgment_status"`
-	MarkedByActor         *string  `json:"marked_by_actor,omitempty"`
-	MarkedByKind          *string  `json:"marked_by_kind,omitempty"`
-	MarkedByModel         *string  `json:"marked_by_model,omitempty"`
-	SessionID             *string  `json:"session_id,omitempty"`
-	CreatedAt             string   `json:"created_at"`
-	UpdatedAt             string   `json:"updated_at"`
+	ID             int64    `json:"id"`
+	SyncID         string   `json:"sync_id"`
+	SourceID       string   `json:"source_id"`
+	TargetID       string   `json:"target_id"`
+	Relation       string   `json:"relation"`
+	Reason         *string  `json:"reason,omitempty"`
+	Evidence       *string  `json:"evidence,omitempty"`
+	Confidence     *float64 `json:"confidence,omitempty"`
+	JudgmentStatus string   `json:"judgment_status"`
+	MarkedByActor  *string  `json:"marked_by_actor,omitempty"`
+	MarkedByKind   *string  `json:"marked_by_kind,omitempty"`
+	MarkedByModel  *string  `json:"marked_by_model,omitempty"`
+	SessionID      *string  `json:"session_id,omitempty"`
+	CreatedAt      string   `json:"created_at"`
+	UpdatedAt      string   `json:"updated_at"`
 
 	// Annotation fields — populated by GetRelationsForObservations via LEFT JOIN.
 	// Excluded from JSON output (used only for in-process annotation building).
 	// REQ-005, REQ-012 | Design §7, §8.
-	SourceIntID     int64  `json:"-"` // integer primary key of source observation
-	SourceTitle     string `json:"-"` // title of source observation; empty if missing/deleted
-	SourceMissing   bool   `json:"-"` // true if source is soft-deleted or not found
-	TargetIntID     int64  `json:"-"` // integer primary key of target observation
-	TargetTitle     string `json:"-"` // title of target observation; empty if missing/deleted
-	TargetMissing   bool   `json:"-"` // true if target is soft-deleted or not found
+	SourceIntID   int64  `json:"-"` // integer primary key of source observation
+	SourceTitle   string `json:"-"` // title of source observation; empty if missing/deleted
+	SourceMissing bool   `json:"-"` // true if source is soft-deleted or not found
+	TargetIntID   int64  `json:"-"` // integer primary key of target observation
+	TargetTitle   string `json:"-"` // title of target observation; empty if missing/deleted
+	TargetMissing bool   `json:"-"` // true if target is soft-deleted or not found
 }
 
 // ObservationRelations groups relations for a single observation, split by role.
@@ -320,7 +368,7 @@ type ObservationRelations struct {
 // SaveRelationParams holds the inputs for SaveRelation.
 type SaveRelationParams struct {
 	// SyncID is the unique identifier for this relation row (format: rel-<16hex>).
-	SyncID   string
+	SyncID string
 	// SourceID is the TEXT sync_id of the source observation.
 	SourceID string
 	// TargetID is the TEXT sync_id of the target observation.
@@ -330,23 +378,23 @@ type SaveRelationParams struct {
 // JudgeRelationParams holds the inputs for JudgeRelation.
 type JudgeRelationParams struct {
 	// JudgmentID is the sync_id of the relation row to update (required).
-	JudgmentID    string
+	JudgmentID string
 	// Relation is the verdict verb (required); must be one of validRelationVerbs.
-	Relation      string
+	Relation string
 	// Reason is an optional free-text explanation.
-	Reason        *string
+	Reason *string
 	// Evidence is optional free-form JSON or text evidence.
-	Evidence      *string
+	Evidence *string
 	// Confidence is optional 0..1 confidence score.
-	Confidence    *float64
+	Confidence *float64
 	// MarkedByActor is the actor identifier (e.g. "agent:claude-sonnet-4-6" or "user").
 	MarkedByActor string
 	// MarkedByKind is the actor kind ("agent", "human", "system").
-	MarkedByKind  string
+	MarkedByKind string
 	// MarkedByModel is the model ID (may be empty for human actors).
 	MarkedByModel string
 	// SessionID is the session in which the judgment was made (optional).
-	SessionID     string
+	SessionID string
 }
 
 // ─── FindCandidates ───────────────────────────────────────────────────────────
@@ -1193,6 +1241,15 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 // Returns a ScanResult with counts of inspected observations, candidates found,
 // already-related pairs skipped, relations inserted, and whether the cap was hit.
 func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
+	// ── Anchor source early-branch (omnia-structural-forgetting PR2) ─────────
+	// Source==SourceAnchor runs an entirely independent pass (re-checking
+	// memory_anchors rows against live git state) that shares nothing with
+	// the FTS5/semantic candidate logic below. The zero value ("") never
+	// takes this branch, so every existing caller is unaffected.
+	if opts.Source == SourceAnchor {
+		return s.scanProjectAnchors(opts)
+	}
+
 	// ── Semantic flag validation (Phase 4) ────────────────────────────────────
 	if opts.Semantic {
 		if opts.Runner == nil {
@@ -1463,4 +1520,190 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 	wg.Wait()
 
 	return result, nil
+}
+
+// ─── ScanProject(Source: anchor) — omnia-structural-forgetting PR2 ──────────
+
+// scanProjectAnchors implements ScanOptions.Source==SourceAnchor: it lists
+// every active memory_anchors row for opts.Project (optionally filtered to
+// opts.Repo) and re-checks each one via opts.AnchorProvider.Recheck, using
+// the SAME bounded worker-pool pattern as the Phase 4 semantic pass above
+// (design D4: "reuse the worker pool", not a parallel scanner).
+//
+// Classification order per anchor (REQ-004 — travel MUST be attempted
+// BEFORE any staleness verdict):
+//
+//  1. Recheck.Found == false: the anchor could not be resolved anywhere
+//     (repo/file/symbol gone, git error). Cannot verify — falls through to
+//     staleness (a materially-changed-and-unrelocatable anchor is exactly
+//     what REQ-005 asks ScanProject to stale).
+//  2. Recheck.ContentHash == stored ContentHash: the body is byte-for-byte
+//     unchanged after normalization (anchor.RangeHash already strips
+//     whitespace before hashing — REQ-003's "any non-whitespace change is
+//     material" is therefore already encoded in hash equality, no separate
+//     materiality call is needed here):
+//     -  same LineStart/LineEnd as stored -> truly unchanged, skip (no write).
+//     -  different LineStart/LineEnd -> TRAVELED: UpdateAnchorRange relocates
+//     the anchor in place; anchor_status stays 'active' (never staled).
+//  3. Otherwise (ContentHash differs): materially changed, wherever it was
+//     found -> MarkAnchorStale (REQ-005). The AnchorRecheckResult.BlameSHA
+//     discovered here is persisted via UpdateAnchorStaleReceipt so the
+//     mem_search receipt (Requirement 6) can show "old->new SHA" without a
+//     second git blame at search time (internal/recall/internal/store never
+//     shell out to git — that only ever happens inside this reconcile pass).
+//
+// Apply gates every WRITE (UpdateAnchorRange / MarkAnchorStale /
+// UpdateAnchorStaleReceipt) but never the counters: a dry run (Apply=false,
+// the default) still reports what checked/traveled/staled WOULD be, so
+// `omnia forget-scan` can preview before committing (task 5.1).
+//
+// This slice never attempts automatic "newer memory supersedes this one"
+// detection — MarkAnchorStale is always called with a nil newerObsSyncID,
+// so no supersedes relation row is ever written by this pass (REQ-005's
+// with-newer-memory branch is exercised directly against MarkAnchorStale,
+// not through ScanProject, in this slice).
+func (s *Store) scanProjectAnchors(opts ScanOptions) (ScanResult, error) {
+	if opts.AnchorProvider == nil {
+		return ScanResult{}, ErrAnchorProviderRequired
+	}
+
+	concurrency := opts.Concurrency
+	if concurrency <= 0 {
+		concurrency = 5
+	}
+	timeoutPerCall := opts.TimeoutPerCall
+	if timeoutPerCall <= 0 {
+		timeoutPerCall = 60 * time.Second
+	}
+
+	result := ScanResult{Project: opts.Project, DryRun: !opts.Apply}
+
+	anchors, err := s.ListActiveAnchors(opts.Project)
+	if err != nil {
+		return result, fmt.Errorf("ScanProject(anchor): ListActiveAnchors: %w", err)
+	}
+	if opts.Repo != "" {
+		filtered := anchors[:0:0] // fresh backing array — never alias anchors' storage
+		for _, a := range anchors {
+			if a.RepoRoot == opts.Repo {
+				filtered = append(filtered, a)
+			}
+		}
+		anchors = filtered
+	}
+	if len(anchors) == 0 {
+		return result, nil
+	}
+
+	anchorCh := make(chan MemoryAnchor, len(anchors))
+	for _, a := range anchors {
+		anchorCh <- a
+	}
+	close(anchorCh)
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for a := range anchorCh {
+				s.recheckOneAnchor(a, opts, timeoutPerCall, &result, &mu)
+			}
+		}()
+	}
+	wg.Wait()
+
+	return result, nil
+}
+
+// recheckOneAnchor re-checks a single anchor and applies the travel-before-
+// staling classification described on scanProjectAnchors. result/mu are
+// shared across the worker pool; every counter increment is mutex-guarded.
+//
+// Error handling mirrors the Phase 4 semantic pass above: a Recheck error OR
+// panic increments AnchorsErrors (never AnchorsChecked) and the anchor is
+// dropped for this run — a git error is not "confirmed unchanged" and must
+// never be indistinguishable from it in the checked/traveled/staled counters.
+func (s *Store) recheckOneAnchor(a MemoryAnchor, opts ScanOptions, timeoutPerCall time.Duration, result *ScanResult, mu *sync.Mutex) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[store] ScanProject(anchor): Recheck panic anchor=%s: %v", a.SyncID, r)
+			mu.Lock()
+			result.AnchorsErrors++
+			mu.Unlock()
+		}
+	}()
+
+	callCtx, cancel := context.WithTimeout(context.Background(), timeoutPerCall)
+	defer cancel()
+
+	recheck, err := opts.AnchorProvider.Recheck(callCtx, a)
+	if err != nil {
+		log.Printf("[store] ScanProject(anchor): Recheck error anchor=%s: %v", a.SyncID, err)
+		mu.Lock()
+		result.AnchorsErrors++
+		mu.Unlock()
+		return
+	}
+
+	mu.Lock()
+	result.AnchorsChecked++
+	mu.Unlock()
+
+	switch {
+	case !recheck.Found:
+		// Unrelocatable — proceed straight to staleness (REQ-004).
+		s.staleAnchor(a, recheck, opts, result, mu)
+
+	case recheck.ContentHash == a.ContentHash:
+		if recheck.LineStart == a.LineStart && recheck.LineEnd == a.LineEnd {
+			// Truly unchanged (or changed only in ways anchor.RangeHash's
+			// whitespace normalization already discounts) — nothing to do.
+			return
+		}
+		// TRAVELED: same body, new location (REQ-004).
+		if opts.Apply {
+			if err := s.UpdateAnchorRange(UpdateAnchorRangeParams{
+				SyncID:      a.SyncID,
+				LineStart:   recheck.LineStart,
+				LineEnd:     recheck.LineEnd,
+				BlameSHA:    recheck.BlameSHA,
+				ContentHash: recheck.ContentHash,
+			}); err != nil {
+				log.Printf("[store] ScanProject(anchor): UpdateAnchorRange anchor=%s: %v", a.SyncID, err)
+				return
+			}
+		}
+		mu.Lock()
+		result.AnchorsTraveled++
+		mu.Unlock()
+
+	default:
+		// Content hash differs at wherever Recheck looked — materially
+		// changed (REQ-003/REQ-005).
+		s.staleAnchor(a, recheck, opts, result, mu)
+	}
+}
+
+// staleAnchor marks a as stale (unless opts.Apply is false, in which case it
+// only updates the counter — see scanProjectAnchors' dry-run doc). No
+// automatic "newer memory" detection happens here (see scanProjectAnchors'
+// doc) — MarkAnchorStale is always called with newerObsSyncID=nil.
+func (s *Store) staleAnchor(a MemoryAnchor, recheck AnchorRecheckResult, opts ScanOptions, result *ScanResult, mu *sync.Mutex) {
+	if opts.Apply {
+		if err := s.MarkAnchorStale(a.SyncID, nil); err != nil {
+			log.Printf("[store] ScanProject(anchor): MarkAnchorStale anchor=%s: %v", a.SyncID, err)
+			return
+		}
+		if recheck.BlameSHA != "" {
+			if err := s.UpdateAnchorStaleReceipt(a.SyncID, recheck.BlameSHA); err != nil {
+				log.Printf("[store] ScanProject(anchor): UpdateAnchorStaleReceipt anchor=%s: %v", a.SyncID, err)
+			}
+		}
+	}
+	mu.Lock()
+	result.AnchorsStaled++
+	mu.Unlock()
 }

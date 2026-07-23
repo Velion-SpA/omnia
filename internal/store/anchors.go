@@ -38,6 +38,15 @@ type MemoryAnchor struct {
 	CreatedAt    string
 	CheckedAt    *string
 	StaledAt     *string
+	// NewBlameSHA is the git blame SHA discovered at STALING time (via
+	// ScanProject{Source:anchor}'s Phase 4 pass, persisted by
+	// UpdateAnchorStaleReceipt) — the "new" half of mem_search's stale-anchor
+	// receipt (Requirement 6: "old->new SHA"). BlameSHA above stays the
+	// ORIGINALLY captured SHA (MarkAnchorStale never touches it), so the two
+	// fields together give the full before/after pair without a second git
+	// blame at search time. nil for active/traveled anchors, or for stale
+	// anchors marked before this field existed.
+	NewBlameSHA *string
 }
 
 // UpsertAnchorParams holds the inputs for UpsertAnchor.
@@ -318,4 +327,78 @@ func (s *Store) MarkAnchorStale(syncID string, newerObsSyncID *string) error {
 
 		return nil
 	})
+}
+
+// ─── UpdateAnchorStaleReceipt ─────────────────────────────────────────────────
+
+// UpdateAnchorStaleReceipt persists the git blame SHA discovered at staling
+// time — ScanProject{Source:anchor}'s Phase 4 pass, from
+// AnchorRecheckResult.BlameSHA — into new_blame_sha, so mem_search's
+// stale-anchor receipt (Requirement 6: "old->new SHA") can report both the
+// originally captured SHA (BlameSHA, untouched by MarkAnchorStale) and the
+// SHA that made the anchor stale, without a second git blame at search time.
+// A no-op-safe helper: callers should skip calling this when there is no new
+// SHA to record (e.g. Recheck.Found==false — nothing was re-blamed).
+func (s *Store) UpdateAnchorStaleReceipt(syncID, newBlameSHA string) error {
+	if strings.TrimSpace(syncID) == "" {
+		return fmt.Errorf("UpdateAnchorStaleReceipt: syncID is required")
+	}
+	if _, err := s.execHook(s.db, `
+		UPDATE memory_anchors SET new_blame_sha = ? WHERE sync_id = ?
+	`, nullableString(newBlameSHA), syncID); err != nil {
+		return fmt.Errorf("UpdateAnchorStaleReceipt: %w", err)
+	}
+	return nil
+}
+
+// ─── GetAnchorsForObservations ────────────────────────────────────────────────
+
+// GetAnchorsForObservations returns memory_anchors rows for the given
+// observation sync_ids, keyed by ObsSyncID — unlike ListActiveAnchors, rows
+// of ANY anchor_status are included (stale rows on purpose). Used by
+// mem_search's stale-anchor downrank + receipt wiring (Requirement 6) to
+// batch-load anchor status for a page of search results in one query instead
+// of one query per hit.
+func (s *Store) GetAnchorsForObservations(syncIDs []string) (map[string][]MemoryAnchor, error) {
+	result := map[string][]MemoryAnchor{}
+	if len(syncIDs) == 0 {
+		return result, nil
+	}
+
+	placeholders := make([]string, len(syncIDs))
+	args := make([]any, len(syncIDs))
+	for i, id := range syncIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, sync_id, obs_sync_id, ifnull(repo_root,''), file_path, ifnull(symbol,''),
+		       line_start, line_end, ifnull(blame_sha,''), ifnull(blame_at,''), content_hash,
+		       anchor_status, created_at, checked_at, staled_at, new_blame_sha
+		FROM memory_anchors
+		WHERE obs_sync_id IN (%s)
+	`, strings.Join(placeholders, ","))
+
+	rows, err := s.queryHook(s.db, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("GetAnchorsForObservations: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var a MemoryAnchor
+		if err := rows.Scan(
+			&a.ID, &a.SyncID, &a.ObsSyncID, &a.RepoRoot, &a.FilePath, &a.Symbol,
+			&a.LineStart, &a.LineEnd, &a.BlameSHA, &a.BlameAt, &a.ContentHash,
+			&a.AnchorStatus, &a.CreatedAt, &a.CheckedAt, &a.StaledAt, &a.NewBlameSHA,
+		); err != nil {
+			return nil, fmt.Errorf("GetAnchorsForObservations: scan: %w", err)
+		}
+		result[a.ObsSyncID] = append(result[a.ObsSyncID], a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetAnchorsForObservations: rows error: %w", err)
+	}
+	return result, nil
 }

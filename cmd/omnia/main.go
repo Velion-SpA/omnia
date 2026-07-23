@@ -727,6 +727,8 @@ func main() {
 		cmdTimeline(cfg)
 	case "conflicts":
 		cmdConflicts(cfg)
+	case "forget-scan":
+		cmdForgetScan(cfg)
 	case "doctor":
 		cmdDoctor(cfg)
 	case "context":
@@ -1138,6 +1140,11 @@ func cmdMCP(cfg store.Config) {
 		// handleSearch regardless of whether hybrid recall itself is enabled —
 		// RankResults/explain work over the FTS5-only path too.
 		mcpCfg.RecallRanking = appCfg.Recall.Ranking
+		// memory-structural-forgetting (omnia-structural-forgetting PR2,
+		// Requirement 6): thread structural_forgetting.enabled through so
+		// handleSearch's stale-anchor downrank + receipt is opt-in per the
+		// config flag (default false, backward-compatible).
+		mcpCfg.StructuralForgetting = appCfg.StructuralForgetting
 		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
 		// enabled, run the worker on the same ctx cancelled at shutdown so
 		// mem_save embeds new memories out-of-band. nil when disabled.
@@ -1286,7 +1293,14 @@ func cmdSearch(cfg store.Config) {
 			truncate(r.Content, 300),
 			timeutil.FormatLocal(r.CreatedAt), project, r.Scope)
 		if explain {
-			receipt := mcp.BuildResultReceipt(r, fusionRan, rankingCfg, relevance, normalizedRelevance, now)
+			// omnia-structural-forgetting PR2: the CLI has no anchor-status
+			// lookup wired (no MCPConfig/store batch-load at this call
+			// site), so it passes 0 — the pre-PR2 reserved default — rather
+			// than blocking --explain on a store round trip this slice
+			// doesn't need. `omnia mcp`/`mem_search` remain the surfaces
+			// with a real staleness_penalty (see internal/mcp/mcp.go's
+			// handleSearch wiring).
+			receipt := mcp.BuildResultReceipt(r, fusionRan, rankingCfg, relevance, normalizedRelevance, now, 0)
 			printScoreBreakdown(receipt)
 		}
 		fmt.Println()
@@ -2989,6 +3003,10 @@ Commands:
                                 [--semantic]  [--concurrency N]  [--timeout-per-call SECONDS]
                                 [--max-semantic N]  [--yes]
                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
+  forget-scan        Reconcile code anchors against the live git tree (structural forgetting)
+                       [--project P] [--repo PATH] [--apply] [--semantic] [--yes]
+                       Dry-run by default: reports checked/traveled/staled counts, writes nothing.
+                       Degrades gracefully with no git or outside a repo (reports 0 checked).
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
   context [project]  Show recent context from previous sessions
   stats              Show memory system statistics
