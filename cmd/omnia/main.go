@@ -752,6 +752,8 @@ func main() {
 		cmdCollect(os.Args[2:])
 	case "migrate":
 		cmdMigrate(os.Args[2:])
+	case "eval":
+		cmdEval(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("omnia %s\n", version)
 	case "help", "--help", "-h":
@@ -2932,6 +2934,13 @@ Commands:
                        collect status   Show collector daemon health and source cursors
   migrate            Migrate a legacy ~/.engram data directory to ~/.omnia (safe, copy-only)
                        [--from DIR] [--to DIR]
+  eval               Run the memory-quality eval harness (3-5 reproducibility runs) and
+                     optionally evaluate a release gate
+                       [--mode advisory|blocking]  (default: advisory — never blocks)
+                       [--runs N]                  (default: 3, must be 3-5)
+                       [--baseline F]              Overall accuracy to compare against (0 skips the gate)
+                       [--threshold F]             Max allowed regression before a blocking gate fails
+                       [--corpus PATH] [--ab-pairs PATH] [--config PATH]
 
   version            Print version
   help               Show this help

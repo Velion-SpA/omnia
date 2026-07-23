@@ -5,6 +5,20 @@ project_name: omnia
 before:
   hooks:
     - go mod tidy
+    # Eval-harness release gate (spec sdd/omnia-eval-harness EVAL-8) — NOT
+    # wired in yet, intentionally. `omnia eval` is advisory-by-default and
+    # exits non-zero only in --mode blocking past --threshold; today's
+    # eval corpus (internal/eval/testdata/cases.json, 11 cases) is still
+    # below spec EVAL-2's 50-case production floor, so a live hook here
+    # would abort EVERY release until that corpus-authoring follow-up
+    # lands. Uncomment once the corpus reaches 50+ cases and a real
+    # --baseline accuracy has been established:
+    #
+    # - cmd: sh -c 'go run ./cmd/omnia eval --mode advisory --runs 3 --baseline 0.80 --threshold 0.05'
+    #
+    # Flip --mode to blocking only after the advisory numbers have been
+    # observed stable across several releases (spec EVAL-8's own guidance:
+    # advisory MUST be the default until a team is confident in the gate).
 
 builds:
   - main: ./cmd/omnia
