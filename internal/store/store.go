@@ -1276,6 +1276,40 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// ── omnia-structural-forgetting (living memory, cheap code anchor) ────
+	// Additive CREATE TABLE IF NOT EXISTS for optional code anchors captured
+	// at mem_save (design obs #1594 / spec obs #1595): file + symbol +
+	// git-blame line range + blame SHA + content hash, linked 1:N to a
+	// memory via obs_sync_id (TEXT, no FK — same cross-machine-portable
+	// convention as memory_relations' source_id/target_id above). No
+	// backfill, no schema break. anchor_status is one of
+	// 'active'|'stale'|'traveled' (see AnchorStatus* constants in
+	// anchors.go). staleness marking (MarkAnchorStale) never deletes this
+	// row or the linked memory — see design's supersede/tombstone decision.
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS memory_anchors (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			sync_id       TEXT    NOT NULL UNIQUE,
+			obs_sync_id   TEXT    NOT NULL,
+			repo_root     TEXT,
+			file_path     TEXT    NOT NULL,
+			symbol        TEXT,
+			line_start    INTEGER NOT NULL,
+			line_end      INTEGER NOT NULL,
+			blame_sha     TEXT,
+			blame_at      TEXT,
+			content_hash  TEXT    NOT NULL,
+			anchor_status TEXT    NOT NULL DEFAULT 'active',
+			created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+			checked_at    TEXT,
+			staled_at     TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_anchor_obs    ON memory_anchors(obs_sync_id);
+		CREATE INDEX IF NOT EXISTS idx_anchor_status ON memory_anchors(anchor_status);
+	`); err != nil {
+		return err
+	}
+
 	return nil
 }
 
