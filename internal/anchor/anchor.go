@@ -383,8 +383,28 @@ func (p *Probe) Capture(ctx context.Context, dir, file, symbol string, start, en
 // declaration of symbol" regex for `git grep -n -E`. This is intentionally
 // NOT a real AST/tree-sitter parse (explicitly deferred — design obs #1594);
 // it is a best-effort heuristic for the explicit-anchor v1 slice.
+//
+// Word boundaries are emulated with non-word character classes instead of
+// \b: POSIX ERE (used by `git grep -E` on platforms whose git has no
+// libpcre, e.g. macOS's stock git) does not support \b, so a pattern using
+// it never matches there — silently breaking symbol relocation. Groups are
+// plain capturing groups, never (?:...), which POSIX ERE also lacks.
+//
+// The keyword is bounded on the left (line start or a non-word char, so a
+// substring keyword like the "var" inside "somevar" does not match) and the
+// symbol is bounded by a mandatory non-word separator after the keyword
+// (with an optional non-word-terminated middle, so receivers/generics like
+// `func (r *Repo) Add(` still match) and a trailing non-word char or line end.
+//
+// This stays a loose best-effort heuristic, not an AST parse: it still admits
+// a same-line non-declaration use (e.g. a field/key inside a one-line struct
+// literal). Word classes are ASCII-oriented; matching near non-ASCII
+// identifiers is git-locale-dependent (Go RE2's [[:alnum:]] is always ASCII).
 func declarationPattern(symbol string) string {
-	return fmt.Sprintf(`(func|def|class|type|const|var|let)[ \t].*\b%s\b`, regexp.QuoteMeta(symbol))
+	return fmt.Sprintf(
+		`(^|[^[:alnum:]_])(func|def|class|type|const|var|let)[^[:alnum:]_](.*[^[:alnum:]_])?%s([^[:alnum:]_]|$)`,
+		regexp.QuoteMeta(symbol),
+	)
 }
 
 // Locate performs a cheap, git-grep-based search for symbol's declaration:

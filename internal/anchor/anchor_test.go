@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -386,5 +388,94 @@ func TestLocate_EmptySymbolIsNotFound(t *testing.T) {
 	}
 	if len(f.calls) != 0 {
 		t.Fatalf("expected no git invocation for an empty symbol")
+	}
+}
+
+// ─── declarationPattern: ERE-portable word boundaries (regression) ─────────────
+
+// TestDeclarationPattern_EmulatesWordBoundaryWithoutBackslashB pins the fix for
+// the \b portability bug: POSIX-ERE git grep (macOS stock git, no libpcre) does
+// not support \b, so the old pattern never matched there and symbol relocation
+// silently broke. The replacement must match real declarations, reject
+// substrings, and contain no \b.
+func TestDeclarationPattern_EmulatesWordBoundaryWithoutBackslashB(t *testing.T) {
+	pat := declarationPattern("Add")
+	if strings.Contains(pat, `\b`) {
+		t.Fatalf("pattern must not use \\b (unsupported by POSIX-ERE git grep): %q", pat)
+	}
+	re := regexp.MustCompile(pat)
+
+	matches := []string{
+		"func Add(a, b int) int {",     // plain function
+		"func (r *Repo) Add(id int) {", // method with receiver + generics-ish middle
+		"type Add struct {",            // type decl
+		"var Add = compute()",          // package var
+		"func Add {",                   // symbol immediately after the keyword separator
+	}
+	for _, line := range matches {
+		if !re.MatchString(line) {
+			t.Errorf("expected declaration to match: %q", line)
+		}
+	}
+
+	nonMatches := []string{
+		"type AddRequest struct {",       // substring suffix
+		"const myAdd = 1",                // substring prefix
+		"result := myAddHelper(x)",       // no keyword + substring
+		"return added(x)",                // no declaration keyword
+		"somevar Add = 1",                // "var" is a substring of "somevar" (leading boundary)
+		"// prototype Add stub function", // "type" inside "prototype" (leading boundary)
+	}
+	for _, line := range nonMatches {
+		if re.MatchString(line) {
+			t.Errorf("expected NO match (substring/non-decl): %q", line)
+		}
+	}
+}
+
+// TestLocate_FindsSymbolViaRealGitGrep exercises Locate against a REAL
+// `git grep -E` in a throwaway repo — the coverage gap that let the \b bug
+// ship: every other Locate test injects a fakeGit and never runs the pattern.
+// With the old \b pattern this test fails on POSIX-ERE git (never matches).
+func TestLocate_FindsSymbolViaRealGitGrep(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	for _, kv := range [][2]string{
+		{"GIT_AUTHOR_NAME", "T"}, {"GIT_AUTHOR_EMAIL", "t@e.co"},
+		{"GIT_COMMITTER_NAME", "T"}, {"GIT_COMMITTER_EMAIL", "t@e.co"},
+	} {
+		t.Setenv(kv[0], kv[1])
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	// AddRequest (line 3) is a decoy that must not shadow func Add (line 5).
+	src := "package foo\n" +
+		"\n" +
+		"type AddRequest struct{}\n" +
+		"\n" +
+		"func Add(a, b int) int {\n" +
+		"\treturn a + b\n" +
+		"}\n"
+	if err := os.WriteFile(filepath.Join(dir, "foo.go"), []byte(src), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	runGit("init", "-q")
+	runGit("add", "foo.go")
+	runGit("commit", "-q", "-m", "init")
+
+	file, line, err := NewProbe().Locate(context.Background(), dir, "foo.go", "Add")
+	if err != nil {
+		t.Fatalf("Locate against real git: %v", err)
+	}
+	if file != "foo.go" || line != 5 {
+		t.Errorf("expected foo.go:5 (the func Add decl), got %s:%d", file, line)
 	}
 }
