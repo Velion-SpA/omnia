@@ -1,0 +1,90 @@
+[
+  {
+    "id": "embed-layer-recall-en",
+    "observation_id": "obs-d0028b15003f693d",
+    "capability": "recall",
+    "query": "What Ollama-based embedding layer did Omnia build for local semantic search?",
+    "language": "en",
+    "expected_fact": "internal/embed: Ollama HTTP client with search_document:/search_query: prefixes, unit-normalized vectors, own SQLite embeddings.db, brute-force cosine search"
+  },
+  {
+    "id": "public-release-recall-es",
+    "observation_id": "obs-ae9cbeb4adab2197",
+    "capability": "recall",
+    "query": "¿Dónde se publicó Omnia v0.1.0 y qué se verificó?",
+    "language": "es",
+    "expected_fact": "github.com/Velion-SpA/omnia + github.com/Velion-SpA/homebrew-tap; verificado end-to-end en ambas máquinas con brew tap"
+  },
+  {
+    "id": "homelab-deploy-recall-en",
+    "observation_id": "obs-800444bf5da4ec17",
+    "capability": "recall",
+    "query": "How is the Omnia cloud service deployed on the homelab?",
+    "language": "en",
+    "expected_fact": "systemd unit deploy/omnia-cloud.service running `omnia cloud serve` as a non-root omnia user, EnvironmentFile=/etc/omnia/cloud.env"
+  },
+  {
+    "id": "dashboard-port-recall-es",
+    "observation_id": "obs-69ffb0cfdecf7003",
+    "capability": "recall",
+    "query": "¿Con qué comando se relanzó el dashboard de Omnia en producción?",
+    "language": "es",
+    "expected_fact": "`omnia dashboard --port 7799` (proceso manual, no launchd)"
+  },
+  {
+    "id": "governance-causal-en",
+    "observation_id": "obs-a54f370762c5764e",
+    "capability": "causal",
+    "query": "Why did Omnia adopt soft-delete plus its own audit log instead of an approval gate for memory updates?",
+    "language": "en",
+    "expected_fact": "chosen for a 'trust but verify' model so memory updates aren't blocked by an approval bottleneck, while still keeping an audit trail"
+  },
+  {
+    "id": "dashboard-union-causal-es",
+    "observation_id": "obs-5f0f37d6c82db89a",
+    "capability": "causal",
+    "query": "¿Por qué knownProjects() se refactorizó para devolver la unión de proyectos?",
+    "language": "es",
+    "expected_fact": "para que el dashboard mostrara TODOS los proyectos del usuario: unión de 'omnia' + config.Projects + todos los targets de config.Routes"
+  },
+  {
+    "id": "design-system-abstraction-en",
+    "observation_id": "obs-32a80db27f88276f",
+    "capability": "state_abstraction",
+    "query": "What architectural pattern unifies the local and cloud Omnia dashboards?",
+    "language": "en",
+    "expected_fact": "a single shared internal/ui design system (one CSS, one shell) used by both dashboards so there is no visual drift between them"
+  },
+  {
+    "id": "routing-foundations-abstraction-es",
+    "observation_id": "obs-ee26147f34365a09",
+    "capability": "state_abstraction",
+    "query": "¿Qué cimientos habilitan el índice propio de Omnia sin tocar el motor de Engram?",
+    "language": "es",
+    "expected_fact": "routing por proyecto + schema omnia-meta v1, como contrato del índice futuro, sin modificar el motor de Engram"
+  },
+  {
+    "id": "dashboard-redesign-state-update-en",
+    "observation_id": "obs-393ccb0f4b37fb93",
+    "capability": "state_update",
+    "query": "What does the Omnia dashboard look like today?",
+    "language": "en",
+    "expected_fact": "redesigned to the 'Command Center' system (variant B), showing memory data instead of raw activity"
+  },
+  {
+    "id": "cloud-allowlist-recall-en",
+    "observation_id": "obs-f20c63d783b1dceb",
+    "capability": "recall",
+    "query": "What blocked the Omnia cloud allowlist rollout after the multi-project dashboard work finished?",
+    "language": "en",
+    "expected_fact": "the homelab being down blocked the cloud allowlist rollout, even though the dashboard multi-project + routing promotion had finished (11 packages green with -race)"
+  },
+  {
+    "id": "video-brand-abstraction-es",
+    "observation_id": "obs-6c018942da345c6b",
+    "capability": "state_abstraction",
+    "query": "¿Qué es el DESIGN.md del sistema de marca de los videos de Omnia?",
+    "language": "es",
+    "expected_fact": "documento único de brand system para la serie de videos de Omnia, empezando por el video de RBAC (Teams+Roles+Permissions), 16:9 para LinkedIn, 45 segundos"
+  }
+]
