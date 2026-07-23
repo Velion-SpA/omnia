@@ -85,8 +85,11 @@ func TestBuildAutoEmbedWorker_WithStoreStillBuildsWorker(t *testing.T) {
 		Enabled: true,
 		BaseURL: "http://127.0.0.1:11434",
 		Model:   "jina/jina-embeddings-v2-base-es",
-		Dim:     3,
-		DBPath:  filepath.Join(t.TempDir(), "embeddings.db"),
+		// Dim matches jina's native 768 output (EMBM-3: a lower Dim would be
+		// a rejected truncation for this non-MRL model) — this test only
+		// asserts the wiring produces a non-nil worker, not real vector math.
+		Dim:    768,
+		DBPath: filepath.Join(t.TempDir(), "embeddings.db"),
 	}
 	worker := buildAutoEmbedWorker(embCfg, s, "")
 	if worker == nil {

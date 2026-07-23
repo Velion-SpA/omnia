@@ -122,6 +122,14 @@ Both default to **off** — disabled reproduces the FTS5-only path byte-for-byte
 so enabling them is a pure config flip with zero database migration. When
 `recall.enabled` is unset and Ollama is reachable, Omnia auto-detects it.
 
+`embeddings.model` accepts any Ollama-served embedding model — jina stays the
+shipped default until an eval-gated swap is recorded. `embeddinggemma:300m`
+(Google's Matryoshka-trained 300M-parameter model) is a selectable
+alternative whose native dimension can be truncated at runtime via
+`embeddings.dim` (`768`/`256`/`128`) instead of always using the full
+dimension — non-MRL models like jina reject a truncated `dim` at config-load
+time rather than silently degrading their output.
+
 ## Omnia Cloud (optional)
 
 Omnia is local-first: your local SQLite is always the source of truth. The cloud
@@ -189,7 +197,8 @@ Config lives at `~/.config/omnia/config.yaml` (`cp config.example.yaml` to start
 | `sources.discord.enabled` | `false` | Enable Discord ingestion |
 | `backfill_days` | `30` | Days to look back on first run |
 | `embeddings.enabled` | `false` | Enable the local semantic index |
-| `embeddings.model` | `jina/jina-embeddings-v2-base-es` | Embedding model (also `bge-m3`) |
+| `embeddings.model` | `jina/jina-embeddings-v2-base-es` | Embedding model (also `bge-m3`, `embeddinggemma:300m` — MRL-capable) |
+| `embeddings.dim` | `768` | Effective embedding dimension; MRL-capable models (`embeddinggemma:300m`) may set this below their native output (`256`/`128`) to truncate + re-normalize — rejected for non-MRL models |
 | `recall.enabled` | `false` | Enable hybrid lexical+semantic recall for `mem_search` |
 | `recall.strong_floor` / `recall.base_floor` | `0.65` / `0.55` | Cosine relevance floors (tune to ~`0.35`/`0.25` for jina) |
 | `recall.ranking.enabled` | `false` | Enable the recency × importance × relevance re-ranking pass over `mem_search`/`omnia search` output (byte-for-byte identical to today's order when off) |

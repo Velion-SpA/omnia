@@ -102,6 +102,44 @@ func TestBuildRecallService_EnabledButStoreUnavailableReturnsNil(t *testing.T) {
 	}
 }
 
+// TestBuildRecallService_InvalidEmbeddingsConfigDegradesToNil is the
+// blocking-fix regression test: recall.enabled=true with an
+// internally-inconsistent embeddings config (a non-MRL model, jina, with a
+// Dim truncated below its native 768) must NOT silently build a
+// recall.Service backed by a broken embedder — config.ValidateEmbeddings
+// must be consulted at this seam and the misconfiguration must fail closed
+// to nil (mem_search degrades to FTS5-only, exactly like the
+// embeddings-store-unavailable branch), surfacing the bad config instead of
+// silently degrading semantic search into keyword-only results with zero
+// diagnostic.
+func TestBuildRecallService_InvalidEmbeddingsConfigDegradesToNil(t *testing.T) {
+	s, err := storeNew(testConfig(t))
+	if err != nil {
+		t.Fatalf("storeNew: %v", err)
+	}
+	defer s.Close()
+
+	embCfg := config.EmbeddingsConfig{
+		BaseURL: "http://127.0.0.1:11434",
+		Model:   "jina/jina-embeddings-v2-base-es", // NOT MRL-capable
+		Dim:     256,                               // truncates jina's native 768
+		DBPath:  filepath.Join(t.TempDir(), "embeddings.db"),
+	}
+	recallCfg := config.RecallConfig{
+		Enabled:     true,
+		RRFK:        60,
+		DenseK:      5,
+		StrongFloor: 0.35,
+		BaseFloor:   0.25,
+		MaxResults:  50,
+	}
+
+	got := buildRecallService(s, recallCfg, embCfg, "")
+	if got != nil {
+		t.Fatal("buildRecallService: expected nil for an invalid (non-MRL truncated-dim) embeddings config — must fail closed to FTS5-only instead of silently building a broken embedder")
+	}
+}
+
 // fakeCLIEmbedSearcher is a hermetic, in-memory embed.Searcher fake — mirrors
 // internal/mcp/recall_wiring_test.go's fakeEmbedSearcher — used to exercise
 // recallOrFTSSearch's fused path without a live Ollama.

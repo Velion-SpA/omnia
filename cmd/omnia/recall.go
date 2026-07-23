@@ -285,6 +285,23 @@ func buildRecallService(s *store.Store, recallCfg config.RecallConfig, embCfg co
 		return nil
 	}
 
+	// EMBM-3/blocking-fix: reject an internally-inconsistent embeddings
+	// config (a truncation/expansion Dim mismatched against the model's MRL
+	// capability, see config.ValidateEmbeddings) before opening the
+	// embeddings store or constructing an Ollama client — mirrors cmdEmbed's
+	// and buildAutoEmbedWorker's validation. THIS is the mem_search product
+	// path (cmdMCP/cmdServe via buildRecallService, cmdSearch/cmdServe's GET
+	// /search via buildRecallServiceForCLI): without this check, a
+	// misconfigured dim silently degraded every query to lexical-only (or
+	// broken semantic hits) with no diagnostic pointing at config — fail
+	// closed to nil (FTS5-only), matching the embeddings-store-unavailable
+	// branch below, but LOUDLY naming the bad model/dim instead of silently
+	// swallowing it.
+	if err := config.ValidateEmbeddings(embCfg); err != nil {
+		log.Printf("[recall] invalid embeddings config (%v); mem_search falls back to FTS5-only search", err)
+		return nil
+	}
+
 	dbPath := config.ResolveEmbeddingsDBPath(embCfg.DBPath, dataDir)
 	embStore, err := embed.OpenStore(dbPath)
 	if err != nil {

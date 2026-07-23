@@ -27,11 +27,20 @@ backfill_days: 30
 
 # Omnia's own local semantic-search index. Disabled by default: off keeps
 # `omnia embed` a no-op and the dashboard serves keyword (FTS) search only.
+# model accepts any Ollama-served embedding model; jina/jina-embeddings-v2-base-es
+# is the shipped default and stays default until an eval-gated swap is
+# recorded (no code changes needed to select a different model).
+# embeddinggemma:300m (Google's Matryoshka-trained 300M-parameter model) is a
+# selectable MRL-capable alternative: for MRL-capable models only, dim may be
+# set BELOW the model's native output (768/256/128) to truncate + re-normalize
+# instead of always using the full dimension. Setting dim below a NON-MRL
+# model's native output (e.g. jina below 768) is rejected at config-validation
+# time, not silently truncated.
 # embeddings:
 #   enabled: true
 #   base_url: http://localhost:11434  # Ollama base URL
-#   model: jina/jina-embeddings-v2-base-es
-#   dim: 768
+#   model: jina/jina-embeddings-v2-base-es  # or embeddinggemma:300m (MRL-capable)
+#   dim: 768  # embeddinggemma:300m also accepts 256 or 128 (Matryoshka truncation)
 #   db_path: ~/.local/share/omnia/embeddings.db
 
 # Hybrid (lexical+semantic) recall fusion for mem_search. Disabled by

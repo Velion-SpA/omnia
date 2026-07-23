@@ -103,6 +103,19 @@ func (s *erroringEmbedder) Embed(ctx context.Context, text string) ([]float32, e
 	return nil, fmt.Errorf("simulated ollama failure")
 }
 
+// flakyEmbedder errors only for the exact texts listed in failFor, so a
+// migration test can simulate an Ollama outage partway through a re-embed
+// run — some rows succeed, one fails — without aborting the whole run
+// (Reconcile already tolerates per-row errors; see Stats.Errors).
+type flakyEmbedder struct{ failFor map[string]bool }
+
+func (f *flakyEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if f.failFor[text] {
+		return nil, fmt.Errorf("simulated ollama failure mid-migration")
+	}
+	return []float32{1, 0, 0}, nil
+}
+
 func execEngram(t *testing.T, path, query string, args ...any) {
 	t.Helper()
 	raw, err := sql.Open("sqlite", "file:"+path+"?mode=rwc")
@@ -233,6 +246,82 @@ func TestReconcile_ForceReembedsAll(t *testing.T) {
 	}
 	if s.Embedded != 2 || s.Reused != 0 {
 		t.Fatalf("force stats: %+v, want embedded=2 reused=0", s)
+	}
+}
+
+// TestReconcile_DimChangeTriggersFullReembed is EMBM-6's migration lock: when
+// the configured Model stays the same but the effective Dim changes (a
+// Matryoshka dimension change, EMBM-4), the next Reconcile run must re-embed
+// EVERY live row — none reused — because every stored row's Dim no longer
+// matches the configured value.
+func TestReconcile_DimChangeTriggersFullReembed(t *testing.T) {
+	ctx := context.Background()
+	reader, store, _ := newReconcileEnv(t)
+	emb := &stubEmbedder{}
+
+	// First run at dim 768 (e.g. EmbeddingGemma native).
+	s, err := Reconcile(ctx, reader, store, emb, "embeddinggemma:300m", 768, false, nil)
+	if err != nil {
+		t.Fatalf("reconcile (dim 768): %v", err)
+	}
+	if s.Embedded != 2 || s.Reused != 0 {
+		t.Fatalf("initial reconcile: got %+v, want embedded=2 reused=0", s)
+	}
+
+	// Same model, dim changes to 256 (Matryoshka truncation config change):
+	// every live row must be re-embedded, none reused.
+	s, err = Reconcile(ctx, reader, store, emb, "embeddinggemma:300m", 256, false, nil)
+	if err != nil {
+		t.Fatalf("reconcile (dim 256): %v", err)
+	}
+	if s.Reused != 0 {
+		t.Errorf("dim-change reconcile: Reused got %d, want 0 (a dim change must force a full re-embed)", s.Reused)
+	}
+	if s.Embedded != 2 {
+		t.Errorf("dim-change reconcile: Embedded got %d, want 2", s.Embedded)
+	}
+}
+
+// TestReconcile_InterruptedMigrationIsResumable is EMBM-6's resumability
+// lock: if a Reconcile run into a new model/dim is interrupted mid-run (one
+// row's embed call fails, simulating an Ollama outage), the row that
+// succeeded stays migrated at the new model/dim, and a subsequent Reconcile
+// run reuses it while re-embedding ONLY the row still mismatched.
+func TestReconcile_InterruptedMigrationIsResumable(t *testing.T) {
+	ctx := context.Background()
+	reader, store, _ := newReconcileEnv(t)
+	stable := &stubEmbedder{}
+
+	// Baseline at the old model/dim (both live rows embedded there).
+	if _, err := Reconcile(ctx, reader, store, stable, "jina/jina-embeddings-v2-base-es", 768, false, nil); err != nil {
+		t.Fatalf("baseline reconcile: %v", err)
+	}
+
+	// Migrate to a new model/dim, but the embedder fails for obs-b's exact
+	// embed input, simulating an Ollama outage partway through the
+	// migration — obs-a succeeds and lands on the new model/dim; obs-b does
+	// not.
+	flaky := &flakyEmbedder{failFor: map[string]bool{"Beta\n\nbeta content body": true}}
+	s, err := Reconcile(ctx, reader, store, flaky, "embeddinggemma:300m", 256, false, nil)
+	if err != nil {
+		t.Fatalf("interrupted reconcile: %v", err)
+	}
+	if s.Embedded != 1 || s.Errors != 1 {
+		t.Fatalf("interrupted migration stats: %+v, want embedded=1 errors=1", s)
+	}
+
+	// Resume with a stable embedder: obs-a is already migrated (reused,
+	// its stored Model/Dim already match), only obs-b (still mismatched
+	// because its embed failed above) re-embeds.
+	s, err = Reconcile(ctx, reader, store, stable, "embeddinggemma:300m", 256, false, nil)
+	if err != nil {
+		t.Fatalf("resume reconcile: %v", err)
+	}
+	if s.Reused != 1 {
+		t.Errorf("resume reconcile: Reused got %d, want 1 (obs-a already migrated)", s.Reused)
+	}
+	if s.Embedded != 1 {
+		t.Errorf("resume reconcile: Embedded got %d, want 1 (only obs-b, still mismatched)", s.Embedded)
 	}
 }
 

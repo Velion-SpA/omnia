@@ -128,6 +128,76 @@ func TestResolveEmbeddingsDBPath_AlternateDataDirGetsScopedStore(t *testing.T) {
 	}
 }
 
+// TestValidateEmbeddings_RejectsTruncationForNonMRLModel locks EMBM-3's core
+// guard: jina-embeddings-v2-base-es has no Matryoshka (MRL) training, so a
+// configured Dim below its native 768 output must be rejected rather than
+// silently truncated.
+func TestValidateEmbeddings_RejectsTruncationForNonMRLModel(t *testing.T) {
+	err := config.ValidateEmbeddings(config.EmbeddingsConfig{
+		Model: "jina/jina-embeddings-v2-base-es",
+		Dim:   256,
+	})
+	if err == nil {
+		t.Fatal("ValidateEmbeddings: expected an error truncating a non-MRL model (jina) to 256, got nil")
+	}
+}
+
+// TestValidateEmbeddings_AcceptsTruncationForMRLModel is the accept-path
+// counterpart: embeddinggemma:300m IS Matryoshka-trained, so the identical
+// shape (Dim below native output) must be accepted.
+func TestValidateEmbeddings_AcceptsTruncationForMRLModel(t *testing.T) {
+	err := config.ValidateEmbeddings(config.EmbeddingsConfig{
+		Model: "embeddinggemma:300m",
+		Dim:   256,
+	})
+	if err != nil {
+		t.Errorf("ValidateEmbeddings: expected no error truncating an MRL-capable model (embeddinggemma:300m) to 256, got %v", err)
+	}
+}
+
+// TestValidateEmbeddings_RejectsDimExceedingNativeDim is the cheap-fix RED
+// test: a configured Dim GREATER than a non-MRL model's native output
+// (jina's 768) must be rejected at config-load time, not surface only as a
+// generic runtime dim-mismatch error deep inside embed.Client.Embed.
+func TestValidateEmbeddings_RejectsDimExceedingNativeDim(t *testing.T) {
+	err := config.ValidateEmbeddings(config.EmbeddingsConfig{
+		Model: "jina/jina-embeddings-v2-base-es",
+		Dim:   1024,
+	})
+	if err == nil {
+		t.Fatal("ValidateEmbeddings: expected an error for dim 1024 exceeding jina's native 768, got nil")
+	}
+}
+
+// TestValidateEmbeddings_RejectsDimExceedingNativeDim_EvenForMRLModel proves
+// the exceeds-native-dim guard applies regardless of MRL capability:
+// Matryoshka training only ever supports truncating a model's native
+// output, never expanding it, so embeddinggemma:300m (MRL-capable, native
+// 768) must still reject a Dim of 1024.
+func TestValidateEmbeddings_RejectsDimExceedingNativeDim_EvenForMRLModel(t *testing.T) {
+	err := config.ValidateEmbeddings(config.EmbeddingsConfig{
+		Model: "embeddinggemma:300m",
+		Dim:   1024,
+	})
+	if err == nil {
+		t.Fatal("ValidateEmbeddings: expected an error for dim 1024 exceeding embeddinggemma:300m's native 768 (MRL never expands), got nil")
+	}
+}
+
+// TestValidateEmbeddings_UnknownModelSkipsGuard proves EMBM-1's selectable-
+// without-code-changes guarantee: a model name absent from the capability
+// registry must not be blocked by the MRL guard — Client.Embed's own
+// dim-mismatch check remains the safety net for that model at embed time.
+func TestValidateEmbeddings_UnknownModelSkipsGuard(t *testing.T) {
+	err := config.ValidateEmbeddings(config.EmbeddingsConfig{
+		Model: "some-unregistered-model",
+		Dim:   64,
+	})
+	if err != nil {
+		t.Errorf("ValidateEmbeddings: expected no error for an unregistered model (guard skipped), got %v", err)
+	}
+}
+
 // TestResolveEmbeddingsDBPath_HomeDefaultViaEnvStaysLegacy proves the fix does
 // NOT over-scope: when OMNIA_DATA_DIR is explicitly set to the home-default
 // data dir (the same instance a bare run would use), embeddings still resolve

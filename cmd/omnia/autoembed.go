@@ -44,6 +44,15 @@ func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig, s *store.Store, dataDi
 	if !embCfg.Enabled {
 		return nil
 	}
+	// EMBM-3: reject an internally-inconsistent embeddings config (a
+	// truncation Dim for a non-MRL model) before this worker ever opens the
+	// store or constructs an Ollama client — mirrors cmdEmbed's validation
+	// in cmd/omnia/embed.go. Fail closed to nil, matching the OpenStore
+	// failure branch below: a bad config must never crash the save path.
+	if err := config.ValidateEmbeddings(embCfg); err != nil {
+		log.Printf("[auto-embed] invalid embeddings config (%v); auto-embed disabled", err)
+		return nil
+	}
 	dbPath := config.ResolveEmbeddingsDBPath(embCfg.DBPath, dataDir)
 	embStore, err := embed.OpenStore(dbPath)
 	if err != nil {
