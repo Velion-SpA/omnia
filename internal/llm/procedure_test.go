@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -236,5 +237,25 @@ func TestSafeInduce_SuccessReturnsInducedResult(t *testing.T) {
 	got := SafeInduce(context.Background(), r, "ignored trigger", "ignored trajectory", "prompt")
 	if got.Trigger != "real induced trigger" {
 		t.Errorf("Trigger = %q; want the REAL induced trigger, not the fallback", got.Trigger)
+	}
+}
+
+// ─── BuildInducePrompt (PR2: shared online/offline prompt construction) ─────
+
+// TestBuildInducePrompt_IncludesTriggerAndTrajectory pins the prompt's basic
+// contract: both inputs must appear verbatim in the rendered prompt, and it
+// must explicitly instruct the model never to set "polarity" (design
+// decision #2).
+func TestBuildInducePrompt_IncludesTriggerAndTrajectory(t *testing.T) {
+	prompt := BuildInducePrompt("nil pointer in handler", "added a guard clause; tests passed")
+
+	if !strings.Contains(prompt, "nil pointer in handler") {
+		t.Errorf("prompt missing trigger text: %q", prompt)
+	}
+	if !strings.Contains(prompt, "added a guard clause; tests passed") {
+		t.Errorf("prompt missing trajectory text: %q", prompt)
+	}
+	if !strings.Contains(prompt, "polarity") {
+		t.Errorf("prompt must instruct the model not to set polarity: %q", prompt)
 	}
 }

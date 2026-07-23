@@ -75,6 +75,46 @@ func TestUpsertProcedure_RejectsEmptyTrigger(t *testing.T) {
 	}
 }
 
+// TestUpsertProcedure_ClampsOutOfRangeConfidence (PR1 review fix, PR2 scope:
+// "add clampConfidence on the incoming p.Confidence in UpsertProcedure now
+// that the inducer feeds real values") verifies a caller-supplied confidence
+// outside [0.0, 1.0] is clamped rather than persisted verbatim — protects
+// the governance gate's trust_threshold/confidence_floor comparisons from
+// an out-of-range seed value fed by a misbehaving inducer.
+func TestUpsertProcedure_ClampsOutOfRangeConfidence(t *testing.T) {
+	s := newTestStore(t)
+
+	over := validProcedure()
+	over.Trigger = "confidence over one"
+	over.Confidence = 1.7
+	syncIDOver, err := s.UpsertProcedure(over)
+	if err != nil {
+		t.Fatalf("UpsertProcedure: unexpected error: %v", err)
+	}
+	got, err := s.GetProcedure(syncIDOver)
+	if err != nil {
+		t.Fatalf("GetProcedure: unexpected error: %v", err)
+	}
+	if got.Confidence != 1.0 {
+		t.Errorf("Confidence = %v; want clamped to 1.0", got.Confidence)
+	}
+
+	under := validProcedure()
+	under.Trigger = "confidence under zero"
+	under.Confidence = -0.4
+	syncIDUnder, err := s.UpsertProcedure(under)
+	if err != nil {
+		t.Fatalf("UpsertProcedure: unexpected error: %v", err)
+	}
+	got, err = s.GetProcedure(syncIDUnder)
+	if err != nil {
+		t.Fatalf("GetProcedure: unexpected error: %v", err)
+	}
+	if got.Confidence != 0.0 {
+		t.Errorf("Confidence = %v; want clamped to 0.0", got.Confidence)
+	}
+}
+
 // TestUpsertProcedure_ValidRecord_IsSearchableByTrigger (tasks 1.5/1.6)
 // verifies a valid procedure is stored with a sync_id and can be found via
 // SearchProcedures by a trigger-word match.

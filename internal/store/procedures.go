@@ -230,6 +230,15 @@ func (s *Store) UpsertProcedure(p Procedure) (string, error) {
 		state = ProcedureStateCandidate
 	}
 
+	// PR1 review fix: clamp the incoming confidence now that PR2's
+	// inducers (online mem_save wiring, offline procedure-induct) feed
+	// real, caller-supplied values instead of only being reachable via
+	// ConfirmReuse/Contradict/DecayProcedures (which already clamp
+	// internally). Without this, a misbehaving inducer could persist an
+	// out-of-range confidence that the governance gate's own thresholds
+	// were never designed to compare against.
+	confidence := clampConfidence(p.Confidence)
+
 	scope := normalizeScope(p.Scope)
 	project, _ := NormalizeProject(p.Project)
 
@@ -258,7 +267,7 @@ func (s *Store) UpsertProcedure(p Procedure) (string, error) {
 				induced_by_model    = excluded.induced_by_model,
 				updated_at          = datetime('now')
 		`, syncID, nullableString(project), scope, p.Polarity, p.Trigger, string(stepsJSON), stepsSummary,
-			nullableString(p.ExpectedOutcome), p.PostconditionKind, nullableString(p.PostconditionExpr), p.Confidence,
+			nullableString(p.ExpectedOutcome), p.PostconditionKind, nullableString(p.PostconditionExpr), confidence,
 			state, p.ReuseConfirmed, p.ContradictedCount, string(sourceJSON),
 			nullableString(p.InducedByActor), nullableString(p.InducedByKind), nullableString(p.InducedByModel),
 		)
