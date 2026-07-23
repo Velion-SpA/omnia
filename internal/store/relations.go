@@ -166,6 +166,44 @@ type ObservationSnippet struct {
 	Content string
 }
 
+// ─── AnchorProvider (structural forgetting, reserved seam) ───────────────────
+//
+// AnchorRecheckResult and AnchorProvider are declared here now (PR1 of
+// omnia-structural-forgetting) so the port shape exists, but are NOT YET
+// wired into ScanOptions/ScanProject — that wiring (CandidateSource enum,
+// ScanOptions.Source/AnchorProvider fields, ScanResult counters, and the
+// travel-before-staling classification logic) is a later slice (design obs
+// #1594 rollout step 4). Declaring the port ahead of that wiring lets
+// internal/mcp's adapter (a later slice) start satisfying it without a
+// follow-up store-package change.
+
+// AnchorRecheckResult is the result of re-blaming a single memory_anchors
+// row. It mirrors internal/anchor.Anchor's essential fields but lives in
+// this package to avoid a store→anchor import cycle — the same pattern
+// SemanticVerdict uses to mirror llm.Verdict in runner.go.
+type AnchorRecheckResult struct {
+	// Found is false when the anchor's file/symbol could no longer be
+	// resolved at all (repo missing, file deleted, git error, etc.).
+	Found bool
+	// LineStart/LineEnd are the current blame range for the anchor. When the
+	// anchor traveled (same body, new location), these differ from the
+	// stored MemoryAnchor.LineStart/LineEnd.
+	LineStart, LineEnd int
+	// BlameSHA is the current git blame commit SHA for the range.
+	BlameSHA string
+	// ContentHash is the current normalized content hash of the range.
+	ContentHash string
+}
+
+// AnchorProvider is a duck-typed interface satisfied by an adapter that
+// wraps *anchor.Probe, without requiring this package to import
+// internal/anchor (mirrors SemanticRunner in runner.go). A later
+// ScanProject{Source: anchor} pass uses this to re-blame each active
+// anchor before deciding travel vs. staleness (REQ-004).
+type AnchorProvider interface {
+	Recheck(ctx context.Context, a MemoryAnchor) (AnchorRecheckResult, error)
+}
+
 // ScanOptions controls a ScanProject call.
 type ScanOptions struct {
 	// Project is required — scopes the observation walk.

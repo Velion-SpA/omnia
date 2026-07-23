@@ -26,6 +26,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/velion/omnia/internal/anchor"
 	"github.com/velion/omnia/internal/audit"
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/diagnostic"
@@ -89,6 +90,20 @@ type MCPConfig struct {
 	// Behavior) even though RankResults is unconditionally called — it is a
 	// pure no-op when RecallRanking.Enabled is false.
 	RecallRanking config.RankingConfig
+
+	// AnchorProbe resolves optional mem_save `code_anchors` into persisted
+	// memory_anchors rows (omnia-structural-forgetting, PR1 — the write
+	// side only). nil (the default) falls back to a lazily-constructed real
+	// anchor.NewProbe() (real git shell-out) inside handleSave. Declared as
+	// the AnchorCapturer interface — not the concrete *anchor.Probe type —
+	// so tests can inject a fake without needing anchor.Probe's unexported
+	// runGit field. Anchor capture is unconditional whenever a mem_save call
+	// supplies code_anchors, and is best-effort: any capture failure (no
+	// git, not a repo, bad range, symbol not found, etc.) is logged and
+	// swallowed — mem_save itself must NEVER fail because of anchoring
+	// (REQ-002 graceful degradation). Omitting code_anchors leaves the save
+	// byte-identical to today regardless of this field.
+	AnchorProbe AnchorCapturer
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -445,6 +460,19 @@ Examples:
 				),
 				mcp.WithString("source",
 					mcp.Description("Write-time provenance class: user | agent | ingest:tool | ingest:web | ingest:doc. Classified into a trust_tag at save time (attribution, not authentication — never blocks or alters the save). Omitted or unrecognized values default to trust_tag=unverified."),
+				),
+				mcp.WithArray("code_anchors",
+					mcp.Description(`Optional list of code anchors to link this memory to: [{file, symbol, line_start, line_end}]. Each entry resolves a git-blame line range, blame SHA, and content hash via the local git repo and persists it linked to this memory (living-memory / structural-forgetting). Omitting this field leaves mem_save unchanged. A missing git binary, a non-repo directory, or a malformed entry never fails the save — that entry (or all of them) is silently skipped.`),
+					mcp.Items(map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"file":       map[string]any{"type": "string", "description": "File path, relative to the repo root (e.g. 'internal/auth/middleware.go')."},
+							"symbol":     map[string]any{"type": "string", "description": "Optional symbol name (function/type/etc) this anchor targets."},
+							"line_start": map[string]any{"type": "number", "description": "1-based start line of the anchored range."},
+							"line_end":   map[string]any{"type": "number", "description": "1-based end line of the anchored range (inclusive)."},
+						},
+						"required": []string{"file", "line_start", "line_end"},
+					}),
 				),
 			),
 			queuedWriteHandler(writeQueue, handleSave(s, cfg, activity)),
@@ -1640,6 +1668,25 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			if obs.Outcome != nil {
 				extra["outcome"] = *obs.Outcome
 			}
+		}
+
+		// Optional code anchor capture (omnia-structural-forgetting, PR1 —
+		// write side only). Unconditional whenever code_anchors is supplied;
+		// omitting it leaves the envelope byte-identical to today. Capture
+		// failures (no git, not a repo, bad range, symbol not found, etc.)
+		// are logged and swallowed — mem_save MUST NEVER fail because of
+		// anchoring (REQ-002 graceful degradation).
+		if anchorInputs := parseCodeAnchorsArg(req); len(anchorInputs) > 0 && savedSyncID != "" {
+			probe := cfg.AnchorProbe
+			if probe == nil {
+				probe = anchor.NewProbe()
+			}
+			adapter := &AnchorCaptureAdapter{Probe: probe, Store: s}
+			captured, capErrs := adapter.Capture(ctx, currentWorkingDirectory(), savedSyncID, anchorInputs)
+			for _, capErr := range capErrs {
+				fmt.Fprintf(os.Stderr, "engram: code_anchors capture error (non-fatal): %v\n", capErr)
+			}
+			extra["anchors_captured"] = captured
 		}
 
 		if len(candidates) > 0 {
