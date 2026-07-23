@@ -62,6 +62,33 @@ type Config struct {
 	// behavior change vs today (backward-compatible default, mirroring
 	// Recall.Enabled/Ranking.Enabled's own off-by-default convention).
 	StructuralForgetting StructuralForgettingConfig `yaml:"structural_forgetting"`
+	// Procedural configures the omnia-procedural-memory playbook/anti-playbook
+	// slot (design obs #1602, spec obs #1606). Disabled by default: with the
+	// flag off (or entirely absent), nothing is induced from a bugfix
+	// `outcome` and nothing auto-injects at retrieval — `mem_save`,
+	// `mem_update`, `mem_search`, `mem_context` behave identically to their
+	// pre-existing contracts (backward-compatibility domain, mirroring
+	// Recall.Enabled/Ranking.Enabled/StructuralForgetting.Enabled's own
+	// off-by-default convention).
+	Procedural ProceduralConfig `yaml:"procedural"`
+}
+
+// ProceduralConfig gates and tunes the procedural-memory governance gate
+// (SSGM): TrustThreshold confirmed reuses promote a candidate procedure to
+// trusted; ConfidenceFloor auto-retires a contradicted/decayed one;
+// ReviewAfterDays is the spaced-repetition window an unused trusted
+// procedure decays on. Defaults mirror internal/store's own
+// defaultProceduralTrustThreshold/defaultProceduralConfidenceFloor/
+// defaultProceduralReviewAfterDays constants (duplicated, not imported —
+// internal/config stays a plain config leaf, same convention RecallConfig's
+// doc comment documents for its own RRFK/DenseK/floor constants). Per
+// design.md's Open Questions, these seed values need one empirical tuning
+// pass against the live corpus.
+type ProceduralConfig struct {
+	Enabled         bool    `yaml:"enabled"`
+	TrustThreshold  int     `yaml:"trust_threshold"`
+	ConfidenceFloor float64 `yaml:"confidence_floor"`
+	ReviewAfterDays int     `yaml:"review_after_days"`
 }
 
 // StructuralForgettingConfig gates memory-structural-forgetting's recall
@@ -474,6 +501,23 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Recall.Ranking.RecencyHalfLifeDays == 0 {
 		cfg.Recall.Ranking.RecencyHalfLifeDays = 14
+	}
+	// Procedural.Enabled intentionally has NO default override — its zero
+	// value (false) IS the default, mirroring Recall.Enabled/Ranking.Enabled's
+	// own convention above. Only the governance-tuning params get defaults, so
+	// an operator who opts in by setting only `procedural: { enabled: true }`
+	// still gets a sane trust_threshold/confidence_floor/review_after_days
+	// instead of zero-valued governance constants that would promote every
+	// candidate on its first reuse (threshold=0) or retire nothing (floor=0
+	// looks like "never retire" only by accident).
+	if cfg.Procedural.TrustThreshold == 0 {
+		cfg.Procedural.TrustThreshold = 3
+	}
+	if cfg.Procedural.ConfidenceFloor == 0 {
+		cfg.Procedural.ConfidenceFloor = 0.15
+	}
+	if cfg.Procedural.ReviewAfterDays == 0 {
+		cfg.Procedural.ReviewAfterDays = 14
 	}
 }
 

@@ -522,15 +522,31 @@ type Config struct {
 	MaxContextResults    int
 	MaxSearchResults     int
 	DedupeWindow         time.Duration
+	// ProceduralTrustThreshold/ProceduralConfidenceFloor/ProceduralReviewAfterDays
+	// mirror internal/config.ProceduralConfig's TrustThreshold/ConfidenceFloor/
+	// ReviewAfterDays defaults (duplicated here, not imported — internal/store
+	// must not depend on internal/config, same convention RecallConfig's own
+	// doc comment documents for its RRFK/DenseK/floor constants). Zero/negative
+	// values are treated as "unset" by ConfirmReuse/Contradict/DecayProcedures,
+	// which fall back to defaultProceduralTrustThreshold/
+	// defaultProceduralConfidenceFloor/defaultProceduralReviewAfterDays — so a
+	// bare Config{} literal (e.g. cmd/omnia/main.go's store.Config{} for
+	// sub-commands that never touch procedures) still behaves safely.
+	ProceduralTrustThreshold  int
+	ProceduralConfidenceFloor float64
+	ProceduralReviewAfterDays int
 }
 
 func DefaultConfig() (Config, error) {
 	return Config{
-		DataDir:              datadir.Resolve(""),
-		MaxObservationLength: 50000,
-		MaxContextResults:    20,
-		MaxSearchResults:     20,
-		DedupeWindow:         15 * time.Minute,
+		DataDir:                   datadir.Resolve(""),
+		MaxObservationLength:      50000,
+		MaxContextResults:         20,
+		MaxSearchResults:          20,
+		DedupeWindow:              15 * time.Minute,
+		ProceduralTrustThreshold:  defaultProceduralTrustThreshold,
+		ProceduralConfidenceFloor: defaultProceduralConfidenceFloor,
+		ProceduralReviewAfterDays: defaultProceduralReviewAfterDays,
 	}, nil
 }
 
@@ -539,11 +555,14 @@ func DefaultConfig() (Config, error) {
 // through alternative means.
 func FallbackConfig(dataDir string) Config {
 	return Config{
-		DataDir:              dataDir,
-		MaxObservationLength: 50000,
-		MaxContextResults:    20,
-		MaxSearchResults:     20,
-		DedupeWindow:         15 * time.Minute,
+		DataDir:                   dataDir,
+		MaxObservationLength:      50000,
+		MaxContextResults:         20,
+		MaxSearchResults:          20,
+		DedupeWindow:              15 * time.Minute,
+		ProceduralTrustThreshold:  defaultProceduralTrustThreshold,
+		ProceduralConfidenceFloor: defaultProceduralConfidenceFloor,
+		ProceduralReviewAfterDays: defaultProceduralReviewAfterDays,
 	}
 }
 
@@ -1321,6 +1340,92 @@ func (s *Store) migrate() error {
 	// a no-op CREATE TABLE IF NOT EXISTS.
 	if err := s.addColumnIfNotExists("memory_anchors", "new_blame_sha", "TEXT"); err != nil {
 		return err
+	}
+
+	// ── omnia-procedural-memory (playbook / anti-playbook procedural slot) ──
+	// Additive CREATE TABLE IF NOT EXISTS for the `procedures` table (design
+	// obs #1602 / spec obs #1606): a verifiable, parameterized program induced
+	// from a bugfix `outcome` (worked→playbook, did_not_work→anti_playbook),
+	// governed by a candidate→trusted→retired state machine — see
+	// UpsertProcedure/ConfirmReuse/Contradict/RetireProcedure/DecayProcedures
+	// in procedures.go. No backfill, no schema break. Local-only this slice
+	// (design decision #6): procedures/procedures_fts intentionally have NO
+	// enqueueSyncMutationTx call and NO SyncEntityProcedure const anywhere in
+	// this codebase, so they never enter the cloud sync payload.
+	//
+	// "trigger" is a SQLite keyword (used by CREATE TRIGGER); it is
+	// double-quoted as an identifier everywhere it appears as a column name
+	// (here, in the FTS5 virtual table, in the sync triggers below, and in
+	// every procedures.go query) to avoid ambiguity with that keyword.
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS procedures (
+			id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+			sync_id             TEXT    NOT NULL UNIQUE,
+			project             TEXT,
+			scope               TEXT    NOT NULL DEFAULT 'project',
+			polarity            TEXT    NOT NULL,
+			"trigger"           TEXT    NOT NULL,
+			steps               TEXT    NOT NULL DEFAULT '[]',
+			steps_summary       TEXT    NOT NULL DEFAULT '',
+			expected_outcome    TEXT,
+			postcondition_kind  TEXT    NOT NULL DEFAULT 'custom',
+			postcondition_expr  TEXT,
+			confidence          REAL    NOT NULL DEFAULT 0,
+			state               TEXT    NOT NULL DEFAULT 'candidate',
+			reuse_confirmed     INTEGER NOT NULL DEFAULT 0,
+			contradicted_count  INTEGER NOT NULL DEFAULT 0,
+			source_obs_sync_ids TEXT    NOT NULL DEFAULT '[]',
+			induced_by_actor    TEXT,
+			induced_by_kind     TEXT,
+			induced_by_model    TEXT,
+			created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+			updated_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+			last_reused_at      TEXT,
+			review_after        TEXT,
+			retired_at          TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_procedures_project  ON procedures(project, scope, state);
+		CREATE INDEX IF NOT EXISTS idx_procedures_polarity ON procedures(polarity, state);
+		CREATE INDEX IF NOT EXISTS idx_procedures_review   ON procedures(state, review_after);
+
+		CREATE VIRTUAL TABLE IF NOT EXISTS procedures_fts USING fts5(
+			"trigger",
+			steps_summary,
+			project,
+			content='procedures',
+			content_rowid='id'
+		);
+	`); err != nil {
+		return err
+	}
+
+	// procedures_fts triggers (idempotent check, mirrors obs_fts_insert above).
+	var procFTSTriggerName string
+	err = s.db.QueryRow(
+		"SELECT name FROM sqlite_master WHERE type='trigger' AND name='proc_fts_insert'",
+	).Scan(&procFTSTriggerName)
+	if err == sql.ErrNoRows {
+		procTriggers := `
+			CREATE TRIGGER proc_fts_insert AFTER INSERT ON procedures BEGIN
+				INSERT INTO procedures_fts(rowid, "trigger", steps_summary, project)
+				VALUES (new.id, new."trigger", new.steps_summary, new.project);
+			END;
+
+			CREATE TRIGGER proc_fts_delete AFTER DELETE ON procedures BEGIN
+				INSERT INTO procedures_fts(procedures_fts, rowid, "trigger", steps_summary, project)
+				VALUES ('delete', old.id, old."trigger", old.steps_summary, old.project);
+			END;
+
+			CREATE TRIGGER proc_fts_update AFTER UPDATE ON procedures BEGIN
+				INSERT INTO procedures_fts(procedures_fts, rowid, "trigger", steps_summary, project)
+				VALUES ('delete', old.id, old."trigger", old.steps_summary, old.project);
+				INSERT INTO procedures_fts(rowid, "trigger", steps_summary, project)
+				VALUES (new.id, new."trigger", new.steps_summary, new.project);
+			END;
+		`
+		if _, err := s.execHook(s.db, procTriggers); err != nil {
+			return err
+		}
 	}
 
 	return nil
