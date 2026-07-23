@@ -21,6 +21,15 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 <!-- Changes that are merged but not yet released are tracked here until the next tag. -->
 
+### Memory provenance foundation (`omnia-provenance-foundation`)
+
+- **feat(store):** every `mem_save`/`AddObservation` now persists a write-time `source` (`user` | `agent` | `ingest:tool` | `ingest:web` | `ingest:doc`) and a derived `trust_tag`, classified via `classifyTrust` — attribution only, never blocks or alters a save; missing/unrecognized source defaults to `unverified`.
+- **feat(store):** hard delete (`DeleteObservation(hard=true)` and the pulled `SyncOpDelete{HardDelete}` path) now writes a durable `deletion_tombstones` proof row alongside the physical purge, independent of the prunable `sync_mutations` journal — replicated on both push and pull.
+- **feat(embed):** add `Store.DeleteBySyncID` — physical vector purge fanned out from `mem_delete(hard_delete=true)`, keeping `internal/store` free of any `internal/embed` import.
+- **feat(mcp):** `mem_save`/`mem_delete` now append an entry to the existing `internal/audit` log (extended with `Source`, `TrustTag`, `SyncID`, `SessionID`, and `ActionRead`/`ActionWrite`) — no parallel audit log.
+- **feat(store):** a freshly created store data directory and database file are now owner-only (`0700`/`0600`); pre-existing looser installs are left as-is and instead flagged by the new `store_exposure` doctor check below.
+- **feat(doctor):** new `store_exposure` check warns when the store directory resolves inside a recognized cloud-backup/sync folder (iCloud Drive, Dropbox, OneDrive) or has group/world-readable permissions. Encrypt-at-rest for content/embeddings is deferred to a later release.
+
 ### Cloud sync
 
 - **fix(cloud):** make chunk and mutation push payload limits configurable with `ENGRAM_CLOUD_MAX_PUSH_BYTES` while preserving the 8 MiB default.

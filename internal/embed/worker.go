@@ -62,6 +62,16 @@ type UpsertHook func(row Row)
 // Start; a nil hook restores the no-op default.
 func (w *Worker) SetUpsertHook(hook UpsertHook) { w.onUpsert = hook }
 
+// Store returns the underlying embeddings store this worker embeds into
+// (memory-provenance foundation, omnia-provenance-foundation). It exists so a
+// caller that already holds a *Worker (e.g. internal/mcp's MCPConfig.AutoEmbed)
+// can fan a physical purge out to the SAME store a save fanned into via
+// Enqueue, without opening a second connection to the embeddings file or this
+// package exposing broader write access. Mirrors enqueueAutoEmbed's existing
+// cfg.AutoEmbed nil-check convention: callers must guard against a nil
+// Worker themselves.
+func (w *Worker) Store() *Store { return w.store }
+
 // NewWorker builds an auto-embed worker. A queueSize <= 0 uses the default.
 func NewWorker(store *Store, emb Embedder, model string, dim, queueSize int, logger *slog.Logger) *Worker {
 	if queueSize <= 0 {

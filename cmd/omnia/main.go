@@ -28,6 +28,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/velion/omnia/internal/audit"
 	"github.com/velion/omnia/internal/cloud/autosync"
 	"github.com/velion/omnia/internal/cloud/constants"
 	"github.com/velion/omnia/internal/cloud/remote"
@@ -40,6 +41,7 @@ import (
 	"github.com/velion/omnia/internal/mcp"
 	"github.com/velion/omnia/internal/obsidian"
 	"github.com/velion/omnia/internal/project"
+	"github.com/velion/omnia/internal/purge"
 	"github.com/velion/omnia/internal/server"
 	"github.com/velion/omnia/internal/setup"
 	"github.com/velion/omnia/internal/store"
@@ -1432,9 +1434,35 @@ func cmdDeleteObservation(cfg store.Config) {
 	}
 	defer s.Close()
 
-	if err := storeDeleteObservation(s, id, hard); err != nil {
-		fatal(err)
-		return
+	if hard {
+		// Hard delete ONLY: store purge + tombstone, embed vector purge
+		// fan-out, and the audit entry are all owned by the shared
+		// internal/purge orchestration helper (omnia-provenance-foundation
+		// review fix, Blocking 1) — the same helper MCP mem_delete and HTTP
+		// DELETE /observations/{id}?hard=true go through, so `omnia delete
+		// --hard` can no longer silently orphan the embedding vector or skip
+		// auditing.
+		var embedStore purge.EmbedPurger
+		if es := buildCLIEmbedPurgeStore(cfg.DataDir); es != nil {
+			embedStore = es
+			defer es.Close()
+		}
+		if err := purge.HardDeleteWithPurge(context.Background(), s, embedStore, audit.Append, "cli", id); err != nil {
+			if errors.Is(err, purge.ErrEmbedPurgeFailed) {
+				// The row + tombstone already committed — only the vector
+				// purge failed (Blocking 2: report honestly on stderr
+				// instead of silently swallowing it).
+				fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+			} else {
+				fatal(err)
+				return
+			}
+		}
+	} else {
+		if err := storeDeleteObservation(s, id, false); err != nil {
+			fatal(err)
+			return
+		}
 	}
 
 	kind := "soft-deleted"

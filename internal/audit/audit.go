@@ -18,17 +18,34 @@ const (
 	ActionEdit       Action = "edit"
 	ActionSoftDelete Action = "soft_delete"
 	ActionHardDelete Action = "hard_delete"
+	// ActionRead and ActionWrite extend the taxonomy for the memory-provenance
+	// foundation (omnia-provenance-foundation). ActionWrite is appended by
+	// mem_save (internal/mcp handleSave); ActionRead is a taxonomy constant
+	// only — no read call-site appends it yet (open question, tracked in the
+	// spec's risk note: wiring read-path auditing is deferred).
+	ActionRead  Action = "read"
+	ActionWrite Action = "write"
 )
 
 // Entry is a single audit log record.
 type Entry struct {
-	Ts            string `json:"ts"`             // RFC3339
-	Actor         string `json:"actor"`           // provisional identity
-	Action        Action `json:"action"`          // edit|soft_delete|hard_delete
+	Ts            string `json:"ts"`     // RFC3339
+	Actor         string `json:"actor"`  // provisional identity
+	Action        Action `json:"action"` // edit|soft_delete|hard_delete|read|write
 	ObservationID int    `json:"observation_id"`
 	Project       string `json:"project"`
-	Summary       string `json:"summary"`         // short before/after for edits, title for deletes; never full content
-	Result        string `json:"result"`          // "ok" | "error"
+	Summary       string `json:"summary"` // short before/after for edits, title for deletes; never full content
+	Result        string `json:"result"`  // "ok" | "error"
+	// Source, TrustTag, SyncID, and SessionID carry write-time provenance
+	// (omnia-provenance-foundation): the attribution class and derived trust
+	// tag recorded on mem_save, plus the observation's portable sync_id and
+	// the originating session. All four are additive and omitempty so
+	// existing JSONL lines (written before this field set existed) still
+	// unmarshal cleanly — an old line simply reads these as "".
+	Source    string `json:"source,omitempty"`
+	TrustTag  string `json:"trust_tag,omitempty"`
+	SyncID    string `json:"sync_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // defaultLogPath returns ~/.local/state/omnia/audit.jsonl.
