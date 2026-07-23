@@ -14,12 +14,19 @@ const (
 	CheckManualSessionNameProjectMismatch = "manual_session_name_project_mismatch"
 	CheckSyncMutationRequiredFields       = "sync_mutation_required_fields"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
+	// CheckStoreExposure is the memory-provenance foundation
+	// (omnia-provenance-foundation) hardening check: flags a store directory
+	// living inside a recognized cloud-backup/sync folder or having
+	// group/world-readable permissions. Encrypt-at-rest is deferred to 0.3
+	// (see design.md) — this check is the 0.2 mitigation instead.
+	CheckStoreExposure = "store_exposure"
 )
 
 type SessionProjectDirectoryMismatchCheck struct{}
 type ManualSessionNameProjectMismatchCheck struct{}
 type SyncMutationRequiredFieldsCheck struct{}
 type SQLiteLockContentionCheck struct{}
+type StoreExposureCheck struct{}
 
 func (SessionProjectDirectoryMismatchCheck) Code() string {
 	return CheckSessionProjectDirectoryMismatch
@@ -29,6 +36,75 @@ func (ManualSessionNameProjectMismatchCheck) Code() string {
 }
 func (SyncMutationRequiredFieldsCheck) Code() string { return CheckSyncMutationRequiredFields }
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
+func (StoreExposureCheck) Code() string              { return CheckStoreExposure }
+
+// cloudSyncPathMarkers are path substrings indicating the store directory
+// lives inside a recognized cloud-backup/sync folder, where a background
+// sync agent could silently replicate the local SQLite file (raw memory
+// content + embedding vectors) to a third-party cloud service — entirely
+// outside Omnia's own sync/encryption posture.
+var cloudSyncPathMarkers = []string{
+	"Mobile Documents/com~apple~CloudDocs",
+	"Dropbox",
+	"OneDrive",
+}
+
+// storeFileStat abstracts os.Stat so tests could substitute a fake if ever
+// needed; today it is always os.Stat (kept as a var for consistency with
+// this file's other injectable seams, e.g. scope.ReadSQLiteLockSnapshot).
+var storeFileStat = os.Stat
+
+func (c StoreExposureCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	dir := scope.Store.DataDir()
+	dbPath := scope.Store.DBPath()
+
+	findings := make([]Finding, 0)
+
+	for _, marker := range cloudSyncPathMarkers {
+		if strings.Contains(dir, marker) {
+			findings = append(findings, Finding{
+				CheckID:              c.Code(),
+				Severity:             SeverityWarning,
+				ReasonCode:           "store_path_cloud_synced",
+				Message:              "Store directory resolves inside a recognized cloud-backup/sync folder.",
+				Why:                  "A background cloud-sync agent (iCloud Drive, Dropbox, OneDrive) can silently replicate the local SQLite database file to a third-party service, bypassing Omnia's own sync/encryption posture entirely.",
+				Evidence:             mustJSON(map[string]any{"data_dir": dir, "matched_marker": marker}),
+				SafeNextStep:         "Move the Omnia data directory (OMNIA_DATA_DIR) outside any cloud-sync folder.",
+				RequiresConfirmation: true,
+			})
+			break
+		}
+	}
+
+	if info, err := storeFileStat(dir); err == nil && info.Mode().Perm()&0o077 != 0 {
+		findings = append(findings, Finding{
+			CheckID:              c.Code(),
+			Severity:             SeverityWarning,
+			ReasonCode:           "store_dir_group_or_world_readable",
+			Message:              "Store directory is group- or world-readable/writable.",
+			Why:                  "A group/world-readable data directory lets other local accounts read or tamper with memory content and embeddings.",
+			Evidence:             mustJSON(map[string]any{"data_dir": dir, "mode": info.Mode().Perm().String()}),
+			SafeNextStep:         "Run `chmod 700` on the Omnia data directory.",
+			RequiresConfirmation: true,
+		})
+	}
+
+	if info, err := storeFileStat(dbPath); err == nil && info.Mode().Perm()&0o077 != 0 {
+		findings = append(findings, Finding{
+			CheckID:              c.Code(),
+			Severity:             SeverityWarning,
+			ReasonCode:           "store_db_file_group_or_world_readable",
+			Message:              "Store database file is group- or world-readable/writable.",
+			Why:                  "A group/world-readable database file lets other local accounts read raw memory content and embeddings directly.",
+			Evidence:             mustJSON(map[string]any{"db_path": dbPath, "mode": info.Mode().Perm().String()}),
+			SafeNextStep:         "Run `chmod 600` on the Omnia database file.",
+			RequiresConfirmation: true,
+		})
+	}
+
+	return resultFromFindings(c.Code(), map[string]any{"data_dir": dir}, findings), nil
+}
 
 func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
 	_ = ctx

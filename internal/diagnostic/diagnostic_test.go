@@ -3,6 +3,7 @@ package diagnostic
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +17,15 @@ func newDiagnosticTestStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatalf("DefaultConfig: %v", err)
 	}
-	cfg.DataDir = t.TempDir()
+	// A NOT-yet-existing subdirectory of t.TempDir() — t.TempDir() itself is
+	// 0755 on this toolchain (its group/world-execute bits are not something
+	// store.New's MkdirAll can retroactively tighten for an ALREADY-existing
+	// path). Using a fresh child dir lets New()'s owner-only MkdirAll
+	// (memory-provenance foundation, omnia-provenance-foundation) actually
+	// apply, so this shared fixture reflects a real fresh-install store and
+	// StoreExposureCheck's permission finding doesn't spuriously fire across
+	// every other test that reuses this helper.
+	cfg.DataDir = filepath.Join(t.TempDir(), "store")
 	s, err := store.New(cfg)
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
@@ -75,7 +84,8 @@ func TestSQLiteLockContentionBranches(t *testing.T) {
 
 func TestRegistryLookupAndOrdering(t *testing.T) {
 	codes := RegisteredCodes()
-	want := []string{CheckManualSessionNameProjectMismatch, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields}
+	// Alphabetical: manual_... < session_... < sqlite_... < store_... < sync_...
+	want := []string{CheckManualSessionNameProjectMismatch, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckStoreExposure, CheckSyncMutationRequiredFields}
 	if strings.Join(codes, ",") != strings.Join(want, ",") {
 		t.Fatalf("RegisteredCodes = %v, want %v", codes, want)
 	}
@@ -144,7 +154,10 @@ func TestRunnerRunAllHealthyEvaluatesEveryMVPCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunAll: %v", err)
 	}
-	if report.Status != StatusOK || report.Summary.OK != 4 || len(report.Checks) != 4 {
+	// 5 checks since omnia-provenance-foundation added StoreExposureCheck;
+	// the test store's fresh, owner-only temp dir (outside any cloud-sync
+	// folder) evaluates OK for it, so every check stays OK end-to-end.
+	if report.Status != StatusOK || report.Summary.OK != 5 || len(report.Checks) != 5 {
 		t.Fatalf("report=%+v", report)
 	}
 	for _, check := range report.Checks {

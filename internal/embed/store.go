@@ -385,6 +385,25 @@ func (s *Store) GraphScoped(projects []string, k int, minScore float32) ([]Graph
 	return nodes, edges, nil
 }
 
+// DeleteBySyncID physically removes a single row by sync_id (memory-provenance
+// foundation, omnia-provenance-foundation): the fan-out target for a hard
+// delete. A real DELETE — not a soft/mark — because a soft-deleted vector is
+// still reconstructible (design obs #1601's "Ghost Vectors" concern) and
+// hard-delete's whole point is a provable physical purge. Deleting a sync_id
+// that was never embedded (embeddings disabled, or not yet reconciled) is a
+// no-op, not an error: 0 rows removed, nil error.
+func (s *Store) DeleteBySyncID(ctx context.Context, syncID string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM embeddings WHERE sync_id = ?`, syncID)
+	if err != nil {
+		return 0, fmt.Errorf("embed: DeleteBySyncID %s: %w", syncID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("embed: DeleteBySyncID %s rows affected: %w", syncID, err)
+	}
+	return int(n), nil
+}
+
 // Prune deletes rows whose sync_id is not in liveSyncIDs. Returns rows removed.
 func (s *Store) Prune(ctx context.Context, liveSyncIDs []string) (int, error) {
 	live := make(map[string]struct{}, len(liveSyncIDs))

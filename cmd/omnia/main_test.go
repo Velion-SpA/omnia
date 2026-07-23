@@ -11,6 +11,7 @@ import (
 	"time"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/velion/omnia/internal/audit"
 	"github.com/velion/omnia/internal/mcp"
 	"github.com/velion/omnia/internal/obsidian"
 	"github.com/velion/omnia/internal/setup"
@@ -1477,6 +1478,16 @@ func TestCmdDeleteSoftDeleteSuccess(t *testing.T) {
 }
 
 func TestCmdDeleteHardDeleteSuccess(t *testing.T) {
+	// Hard delete now goes through internal/purge.HardDeleteWithPurge
+	// (omnia-provenance-foundation review fix, Blocking 1/2), which calls
+	// loadAppConfigWithRecallAutodetect (reads $HOME/.config/omnia/config.yaml)
+	// and audit.Append (writes $HOME/.local/state/omnia/audit.jsonl).
+	// Isolating HOME keeps this test hermetic — it must never read the
+	// developer machine's real config/embeddings.db or pollute the real
+	// audit log, mirroring stubRuntimeHooks' rationale for
+	// loadAppConfigWithRecallAutodetect elsewhere in this package.
+	t.Setenv("HOME", t.TempDir())
+
 	cfg := testConfig(t)
 	id := mustSeedObservation(t, cfg, "s-del2", "proj-del2", "decision", "hard-delete", "hard delete me", "project")
 
@@ -1490,6 +1501,27 @@ func TestCmdDeleteHardDeleteSuccess(t *testing.T) {
 	}
 	if !strings.Contains(stdout, strconv.FormatInt(id, 10)) {
 		t.Fatalf("expected id in output, got: %q", stdout)
+	}
+
+	// omnia-provenance-foundation review fix, Blocking 1: `omnia delete
+	// --hard` used to write NO audit entry at all. It must now audit exactly
+	// like MCP mem_delete / HTTP DELETE ?hard=true do, via the shared
+	// internal/purge.HardDeleteWithPurge helper.
+	entries, err := audit.EntriesForObservation(int(id))
+	if err != nil {
+		t.Fatalf("EntriesForObservation: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 audit entry for the hard-deleted observation, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Action != audit.ActionHardDelete {
+		t.Errorf("Action = %q, want %q", entries[0].Action, audit.ActionHardDelete)
+	}
+	if entries[0].Actor != "cli" {
+		t.Errorf("Actor = %q, want %q", entries[0].Actor, "cli")
+	}
+	if entries[0].Result != "ok" {
+		t.Errorf("Result = %q, want %q", entries[0].Result, "ok")
 	}
 }
 

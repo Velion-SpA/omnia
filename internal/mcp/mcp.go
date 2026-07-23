@@ -26,10 +26,12 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/velion/omnia/internal/audit"
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/diagnostic"
 	"github.com/velion/omnia/internal/embed"
 	projectpkg "github.com/velion/omnia/internal/project"
+	"github.com/velion/omnia/internal/purge"
 	"github.com/velion/omnia/internal/recall"
 	"github.com/velion/omnia/internal/store"
 	"github.com/velion/omnia/internal/timeutil"
@@ -98,6 +100,14 @@ var addPromptIfMissing = func(s *store.Store, params store.AddPromptParams) (int
 var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
+
+// auditAppend is the injectable seam over audit.Append (memory-provenance
+// foundation, omnia-provenance-foundation) so save/delete audit-append call
+// sites are testable without touching the real ~/.local/state/omnia/audit.jsonl
+// file. audit.Append itself never returns an error and swallows failures
+// internally (logs to stderr) — this seam does not change that contract, it
+// only makes the call observable in tests via a stub.
+var auditAppend = audit.Append
 
 func currentWorkingDirectory() string {
 	cwd, err := os.Getwd()
@@ -433,6 +443,9 @@ Examples:
 				mcp.WithString("outcome",
 					mcp.Description("Optional outcome for a bugfix-family save: worked | did_not_work | unknown (default). A fix marked worked ranks above unrecorded/unknown fixes in mem_search; did_not_work ranks below. Use mem_update to set this later once a fix has been verified."),
 				),
+				mcp.WithString("source",
+					mcp.Description("Write-time provenance class: user | agent | ingest:tool | ingest:web | ingest:doc. Classified into a trust_tag at save time (attribution, not authentication — never blocks or alters the save). Omitted or unrecognized values default to trust_tag=unverified."),
+				),
 			),
 			queuedWriteHandler(writeQueue, handleSave(s, cfg, activity)),
 		)
@@ -541,7 +554,7 @@ Examples:
 					mcp.Description("If true, permanently deletes the observation"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleDelete(s)),
+			queuedWriteHandler(writeQueue, handleDelete(s, cfg)),
 		)
 	}
 
@@ -1446,6 +1459,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		topicKey, _ := req.GetArguments()["topic_key"].(string)
 		errorSignature, _ := req.GetArguments()["error_signature"].(string)
 		outcome, _ := req.GetArguments()["outcome"].(string)
+		source, _ := req.GetArguments()["source"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
 		_, explicitProjectProvided := req.GetArguments()["project"]
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
@@ -1518,6 +1532,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			TopicKey:       topicKey,
 			ErrorSignature: errorSignature,
 			Outcome:        outcome,
+			Source:         source,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
@@ -1527,6 +1542,31 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// becomes semantically searchable within seconds without slowing the
 		// save. No-op when embeddings are disabled.
 		enqueueAutoEmbed(cfg, s, savedID)
+
+		// Write-time provenance audit (memory-provenance foundation,
+		// omnia-provenance-foundation): source was already classified into
+		// trust_tag inside AddObservation (store.classifyTrust); read the
+		// persisted values back here so the audit entry always reflects what
+		// was actually stored, not what the caller asked for. Reuses
+		// internal/audit — no parallel log. auditAppend/audit.Append never
+		// returns an error and swallows failures internally (logs to
+		// stderr), so a failing audit write can never block or roll back
+		// this save.
+		if savedObs, obsErr := s.GetObservation(savedID); obsErr == nil {
+			auditAppend(audit.Entry{
+				Ts:            audit.Now(),
+				Actor:         "mcp",
+				Action:        audit.ActionWrite,
+				ObservationID: int(savedID),
+				Project:       project,
+				Summary:       title,
+				Result:        "ok",
+				Source:        strFromPtr(savedObs.Source),
+				TrustTag:      strFromPtr(savedObs.TrustTag),
+				SyncID:        savedObs.SyncID,
+				SessionID:     sessionID,
+			})
+		}
 
 		if capturePrompt && activity != nil {
 			if prompt, ok := activity.CurrentPrompt(sessionID, project); ok {
@@ -1811,7 +1851,7 @@ func handleReview(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	}
 }
 
-func handleDelete(s *store.Store) server.ToolHandlerFunc {
+func handleDelete(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
@@ -1819,15 +1859,68 @@ func handleDelete(s *store.Store) server.ToolHandlerFunc {
 		}
 
 		hardDelete := boolArg(req, "hard_delete", false)
-		if err := s.DeleteObservation(id, hardDelete); err != nil {
+
+		if hardDelete {
+			// Hard delete ONLY: store purge + tombstone, embed vector purge
+			// fan-out, and the audit entry are all owned by the shared
+			// internal/purge orchestration helper so this path can never
+			// silently regress on any of the three (omnia-provenance-foundation
+			// review fix, Blocking 1) — the exact same helper HTTP
+			// DELETE /observations/{id}?hard=true and `omnia delete --hard`
+			// go through. A disabled/absent embeddings worker makes the
+			// vector purge a no-op, mirroring enqueueAutoEmbed's
+			// cfg.AutoEmbed nil-guard: there is nothing to purge if nothing
+			// was ever embedded.
+			var embedStore purge.EmbedPurger
+			if cfg.AutoEmbed != nil {
+				embedStore = cfg.AutoEmbed.Store()
+			}
+			if err := purge.HardDeleteWithPurge(ctx, s, embedStore, auditAppend, "mcp", id); err != nil {
+				if errors.Is(err, purge.ErrEmbedPurgeFailed) {
+					// The row + tombstone already committed — only the
+					// vector purge failed (Blocking 2: report honestly
+					// instead of swallowing it as an unconditional "ok").
+					return mcp.NewToolResultText(fmt.Sprintf("Memory #%d permanently deleted (warning: %v)", id, err)), nil
+				}
+				return mcp.NewToolResultError("Failed to delete memory: " + err.Error()), nil
+			}
+			return mcp.NewToolResultText(fmt.Sprintf("Memory #%d permanently deleted", id)), nil
+		}
+
+		// Soft delete stays out of the purge helper entirely — it is out of
+		// physical-purge scope per spec (no tombstone, no vector purge) and
+		// only needs its own audit entry.
+		//
+		// Fetch the observation BEFORE deleting it so we still have its
+		// sync_id/project/title for the audit entry below — after
+		// DeleteObservation the row's deleted_at is set (still readable, but
+		// no need to re-fetch).
+		preDelete, preErr := s.GetObservation(id)
+
+		if err := s.DeleteObservation(id, false); err != nil {
 			return mcp.NewToolResultError("Failed to delete memory: " + err.Error()), nil
 		}
 
-		mode := "soft-deleted"
-		if hardDelete {
-			mode = "permanently deleted"
+		// Audit soft delete via the existing audit log (no parallel log) —
+		// auditAppend/audit.Append never returns an error and swallows
+		// failures internally, so this can never block the delete that
+		// already succeeded above.
+		if preErr == nil {
+			auditAppend(audit.Entry{
+				Ts:            audit.Now(),
+				Actor:         "mcp",
+				Action:        audit.ActionSoftDelete,
+				ObservationID: int(id),
+				Project:       strFromPtr(preDelete.Project),
+				Summary:       preDelete.Title,
+				Result:        "ok",
+				Source:        strFromPtr(preDelete.Source),
+				TrustTag:      strFromPtr(preDelete.TrustTag),
+				SyncID:        preDelete.SyncID,
+			})
 		}
-		return mcp.NewToolResultText(fmt.Sprintf("Memory #%d %s", id, mode)), nil
+
+		return mcp.NewToolResultText(fmt.Sprintf("Memory #%d soft-deleted", id)), nil
 	}
 }
 

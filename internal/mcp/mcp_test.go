@@ -1052,7 +1052,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 		t.Fatalf("unexpected get error: %s", callResultText(t, getRes))
 	}
 
-	deleteHandler := handleDelete(s)
+	deleteHandler := handleDelete(s, MCPConfig{})
 	delReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":          float64(obsID),
 		"hard_delete": true,
@@ -1349,7 +1349,7 @@ func TestMCPHandlersErrorBranches(t *testing.T) {
 		t.Fatalf("expected update no fields to return tool error")
 	}
 
-	deleteHandler := handleDelete(s)
+	deleteHandler := handleDelete(s, MCPConfig{})
 	delMissingIDRes, err := deleteHandler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}})
 	if err != nil {
 		t.Fatalf("delete missing id error: %v", err)
@@ -1423,7 +1423,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected update to return tool error when store is closed")
 	}
 
-	deleteRes, err := handleDelete(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0}}})
+	deleteRes, err := handleDelete(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0}}})
 	if err != nil {
 		t.Fatalf("closed store delete call: %v", err)
 	}

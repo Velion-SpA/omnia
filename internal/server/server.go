@@ -21,10 +21,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/velion/omnia/internal/audit"
 	"github.com/velion/omnia/internal/diagnostic"
 	"github.com/velion/omnia/internal/embed"
 	"github.com/velion/omnia/internal/envx"
 	projectpkg "github.com/velion/omnia/internal/project"
+	"github.com/velion/omnia/internal/purge"
 	"github.com/velion/omnia/internal/store"
 )
 
@@ -555,7 +557,52 @@ func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request)
 	}
 
 	hard := queryBool(r, "hard", false)
-	if err := s.store.DeleteObservation(id, hard); err != nil {
+
+	if hard {
+		// Hard delete ONLY: store purge + tombstone, embed vector purge
+		// fan-out, and the audit entry are all owned by the shared
+		// internal/purge orchestration helper (omnia-provenance-foundation
+		// review fix, Blocking 1) — the same helper MCP mem_delete and
+		// `omnia delete --hard` go through, so this HTTP path (also used by
+		// the dashboard's hard-delete button, internal/dashboard/engram.go)
+		// can no longer silently orphan the embedding vector or skip
+		// auditing. A disabled/absent auto-embed worker makes the vector
+		// purge a no-op, mirroring enqueueAutoEmbed's nil-guard convention.
+		var embedStore purge.EmbedPurger
+		if s.autoEmbed != nil {
+			embedStore = s.autoEmbed.Store()
+		}
+		if err := purge.HardDeleteWithPurge(r.Context(), s.store, embedStore, audit.Append, "http", id); err != nil {
+			if errors.Is(err, store.ErrObservationNotFound) {
+				jsonError(w, http.StatusNotFound, err.Error())
+				return
+			}
+			if errors.Is(err, purge.ErrEmbedPurgeFailed) {
+				// The row + tombstone already committed — only the vector
+				// purge failed (Blocking 2: report honestly instead of an
+				// unconditional 200-with-no-warning).
+				s.notifyWrite()
+				jsonResponse(w, http.StatusOK, map[string]any{
+					"id":          id,
+					"status":      "deleted",
+					"hard_delete": true,
+					"warning":     err.Error(),
+				})
+				return
+			}
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.notifyWrite()
+		jsonResponse(w, http.StatusOK, map[string]any{
+			"id":          id,
+			"status":      "deleted",
+			"hard_delete": true,
+		})
+		return
+	}
+
+	if err := s.store.DeleteObservation(id, false); err != nil {
 		switch {
 		case errors.Is(err, store.ErrObservationNotFound):
 			jsonError(w, http.StatusNotFound, err.Error())
@@ -569,7 +616,7 @@ func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request)
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"id":          id,
 		"status":      "deleted",
-		"hard_delete": hard,
+		"hard_delete": false,
 	})
 }
 

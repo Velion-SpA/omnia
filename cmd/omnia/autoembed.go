@@ -75,6 +75,44 @@ func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig, s *store.Store, dataDi
 	return worker
 }
 
+// buildCLIEmbedPurgeStore resolves an embed.Store handle for a one-shot CLI
+// hard-delete purge (`omnia delete --hard`, omnia-provenance-foundation
+// review fix, Blocking 1: the CLI path used to call store.DeleteObservation
+// directly and silently orphan the embedding vector). Unlike
+// buildAutoEmbedWorker, this never starts an Ollama client or a background
+// worker — `omnia delete` is a one-shot command, not a long-lived process,
+// and purging a single vector by sync_id needs nothing but a direct store
+// handle.
+//
+// It is a var (mirroring this file's storeNew/storeDeleteObservation
+// injection convention) so tests can stub it instead of depending on the
+// developer machine's real ~/.config/omnia/config.yaml and
+// ~/.local/share/omnia/embeddings.db — the exact footgun stubRuntimeHooks
+// already guards cmdSearch/cmdServe against (main_extra_test.go).
+//
+// Returns nil when embeddings are disabled, misconfigured, or the store is
+// unavailable — the purge fan-out then becomes a no-op, exactly like every
+// other disabled-embeddings code path in this codebase (fail closed: a
+// missing/broken embeddings store must never fail the delete itself). The
+// caller owns closing the returned store when non-nil.
+var buildCLIEmbedPurgeStore = func(dataDir string) *embed.Store {
+	appCfg, err := loadAppConfigWithRecallAutodetect()
+	if err != nil || !appCfg.Embeddings.Enabled {
+		return nil
+	}
+	if err := config.ValidateEmbeddings(appCfg.Embeddings); err != nil {
+		log.Printf("[delete] invalid embeddings config (%v); vector purge skipped", err)
+		return nil
+	}
+	dbPath := config.ResolveEmbeddingsDBPath(appCfg.Embeddings.DBPath, dataDir)
+	embStore, err := embed.OpenStore(dbPath)
+	if err != nil {
+		log.Printf("[delete] embeddings store unavailable (%v); vector purge skipped", err)
+		return nil
+	}
+	return embStore
+}
+
 // buildEmbeddingSyncHook returns an embed.UpsertHook that records a
 // SyncEntityEmbedding sync mutation for every successfully upserted row via
 // s.EnqueueEmbeddingMutation, exactly as JudgeRelation does for relations

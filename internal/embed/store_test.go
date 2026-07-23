@@ -140,6 +140,71 @@ func TestStore_Upsert_ReplacesBySyncID(t *testing.T) {
 	}
 }
 
+// TestStore_DeleteBySyncID (omnia-provenance-foundation, phase 5): the fan-out
+// target for handleDelete's hard-delete purge — physically removes a single
+// row by sync_id so a hard-deleted memory's vector cannot be reconstructed
+// (design obs #1601's "Ghost Vectors" concern: soft/mark-deleted vectors are
+// still recoverable, so this must be a real DELETE).
+func TestStore_DeleteBySyncID(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	mustUpsert(t, store, unitRow("keep", 1, []float32{1, 0, 0}))
+	mustUpsert(t, store, unitRow("purge-me", 2, []float32{0, 1, 0}))
+
+	removed, err := store.DeleteBySyncID(ctx, "purge-me")
+	if err != nil {
+		t.Fatalf("DeleteBySyncID: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("DeleteBySyncID removed: got %d, want 1", removed)
+	}
+
+	n, err := store.Count(ctx)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("Count after DeleteBySyncID: got %d, want 1 (only 'keep' should remain)", n)
+	}
+
+	stored, err := store.Stored(ctx)
+	if err != nil {
+		t.Fatalf("Stored: %v", err)
+	}
+	if _, ok := stored["purge-me"]; ok {
+		t.Error("expected 'purge-me' to be gone from Stored()")
+	}
+	if _, ok := stored["keep"]; !ok {
+		t.Error("expected 'keep' to remain")
+	}
+}
+
+// TestStore_DeleteBySyncID_UnknownSyncIDIsNoop (omnia-provenance-foundation,
+// phase 5): deleting a sync_id that was never embedded (e.g. embeddings
+// disabled, or the reconcile backstop hasn't run yet) must not error — the
+// fan-out from handleDelete must never fail the delete itself.
+func TestStore_DeleteBySyncID_UnknownSyncIDIsNoop(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	removed, err := store.DeleteBySyncID(ctx, "never-embedded")
+	if err != nil {
+		t.Fatalf("DeleteBySyncID on unknown sync_id must not error: %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("DeleteBySyncID removed: got %d, want 0", removed)
+	}
+}
+
 func TestStore_Prune(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenStore(t.TempDir() + "/emb.db")

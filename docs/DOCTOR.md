@@ -63,6 +63,7 @@ The CLI `--json` and MCP tool return:
 - `manual_session_name_project_mismatch` — warns when a `manual-save-{suffix}` session name disagrees with `sessions.project`.
 - `sync_mutation_required_fields` — blocks when a pending `sync_mutations.payload` is missing required fields.
 - `sqlite_lock_contention` — warns on conservative SQLite contention signals; returns an error if lock state cannot be evaluated.
+- `store_exposure` — warns when the store directory resolves inside a recognized cloud-backup/sync folder (iCloud Drive, Dropbox, OneDrive) or when the store directory/database file is group- or world-readable. Encrypt-at-rest is deferred to a later release; this check plus owner-only file permissions on a fresh install are the current mitigation.
 
 ## Safety
 

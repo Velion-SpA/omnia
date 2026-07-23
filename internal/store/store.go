@@ -115,6 +115,13 @@ type Observation struct {
 	// exactly as before this slice.
 	ErrorSignature *string `json:"error_signature,omitempty"`
 	Outcome        *string `json:"outcome,omitempty"`
+	// Source and TrustTag support the memory-provenance foundation
+	// (omnia-provenance-foundation): write-time attribution captured at
+	// AddObservation, not retrieval time. Both nullable/additive — existing
+	// rows have NULL Source and read TrustTag as "unverified" via
+	// classifyTrust's default, exactly as before this slice.
+	Source   *string `json:"source,omitempty"`
+	TrustTag *string `json:"trust_tag,omitempty"`
 }
 
 const (
@@ -216,6 +223,14 @@ type AddObservationParams struct {
 	// Outcome is one of "worked", "did_not_work", "unknown", or empty
 	// (default). Invalid values are rejected.
 	Outcome string `json:"outcome,omitempty"`
+	// Source is the write-time provenance class (omnia-provenance-foundation):
+	// "user", "agent", "ingest:tool", "ingest:web", "ingest:doc". Classified
+	// into TrustTag via classifyTrust — absent or unrecognized values default
+	// to "unverified" (attribution, not authentication: never rejects a
+	// save). Empty means "not provided": on a topic_key revision this
+	// PRESERVES the previously stored source/trust_tag rather than clearing
+	// them, mirroring ErrorSignature/Outcome's revision-preserving behavior.
+	Source string `json:"source,omitempty"`
 }
 
 type UpdateObservationParams struct {
@@ -291,7 +306,7 @@ var decayReviewAfterMonths = map[string]int{
 
 const observationSelectColumns = `id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
 	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at,
-	       error_signature, outcome`
+	       error_signature, outcome, source, trust_tag`
 
 type SyncState struct {
 	TargetKey           string  `json:"target_key"`
@@ -537,6 +552,20 @@ func (s *Store) MaxObservationLength() int {
 	return s.cfg.MaxObservationLength
 }
 
+// DataDir returns the store's configured data directory (memory-provenance
+// foundation, omnia-provenance-foundation): used by internal/diagnostic's
+// StoreExposureCheck to evaluate filesystem exposure (cloud-sync folders,
+// loose permissions) without that package needing its own copy of Config.
+func (s *Store) DataDir() string {
+	return s.cfg.DataDir
+}
+
+// DBPath returns the absolute path to the SQLite database file within
+// DataDir (memory-provenance foundation, omnia-provenance-foundation).
+func (s *Store) DBPath() string {
+	return datadir.DBPath(s.cfg.DataDir)
+}
+
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
@@ -672,7 +701,13 @@ func New(cfg Config) (*Store, error) {
 	if !filepath.IsAbs(cfg.DataDir) {
 		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set OMNIA_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+	// Owner-only on a FRESH create (memory-provenance foundation,
+	// omnia-provenance-foundation): MkdirAll only applies this mode to
+	// directories it actually creates — an already-existing (looser) data
+	// dir from before this slice is left as-is here and flagged instead by
+	// internal/diagnostic's StoreExposureCheck, so upgrades never silently
+	// re-permission a directory the operator may have intentionally shared.
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("engram: create data dir: %w", err)
 	}
 
@@ -696,6 +731,15 @@ func New(cfg Config) (*Store, error) {
 		}
 	}
 
+	// Lock the db file down to owner-only too — the pragma loop above forces
+	// SQLite to actually create the file (WAL mode touches it immediately),
+	// so Chmod here always has a real file to act on. Unlike MkdirAll's mode
+	// argument, Chmod is unconditional: it re-tightens the file's perms on
+	// every New() call, not just on first create.
+	if err := os.Chmod(dbPath, 0o600); err != nil {
+		return nil, fmt.Errorf("engram: chmod database file: %w", err)
+	}
+
 	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("engram: migration: %w", err)
@@ -713,7 +757,7 @@ func newWithoutRepair(cfg Config) (*Store, error) {
 	if !filepath.IsAbs(cfg.DataDir) {
 		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set OMNIA_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("engram: create data dir: %w", err)
 	}
 
@@ -734,6 +778,10 @@ func newWithoutRepair(cfg Config) (*Store, error) {
 		if _, err := db.Exec(p); err != nil {
 			return nil, fmt.Errorf("engram: pragma %q: %w", p, err)
 		}
+	}
+
+	if err := os.Chmod(dbPath, 0o600); err != nil {
+		return nil, fmt.Errorf("engram: chmod database file: %w", err)
 	}
 
 	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
@@ -1182,6 +1230,48 @@ func (s *Store) migrate() error {
 	}
 	if _, err := s.execHook(s.db, `
 		CREATE INDEX IF NOT EXISTS idx_obs_error_signature ON observations(error_signature);
+	`); err != nil {
+		return err
+	}
+
+	// ── Memory provenance foundation (omnia-provenance-foundation) ─────────
+	// Additive nullable `source`/`trust_tag` columns on observations,
+	// captured at WRITE time (AddObservation), not retrieval time — see
+	// classifyTrust in provenance.go. Applied via addColumnIfNotExists so
+	// migrate() on a fresh DB (where these are never part of the base CREATE
+	// TABLE, matching the convention above) is a no-op on subsequent runs.
+	provenanceObsCols := []struct {
+		name       string
+		definition string
+	}{
+		{name: "source", definition: "TEXT"},
+		{name: "trust_tag", definition: "TEXT"},
+	}
+	for _, c := range provenanceObsCols {
+		if err := s.addColumnIfNotExists("observations", c.name, c.definition); err != nil {
+			return err
+		}
+	}
+
+	// deletion_tombstones is the durable, independent proof of physical
+	// deletion (GDPR Art.17-style "right to be forgotten" record): written
+	// alongside every hard delete — local (DeleteObservation) AND replicated
+	// pull (applyObservationDeleteTx) — so the proof survives regardless of
+	// which side of sync initiated the delete. It is deliberately separate
+	// from the (prunable) sync_mutations journal: that journal is pruned
+	// post-ack, so it cannot serve as a durable deletion proof on its own.
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS deletion_tombstones (
+			sync_id      TEXT PRIMARY KEY,
+			entity       TEXT NOT NULL DEFAULT 'observation',
+			project      TEXT,
+			actor        TEXT,
+			reason       TEXT,
+			content_hash TEXT,
+			hard         INTEGER NOT NULL DEFAULT 1,
+			deleted_at   TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE INDEX IF NOT EXISTS idx_deletion_tombstones_project ON deletion_tombstones(project, deleted_at DESC);
 	`); err != nil {
 		return err
 	}
@@ -2382,6 +2472,20 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		errSig = NormalizeErrorSignature(extractErrorText(content))
 	}
 
+	// ── Memory provenance foundation (omnia-provenance-foundation) ─────────
+	// trustTagForRevision is only computed when Source was actually provided
+	// on THIS call: an empty value here means "not provided," which — via
+	// the same COALESCE(NULLIF(?, ''), col) convention as
+	// error_signature/outcome above — PRESERVES the previously stored
+	// source/trust_tag on a topic_key revision instead of resetting it to
+	// "unverified". A NEW-ROW insert always classifies (classifyTrust("")
+	// already returns "unverified", satisfying the "missing source defaults
+	// unverified" requirement independent of this preservation rule).
+	var trustTagForRevision string
+	if strings.TrimSpace(p.Source) != "" {
+		trustTagForRevision = classifyTrust(p.Source)
+	}
+
 	var observationID int64
 	err = s.withTx(func(tx *sql.Tx) error {
 		var obs *Observation
@@ -2412,6 +2516,8 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					     normalized_hash = ?,
 					     error_signature = COALESCE(NULLIF(?, ''), error_signature),
 					     outcome = COALESCE(NULLIF(?, ''), outcome),
+					     source = COALESCE(NULLIF(?, ''), source),
+					     trust_tag = COALESCE(NULLIF(?, ''), trust_tag),
 					     revision_count = revision_count + 1,
 					     last_seen_at = datetime('now'),
 					     updated_at = datetime('now')
@@ -2424,6 +2530,8 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					normHash,
 					errSig,
 					outcome,
+					p.Source,
+					trustTagForRevision,
 					existingID,
 				); err != nil {
 					return err
@@ -2477,13 +2585,18 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 			return err
 		}
 
+		// New-row inserts always classify: classifyTrust("") already returns
+		// "unverified", satisfying "missing source defaults to unverified"
+		// without any special-casing here.
+		trustTag := classifyTrust(p.Source)
+
 		syncID := newSyncID("obs")
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at, error_signature, outcome)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'), ?, ?)`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at, error_signature, outcome, source, trust_tag)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'), ?, ?, ?, ?)`,
 			syncID, p.SessionID, p.Type, title, content,
 			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
-			nullableString(errSig), nullableString(outcome),
+			nullableString(errSig), nullableString(outcome), nullableString(p.Source), nullableString(trustTag),
 		)
 		if err != nil {
 			return err
@@ -3073,6 +3186,25 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 }
 
 func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
+	return s.deleteObservation(id, hardDelete, "")
+}
+
+// DeleteObservationWithActor is DeleteObservation but additionally records
+// actor on the deletion_tombstones proof row written for a hard delete
+// (omnia-provenance-foundation review fix, should-fix #5: the tombstone
+// table has had actor/reason columns since the migration that created it,
+// but nothing ever populated them). actor identifies who initiated the
+// delete — e.g. "mcp", "http", "cli" — and is attribution only, never
+// validated. It is ignored entirely for a soft delete (no tombstone is
+// written on that branch either way). The orchestration helper in
+// internal/purge (HardDeleteWithPurge) is the intended caller; plain
+// DeleteObservation remains for callers that have no actor to report and
+// simply passes "" (stored as NULL, unchanged from before this fix).
+func (s *Store) DeleteObservationWithActor(id int64, hardDelete bool, actor string) error {
+	return s.deleteObservation(id, hardDelete, actor)
+}
+
+func (s *Store) deleteObservation(id int64, hardDelete bool, actor string) error {
 	return s.withTx(func(tx *sql.Tx) error {
 		obs, err := s.getObservationTx(tx, id)
 		if err == sql.ErrNoRows {
@@ -3099,6 +3231,31 @@ func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
 					WHERE source_id = ? OR target_id = ?
 				`, obs.SyncID, obs.SyncID); err != nil {
 					return fmt.Errorf("orphan memory_relations after hard-delete: %w", err)
+				}
+			}
+			// ── Memory provenance foundation (omnia-provenance-foundation) ───
+			// Write the durable deletion_tombstones proof row BEFORE
+			// enqueueSyncMutationTx, inside the same transaction as the
+			// physical purge above — so the proof and the purge are atomic:
+			// either both land or neither does. content_hash lets a future
+			// auditor confirm what was deleted without retaining the content
+			// itself (hashNormalized mirrors AddObservation's own dedupe
+			// hash, an existing convention in this file). reason is a
+			// constant for this (local, push-side) code path — it is always
+			// "hard_delete" here; the pull-side applyObservationDeleteTx below
+			// records its own constant "cloud_pull_delete" instead.
+			if obs.SyncID != "" {
+				if _, err := s.execHook(tx, `
+					INSERT INTO deletion_tombstones (sync_id, entity, project, actor, reason, content_hash, hard, deleted_at)
+					VALUES (?, 'observation', ?, ?, 'hard_delete', ?, 1, datetime('now'))
+					ON CONFLICT(sync_id) DO UPDATE SET
+						content_hash = excluded.content_hash,
+						hard         = excluded.hard,
+						deleted_at   = excluded.deleted_at,
+						actor        = excluded.actor,
+						reason       = excluded.reason
+				`, obs.SyncID, obs.Project, nullableString(actor), hashNormalized(obs.Content)); err != nil {
+					return fmt.Errorf("write deletion tombstone: %w", err)
 				}
 			}
 		} else {
@@ -3461,7 +3618,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	sqlQ := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
 		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
-		       o.error_signature, o.outcome,
+		       o.error_signature, o.outcome, o.source, o.trust_tag,
 		       fts.rank
 		FROM observations_fts fts
 		JOIN observations o ON o.id = fts.rowid
@@ -3502,11 +3659,12 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
 			&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
 			&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
-			&sr.ErrorSignature, &sr.Outcome,
+			&sr.ErrorSignature, &sr.Outcome, &sr.Source, &sr.TrustTag,
 			&sr.Rank,
 		); err != nil {
 			return nil, err
 		}
+		normalizeTrustTag(&sr.Observation)
 		if !seen[sr.ID] {
 			results = append(results, sr)
 			seen[sr.ID] = true
@@ -6515,8 +6673,29 @@ func (s *Store) applyObservationDeleteTx(tx *sql.Tx, payload syncObservationPayl
 		return err
 	}
 	if payload.HardDelete {
-		_, err = s.execHook(tx, `DELETE FROM observations WHERE id = ?`, existing.ID)
-		return err
+		if _, err := s.execHook(tx, `DELETE FROM observations WHERE id = ?`, existing.ID); err != nil {
+			return err
+		}
+		// ── Memory provenance foundation (omnia-provenance-foundation) ───────
+		// The pull path writes its OWN deletion_tombstones row — the proof
+		// must replicate independent of whatever happened on the pushing
+		// side (a remote peer's local tombstone never syncs here as data;
+		// only the delete mutation itself does). actor/reason are constants
+		// on this path (should-fix #5): every row written here was applied by
+		// the cloud-pull code path, never by a locally-identified actor.
+		if _, err := s.execHook(tx, `
+			INSERT INTO deletion_tombstones (sync_id, entity, project, actor, reason, content_hash, hard, deleted_at)
+			VALUES (?, 'observation', ?, 'cloud_sync', 'cloud_pull_delete', ?, 1, datetime('now'))
+			ON CONFLICT(sync_id) DO UPDATE SET
+				content_hash = excluded.content_hash,
+				hard         = excluded.hard,
+				deleted_at   = excluded.deleted_at,
+				actor        = excluded.actor,
+				reason       = excluded.reason
+		`, payload.SyncID, existing.Project, hashNormalized(existing.Content)); err != nil {
+			return fmt.Errorf("write deletion tombstone (pulled): %w", err)
+		}
+		return nil
 	}
 	deletedAt := payload.DeletedAt
 	if deletedAt == nil {
@@ -6635,12 +6814,34 @@ type observationScanner interface {
 }
 
 func scanObservationRow(scanner observationScanner, o *Observation) error {
-	return scanner.Scan(
+	if err := scanner.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
 		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
-		&o.ErrorSignature, &o.Outcome,
-	)
+		&o.ErrorSignature, &o.Outcome, &o.Source, &o.TrustTag,
+	); err != nil {
+		return err
+	}
+	normalizeTrustTag(o)
+	return nil
+}
+
+// normalizeTrustTag defaults a genuinely-NULL trust_tag to "unverified" ON
+// READ (omnia-provenance-foundation review fix, should-fix #4). classifyTrust
+// only ever runs at AddObservation write time — a row written before this
+// slice existed, or inserted directly (a cloud pull, a raw migration
+// fixture) without ever going through AddObservation, has trust_tag=NULL in
+// the database and, without this call, would surface as a nil *string
+// instead of the documented "unverified" default (spec scenario: "Legacy
+// rows read as unverified"). Source is left untouched — only trust_tag has a
+// documented read-time default; nil Source legitimately means "no
+// attribution was ever recorded," which is a distinct, honest signal from
+// trust_tag's classification default.
+func normalizeTrustTag(o *Observation) {
+	if o.TrustTag == nil {
+		tag := TrustTagUnverified
+		o.TrustTag = &tag
+	}
 }
 
 func (s *Store) queryObservations(query string, args ...any) ([]Observation, error) {

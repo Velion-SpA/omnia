@@ -920,3 +920,164 @@ func TestMigrate_AddsErrorSignatureAndOutcomeColumns_Idempotent(t *testing.T) {
 		t.Errorf("after second migrate: expected %d rows, got %d", len(fixtures), count2)
 	}
 }
+
+// TestMigrate_ProvenanceColumnsAndTombstones_PreservePopulatedData
+// (omnia-provenance-foundation review fix, should-fix #3): runs migrate() —
+// via New(cfg), reusing this file's EXISTING legacy-schema harness,
+// newTestStoreWithLegacySchemaPostP1 — against a POPULATED pre-slice
+// database (real pre-existing rows AND memory_relations rows, seeded before
+// source/trust_tag/deletion_tombstones ever existed) and asserts:
+//  1. no data loss — all pre-existing observation rows survive with their
+//     original content;
+//  2. source/trust_tag are added as nullable columns and existing rows
+//     read back with source=nil, trust_tag normalized to "unverified" (the
+//     full write-schema-then-read pipeline, tying should-fix #3 and #4
+//     together);
+//  3. deletion_tombstones is created empty — migration must not spuriously
+//     write a tombstone for pre-existing (never-deleted) rows;
+//  4. running migrate() a second time against the now-migrated database is
+//     still idempotent and still loses no data.
+func TestMigrate_ProvenanceColumnsAndTombstones_PreservePopulatedData(t *testing.T) {
+	obsRows, relRows := migrationFixtureRowsPostP1()
+	s := newTestStoreWithLegacySchemaPostP1(t, obsRows, relRows)
+	dir := s.cfg.DataDir
+
+	// 1. No data loss: all pre-existing fixture rows survive.
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE session_id = 'ses-p1-migration-test'`).Scan(&count); err != nil {
+		t.Fatalf("count fixture rows after migrate: %v", err)
+	}
+	if count != len(obsRows) {
+		t.Fatalf("after migrate: expected %d pre-existing rows, got %d", len(obsRows), count)
+	}
+
+	// 2. source/trust_tag: nullable columns added, and existing rows read
+	// back through the normal Go read path with the documented defaults —
+	// source stays nil (no attribution was ever recorded), trust_tag
+	// normalizes to "unverified" (should-fix #4's read-time default).
+	for _, row := range obsRows {
+		obs, err := s.GetObservationBySyncID(row.syncID)
+		if err != nil {
+			t.Fatalf("GetObservationBySyncID(%q): %v", row.syncID, err)
+		}
+		if obs.Content != row.content {
+			t.Errorf("sync_id %q: content = %q, want preserved %q", row.syncID, obs.Content, row.content)
+		}
+		if obs.Source != nil {
+			t.Errorf("sync_id %q: Source = %v, want nil for a pre-slice row", row.syncID, obs.Source)
+		}
+		if obs.TrustTag == nil || *obs.TrustTag != TrustTagUnverified {
+			t.Errorf("sync_id %q: TrustTag = %v, want %q", row.syncID, obs.TrustTag, TrustTagUnverified)
+		}
+	}
+
+	// 3. deletion_tombstones exists and is empty — migration must not
+	// pre-populate it for rows that were never deleted.
+	var tombCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM deletion_tombstones`).Scan(&tombCount); err != nil {
+		t.Fatalf("count deletion_tombstones rows: %v (table may be missing)", err)
+	}
+	if tombCount != 0 {
+		t.Errorf("deletion_tombstones has %d rows after migration, want 0 (migration must not pre-populate)", tombCount)
+	}
+
+	// 4. Idempotency: close and re-open (migrate() runs a SECOND time
+	// against the same, now-migrated database) — must not error, and must
+	// still preserve every row.
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store before second migration: %v", err)
+	}
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = dir
+	s2, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() second run failed: %v — migrate() is not idempotent for the provenance-foundation additions", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	var count2 int
+	if err := s2.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE session_id = 'ses-p1-migration-test'`).Scan(&count2); err != nil {
+		t.Fatalf("count fixture rows after second migrate: %v", err)
+	}
+	if count2 != len(obsRows) {
+		t.Errorf("after second migrate: expected %d rows, got %d", len(obsRows), count2)
+	}
+}
+
+// TestMigrate_AddsSourceTrustTagColumns_Idempotent (omnia-provenance-foundation,
+// phase 2): migrate() must add nullable `source`/`trust_tag` columns to
+// observations, and running migrate() a second time against an
+// already-migrated database must not error (addColumnIfNotExists guard).
+func TestMigrate_AddsSourceTrustTagColumns_Idempotent(t *testing.T) {
+	s := newTestStore(t)
+
+	probeRows, err := s.db.Query(`SELECT source, trust_tag FROM observations LIMIT 1`)
+	if err != nil {
+		t.Fatalf("source/trust_tag columns missing after migrate: %v (expected red)", err)
+	}
+	if err := probeRows.Close(); err != nil {
+		t.Fatalf("close probe rows: %v", err)
+	}
+
+	rows, err := s.db.Query(`PRAGMA table_info(observations)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(observations): %v", err)
+	}
+	seen := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var defaultVal any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultVal, &pk); err != nil {
+			rows.Close()
+			t.Fatalf("scan observations column: %v", err)
+		}
+		if name == "source" || name == "trust_tag" {
+			seen[name] = true
+			if notNull != 0 {
+				t.Errorf("column %q must be nullable (notnull=0), got notnull=%d", name, notNull)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("rows.Err: %v", err)
+	}
+	rows.Close()
+	if !seen["source"] || !seen["trust_tag"] {
+		t.Fatalf("expected both source and trust_tag columns, got %v", seen)
+	}
+
+	// Re-running migrate() directly (idempotency guard) must not error.
+	if err := s.migrate(); err != nil {
+		t.Fatalf("second migrate() call failed: %v — addColumnIfNotExists not idempotent for source/trust_tag", err)
+	}
+}
+
+// TestMigrate_CreatesDeletionTombstonesTable (omnia-provenance-foundation,
+// phase 4): migrate() must create the deletion_tombstones table (sync_id PK)
+// as a durable, independent proof of physical deletion. CREATE TABLE IF NOT
+// EXISTS makes re-running migrate() idempotent for free.
+func TestMigrate_CreatesDeletionTombstonesTable(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.db.Exec(
+		`INSERT INTO deletion_tombstones (sync_id, entity, project, actor, reason, content_hash, hard, deleted_at)
+		 VALUES ('obs-test-1', 'observation', 'myproject', 'tester', 'test', 'abc123', 1, datetime('now'))`,
+	); err != nil {
+		t.Fatalf("deletion_tombstones table missing or wrong shape: %v (expected red)", err)
+	}
+
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM deletion_tombstones WHERE sync_id = 'obs-test-1'`).Scan(&count); err != nil {
+		t.Fatalf("query deletion_tombstones: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 tombstone row, got %d", count)
+	}
+
+	// Idempotent re-run.
+	if err := s.migrate(); err != nil {
+		t.Fatalf("second migrate() call failed: %v — deletion_tombstones CREATE TABLE not idempotent", err)
+	}
+}
