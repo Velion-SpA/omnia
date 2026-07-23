@@ -397,3 +397,172 @@ func TestHandleSearch_RecallEnabled_SemanticLegScopedByProject(t *testing.T) {
 		t.Fatalf("expected same-project semantic-only paraphrase (id %d) to still surface, got %v", paraphraseID, gotIDs)
 	}
 }
+
+// TestHandleSearch_RankingUnsetByteIdentical is the memory-recall-ranking
+// regression gate (task 6.1): with cfg.RecallRanking left at its zero value
+// (Enabled=false, the default), handleSearch's result order must stay
+// byte-for-byte identical to legacy store.Search — gating every requirement
+// in that spec (Requirement: Backward-Compatible Default Behavior) even
+// though RankResults is now unconditionally wired into the response path.
+// Observation types/timestamps are deliberately varied (decision vs
+// tool_use/file_read, out of BM25-rank order) so a leaked ranking reorder
+// would be immediately visible if this gate ever regressed.
+func TestHandleSearch_RankingUnsetByteIdentical(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-rank-off", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for _, tc := range []struct{ typ, title string }{
+		{"tool_use", "panic handling in loader alpha"},
+		{"decision", "panic handling in loader beta"},
+		{"file_read", "panic handling in loader gamma"},
+	} {
+		if _, err := s.AddObservation(store.AddObservationParams{
+			SessionID: "s-rank-off",
+			Type:      tc.typ,
+			Title:     tc.title,
+			Content:   tc.title,
+			Project:   "engram",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add observation %q: %v", tc.title, err)
+		}
+	}
+
+	wantResults, err := s.Search("panic", store.SearchOptions{Project: "engram", Scope: "project", Limit: 10})
+	if err != nil {
+		t.Fatalf("legacy store.Search: %v", err)
+	}
+	if len(wantResults) == 0 {
+		t.Fatalf("expected legacy store.Search to find matches")
+	}
+
+	// cfg.RecallRanking is the zero value (Enabled=false) — the
+	// pre-ranking-slice contract.
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":   "panic",
+		"project": "engram",
+		"scope":   "project",
+		"limit":   10.0,
+	}}}
+	res, err := search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleSearch error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected search error: %s", callResultText(t, res))
+	}
+
+	body := callResultJSON(t, res)
+	gotIDs := searchResultIDs(t, body)
+
+	if len(gotIDs) != len(wantResults) {
+		t.Fatalf("ranking-unset result count = %d; want %d (legacy order)", len(gotIDs), len(wantResults))
+	}
+	for i, want := range wantResults {
+		if gotIDs[i] != want.ID {
+			t.Fatalf("ranking-unset result[%d] id = %d; want %d (legacy store.Search order): got=%v want=%v",
+				i, gotIDs[i], want.ID, gotIDs, idsOfResults(wantResults))
+		}
+	}
+}
+
+// TestHandleSearch_ExplainOmitted_NoBreakdownField locks the default (no
+// explain arg) response shape unchanged: no score_breakdown key on any
+// result entry (Requirement: Per-Hit Score Breakdown, "explain omitted by
+// default -> no breakdown fields").
+func TestHandleSearch_ExplainOmitted_NoBreakdownField(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-explain-off", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-explain-off", Type: "bugfix", Title: "Fix panic", Content: "panic fix",
+		Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query": "panic", "project": "engram", "scope": "project", "limit": 5.0,
+	}}}
+	res, err := search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleSearch error: %v", err)
+	}
+	body := callResultJSON(t, res)
+	results, ok := body["results"].([]any)
+	if !ok || len(results) == 0 {
+		t.Fatalf("expected non-empty results, got %#v", body["results"])
+	}
+	entry, ok := results[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result entry to be a map, got %#v", results[0])
+	}
+	if _, present := entry["score_breakdown"]; present {
+		t.Errorf("entry[score_breakdown] present = %v, want absent when explain is omitted", entry["score_breakdown"])
+	}
+}
+
+// TestHandleSearch_ExplainTrue_AttachesScoreBreakdown proves explain=true
+// attaches a score_breakdown to every hit, and that on the FTS5-only path
+// (semantic recall disabled entirely) semantic/fusion stay null while
+// lexical/recency/importance/final are populated (Requirement: Per-Hit Score
+// Breakdown; Requirement: Ranking and Explain Degrade Gracefully).
+func TestHandleSearch_ExplainTrue_AttachesScoreBreakdown(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-explain-on", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-explain-on", Type: "decision", Title: "Fix panic", Content: "panic fix decision",
+		Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query": "panic", "project": "engram", "scope": "project", "limit": 5.0, "explain": true,
+	}}}
+	res, err := search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleSearch error: %v", err)
+	}
+	body := callResultJSON(t, res)
+	results, ok := body["results"].([]any)
+	if !ok || len(results) == 0 {
+		t.Fatalf("expected non-empty results, got %#v", body["results"])
+	}
+	entry, ok := results[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result entry to be a map, got %#v", results[0])
+	}
+	breakdown, ok := entry["score_breakdown"].(map[string]any)
+	if !ok {
+		t.Fatalf("entry[score_breakdown] missing or wrong type: %#v", entry["score_breakdown"])
+	}
+	if breakdown["semantic"] != nil {
+		t.Errorf("breakdown[semantic] = %v, want nil (semantic recall disabled)", breakdown["semantic"])
+	}
+	if breakdown["fusion"] != nil {
+		t.Errorf("breakdown[fusion] = %v, want nil (FTS5-only path, no RRF fusion ran)", breakdown["fusion"])
+	}
+	if _, ok := breakdown["lexical"].(map[string]any); !ok {
+		t.Errorf("breakdown[lexical] missing or wrong type: %#v", breakdown["lexical"])
+	}
+	if breakdown["recency"] == nil {
+		t.Error("breakdown[recency] = nil, want populated")
+	}
+	if breakdown["importance"] == nil {
+		t.Error("breakdown[importance] = nil, want populated")
+	}
+	if breakdown["final"] == nil {
+		t.Error("breakdown[final] = nil, want populated")
+	}
+	if _, ok := breakdown["staleness_penalty"]; !ok {
+		t.Error("breakdown[staleness_penalty] missing")
+	}
+}

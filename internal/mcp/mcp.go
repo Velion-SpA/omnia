@@ -26,6 +26,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/diagnostic"
 	"github.com/velion/omnia/internal/embed"
 	projectpkg "github.com/velion/omnia/internal/project"
@@ -77,6 +78,15 @@ type MCPConfig struct {
 	// byte-for-byte today's. Enqueue is non-blocking, so the save never waits
 	// on the embedding.
 	AutoEmbed *embed.Worker
+
+	// RecallRanking configures the optional recency x importance x relevance
+	// ranking pass over handleSearch's results (memory-recall-ranking spec,
+	// recall_ranking.go's RankResults). The zero value (Enabled=false) is the
+	// default: handleSearch's response stays byte-for-byte identical to
+	// today's relevance-only order (Requirement: Backward-Compatible Default
+	// Behavior) even though RankResults is unconditionally called — it is a
+	// pure no-op when RecallRanking.Enabled is false.
+	RecallRanking config.RankingConfig
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -339,6 +349,9 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 				),
 				mcp.WithNumber("limit",
 					mcp.Description("Max results (default: 10, max: 20)"),
+				),
+				mcp.WithBoolean("explain",
+					mcp.Description("Attach a per-hit score breakdown (lexical, semantic, fusion, recency, importance, final, staleness_penalty) to each result for transparency into why it ranked where it did. Omitted by default — response shape is unchanged unless explicitly requested."),
 				),
 			),
 			handleSearch(s, cfg, activity),
@@ -1024,6 +1037,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		scope, _ := req.GetArguments()["scope"].(string)
 		allProjects := boolArg(req, "all_projects", false)
 		limit := intArg(req, "limit", 10)
+		explain := boolArg(req, "explain", false)
 
 		// all_projects=true short-circuits project resolution: we search globally
 		// regardless of the project override or any auto-detected project. This
@@ -1070,6 +1084,16 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		// carries Project/Type/Content). When nil (the default), this branch
 		// is skipped entirely: the else branch below is byte-for-byte today's
 		// FTS5-only store.Search call, unchanged, so rollback is always safe.
+		// relevance carries each result's un-normalized relevance signal,
+		// keyed by Observation.ID, for the memory-recall-ranking pass below
+		// (RankResults) — RRF fusion Score for the hybrid recall path
+		// (higher is already more relevant), or negated FTS5 bm25 Rank for
+		// the FTS5-only path (bm25's rank is a small negative "cost," so
+		// negating it makes a better match a larger positive relevance,
+		// matching the fused path's "higher is better" convention). Built
+		// alongside results below so both branches populate it consistently.
+		relevance := make(map[int64]float64)
+
 		var results []store.SearchResult
 		if cfg.Recall != nil {
 			// RecallFetchLimit over-fetches candidates (beyond the caller's
@@ -1085,6 +1109,9 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			})
 			if ferr != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", ferr)), nil
+			}
+			for _, fr := range fused {
+				relevance[fr.ID] = fr.Score
 			}
 			results = HydrateFusedResults(s, fused, limit, RecallScopeFilter{
 				Type:    typ,
@@ -1102,12 +1129,26 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 				return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", serr)), nil
 			}
 			results = r
+			for _, rr := range r {
+				if rr.Rank == exactSentinelRank {
+					continue
+				}
+				relevance[rr.ID] = -rr.Rank
+			}
 		}
 
 		if len(results) == 0 {
 			// JW4: use respondWithProject even for empty results.
 			return respondWithProject(detRes, fmt.Sprintf("No memories found for: %q", query), nil), nil
 		}
+
+		// memory-recall-ranking (design D6 wiring boundary): re-sorts by
+		// recency x importance x relevance when cfg.RecallRanking.Enabled.
+		// A pure no-op when it's not (the default), so this call never
+		// changes handleSearch's response when ranking is unconfigured
+		// (Requirement: Backward-Compatible Default Behavior).
+		now := time.Now()
+		results = RankResults(results, relevance, cfg.RecallRanking, now)
 
 		// Batch-load relations for all results (REQ-002). Avoids N+1.
 		syncIDs := make([]string, 0, len(results))
@@ -1122,6 +1163,29 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 				relationsMap = rm
 			}
 			// Errors from relation loading are swallowed — search must not fail.
+		}
+
+		// explain (Requirement: Per-Hit Score Breakdown) needs the SAME
+		// batch-normalized relevance RankResults scores against, so a
+		// receipt's "final" is honest about what RankResults actually
+		// computed (or would compute, if ranking is currently disabled) for
+		// that row — not a value normalized differently. Sentinel AND
+		// signature-match rows are excluded from normalization here too,
+		// mirroring RankResults' own pre-emption of both, and treated as
+		// maximally relevant (1.0) below (BuildResultReceipt's preempted
+		// check) — otherwise a signature row's outlier relevance (FTS5-only
+		// path's relevance[id] = -rank, ~500 for signatureMatchRank) would
+		// pin the batch's max and crush every other row's normalized
+		// relevance toward 0.
+		var normalizedRelevance map[int64]float64
+		if explain {
+			nonSentinel := make([]store.SearchResult, 0, len(results))
+			for _, r := range results {
+				if r.Rank != exactSentinelRank && !r.SignatureMatch {
+					nonSentinel = append(nonSentinel, r)
+				}
+			}
+			normalizedRelevance = MinMaxNormalizeRelevance(nonSentinel, relevance)
 		}
 
 		var b strings.Builder
@@ -1169,6 +1233,15 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			}
 			if r.SignatureMatch {
 				entry["signature_match"] = true
+			}
+			if explain {
+				// cfg.Recall != nil is always an accurate "did fusion run"
+				// signal at this call site: unlike cmd/omnia's cmdSearch,
+				// handleSearch never silently falls back to the FTS5-only
+				// path on a fusion error above — it returns an error result
+				// instead (see the cfg.Recall != nil branch), so there is no
+				// mid-query fallback case to distinguish here.
+				entry["score_breakdown"] = BuildResultReceipt(r, cfg.Recall != nil, cfg.RecallRanking, relevance, normalizedRelevance, now)
 			}
 			structuredResults = append(structuredResults, entry)
 

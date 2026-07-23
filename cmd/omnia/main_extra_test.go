@@ -4298,3 +4298,51 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 		t.Fatalf("expected MCP autosync poll ticker proof to complete cleanly, panic=%v stderr=%q", recovered, stderr)
 	}
 }
+
+// TestCmdSearch_ExplainFlag_PrintsBreakdown (task 5.1): `omnia search
+// --explain` must print a per-result score breakdown (lexical, semantic,
+// fusion, recency, importance, final, staleness_penalty) after the existing
+// result block (Requirement: Per-Hit Score Breakdown).
+func TestCmdSearch_ExplainFlag_PrintsBreakdown(t *testing.T) {
+	cfg := testConfig(t)
+	stubRuntimeHooks(t)
+	mustSeedObservation(t, cfg, "s-explain-cli", "proj-explain", "decision", "explain-result", "explain content for search", "project")
+
+	withArgs(t, "engram", "search", "explain", "--project", "proj-explain", "--explain")
+	stdout, stderr := captureOutput(t, func() { cmdSearch(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "Found") {
+		t.Fatalf("expected search results, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "score breakdown:") {
+		t.Fatalf("expected a score breakdown line with --explain, got: %q", stdout)
+	}
+	for _, field := range []string{"lexical=", "semantic=", "fusion=", "recency=", "importance=", "final=", "staleness_penalty="} {
+		if !strings.Contains(stdout, field) {
+			t.Errorf("expected score breakdown to include %q, got: %q", field, stdout)
+		}
+	}
+}
+
+// TestCmdSearch_NoExplainFlag_UnchangedOutput (task 5.2): omitting --explain
+// must produce byte-identical output to today's `omnia search` — no score
+// breakdown line at all.
+func TestCmdSearch_NoExplainFlag_UnchangedOutput(t *testing.T) {
+	cfg := testConfig(t)
+	stubRuntimeHooks(t)
+	mustSeedObservation(t, cfg, "s-noexplain-cli", "proj-noexplain", "decision", "noexplain-result", "noexplain content for search", "project")
+
+	withArgs(t, "engram", "search", "noexplain", "--project", "proj-noexplain")
+	stdout, stderr := captureOutput(t, func() { cmdSearch(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "Found") {
+		t.Fatalf("expected search results, got: %q", stdout)
+	}
+	if strings.Contains(stdout, "score breakdown:") {
+		t.Fatalf("expected no score breakdown line without --explain, got: %q", stdout)
+	}
+}
