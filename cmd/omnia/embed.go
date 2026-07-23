@@ -32,6 +32,13 @@ func cmdEmbed(args []string) {
 	if err != nil {
 		fatal(fmt.Errorf("load config: %w", err))
 	}
+	// EMBM-3: reject an internally-inconsistent embeddings config (a
+	// truncation Dim for a non-MRL model) before any Ollama call is made —
+	// right after config.Load, exactly like every other config validation
+	// in this command.
+	if err := config.ValidateEmbeddings(cfg.Embeddings); err != nil {
+		fatal(err)
+	}
 	if !cfg.Embeddings.Enabled {
 		logger.Info("embeddings disabled; nothing to do (set embeddings.enabled: true to opt in)")
 		return

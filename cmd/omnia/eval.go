@@ -199,6 +199,20 @@ func defaultRunEvalHarness(ctx context.Context, opts evalRunOptions) (eval.RunSu
 
 	fetch := storeBackedFetcher(s)
 	appCfg, appCfgErr := config.Load(opts.ConfigPath)
+	// EMBM-3/blocking-fix: reject an internally-inconsistent embeddings
+	// config (a truncation/expansion Dim mismatched against the model's MRL
+	// capability, see config.ValidateEmbeddings) right after config.Load,
+	// exactly like cmdEmbed (cmd/omnia/embed.go) — fatal, not a silent
+	// degrade, since eval is a release-gate tool and a misconfigured
+	// embeddings section must never let a run silently skip or corrupt the
+	// retrieval-only section (spec EVAL-7) without surfacing why. A missing
+	// config file (appCfgErr != nil) is left alone: that already degrades
+	// gracefully below (best-effort retrieval section skipped), unchanged.
+	if appCfgErr == nil {
+		if err := config.ValidateEmbeddings(appCfg.Embeddings); err != nil {
+			return eval.RunSummary{}, fmt.Errorf("eval: invalid embeddings config: %w", err)
+		}
+	}
 
 	runFunc := func(ctx context.Context) (eval.Report, error) {
 		report, err := eval.RunOnce(ctx, cases, fetch, judge, s)

@@ -453,6 +453,58 @@ func TestStore_GraphScoped_EmptyProjectsMatchesWholeStoreGraph(t *testing.T) {
 	}
 }
 
+// TestStore_SearchScoped_SkipsDimMismatch768vs256 is EMBM-5's migration
+// regression lock: a store holding a pre-migration row at the old native
+// dimension (768, e.g. jina or EmbeddingGemma at full dimension) alongside a
+// post-migration row at a newly configured Matryoshka dimension (256, EMBM-4)
+// must only ever compare same-dimension vectors — a 256-dim query must skip
+// the 768-dim row entirely, via BOTH Search and SearchScoped, never mixing
+// dimensionalities in the brute-force cosine scan.
+func TestStore_SearchScoped_SkipsDimMismatch768vs256(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	old768 := unitRow("pre-migration-768", 1, oneHot(768, 0))
+	old768.Dim = 768
+	mustUpsert(t, store, old768)
+
+	new256 := unitRow("post-migration-256", 2, oneHot(256, 0))
+	new256.Dim = 256
+	mustUpsert(t, store, new256)
+
+	query := oneHot(256, 0)
+
+	hits, err := store.Search(ctx, query, 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 1 || hits[0].SyncID != "post-migration-256" {
+		t.Fatalf("Search(256d query): got %+v, want exactly the 256d row (768d row must be dim-skipped)", hits)
+	}
+
+	scopedHits, err := store.SearchScoped(ctx, query, 10, "p1")
+	if err != nil {
+		t.Fatalf("SearchScoped: %v", err)
+	}
+	if len(scopedHits) != 1 || scopedHits[0].SyncID != "post-migration-256" {
+		t.Fatalf("SearchScoped(256d query): got %+v, want exactly the 256d row (768d row must be dim-skipped)", scopedHits)
+	}
+}
+
+// oneHot returns a dim-length vector with a single 1.0 at pos and 0
+// elsewhere — trivially unit-normalized, so it doubles as both a stored
+// vector and a query vector in dimension-isolation tests without needing
+// any real embedding math.
+func oneHot(dim, pos int) []float32 {
+	v := make([]float32, dim)
+	v[pos] = 1
+	return v
+}
+
 func mustUpsert(t *testing.T, store *Store, r Row) {
 	t.Helper()
 	if err := store.Upsert(context.Background(), r); err != nil {

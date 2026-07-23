@@ -86,6 +86,72 @@ func TestClient_Embed_DimMismatch(t *testing.T) {
 	}
 }
 
+// TestClient_Embed_NonMRLDimMismatchStillErrors locks EMBM-3's guard at the
+// client level for a REGISTERED non-MRL model (jina): even though the
+// configured dim (2) is smaller than the returned vector's length (3) —
+// exactly the shape that WOULD be truncated for an MRL-capable model — jina
+// has no Matryoshka training, so this must still be a hard error, never a
+// silent truncation.
+func TestClient_Embed_NonMRLDimMismatchStillErrors(t *testing.T) {
+	srv := fakeOllama(t, []float32{1, 0, 0}, http.StatusOK, nil) // 3 dims from Ollama
+	defer srv.Close()
+
+	c := New(srv.URL, "jina/jina-embeddings-v2-base-es", 2) // jina is NOT MRL-capable
+	if _, err := c.Embed(context.Background(), "x"); err == nil {
+		t.Error("expected dim-mismatch error for non-MRL model (jina), got nil — truncation must be rejected")
+	}
+}
+
+// TestClient_Embed_TruncatesAndRenormalizes_MRLModel is EMBM-4's core
+// scenario: for a Matryoshka-capable model (embeddinggemma:300m), a
+// configured dim smaller than the returned vector's length truncates to the
+// leading components and re-normalizes to unit length, rather than erroring.
+func TestClient_Embed_TruncatesAndRenormalizes_MRLModel(t *testing.T) {
+	srv := fakeOllama(t, []float32{3, 4, 0, 0}, http.StatusOK, nil) // native "4-dim", norm 5 over [3,4]
+	defer srv.Close()
+
+	c := New(srv.URL, "embeddinggemma:300m", 2) // configured dim 2 < native 4
+	vec, err := c.Embed(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(vec) != 2 {
+		t.Fatalf("vec dim: got %d, want 2 (truncated to configured dim)", len(vec))
+	}
+	// [3,4] truncated (drop trailing zeros) then re-normalized → [0.6, 0.8].
+	want := []float32{0.6, 0.8}
+	for i := range want {
+		if math.Abs(float64(vec[i]-want[i])) > 1e-6 {
+			t.Errorf("vec[%d]: got %v, want %v", i, vec[i], want[i])
+		}
+	}
+	var norm float64
+	for _, x := range vec {
+		norm += float64(x) * float64(x)
+	}
+	if math.Abs(math.Sqrt(norm)-1.0) > 1e-6 {
+		t.Errorf("truncated output not re-normalized to unit length: norm=%v", math.Sqrt(norm))
+	}
+}
+
+// TestClient_Embed_FullDimensionLeavesVectorUntouched_MRLModel is EMBM-4's
+// no-truncation scenario: when the configured dim equals the model's native
+// output length, no truncation branch is taken at all — the vector is only
+// normalized, exactly like today's non-Matryoshka path.
+func TestClient_Embed_FullDimensionLeavesVectorUntouched_MRLModel(t *testing.T) {
+	srv := fakeOllama(t, []float32{1, 0, 0}, http.StatusOK, nil) // already 3 dims
+	defer srv.Close()
+
+	c := New(srv.URL, "embeddinggemma:300m", 3) // configured dim matches native output
+	vec, err := c.Embed(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(vec) != 3 {
+		t.Fatalf("vec dim: got %d, want 3 (untouched, no truncation)", len(vec))
+	}
+}
+
 func TestClient_Embed_ZeroVectorRejected(t *testing.T) {
 	srv := fakeOllama(t, []float32{0, 0, 0}, http.StatusOK, nil)
 	defer srv.Close()

@@ -50,7 +50,7 @@ func TestModelAB_JinaVsBGEM3(t *testing.T) {
 		dim   int
 	}{
 		{"jina/jina-embeddings-v2-base-es", 768}, // primary (obs #1401)
-		{"bge-m3", 1024},                          // runner-up (obs #1401)
+		{"bge-m3", 1024},                         // runner-up (obs #1401)
 	}
 
 	for _, c := range candidates {
@@ -64,6 +64,74 @@ func TestModelAB_JinaVsBGEM3(t *testing.T) {
 			t.Logf("%s: recall@%d = %.3f (%d/%d hits)", c.model, k, result.RecallAtK, result.Hits, result.Total)
 			if result.RecallAtK < recallGate {
 				t.Errorf("%s: recall@%d = %.3f, want >= %.2f (design.md bilingual gate)", c.model, k, result.RecallAtK, recallGate)
+			}
+		})
+	}
+}
+
+// TestModelAB_JinaVsEmbeddingGemma is EMBM-2's eval-gated-swap evidence gate
+// (omnia-embeddings-gemma, ties to sdd/omnia-eval-harness EVAL-7): it
+// compares jina-embeddings-v2-base-es (today's shipped default) against the
+// EmbeddingGemma-300m candidate at both its native dimension (768) and a
+// Matryoshka-truncated dimension (256, EMBM-4), over the same bilingual
+// ES/EN golden set already used for the jina-vs-bge-m3 gate above. The
+// logged recall@k comparison IS the "recorded evidence" EMBM-2 requires
+// before any future default-swap proposal — this test asserts no regression
+// vs jina but deliberately does NOT touch applyDefaults: jina stays the
+// shipped default regardless of this test's outcome.
+//
+// Same double-gate as TestModelAB_JinaVsBGEM3 above (build tag +
+// OLLAMA_LIVE_TEST=1), so it can never affect `go test ./...` or CI, and can
+// never block a build without a live Ollama serving both models:
+//
+//	OLLAMA_LIVE_TEST=1 go test -tags ollama_live ./internal/embed/... -run TestModelAB_JinaVsEmbeddingGemma -v
+func TestModelAB_JinaVsEmbeddingGemma(t *testing.T) {
+	if os.Getenv("OLLAMA_LIVE_TEST") != "1" {
+		t.Skip("OLLAMA_LIVE_TEST not set — skipping live-Ollama jina-vs-EmbeddingGemma model A/B gate")
+	}
+
+	baseURL := os.Getenv("OLLAMA_BASE_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+
+	pairs, err := LoadABPairs("testdata/ab_pairs.json")
+	if err != nil {
+		t.Fatalf("LoadABPairs: %v", err)
+	}
+
+	const k = 10
+	const jinaModel = "jina/jina-embeddings-v2-base-es"
+
+	jinaClient := New(baseURL, jinaModel, 768)
+	jinaResult, err := RunModelAB(context.Background(), jinaModel, jinaClient, pairs, k)
+	if err != nil {
+		t.Fatalf("RunModelAB(%s): %v", jinaModel, err)
+	}
+	t.Logf("%s: recall@%d = %.3f (%d/%d hits) [shipped default, EMBM-2]", jinaModel, k, jinaResult.RecallAtK, jinaResult.Hits, jinaResult.Total)
+
+	candidates := []struct {
+		label string
+		dim   int
+	}{
+		{"embeddinggemma:300m@768(native)", 768},
+		{"embeddinggemma:300m@256(truncated,EMBM-4)", 256},
+	}
+
+	for _, c := range candidates {
+		c := c
+		t.Run(c.label, func(t *testing.T) {
+			client := New(baseURL, "embeddinggemma:300m", c.dim)
+			result, err := RunModelAB(context.Background(), c.label, client, pairs, k)
+			if err != nil {
+				t.Fatalf("RunModelAB(%s): %v", c.label, err)
+			}
+			t.Logf("%s: recall@%d = %.3f (%d/%d hits)", c.label, k, result.RecallAtK, result.Hits, result.Total)
+			// EMBM-2: this comparison is the recorded evidence gate a future
+			// default-swap proposal requires. A regression here fails only
+			// this live-only test — it never flips applyDefaults itself.
+			if result.RecallAtK < jinaResult.RecallAtK {
+				t.Errorf("%s: recall@%d = %.3f regresses vs jina's %.3f (EMBM-2 gate) — do NOT propose swapping the default on this evidence", c.label, k, result.RecallAtK, jinaResult.RecallAtK)
 			}
 		})
 	}

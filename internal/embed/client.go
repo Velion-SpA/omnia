@@ -109,7 +109,18 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	}
 	vec := er.Embeddings[0]
 	if c.dim > 0 && len(vec) != c.dim {
-		return nil, fmt.Errorf("embed: expected dim %d, got %d", c.dim, len(vec))
+		// EMBM-4: a configured dim smaller than the model's native output is
+		// only valid Matryoshka (MRL) truncation — keep the leading c.dim
+		// components and let normalize() below re-establish unit length.
+		// EMBM-3's guard: this is REJECTED for any model not flagged
+		// MRL-capable in the registry (e.g. jina), and for an unknown model
+		// (LookupModel's second return false), so truncation never silently
+		// degrades a model that was never trained to support it.
+		if info, ok := LookupModel(c.model); ok && info.MRL && c.dim < len(vec) {
+			vec = vec[:c.dim]
+		} else {
+			return nil, fmt.Errorf("embed: expected dim %d, got %d", c.dim, len(vec))
+		}
 	}
 	return normalize(vec)
 }

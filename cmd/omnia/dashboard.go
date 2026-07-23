@@ -30,6 +30,8 @@ func cmdDashboard(args []string) {
 		fatal(err)
 	}
 
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
 	var (
 		resolvedDaemon = *daemonURL
 		configProjects []string
@@ -49,6 +51,21 @@ func cmdDashboard(args []string) {
 		configAliases = cfg.ProjectAliases
 		configGroups = cfg.ProjectGroups
 		embCfg = cfg.Embeddings
+		// EMBM-3/blocking-fix: an internally-inconsistent embeddings config
+		// (a truncation/expansion Dim mismatched against the model's MRL
+		// capability, see config.ValidateEmbeddings) must never silently
+		// build a broken embedder for the dashboard's semantic search —
+		// mirrors buildRecallService's validation in cmd/omnia/recall.go.
+		// Fail closed by disabling embeddings (the dashboard falls back to
+		// keyword/FTS search, exactly as if embeddings.enabled were never
+		// set) while LOUDLY naming the bad model/dim instead of silently
+		// degrading.
+		if embCfg.Enabled {
+			if verr := config.ValidateEmbeddings(embCfg); verr != nil {
+				logger.Warn("invalid embeddings config; dashboard semantic search disabled", "err", verr, "model", embCfg.Model, "dim", embCfg.Dim)
+				embCfg.Enabled = false
+			}
+		}
 	}
 	if resolvedDaemon == "" {
 		resolvedDaemon = "http://127.0.0.1:7437"
@@ -62,8 +79,6 @@ func cmdDashboard(args []string) {
 			}
 		}
 	}
-
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	// Resolve the embeddings store path against the SAME active data
 	// directory EngramDataDir uses (fixes #82: a --data-dir/OMNIA_DATA_DIR

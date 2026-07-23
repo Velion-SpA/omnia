@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/velion/omnia/internal/datadir"
+	"github.com/velion/omnia/internal/embed"
 	"github.com/velion/omnia/internal/projectname"
 	"gopkg.in/yaml.v3"
 )
@@ -64,8 +65,19 @@ type EngramConfig struct {
 type EmbeddingsConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	BaseURL string `yaml:"base_url"` // Ollama base URL, e.g. http://localhost:11434
-	Model   string `yaml:"model"`    // e.g. jina/jina-embeddings-v2-base-es (default), bge-m3
-	Dim     int    `yaml:"dim"`      // embedding dimension, e.g. 768 for jina-v2-es, 1024 for bge-m3
+	// Model selects the Ollama embedding model (EMBM-1: selectable without
+	// code changes). Defaults to jina/jina-embeddings-v2-base-es (EMBM-2:
+	// jina stays the shipped default until an eval-gated swap is recorded).
+	// embeddinggemma:300m (Google's Matryoshka-trained 300M-parameter model,
+	// see internal/embed.LookupModel) is a selectable MRL-capable
+	// alternative; bge-m3 remains selectable but is not MRL-capable either.
+	Model string `yaml:"model"`
+	// Dim is the effective embedding dimension, e.g. 768 for jina-v2-es
+	// (native, non-truncatable) or 1024 for bge-m3. For an MRL-capable model
+	// (embeddinggemma:300m), Dim may be set below the model's native output
+	// (e.g. 768/256/128) to truncate-and-renormalize (EMBM-4); ValidateEmbeddings
+	// rejects that same shape for a non-MRL model (EMBM-3).
+	Dim int `yaml:"dim"`
 	// DBPath is the path to Omnia's own embeddings SQLite file. Left EMPTY by
 	// Load/applyDefaults on purpose (unlike every other Embeddings* field):
 	// the right default depends on the active data directory, which Load
@@ -455,6 +467,54 @@ func applyDefaults(cfg *Config) {
 func legacyEmbeddingsDBPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "share", "omnia", "embeddings.db")
+}
+
+// ValidateEmbeddings checks an EmbeddingsConfig for the two
+// internally-inconsistent shapes EMBM-3 forbids:
+//
+//  1. a configured Dim that would require truncating a model's native
+//     output, for a model NOT flagged Matryoshka (MRL) capable in
+//     internal/embed's model registry. Truncating a non-MRL model's output
+//     silently degrades every stored/query vector with no error surfaced
+//     otherwise.
+//  2. a configured Dim GREATER than the model's native output dimension,
+//     for ANY model (MRL-capable or not) — Matryoshka training only ever
+//     supports truncating a model's native output, never expanding it, so a
+//     Dim above NativeDim can never be satisfied and would otherwise only
+//     surface as a generic runtime dim-mismatch error deep inside
+//     embed.Client.Embed instead of at config-load time.
+//
+// This must be checked before any Ollama call — callers wire it in right
+// after config.Load (cmd/omnia/embed.go, cmd/omnia/autoembed.go,
+// cmd/omnia/recall.go, cmd/omnia/dashboard.go, cmd/omnia/eval.go).
+//
+// An unregistered model name (embed.LookupModel's second return value false)
+// is NOT rejected here: EMBM-1 requires the active model stay selectable via
+// config without code changes, so an operator picking a model this registry
+// hasn't been taught about yet must not be blocked by this guard —
+// embed.Client.Embed's own dim-mismatch check remains the safety net for
+// that model at embed time.
+func ValidateEmbeddings(cfg EmbeddingsConfig) error {
+	info, ok := embed.LookupModel(cfg.Model)
+	if !ok {
+		return nil
+	}
+	if cfg.Dim <= 0 {
+		return nil
+	}
+	if cfg.Dim > info.NativeDim {
+		return fmt.Errorf(
+			"config: embeddings.dim %d exceeds %s's native %d-dim output; a model cannot produce more dimensions than it was trained for",
+			cfg.Dim, cfg.Model, info.NativeDim,
+		)
+	}
+	if cfg.Dim < info.NativeDim && !info.MRL {
+		return fmt.Errorf(
+			"config: embeddings.dim %d truncates %s's native %d-dim output, but %s is not Matryoshka (MRL) capable; truncating a non-MRL model silently degrades its embeddings",
+			cfg.Dim, cfg.Model, info.NativeDim, cfg.Model,
+		)
+	}
+	return nil
 }
 
 // ResolveEmbeddingsDBPath returns the file path Omnia should use for its own
