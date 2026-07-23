@@ -8602,3 +8602,52 @@ func TestMostRecentActiveSessionScopedByProject(t *testing.T) {
 		t.Fatalf("expected no active session for engram when only 'other' has one, got ok=%v", ok)
 	}
 }
+
+// ─── omnia-procedural-memory (design obs #1602 / spec obs #1606), PR2 Phase 8 ───
+//
+// TestProcedureLifecycle_NeverEnqueuesSyncMutations (task 8.2) pins the
+// "local-only this slice" design decision (#6): a procedure's FULL lifecycle
+// — upsert, confirm, contradict, retire, decay — must never write a single
+// row to sync_mutations. procedures/procedures_fts are intentionally absent
+// from the cloud sync payload; this guards against a future edit to
+// procedures.go accidentally introducing an enqueueSyncMutationTx call.
+func TestProcedureLifecycle_NeverEnqueuesSyncMutations(t *testing.T) {
+	s := newTestStore(t)
+
+	var before int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&before); err != nil {
+		t.Fatalf("count sync_mutations before: %v", err)
+	}
+
+	syncID, err := s.UpsertProcedure(Procedure{
+		Project:           "syncproj",
+		Polarity:          ProcedurePolarityPlaybook,
+		Trigger:           "sync exclusion regression trigger",
+		Steps:             []ProcedureStep{{Order: 1, Template: "do the thing"}},
+		PostconditionKind: PostconditionTestsPass,
+		Confidence:        0.5,
+	})
+	if err != nil {
+		t.Fatalf("UpsertProcedure: %v", err)
+	}
+	if _, err := s.ConfirmReuse(syncID, "engram"); err != nil {
+		t.Fatalf("ConfirmReuse: %v", err)
+	}
+	if _, err := s.Contradict(syncID, "engram"); err != nil {
+		t.Fatalf("Contradict: %v", err)
+	}
+	if _, err := s.RetireProcedure(syncID); err != nil {
+		t.Fatalf("RetireProcedure: %v", err)
+	}
+	if _, err := s.DecayProcedures(); err != nil {
+		t.Fatalf("DecayProcedures: %v", err)
+	}
+
+	var after int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&after); err != nil {
+		t.Fatalf("count sync_mutations after: %v", err)
+	}
+	if after != before {
+		t.Errorf("procedure lifecycle must never enqueue sync_mutations rows; before=%d after=%d", before, after)
+	}
+}

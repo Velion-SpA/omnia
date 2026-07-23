@@ -729,6 +729,10 @@ func main() {
 		cmdConflicts(cfg)
 	case "forget-scan":
 		cmdForgetScan(cfg)
+	case "procedure-induct":
+		cmdProcedureInduct(cfg)
+	case "procedure":
+		cmdProcedure(cfg)
 	case "doctor":
 		cmdDoctor(cfg)
 	case "context":
@@ -1152,6 +1156,15 @@ func cmdMCP(cfg store.Config) {
 			worker.Start(ctx)
 			mcpCfg.AutoEmbed = worker
 			autoEmbedWorker = worker
+		}
+		// omnia-procedural-memory (design obs #1602 / spec obs #1606): only
+		// builds the Procedural wiring when procedural.enabled is true in
+		// config.yaml, mirroring AutoEmbed's own nil-means-disabled
+		// convention above. resolveProcedureInducer may return nil (no CLI
+		// configured) — SafeInduce degrades gracefully rather than
+		// disabling induction outright.
+		if appCfg.Procedural.Enabled {
+			mcpCfg.Procedural = &mcp.ProceduralWiring{Inducer: resolveProcedureInducer()}
 		}
 	}
 	allowlist := resolveMCPTools(toolsFilter)

@@ -183,3 +183,104 @@ func HydrateFusedResults(s *store.Store, fused []recall.Result, limit int, filte
 	}
 	return out
 }
+
+// ─── omnia-procedural-memory (design obs #1602 / spec obs #1606), PR2 Phase 7 ───
+//
+// Contrastive-pair retrieval: internal/recall stays pure (no pairing logic
+// lives there, and recall.Fuse is untouched by this slice) — the PAIRING of
+// the top-ranked TRUSTED playbook with the top-ranked TRUSTED anti_playbook
+// happens here, at the same wiring-layer boundary HydrateFusedResults
+// already occupies (design decision #5).
+
+// ProcedureCard is the contrastive-pair envelope attached to mem_search/
+// mem_context responses when procedural memory is enabled and at least one
+// TRUSTED procedure matches. Only the polarity that actually has a trusted
+// match is populated — the missing side is never fabricated (spec
+// scenario: "only one polarity is trusted").
+type ProcedureCard struct {
+	Playbook     *ProcedureCardEntry `json:"playbook,omitempty"`
+	AntiPlaybook *ProcedureCardEntry `json:"anti_playbook,omitempty"`
+}
+
+// ProcedureCardEntry is one polarity's half of a ProcedureCard.
+type ProcedureCardEntry struct {
+	SyncID            string   `json:"sync_id"`
+	Trigger           string   `json:"trigger"`
+	Steps             []string `json:"steps"`
+	ExpectedOutcome   string   `json:"expected_outcome,omitempty"`
+	PostconditionKind string   `json:"postcondition_kind"`
+	Confidence        float64  `json:"confidence"`
+}
+
+// procedureCardEntryFrom converts a store.Procedure row into its
+// ProcedureCardEntry projection (steps flattened to their template text —
+// the card is a human/agent-facing summary, not the full stored program).
+func procedureCardEntryFrom(p store.Procedure) *ProcedureCardEntry {
+	steps := make([]string, 0, len(p.Steps))
+	for _, st := range p.Steps {
+		steps = append(steps, st.Template)
+	}
+	return &ProcedureCardEntry{
+		SyncID:            p.SyncID,
+		Trigger:           p.Trigger,
+		Steps:             steps,
+		ExpectedOutcome:   p.ExpectedOutcome,
+		PostconditionKind: p.PostconditionKind,
+		Confidence:        p.Confidence,
+	}
+}
+
+// BuildProcedureCard picks the single top-ranked TRUSTED playbook and the
+// single top-ranked TRUSTED anti_playbook matching query, and returns one
+// combined card naming both — or just the one polarity that matched, never
+// fabricating the other side. Returns nil when NEITHER polarity has a
+// trusted match, so callers can skip attaching anything to the envelope
+// (mirrors cfg.StructuralForgetting.Enabled's own "nothing to attach" no-op
+// shape in handleSearch).
+func BuildProcedureCard(s *store.Store, query string) *ProcedureCard {
+	playbook := topTrustedProcedureByQuery(s, query, store.ProcedurePolarityPlaybook)
+	antiPlaybook := topTrustedProcedureByQuery(s, query, store.ProcedurePolarityAntiPlaybook)
+	if playbook == nil && antiPlaybook == nil {
+		return nil
+	}
+	return &ProcedureCard{Playbook: playbook, AntiPlaybook: antiPlaybook}
+}
+
+func topTrustedProcedureByQuery(s *store.Store, query, polarity string) *ProcedureCardEntry {
+	results, err := s.SearchProcedures(query, polarity, store.ProcedureStateTrusted, 1)
+	if err != nil || len(results) == 0 {
+		return nil
+	}
+	return procedureCardEntryFrom(results[0])
+}
+
+// BuildProcedureCardForProject is BuildProcedureCard's mem_context
+// counterpart: mem_context has no free-text query to match procedures_fts
+// against (it summarizes a whole project's context), so instead of a
+// query-relevance match it surfaces the single most-recently-updated
+// TRUSTED procedure of each polarity for the project — "what should I keep
+// in mind for this project" rather than "what matches this search." Same
+// "only attach what's actually trusted, never fabricate the missing
+// polarity" contract as BuildProcedureCard.
+func BuildProcedureCardForProject(s *store.Store, project, scope string) *ProcedureCard {
+	playbook := topTrustedProcedureForProject(s, project, scope, store.ProcedurePolarityPlaybook)
+	antiPlaybook := topTrustedProcedureForProject(s, project, scope, store.ProcedurePolarityAntiPlaybook)
+	if playbook == nil && antiPlaybook == nil {
+		return nil
+	}
+	return &ProcedureCard{Playbook: playbook, AntiPlaybook: antiPlaybook}
+}
+
+func topTrustedProcedureForProject(s *store.Store, project, scope, polarity string) *ProcedureCardEntry {
+	results, err := s.ListProcedures(store.ListProceduresOptions{
+		Project:  project,
+		Scope:    scope,
+		Polarity: polarity,
+		State:    store.ProcedureStateTrusted,
+		Limit:    1,
+	})
+	if err != nil || len(results) == 0 {
+		return nil
+	}
+	return procedureCardEntryFrom(results[0])
+}

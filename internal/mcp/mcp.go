@@ -116,6 +116,19 @@ type MCPConfig struct {
 	// forget-scan` are never gated by this flag either way — see
 	// config.Config.StructuralForgetting's doc.
 	StructuralForgetting config.StructuralForgettingConfig
+
+	// Procedural, when non-nil, enables the omnia-procedural-memory
+	// playbook/anti-playbook slot (design obs #1602, spec obs #1606):
+	// mem_save/mem_update's online candidate induction + SSGM
+	// applied_procedure reuse feedback, and mem_search/mem_context's
+	// contrastive procedure card. nil (the default, mirroring AutoEmbed's
+	// own nil-means-disabled convention) means procedural.enabled=false in
+	// config.yaml — every one of those call sites is then a total no-op,
+	// keeping mem_save/mem_update/mem_search/mem_context byte-for-byte
+	// identical to their pre-existing contracts (spec: backward-compatibility
+	// domain). Built by cmd/omnia/main.go from config.ProceduralConfig only
+	// when Enabled is true.
+	Procedural *ProceduralWiring
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -470,6 +483,9 @@ Examples:
 				mcp.WithString("outcome",
 					mcp.Description("Optional outcome for a bugfix-family save: worked | did_not_work | unknown (default). A fix marked worked ranks above unrecorded/unknown fixes in mem_search; did_not_work ranks below. Use mem_update to set this later once a fix has been verified."),
 				),
+				mcp.WithString("applied_procedure",
+					mcp.Description("Optional sync_id of a procedure (playbook or anti_playbook) you applied before this save's outcome. worked confirms/promotes it (SSGM UPVOTE); did_not_work contradicts it (SSGM DOWNVOTE). Only takes effect when procedural memory is enabled."),
+				),
 				mcp.WithString("source",
 					mcp.Description("Write-time provenance class: user | agent | ingest:tool | ingest:web | ingest:doc. Classified into a trust_tag at save time (attribution, not authentication — never blocks or alters the save). Omitted or unrecognized values default to trust_tag=unverified."),
 				),
@@ -524,8 +540,11 @@ Examples:
 				mcp.WithString("outcome",
 					mcp.Description("Mark a bugfix's outcome after the fact: worked | did_not_work | unknown. Use this once a fix has been verified in practice — mem_search ranks worked fixes above unknown ones for the same match."),
 				),
+				mcp.WithString("applied_procedure",
+					mcp.Description("Optional sync_id of a procedure (playbook or anti_playbook) you applied. worked confirms/promotes it (SSGM UPVOTE); did_not_work contradicts it (SSGM DOWNVOTE). Only takes effect when procedural memory is enabled."),
+				),
 			),
-			queuedWriteHandler(writeQueue, handleUpdate(s)),
+			queuedWriteHandler(writeQueue, handleUpdate(s, cfg)),
 		)
 	}
 
@@ -1393,8 +1412,22 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			b.WriteString(nudge)
 		}
 
+		envelope := map[string]any{"results": structuredResults}
+
+		// omnia-procedural-memory (design obs #1602 / spec obs #1606), PR2
+		// Phase 7: attach a contrastive procedure card (top trusted playbook
+		// + top trusted anti_playbook matching query) when procedural memory
+		// is enabled. Gated by cfg.Procedural != nil, mirroring
+		// cfg.StructuralForgetting.Enabled's own "byte-identical when off"
+		// contract — internal/recall stays untouched/pure either way.
+		if cfg.Procedural != nil {
+			if card := BuildProcedureCard(s, query); card != nil {
+				envelope["procedure_card"] = card
+			}
+		}
+
 		// JW4: use respondWithProject for the success path (REQ-314).
-		return respondWithProject(detRes, b.String(), map[string]any{"results": structuredResults}), nil
+		return respondWithProject(detRes, b.String(), envelope), nil
 	}
 }
 
@@ -1540,6 +1573,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		errorSignature, _ := req.GetArguments()["error_signature"].(string)
 		outcome, _ := req.GetArguments()["outcome"].(string)
 		source, _ := req.GetArguments()["source"].(string)
+		appliedProcedure, _ := req.GetArguments()["applied_procedure"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
 		_, explicitProjectProvided := req.GetArguments()["project"]
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
@@ -1622,6 +1656,12 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// becomes semantically searchable within seconds without slowing the
 		// save. No-op when embeddings are disabled.
 		enqueueAutoEmbed(cfg, s, savedID)
+
+		// omnia-procedural-memory (design obs #1602 / spec obs #1606), PR2
+		// Phases 4-5: online candidate induction + SSGM applied_procedure
+		// reuse feedback. No-op when procedural.enabled is false (the
+		// default) — see runProceduralHooksForObservation's own doc.
+		runProceduralHooksForObservation(cfg, s, savedID, appliedProcedure)
 
 		// Write-time provenance audit (memory-provenance foundation,
 		// omnia-provenance-foundation): source was already classified into
@@ -1793,12 +1833,14 @@ func handleSuggestTopicKey() server.ToolHandlerFunc {
 	}
 }
 
-func handleUpdate(s *store.Store) server.ToolHandlerFunc {
+func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
 		}
+
+		appliedProcedure, _ := req.GetArguments()["applied_procedure"].(string)
 
 		update := store.UpdateObservationParams{}
 		if v, ok := req.GetArguments()["title"].(string); ok {
@@ -1833,6 +1875,13 @@ func handleUpdate(s *store.Store) server.ToolHandlerFunc {
 		if err != nil {
 			return mcp.NewToolResultError("Failed to update memory: " + err.Error()), nil
 		}
+
+		// omnia-procedural-memory (design obs #1602 / spec obs #1606), PR2
+		// Phases 4-5: online candidate induction + SSGM applied_procedure
+		// reuse feedback — mem_update can record/confirm an outcome after
+		// the fact, exactly like mem_save. No-op when procedural.enabled is
+		// false (the default).
+		runProceduralHooksForObservation(cfg, s, obs.ID, appliedProcedure)
 
 		msg := fmt.Sprintf("Memory updated: #%d %q (%s, scope=%s)", obs.ID, obs.Title, obs.Type, obs.Scope)
 		if contentLen > s.MaxObservationLength() {
@@ -2128,7 +2177,19 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 			result += nudge
 		}
 
-		return respondWithProject(detRes, result, nil), nil
+		// omnia-procedural-memory (design obs #1602 / spec obs #1606), PR2
+		// Phase 7: mem_context has no free-text query, so it surfaces the
+		// most-recently-updated trusted procedure of each polarity for the
+		// project instead of a query match (BuildProcedureCardForProject's
+		// own doc). Gated by cfg.Procedural != nil, same as handleSearch.
+		var extra map[string]any
+		if cfg.Procedural != nil {
+			if card := BuildProcedureCardForProject(s, contextProject, scope); card != nil {
+				extra = map[string]any{"procedure_card": card}
+			}
+		}
+
+		return respondWithProject(detRes, result, extra), nil
 	}
 }
 

@@ -278,6 +278,37 @@ func DeterministicInduce(trigger, trajectory string) InducedProcedure {
 	}
 }
 
+// ─── Prompt construction (PR2: online + offline induction callers) ──────────
+
+// BuildInducePrompt renders the canonical prompt sent to
+// ProcedureInducer.Induce for a given trigger + trajectory pair. Shared by
+// BOTH the online caller (internal/mcp's mem_save wiring, PR2 Phase 4) and
+// the offline caller (`omnia procedure-induct`, PR2 Phase 6) so the two
+// induction paths never drift out of sync on prompt wording — mirrors
+// BuildPrompt's shared role for AgentRunner.Compare. Deliberately instructs
+// the model to omit "polarity" (see ErrModelSetPolarity's doc: polarity is
+// assigned by the caller, never the model).
+func BuildInducePrompt(trigger, trajectory string) string {
+	return fmt.Sprintf(`You are extracting a reusable, verifiable procedure from a single past trajectory.
+
+Trigger (the situation this procedure applies to):
+%s
+
+Trajectory (what was actually done, and its result):
+%s
+
+Respond with a single JSON object only (no prose, no markdown fences), with this exact shape:
+{
+  "trigger": "short description of when this procedure applies",
+  "steps": [{"order": 1, "template": "step description", "slots": ["param1"]}],
+  "expected_outcome": "what should happen if the steps are followed",
+  "postcondition_kind": "tests_pass" | "lint_clean" | "build_green" | "custom",
+  "postcondition_expr": "optional machine-checkable expression when postcondition_kind is custom"
+}
+
+Do NOT include a "polarity" field in your response — polarity is assigned by the caller, never by you.`, trigger, trajectory)
+}
+
 // SafeInduce wraps a ProcedureInducer call so a missing runner or an Induce
 // error never propagates to the caller: it falls back to
 // DeterministicInduce(trigger, trajectory) instead of returning an error.

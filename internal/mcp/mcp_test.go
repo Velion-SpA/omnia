@@ -1027,7 +1027,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 		t.Fatalf("expected search result pinned=true, got %v", firstResult["pinned"])
 	}
 
-	update := handleUpdate(s)
+	update := handleUpdate(s, MCPConfig{})
 	updateReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":    float64(obsID),
 		"title": "Fix parser panic",
@@ -1331,7 +1331,7 @@ func TestMCPHandlersErrorBranches(t *testing.T) {
 		t.Fatalf("expected no memories response")
 	}
 
-	update := handleUpdate(s)
+	update := handleUpdate(s, MCPConfig{})
 	missingIDRes, err := update(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}})
 	if err != nil {
 		t.Fatalf("update missing id error: %v", err)
@@ -1415,7 +1415,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected search to return tool error when store is closed")
 	}
 
-	updateRes, err := handleUpdate(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "title": "new"}}})
+	updateRes, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "title": "new"}}})
 	if err != nil {
 		t.Fatalf("closed store update call: %v", err)
 	}
@@ -1612,7 +1612,7 @@ func TestHandleUpdateAcceptsAllOptionalFields(t *testing.T) {
 		t.Fatalf("add observation: %v", err)
 	}
 
-	res, err := handleUpdate(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":        float64(id),
 		"title":     "Updated",
 		"content":   "Updated content",
@@ -7442,5 +7442,74 @@ func TestHandleSearchLegacyMixedCaseProject(t *testing.T) {
 	text := callResultText(t, res)
 	if !strings.Contains(text, "Found") || strings.Contains(text, "No memories found") {
 		t.Fatalf("expected search results for legacy project, got: %s", text)
+	}
+}
+
+// ─── omnia-procedural-memory (design obs #1602 / spec obs #1606), PR2 Phase 8 ───
+
+// TestHandleSave_ProceduralDisabled_ResponseIdenticalToBaseline (task 8.1)
+// pins the backward-compatibility contract: with cfg.Procedural unset
+// (procedural.enabled=false, the default), an outcome=worked bugfix save's
+// response text and structured envelope are BYTE-IDENTICAL to the same call
+// against a store with no procedural wiring touched at all — i.e. the
+// procedural-memory feature, when disabled, changes NOTHING about
+// mem_save's response.
+func TestHandleSave_ProceduralDisabled_ResponseIdenticalToBaseline(t *testing.T) {
+	args := map[string]any{
+		"title":   "Fixed slice index panic",
+		"content": "Guarded the slice access with a length check before indexing.",
+		"type":    "bugfix",
+		"project": "engram",
+		"outcome": "worked",
+	}
+
+	sBaseline := newMCPTestStore(t)
+	if err := sBaseline.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	baselineRes, err := handleSave(sBaseline, MCPConfig{}, NewSessionActivity(10*time.Minute))(
+		context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+	if err != nil {
+		t.Fatalf("baseline handler error: %v", err)
+	}
+
+	sDisabled := newMCPTestStore(t)
+	if err := sDisabled.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	// cfg.Procedural is explicitly nil here too — this is the SAME zero
+	// value as the baseline call above, proving there is no hidden
+	// behavior difference between "field never set" and "field
+	// deliberately left disabled."
+	disabledCfg := MCPConfig{Procedural: nil}
+	disabledRes, err := handleSave(sDisabled, disabledCfg, NewSessionActivity(10*time.Minute))(
+		context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+	if err != nil {
+		t.Fatalf("disabled handler error: %v", err)
+	}
+
+	baselineBody := callResultJSON(t, baselineRes)
+	disabledBody := callResultJSON(t, disabledRes)
+	if _, ok := baselineBody["procedure_card"]; ok {
+		t.Error("baseline envelope must never contain procedure_card")
+	}
+	if _, ok := disabledBody["procedure_card"]; ok {
+		t.Error("disabled envelope must never contain procedure_card")
+	}
+	// sync_id/id differ across two independent AddObservation calls against
+	// two independent stores — everything ELSE in the envelope (including
+	// the human-readable "result" text and its embedded topic_key
+	// suggestion) must be identical.
+	for _, k := range []string{"sync_id", "id"} {
+		delete(baselineBody, k)
+		delete(disabledBody, k)
+	}
+	if len(baselineBody) != len(disabledBody) {
+		t.Errorf("envelope key sets differ: baseline=%v disabled=%v", baselineBody, disabledBody)
+	}
+	for k, v := range baselineBody {
+		if disabledBody[k] != v {
+			t.Errorf("envelope[%q] differs: baseline=%v disabled=%v", k, v, disabledBody[k])
+		}
 	}
 }
