@@ -104,6 +104,18 @@ type MCPConfig struct {
 	// (REQ-002 graceful degradation). Omitting code_anchors leaves the save
 	// byte-identical to today regardless of this field.
 	AnchorProbe AnchorCapturer
+
+	// StructuralForgetting gates handleSearch's stale-anchor downrank +
+	// receipt (memory-structural-forgetting spec, Requirement 6;
+	// omnia-structural-forgetting PR2). The zero value (Enabled=false) is
+	// the default: handleSearch's response — including whether
+	// anchor_receipt is ever attached and whether score_breakdown's
+	// staleness_penalty is ever non-zero — stays byte-for-byte identical to
+	// today (Regression: memory with no anchor unaffected, extended to
+	// "flag off"). Anchor CAPTURE (mem_save's code_anchors) and `omnia
+	// forget-scan` are never gated by this flag either way — see
+	// config.Config.StructuralForgetting's doc.
+	StructuralForgetting config.StructuralForgettingConfig
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -1206,6 +1218,23 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			// Errors from relation loading are swallowed — search must not fail.
 		}
 
+		// memory-structural-forgetting (design D6 wiring boundary, PR2
+		// Requirement 6): downranks memories carrying at least one stale code
+		// anchor and attaches an anchor_receipt line. Gated behind
+		// cfg.StructuralForgetting.Enabled (default false) so the ENTIRE
+		// block — including the anchor batch-load itself — is skipped when
+		// the flag is off, keeping handleSearch's response byte-for-byte
+		// identical to before this slice existed (Regression: memory with no
+		// anchor unaffected, extended to "flag off" too).
+		anchorsByObs := map[string][]store.MemoryAnchor{}
+		if cfg.StructuralForgetting.Enabled && len(syncIDs) > 0 {
+			if am, aerr := s.GetAnchorsForObservations(syncIDs); aerr == nil {
+				anchorsByObs = am
+			}
+			// Errors from anchor loading are swallowed — search must not fail.
+			results = ApplyStalenessDownrank(results, anchorsByObs)
+		}
+
 		// explain (Requirement: Per-Hit Score Breakdown) needs the SAME
 		// batch-normalized relevance RankResults scores against, so a
 		// receipt's "final" is honest about what RankResults actually
@@ -1275,6 +1304,26 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			if r.SignatureMatch {
 				entry["signature_match"] = true
 			}
+			// memory-structural-forgetting (Requirement 6): attach the
+			// "anchor <file>:<lines> changed <old->new sha>" receipt line
+			// (both to the structured entry and, below, the human-readable
+			// text block) when this result carries a stale anchor, and
+			// compute the staleness_penalty that feeds into score_breakdown
+			// below. stalenessPenalty stays 0 (its pre-PR2 reserved default)
+			// when the flag is off or this result has no anchors at all.
+			var stalenessPenalty float64
+			var anchorReceiptLine string
+			if cfg.StructuralForgetting.Enabled {
+				if anchors, ok := anchorsByObs[r.SyncID]; ok {
+					stalenessPenalty = StalenessPenaltyFor(anchors)
+					if stale, found := firstStaleAnchor(anchors); found {
+						if receipt := BuildStaleReceipt(stale); receipt != "" {
+							anchorReceiptLine = receipt
+							entry["anchor_receipt"] = receipt
+						}
+					}
+				}
+			}
 			if explain {
 				// cfg.Recall != nil is always an accurate "did fusion run"
 				// signal at this call site: unlike cmd/omnia's cmdSearch,
@@ -1282,7 +1331,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 				// path on a fusion error above — it returns an error result
 				// instead (see the cfg.Recall != nil branch), so there is no
 				// mid-query fallback case to distinguish here.
-				entry["score_breakdown"] = BuildResultReceipt(r, cfg.Recall != nil, cfg.RecallRanking, relevance, normalizedRelevance, now)
+				entry["score_breakdown"] = BuildResultReceipt(r, cfg.Recall != nil, cfg.RecallRanking, relevance, normalizedRelevance, now, stalenessPenalty)
 			}
 			structuredResults = append(structuredResults, entry)
 
@@ -1330,6 +1379,9 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 						fmt.Fprintf(&b, "    conflict: contested by #%s (pending)\n", rel.SourceID)
 					}
 				}
+			}
+			if anchorReceiptLine != "" {
+				fmt.Fprintf(&b, "    %s\n", anchorReceiptLine)
 			}
 			b.WriteString("\n")
 		}

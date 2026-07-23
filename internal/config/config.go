@@ -52,6 +52,24 @@ type Config struct {
 	// false`. Computed by Load; not itself part of the YAML schema
 	// (yaml:"-").
 	RecallEnabledExplicit bool `yaml:"-"`
+	// StructuralForgetting configures the omnia-structural-forgetting living-
+	// memory layer's RECALL-SIDE integration only (design obs #1594, spec
+	// obs #1595). Disabled by default: `mem_save`'s optional `code_anchors`
+	// capture and `omnia forget-scan` are explicit, user-initiated actions
+	// that are NEVER gated by this flag either way — this config covers only
+	// handleSearch's stale-anchor downrank + receipt line, so a fresh
+	// install/upgrade that never mentions `structural_forgetting` sees ZERO
+	// behavior change vs today (backward-compatible default, mirroring
+	// Recall.Enabled/Ranking.Enabled's own off-by-default convention).
+	StructuralForgetting StructuralForgettingConfig `yaml:"structural_forgetting"`
+}
+
+// StructuralForgettingConfig gates memory-structural-forgetting's recall
+// downrank (Requirement 6: "Retrieval Downranks Stale Memories"). See
+// Config.StructuralForgetting's doc for what this flag does and does NOT
+// cover.
+type StructuralForgettingConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type EngramConfig struct {

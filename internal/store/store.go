@@ -1310,6 +1310,19 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// omnia-structural-forgetting PR2: new_blame_sha records the git blame SHA
+	// discovered at STALING time (ScanProject{Source:anchor}'s Phase 4 pass),
+	// so mem_search's stale-anchor receipt (Requirement 6: "old->new SHA") can
+	// report the ORIGINALLY captured SHA (blame_sha, untouched by
+	// MarkAnchorStale) alongside the SHA that made it stale, without a second
+	// git blame at search time. Added via addColumnIfNotExists (not folded
+	// into the CREATE TABLE above) because memory_anchors already shipped in
+	// PR1 (commit 7b52380) — an existing on-disk table needs ALTER TABLE, not
+	// a no-op CREATE TABLE IF NOT EXISTS.
+	if err := s.addColumnIfNotExists("memory_anchors", "new_blame_sha", "TEXT"); err != nil {
+		return err
+	}
+
 	return nil
 }
 

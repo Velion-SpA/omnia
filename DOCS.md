@@ -535,6 +535,28 @@ Inspect or replay the `sync_apply_deferred` queue.
 - `--inspect <sync_id>`: print full decoded payload for one row; exits non-zero when not found.
 - `--replay`: call `ReplayDeferred()` and print retried/succeeded/failed/dead counts.
 
+### Forget Scan CLI (admin)
+
+`omnia forget-scan` is the reconcile pass for living-memory / structural-forgetting (spec `memory-structural-forgetting`): it re-blames every active code anchor (captured via `mem_save`'s `code_anchors`, see above) against the live git working tree and classifies each one.
+
+```
+omnia forget-scan [--project <name>] [--repo <path>] [--semantic] [--apply] [--yes]
+```
+
+- `--dry-run` (default, implicit): reports `checked` / `traveled` / `staled` counts without writing anything.
+- `--apply`: persists the outcomes — relocates traveled anchors in place (`anchor_status` stays `active`), and marks materially-changed, unrelocatable anchors `stale` (never deletes the memory or the anchor row; sets the linked memory's `review_after` to now so it surfaces in the normal review flow).
+- `--repo <path>`: scope the scan to one repo root when multiple repos share a project.
+- `--semantic`: accepted for interface parity with `omnia conflicts scan`'s cost-confirm gate; structural forgetting's materiality check is deterministic (content-hash + line-delta) only this slice, so `--semantic` does not change classification — it still requires an agent CLI configured (`ENGRAM_AGENT_CLI`) so the flag fails loudly rather than silently no-op'ing.
+- `--yes`: skip the `--semantic` cost-estimate confirmation prompt.
+
+Classification per anchor (travel is always attempted before any staleness verdict):
+
+1. Re-blamed content hash unchanged at the same location → unchanged, skipped.
+2. Re-blamed content hash unchanged but at a new location (a refactor moved it) → **traveled**: the anchor's line range relocates in place, never staled.
+3. Content hash changed (wherever it was found, including "symbol not found anywhere") → **stale**.
+
+Set `structural_forgetting.enabled: true` in config to have `mem_search` downrank stale-anchored memories and surface a receipt line — see the `mem_search` `score_breakdown.staleness_penalty` / `anchor_receipt` docs above. The flag defaults to `false` (backward-compatible: a fresh install/upgrade that never mentions `structural_forgetting` sees zero behavior change). `mem_save`'s `code_anchors` capture and `omnia forget-scan` itself are never gated by this flag either way — it only controls the recall-side downrank/receipt.
+
 ### Eval Harness CLI (admin)
 
 `omnia eval` runs the memory-quality eval harness (spec `sdd/omnia-eval-harness`): a token-cost-normalized measuring stick over a corpus of real, dogfooded memory cases, segmented by capability (Recall, Causal, State-Update/Staleness, State-Abstraction) and by query language (EN/ES), plus a distinct retrieval-only recall@k section. It is NOT for end users — it is a maintainer/CI tool for judging embedding-model and recall-config changes.
@@ -831,9 +853,11 @@ Set `explain: true` (boolean, default `false`) to attach a per-hit `score_breakd
 - **recency**: the recency decay term (`0`–`1`, half-life controlled by `recall.ranking.recency_half_life_days`), or `null` when `updated_at` can't be parsed
 - **importance**: the normalized importance weight for the hit's `type` (`recall.ranking.importance_overrides` aware)
 - **final**: the weighted-sum ranking score (`recall.ranking.weights.*`) computed from the three components above — reflects what `recall.ranking.enabled: true` would sort by, even when ranking is currently off
-- **staleness_penalty**: reserved, always `0` this slice (forward-compat slot for a future structural-forgetting downrank)
+- **staleness_penalty**: the fixed downrank deduction (`0.5`) applied when this memory carries at least one stale code anchor and `structural_forgetting.enabled: true`; `0` otherwise (no stale anchor, or the flag is off). Populated by `omnia mcp`'s `mem_search`; `omnia search --explain` always passes `0` here (no anchor-status lookup wired at that call site yet).
 
 `omnia search --explain` prints the same breakdown for CLI callers. When `explain` is omitted (the default), no `score_breakdown` field is present on any result entry — response shape is unchanged.
+
+When `structural_forgetting.enabled: true` in config and a result carries a stale code anchor (set by `omnia forget-scan`, see below), its structured entry also gets an `anchor_receipt` string field — `"anchor <file>:<lines> changed old_sha->new_sha"` — and stale-anchored memories are stable-sorted after every equally-relevant fresh one (never excluded outright). The same line is appended to the text output. Both are absent/unaffected when the flag is off (default) or the memory has no stale anchor — a memory with no `code_anchors` ever supplied is never touched by this.
 
 ### mem_save
 
