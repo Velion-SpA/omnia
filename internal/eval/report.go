@@ -40,10 +40,19 @@ type CaseResult struct {
 
 // Report is the spec EVAL-3 segmented report: accuracy and
 // quality-per-1k-tokens broken down per capability (all four buckets) AND
-// separately per language (EN vs ES).
+// separately per language (EN vs ES), plus (spec EVAL-7) a distinct
+// retrieval-only recall@k section that BuildReport never populates and never
+// derives from ByCapability/ByLanguage — callers attach it separately so the
+// intrinsic (retrieval) and extrinsic (end-task) figures can never collapse
+// into one merged number.
 type Report struct {
 	ByCapability map[Capability]Segment
 	ByLanguage   map[Language]Segment
+	// Retrieval is spec EVAL-7's retrieval-only recall@k section. Nil until a
+	// caller explicitly attaches one (e.g. via RunRetrievalSection) — a run
+	// with no retrieval section is distinguishable from one whose retrieval
+	// figure happens to be zero.
+	Retrieval *RetrievalSection
 }
 
 // allCapabilities is the closed set BuildReport always seeds into
