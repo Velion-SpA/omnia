@@ -32,6 +32,7 @@ import (
 	"github.com/velion/omnia/internal/cloud/constants"
 	"github.com/velion/omnia/internal/cloud/remote"
 	"github.com/velion/omnia/internal/cloud/syncguidance"
+	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/datadir"
 	"github.com/velion/omnia/internal/diagnostic"
 	"github.com/velion/omnia/internal/embed"
@@ -1131,6 +1132,10 @@ func cmdMCP(cfg store.Config) {
 	// buildRecallService reads it below.
 	if appCfg, cfgErr := loadAppConfigWithRecallAutodetect(); cfgErr == nil {
 		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir)
+		// memory-recall-ranking (task 5.4): thread recall.ranking.* through to
+		// handleSearch regardless of whether hybrid recall itself is enabled —
+		// RankResults/explain work over the FTS5-only path too.
+		mcpCfg.RecallRanking = appCfg.Recall.Ranking
 		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
 		// enabled, run the worker on the same ctx cancelled at shutdown so
 		// mem_save embeds new memories out-of-band. nil when disabled.
@@ -1165,13 +1170,14 @@ func cmdTUI(cfg store.Config) {
 
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: omnia search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]")
+		fmt.Fprintln(os.Stderr, "usage: omnia search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N] [--explain]")
 		exitFunc(1)
 	}
 
 	// Collect the query (everything that's not a flag)
 	var queryParts []string
 	opts := store.SearchOptions{Limit: 10}
+	explain := false
 
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -1197,6 +1203,10 @@ func cmdSearch(cfg store.Config) {
 				opts.Scope = os.Args[i+1]
 				i++
 			}
+		case "--explain":
+			// Per-hit score breakdown (Requirement: Per-Hit Score
+			// Breakdown) — a bare flag, no value to consume.
+			explain = true
 		default:
 			queryParts = append(queryParts, os.Args[i])
 		}
@@ -1219,9 +1229,15 @@ func cmdSearch(cfg store.Config) {
 	// engine MCP mem_search uses (buildRecallServiceForCLI mirrors cmdMCP's
 	// wiring exactly), falling back to the plain FTS5 storeSearch below
 	// whenever recall is disabled, unconfigured, or unavailable —
-	// recallOrFTSSearch never crashes or hangs on a degraded recall service.
+	// recallOrFTSSearchWithRelevance never crashes or hangs on a degraded
+	// recall service. fusionRan reports whether RRF fusion actually produced
+	// these results (as opposed to merely "a recall.Service was configured")
+	// — a configured recall.Service that errors mid-query gracefully falls
+	// back to plain FTS5 lexical results, and --explain below must label
+	// that fallback as lexical, not fusion (blocking fix: --explain
+	// mislabels fusion vs lexical on mid-query FTS5 fallback).
 	recallSvc := buildRecallServiceForCLI(s, cfg.DataDir)
-	results, err := recallOrFTSSearch(context.Background(), s, recallSvc, query, opts)
+	results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, query, opts)
 	if err != nil {
 		fatal(err)
 		return
@@ -1232,17 +1248,65 @@ func cmdSearch(cfg store.Config) {
 		return
 	}
 
+	// memory-recall-ranking (task 5.3/5.4): --explain prints a per-result
+	// score breakdown after the existing result block. Computed via
+	// internal/mcp's exported MinMaxNormalizeRelevance/BuildResultReceipt —
+	// the SAME primitives mem_search's explain wiring uses (structural nit:
+	// no more hand-rolled CLI-only copies that can silently drift out of
+	// sync) — so the two surfaces stay consistent. Sentinel AND
+	// signature-match rows are excluded from the normalization batch,
+	// mirroring internal/mcp's handleSearch: leaving a signature-match row's
+	// outlier relevance (FTS5-only path's relevance[id] = -rank, ~500 for
+	// signatureMatchRank) in the batch would pin the max and crush every
+	// other row's normalized relevance toward 0.
+	var rankingCfg config.RankingConfig
+	var normalizedRelevance map[int64]float64
+	now := time.Now()
+	if explain {
+		rankingCfg = loadRankingConfigForCLI()
+		nonSentinel := make([]store.SearchResult, 0, len(results))
+		for _, r := range results {
+			if r.Rank != cliExactSentinelRank && !r.SignatureMatch {
+				nonSentinel = append(nonSentinel, r)
+			}
+		}
+		normalizedRelevance = mcp.MinMaxNormalizeRelevance(nonSentinel, relevance)
+	}
+
 	fmt.Printf("Found %d memories:\n\n", len(results))
 	for i, r := range results {
 		project := ""
 		if r.Project != nil {
 			project = fmt.Sprintf(" | project: %s", *r.Project)
 		}
-		fmt.Printf("[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s\n\n",
+		fmt.Printf("[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s\n",
 			i+1, r.ID, r.Type, r.Title,
 			truncate(r.Content, 300),
 			timeutil.FormatLocal(r.CreatedAt), project, r.Scope)
+		if explain {
+			receipt := mcp.BuildResultReceipt(r, fusionRan, rankingCfg, relevance, normalizedRelevance, now)
+			printScoreBreakdown(receipt)
+		}
+		fmt.Println()
 	}
+}
+
+// printScoreBreakdown renders BuildReceipt's map[string]any output as one
+// human-readable line for `omnia search --explain` (task 5.3).
+func printScoreBreakdown(receipt map[string]any) {
+	lexical, _ := receipt["lexical"].(map[string]any)
+	fmt.Printf("    score breakdown: lexical=%s exact_match=%v semantic=%s fusion=%s recency=%s importance=%s final=%s staleness_penalty=%v\n",
+		formatBreakdownValue(lexical["rank"]), lexical["exact_match"],
+		formatBreakdownValue(receipt["semantic"]), formatBreakdownValue(receipt["fusion"]),
+		formatBreakdownValue(receipt["recency"]), formatBreakdownValue(receipt["importance"]),
+		formatBreakdownValue(receipt["final"]), receipt["staleness_penalty"])
+}
+
+func formatBreakdownValue(v any) string {
+	if v == nil {
+		return "null"
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 func cmdSave(cfg store.Config) {

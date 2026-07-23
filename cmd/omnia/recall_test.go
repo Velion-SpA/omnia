@@ -288,6 +288,114 @@ func TestRecallOrFTSSearch_RecallSearchErrorFallsBackToFTS(t *testing.T) {
 	}
 }
 
+// TestRecallOrFTSSearchWithRelevance_NilRecallReportsFusionDidNotRun locks the
+// fusionRan=false case for a nil recallSvc — the "recall disabled" branch.
+func TestRecallOrFTSSearchWithRelevance_NilRecallReportsFusionDidNotRun(t *testing.T) {
+	cfg := testConfig(t)
+	s, err := storeNew(cfg)
+	if err != nil {
+		t.Fatalf("storeNew: %v", err)
+	}
+	defer s.Close()
+
+	_, _, fusionRan, err := recallOrFTSSearchWithRelevance(context.Background(), s, nil, "panic", store.SearchOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("recallOrFTSSearchWithRelevance(nil recall): %v", err)
+	}
+	if fusionRan {
+		t.Error("fusionRan = true, want false when recallSvc is nil (no fusion ever ran)")
+	}
+}
+
+// TestRecallOrFTSSearchWithRelevance_SuccessReportsFusionRan locks the
+// fusionRan=true case: recallSvc.Search succeeding must report that fusion
+// actually ran, so --explain can correctly label the result as fusion.
+func TestRecallOrFTSSearchWithRelevance_SuccessReportsFusionRan(t *testing.T) {
+	s, err := storeNew(testConfig(t))
+	if err != nil {
+		t.Fatalf("storeNew: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CreateSession("s-cli-fusionran", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-cli-fusionran",
+		Type:      "bugfix",
+		Title:     "Fix login timeout",
+		Content:   "Fix login timeout under load",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	semantic := fakeCLIEmbedSearcher{hits: []embed.Hit{{ObsID: int(obsID), Score: 0.9}}}
+	recallSvc := recall.NewService(mcp.NewStoreLexicalSearcher(s), semantic, recall.DefaultFuseParams())
+
+	_, _, fusionRan, err := recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, "login timeout", store.SearchOptions{
+		Project: "engram", Scope: "project", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("recallOrFTSSearchWithRelevance: %v", err)
+	}
+	if !fusionRan {
+		t.Error("fusionRan = false, want true when recallSvc.Search succeeds")
+	}
+}
+
+// TestRecallOrFTSSearchWithRelevance_FallbackReportsFusionDidNotRun is the RED
+// test for blocking fix 2: cmdSearch's --explain used the static
+// `recallSvc != nil` check to decide fusion-vs-lexical labeling, but
+// recallOrFTSSearchWithRelevance silently falls back to storeSearch+lexical
+// when recallSvc.Search errors mid-query — so a configured-but-erroring
+// recall.Service (recallSvc != nil) must still report fusionRan=false here,
+// proving the caller has a way to label the receipt correctly instead of
+// mislabeling a lexical fallback as "fusion".
+func TestRecallOrFTSSearchWithRelevance_FallbackReportsFusionDidNotRun(t *testing.T) {
+	cfg := testConfig(t)
+	s, err := storeNew(cfg)
+	if err != nil {
+		t.Fatalf("storeNew: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CreateSession("s-cli-fusionfallback", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	wantID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-cli-fusionfallback",
+		Type:      "bugfix",
+		Title:     "Fix panic in loader",
+		Content:   "Fix panic in loader when config is missing",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	recallSvc := recall.NewService(failingLexicalSearcher{}, nil, recall.DefaultFuseParams())
+
+	results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, "panic", store.SearchOptions{
+		Project: "engram", Scope: "project", Limit: 5,
+	})
+	if err != nil {
+		t.Fatalf("expected graceful fallback to storeSearch, got error: %v", err)
+	}
+	if fusionRan {
+		t.Error("fusionRan = true, want false: recallSvc.Search errored and fell back to storeSearch+lexical, so --explain must not label this as fusion")
+	}
+	if len(results) != 1 || results[0].ID != wantID {
+		t.Fatalf("expected fallback FTS result [%d], got %+v", wantID, results)
+	}
+	if _, ok := relevance[wantID]; !ok {
+		t.Errorf("expected a lexical relevance entry for the fallback result id %d, got %v", wantID, relevance)
+	}
+}
+
 // TestBuildRecallServiceForCLI_UsesSharedLoader proves buildRecallServiceForCLI
 // (the cmdSearch/cmdServe seam) routes through the shared
 // loadAppConfigWithRecallAutodetect var rather than reading config.yaml

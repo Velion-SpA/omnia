@@ -152,8 +152,41 @@ func buildRecallServiceForCLI(s *store.Store, dataDir string) *recall.Service {
 const recallQueryTimeout = 5 * time.Second
 
 func recallOrFTSSearch(ctx context.Context, s *store.Store, recallSvc *recall.Service, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+	results, _, _, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, opts)
+	return results, err
+}
+
+// cliExactSentinelRank mirrors internal/store's unexported
+// topicKeySentinelRank (-1000), the same cross-package sentinel contract
+// internal/mcp/recall_adapter.go and internal/mcp/recall_ranking.go already
+// rely on under their own names.
+const cliExactSentinelRank = -1000.0
+
+// recallOrFTSSearchWithRelevance is recallOrFTSSearch's superset: alongside
+// the same hydrated results, it also returns each result's un-normalized
+// relevance signal keyed by Observation.ID — RRF fusion Score for the hybrid
+// recall path, or negated FTS5 bm25 Rank for the FTS5-only path (mirroring
+// internal/mcp's handleSearch wiring exactly) — and fusionRan, which reports
+// whether RRF fusion ACTUALLY produced these results this call, as opposed to
+// merely "a recall.Service was configured" — so `omnia search --explain`
+// (task 5.3) can build a score breakdown consistent with mem_search's own
+// explain surface without re-deriving or duplicating the fusion/hydration
+// logic itself.
+//
+// fusionRan is deliberately a return value rather than something the caller
+// derives from `recallSvc != nil`: recallSvc.Search can error mid-query (the
+// lexical leg failing, e.g. a malformed FTS5 query) and this function
+// gracefully falls back to storeSearch — a real recall.Service was
+// configured, but fusion did NOT run for this particular query. A caller
+// that used `recallSvc != nil` to decide fusion-vs-lexical labeling would
+// mislabel that fallback's plain lexical relevance as a fusion score
+// (blocking fix: --explain mislabels fusion vs lexical on mid-query FTS5
+// fallback). recallOrFTSSearch delegates to this so existing callers keep
+// their exact original two-value signature.
+func recallOrFTSSearchWithRelevance(ctx context.Context, s *store.Store, recallSvc *recall.Service, query string, opts store.SearchOptions) ([]store.SearchResult, map[int64]float64, bool, error) {
 	if recallSvc == nil {
-		return storeSearch(s, query, opts)
+		results, err := storeSearch(s, query, opts)
+		return results, lexicalRelevance(results), false, err
 	}
 
 	// Normalize the project exactly like the store does (mcp.go does this too):
@@ -172,18 +205,54 @@ func recallOrFTSSearch(ctx context.Context, s *store.Store, recallSvc *recall.Se
 		Limit:   mcp.RecallFetchLimit(opts.Limit),
 	})
 	if err != nil {
-		return storeSearch(s, query, opts)
+		results, serr := storeSearch(s, query, opts)
+		return results, lexicalRelevance(results), false, serr
+	}
+
+	relevance := make(map[int64]float64, len(fused))
+	for _, fr := range fused {
+		relevance[fr.ID] = fr.Score
 	}
 
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = 10
 	}
-	return mcp.HydrateFusedResults(s, fused, limit, mcp.RecallScopeFilter{
+	results := mcp.HydrateFusedResults(s, fused, limit, mcp.RecallScopeFilter{
 		Type:    opts.Type,
 		Project: opts.Project,
 		Scope:   opts.Scope,
-	}), nil
+	})
+	return results, relevance, true, nil
+}
+
+// lexicalRelevance builds the FTS5-only-path relevance map: negated bm25
+// Rank (a small negative "cost" — negating it makes a better match a larger
+// positive relevance, matching the fused path's "higher is better"
+// convention), skipping the topic_key exact-match sentinel entirely (it
+// always pre-empts ranking, mirroring recall.Fuse/RankResults).
+func lexicalRelevance(results []store.SearchResult) map[int64]float64 {
+	relevance := make(map[int64]float64, len(results))
+	for _, r := range results {
+		if r.Rank == cliExactSentinelRank {
+			continue
+		}
+		relevance[r.ID] = -r.Rank
+	}
+	return relevance
+}
+
+// loadRankingConfigForCLI loads just the recall.ranking.* config for `omnia
+// search --explain` (task 5.4), independent of buildRecallServiceForCLI's
+// own config load. Mirrors that function's graceful degradation: any load
+// error yields the zero-value RankingConfig (ranking disabled, matching
+// config.Load's own D7-style default), never a fatal error for a CLI search.
+func loadRankingConfigForCLI() config.RankingConfig {
+	appCfg, err := loadAppConfigWithRecallAutodetect()
+	if err != nil {
+		return config.RankingConfig{}
+	}
+	return appCfg.Recall.Ranking
 }
 
 // buildRecallService constructs the recall.Service wired into

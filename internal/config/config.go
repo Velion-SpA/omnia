@@ -105,6 +105,65 @@ type RecallConfig struct {
 	StrongFloor float32 `yaml:"strong_floor"`
 	BaseFloor   float32 `yaml:"base_floor"`
 	MaxResults  int     `yaml:"max_results"`
+	// Ranking configures an optional recency x importance x relevance
+	// ranking pass over already-fused/searched results (memory-recall-ranking
+	// spec, Requirement: Ranking Combines Relevance, Recency, and
+	// Importance). See RankingConfig's own doc for the D7-style rollback
+	// guarantee this mirrors.
+	Ranking RankingConfig `yaml:"ranking"`
+}
+
+// RankingConfig configures Omnia's optional recency x importance x relevance
+// ranking pass (Generative Agents' weighted-sum retrieval shape) applied at
+// the internal/mcp wiring boundary, never inside internal/recall or
+// internal/store — both of those stay untouched, pure leaves this slice
+// (memory-recall-ranking spec, design note D6). Enabled defaults to false
+// (Requirement: Backward-Compatible Default Behavior): when unset,
+// mem_search/omnia search order and scores stay byte-for-byte identical to
+// today's relevance-only recall.Fuse/store.Search output.
+type RankingConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// RecencyHalfLifeDays controls how fast the recency component decays:
+	// 1.0 at zero elapsed days, 0.5 at this many elapsed days, asymptotically
+	// approaching (never reaching) zero — recency alone must never be able
+	// to exclude a result (Requirement: Recency Decay Never Hard-Filters).
+	RecencyHalfLifeDays float64 `yaml:"recency_half_life_days"`
+	// Weights are the per-component multipliers applied to each normalized
+	// [0,1] signal (relevance/recency/importance) before summing them into
+	// the final ranking score.
+	Weights RankingWeights `yaml:"weights"`
+	// ImportanceOverrides lets an operator override
+	// DefaultImportanceWeight's heuristic-by-type default per
+	// Observation.Type (Requirement: Importance Heuristic By Observation
+	// Type — "MUST allow per-type overrides via config").
+	ImportanceOverrides map[string]float32 `yaml:"importance_overrides"`
+}
+
+// RankingWeights are the per-component multipliers RankScore applies to each
+// normalized [0,1] signal. All three default to 1.0 (Requirement:
+// Configurable Weights With Safe Defaults) — an equal-weight sum, matching
+// the Generative Agents retrieval formula's shape.
+type RankingWeights struct {
+	Recency    float32 `yaml:"recency"`
+	Importance float32 `yaml:"importance"`
+	Relevance  float32 `yaml:"relevance"`
+}
+
+// DefaultImportanceWeight returns the heuristic-by-type importance weight
+// (Requirement: Importance Heuristic By Observation Type) BEFORE any
+// RankingConfig.ImportanceOverrides is applied: decision/architecture score
+// highest (3), bugfix/pattern/manual are mid-tier (2), and everything else —
+// including session-chatter types like tool_use/file_read/search — is the
+// baseline (1).
+func DefaultImportanceWeight(obsType string) float32 {
+	switch obsType {
+	case "decision", "architecture":
+		return 3
+	case "bugfix", "pattern", "manual":
+		return 2
+	default:
+		return 1
+	}
 }
 
 type SourcesConfig struct {
@@ -367,6 +426,24 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Recall.MaxResults == 0 {
 		cfg.Recall.MaxResults = 50
+	}
+	// Ranking.Enabled intentionally has NO default override — its zero value
+	// (false) IS the default, mirroring Recall.Enabled's own convention
+	// above. Only the ranking params get defaults, so an operator who opts
+	// in by setting only `recall: { ranking: { enabled: true } }` still gets
+	// an equal-weight sum and a sane 14-day recency half-life instead of
+	// zero-valued weights that would silently zero out every RankScore.
+	if cfg.Recall.Ranking.Weights.Recency == 0 {
+		cfg.Recall.Ranking.Weights.Recency = 1.0
+	}
+	if cfg.Recall.Ranking.Weights.Importance == 0 {
+		cfg.Recall.Ranking.Weights.Importance = 1.0
+	}
+	if cfg.Recall.Ranking.Weights.Relevance == 0 {
+		cfg.Recall.Ranking.Weights.Relevance = 1.0
+	}
+	if cfg.Recall.Ranking.RecencyHalfLifeDays == 0 {
+		cfg.Recall.Ranking.RecencyHalfLifeDays = 14
 	}
 }
 

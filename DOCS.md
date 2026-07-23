@@ -823,6 +823,18 @@ Multiple annotation lines appear when multiple relations apply — one per relat
 
 Pending relations (from `mem_save` conflict surfacing, before `mem_judge` is called) produce the `conflict: contested by #<id> (pending)` form. Judged relations produce the enriched form with title.
 
+Set `explain: true` (boolean, default `false`) to attach a per-hit `score_breakdown` object to every structured result entry — a diagnostic view of how that hit was scored, independent of whether `recall.ranking.enabled` is actually on:
+
+- **lexical**: `{ rank, exact_match }` — the raw FTS5 bm25 rank (`null` when semantic recall fused this result instead) and whether this hit was the topic_key exact-match sentinel
+- **semantic**: always `null` this slice — the per-hit semantic cosine score isn't currently exposed past the combined fusion score
+- **fusion**: the RRF fusion score when semantic recall is enabled and actually fused this query (`null` on the FTS5-only path, or when a configured recall service fell back to lexical-only for this query)
+- **recency**: the recency decay term (`0`–`1`, half-life controlled by `recall.ranking.recency_half_life_days`), or `null` when `updated_at` can't be parsed
+- **importance**: the normalized importance weight for the hit's `type` (`recall.ranking.importance_overrides` aware)
+- **final**: the weighted-sum ranking score (`recall.ranking.weights.*`) computed from the three components above — reflects what `recall.ranking.enabled: true` would sort by, even when ranking is currently off
+- **staleness_penalty**: reserved, always `0` this slice (forward-compat slot for a future structural-forgetting downrank)
+
+`omnia search --explain` prints the same breakdown for CLI callers. When `explain` is omitted (the default), no `score_breakdown` field is present on any result entry — response shape is unchanged.
+
 ### mem_save
 
 Save structured observations. The tool description teaches agents the format:
