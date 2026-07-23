@@ -83,6 +83,22 @@ func TestLoadCorpus_RequiresOneCapabilityTag(t *testing.T) {
 	}
 }
 
+func TestLoadCorpus_RequiresValidLanguage(t *testing.T) {
+	cases := makeCases(MinCorpusSize)
+	cases[5].Language = "" // untagged
+	path := writeCasesFile(t, cases)
+	if _, err := LoadCorpus(path); err == nil {
+		t.Error("expected error for a case with no language tag, got nil")
+	}
+
+	cases2 := makeCases(MinCorpusSize)
+	cases2[5].Language = Language("En") // typo'd value must not create a stray third bucket
+	path2 := writeCasesFile(t, cases2)
+	if _, err := LoadCorpus(path2); err == nil {
+		t.Error("expected error for a case with an invalid language tag, got nil")
+	}
+}
+
 func TestLoadCorpus_RequiresQuery(t *testing.T) {
 	cases := makeCases(MinCorpusSize)
 	cases[5].Query = "" // missing query

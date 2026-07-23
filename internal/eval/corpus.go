@@ -41,6 +41,15 @@ const (
 	LanguageES Language = "es"
 )
 
+// validLanguages is the closed set LoadCorpus accepts, mirroring
+// validCapabilities: an empty or unrecognized (e.g. typo'd "En") language
+// fails fast rather than silently landing report.go's accumulate in a stray
+// third bucket keyed off the raw string value.
+var validLanguages = map[Language]bool{
+	LanguageEN: true,
+	LanguageES: true,
+}
+
 // EvalCase is one eval-harness case: a query against a real, dogfooded Omnia
 // memory (spec EVAL-2), tagged by capability and language, with the fact
 // expected to surface. SupersedesOf is set only for adversarial contradiction
@@ -66,8 +75,8 @@ const (
 
 // LoadCorpus reads a JSON array of EvalCase from path and validates it
 // against spec EVAL-2: case count MUST be in [MinCorpusSize, MaxCorpusSize],
-// and every case MUST carry exactly one valid Capability plus a non-empty
-// ObservationID and ExpectedFact.
+// and every case MUST carry exactly one valid Capability, one valid
+// Language, plus a non-empty ObservationID and ExpectedFact.
 func LoadCorpus(path string) ([]EvalCase, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -100,6 +109,9 @@ func parseCorpus(data []byte, source string) ([]EvalCase, error) {
 		seenIDs[c.ID] = true
 		if !validCapabilities[c.Capability] {
 			return nil, fmt.Errorf("eval: corpus %s: case %q (index %d) has invalid capability %q", source, c.ID, i, c.Capability)
+		}
+		if !validLanguages[c.Language] {
+			return nil, fmt.Errorf("eval: corpus %s: case %q (index %d) has invalid language %q", source, c.ID, i, c.Language)
 		}
 		if c.ObservationID == "" {
 			return nil, fmt.Errorf("eval: corpus %s: case %q (index %d) missing observation_id", source, c.ID, i)

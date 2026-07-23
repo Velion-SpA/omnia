@@ -40,13 +40,13 @@ All new code lives in `internal/eval` (new package, import path `github.com/veli
 
 ## Phase 3: Scoring Strategy (EVAL-5)
 
-- [ ] 3.1 [RED] `internal/eval/scoring_test.go`: `TestScoreRecall_SubstringMatch_NoJudgeTokens`, `TestScoreStateUpdate_ExactOrEmbeddingThreshold`, `TestScoreCausal_UsesAgentRunner`, `TestScoreStateAbstraction_CountsJudgeTokensInTotal`
-- [ ] 3.2 [GREEN] `internal/eval/scoring.go`: `Score(ctx, case EvalCase, retrieved string, judge llm.AgentRunner) (hit bool, judgeTokens int, err error)` — substring/exact/embedding-threshold for Recall+StateUpdate (no judge); `judge.Compare` for Causal+StateAbstraction (judge tokens counted)
+- [x] 3.1 [RED] `internal/eval/scoring_test.go`: `TestScoreRecall_SubstringMatch_NoJudgeTokens`, `TestScoreStateUpdate_ExactOrEmbeddingThreshold`, `TestScoreCausal_UsesAgentRunner`, `TestScoreStateAbstraction_CountsJudgeTokensInTotal` (plus miss/error/rejection edge cases)
+- [x] 3.2 [GREEN] `internal/eval/scoring.go`: `Scorer` interface + `Score(ctx, c EvalCase, retrieved string, judge llm.AgentRunner) (hit bool, judgeTokens int, err error)` dispatcher — `JudgeFreeScorer` (substring/exact + optional embedding-threshold via `EmbeddingSimilarity`, no judge, always 0 tokens) for Recall+StateUpdate; `LLMJudgeScorer` (wraps `llm.AgentRunner.Compare` via the existing `llm.BuildPrompt`, hit = Relation `compatible`/`related`, tokens via existing `llm.EstimateScanCost(1)`) for Causal+StateAbstraction
 
 ## Phase 4: Segmented Reporting (EVAL-3)
 
-- [ ] 4.1 [RED] `internal/eval/report_test.go`: `TestReport_AllFourCapabilityRowsPresent`, `TestReport_ENvsESRowsUseExistingABPairs`
-- [ ] 4.2 [GREEN] `internal/eval/report.go`: `Report{ByCapability map[Capability]Segment; ByLanguage map[string]Segment}`; reuses `internal/embed/testdata/ab_pairs.json` for the ES slice (no re-authoring)
+- [x] 4.1 [RED] `internal/eval/report_test.go`: `TestReport_AllFourCapabilityRowsPresent`, `TestReport_ENvsESRowsUseExistingABPairs` (plus `TestSegment_Accuracy`, `TestSegment_QualityPer1kTokens`, `TestBuildReport_AggregatesHitsAndTokens`)
+- [x] 4.2 [GREEN] `internal/eval/report.go`: `Segment{Label,Total,Hits,TotalTokens}` + `.Accuracy()`/`.QualityPer1kTokens()`, `CaseResult{Case,Hit,TotalTokens}`, `Report{ByCapability map[Capability]Segment; ByLanguage map[Language]Segment}`, `BuildReport([]CaseResult) Report` (always seeds all 4 capability + 2 language rows). Segmented via the existing corpus's own `Language` field (real dogfooded material, no new dataset authored); `internal/embed/testdata/ab_pairs.json` deliberately stays out of this report — its `ABPair` shape has no Capability/expected-fact fields to segment by, and Phase 6/PR3's retrieval-only recall@k section (EVAL-7) keeps that metric un-merged with this end-task view — see PR2 apply-progress.
 
 ## Phase 5: Adversarial Contradiction (EVAL-4)
 
