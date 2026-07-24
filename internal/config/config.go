@@ -71,6 +71,41 @@ type Config struct {
 	// Recall.Enabled/Ranking.Enabled/StructuralForgetting.Enabled's own
 	// off-by-default convention).
 	Procedural ProceduralConfig `yaml:"procedural"`
+	// Injection configures Omnia v0.3's "Context Economy" family of optional,
+	// gated re-sort/trim passes over already-ranked handleSearch results
+	// (design obs #1643, spec obs #1642): a token-based injection budget
+	// (this slice, PR2), FormatContext's own aggregate token budget (PR3),
+	// MMR diversity (PR4), and situational type-as-lens boosting (PR5) all
+	// live under this single parent block. Every sub-gate defaults to
+	// disabled, mirroring Recall.Enabled/Ranking.Enabled/
+	// StructuralForgetting.Enabled/Procedural.Enabled's own off-by-default
+	// convention: a fresh install or upgrade that never mentions `injection`
+	// sees ZERO behavior change from pre-v0.3.
+	Injection InjectionConfig `yaml:"injection"`
+}
+
+// InjectionConfig is the parent block for every Context Economy sub-gate
+// (design obs #1643). Each field is its own independently-gated pass; only
+// Budget exists as of PR2 — ContextBudget/Diversity/TypeLens are added by
+// PR3/PR4/PR5 respectively.
+type InjectionConfig struct {
+	// Budget gates handleSearch's token-based injection budget (spec
+	// injection-budget, ApplyTokenBudget in internal/mcp/token_budget.go).
+	// Disabled by default: handleSearch's response stays byte-for-byte
+	// identical to pre-v0.3 output when unset (spec REQ6).
+	Budget TokenBudgetConfig `yaml:"budget"`
+}
+
+// TokenBudgetConfig gates a single token-based budget pass (spec
+// injection-budget). MaxTokens is the ceiling passed to
+// internal/token.TrimToBudget — the same shared primitive used by
+// handleSearch (PR2), FormatContext (PR3), and cmd/omnia/recall_fix.go
+// (PR2), so all three can never drift out of sync (spec REQ4). Enabled
+// defaults to false; when false (or MaxTokens<=0), the gated pass is a
+// total no-op (spec REQ6).
+type TokenBudgetConfig struct {
+	Enabled   bool `yaml:"enabled"`
+	MaxTokens int  `yaml:"max_tokens"`
 }
 
 // ProceduralConfig gates and tunes the procedural-memory governance gate
@@ -390,7 +425,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	cfg.RecallEnabledExplicit = recallEnabledKeyPresent(data)
-	applyDefaults(&cfg)
+	applyDefaults(&cfg, data)
 	return &cfg, nil
 }
 
@@ -417,7 +452,34 @@ func recallEnabledKeyPresent(data []byte) bool {
 	return probe.Recall.Enabled != nil
 }
 
-func applyDefaults(cfg *Config) {
+// injectionBudgetMaxTokensKeyPresent reports whether the loaded YAML
+// explicitly set `injection.budget.max_tokens` (to any integer, including
+// 0), as opposed to the key being entirely absent. Mirrors
+// recallEnabledKeyPresent's own explicit-vs-absent probe (see that func's
+// doc comment) for the same reason: TokenBudgetConfig.MaxTokens is a plain
+// int, so its zero value cannot on its own distinguish "operator explicitly
+// disabled the trim pass via max_tokens: 0" (ApplyTokenBudget's own
+// MaxTokens<=0 branch) from "operator never mentioned max_tokens at all"
+// (which must still default to 1500). A re-parse failure here is not
+// expected since Load's own yaml.Unmarshal already succeeded; if it somehow
+// occurs, treat the key as absent (safest: falls through to applying the
+// 1500 default rather than risking a stuck zero-budget that silently drops
+// every result).
+func injectionBudgetMaxTokensKeyPresent(data []byte) bool {
+	var probe struct {
+		Injection struct {
+			Budget struct {
+				MaxTokens *int `yaml:"max_tokens"`
+			} `yaml:"budget"`
+		} `yaml:"injection"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	return probe.Injection.Budget.MaxTokens != nil
+}
+
+func applyDefaults(cfg *Config, data []byte) {
 	if cfg.Engram.BaseURL == "" {
 		cfg.Engram.BaseURL = "http://127.0.0.1:7437"
 	}
@@ -518,6 +580,25 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Procedural.ReviewAfterDays == 0 {
 		cfg.Procedural.ReviewAfterDays = 14
+	}
+	// Injection.Budget.Enabled intentionally has NO default override — its
+	// zero value (false) IS the default, mirroring Recall.Enabled/
+	// Ranking.Enabled/StructuralForgetting.Enabled/Procedural.Enabled's own
+	// convention above. Only MaxTokens gets a default, so an operator who
+	// opts in with only `injection: { budget: { enabled: true } }` still
+	// gets a sane ceiling instead of a zero-valued budget that would trim
+	// every result away (ApplyTokenBudget treats MaxTokens<=0 as "disabled",
+	// not "budget of zero").
+	//
+	// PR2 review fix (WARNING): only apply that 1500 default when
+	// `injection.budget.max_tokens` is entirely ABSENT from the YAML (see
+	// injectionBudgetMaxTokensKeyPresent, mirroring recallEnabledKeyPresent's
+	// own explicit-vs-absent precedent above). An operator who explicitly
+	// writes `max_tokens: 0` is deliberately reaching ApplyTokenBudget's own
+	// MaxTokens<=0 "disabled" branch, not accidentally leaving the key unset
+	// — without this probe that branch is unreachable from real config.
+	if cfg.Injection.Budget.MaxTokens == 0 && !injectionBudgetMaxTokensKeyPresent(data) {
+		cfg.Injection.Budget.MaxTokens = 1500
 	}
 }
 

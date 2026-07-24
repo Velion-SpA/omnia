@@ -53,3 +53,15 @@ backfill_days: 30
 #   strong_floor: 0.65
 #   base_floor: 0.55
 #   max_results: 50
+
+# Omnia v0.3 "Context Economy": token-based injection budget for mem_search.
+# Disabled by default: off keeps handleSearch's output byte-for-byte
+# identical to today. Top-ranked results are kept COMPLETE, in rank order,
+# until the next one would exceed max_tokens (estimated via a cheap
+# char/4 heuristic, not a real tokenizer) — no result is ever partially
+# truncated. The topic_key exact-match sentinel and error-signature-match
+# rows are always emitted complete and never count against this budget.
+# injection:
+#   budget:
+#     enabled: true
+#     max_tokens: 1500

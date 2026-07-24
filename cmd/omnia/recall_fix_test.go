@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/velion/omnia/internal/store"
 )
@@ -211,8 +212,130 @@ func TestCmdRecallFix_JSONModeOutputsStructuredHits(t *testing.T) {
 // ─── Pure formatting helpers (no store/DB needed) ─────────────────────────────
 
 func TestFormatRecallFixCompact_EmptyHitsReturnsEmptyString(t *testing.T) {
-	if got := formatRecallFixCompact(nil, maxRecallFixTotalChars); got != "" {
+	if got := formatRecallFixCompact(nil, maxRecallFixTokenBudget); got != "" {
 		t.Fatalf("expected empty string for zero hits, got: %q", got)
+	}
+}
+
+// TestFormatRecallFixCompact_TokenParityWithOldCharCap (spec injection-budget
+// REQ4 — one shared primitive across consumers; design obs #1643 decision 2):
+// recall-fix migrated from a flat maxRecallFixTotalChars=600 char cap +
+// mid-string truncate to token.TrimToBudget(hitLines, token.EstimateTokens,
+// maxRecallFixTokenBudget) — maxRecallFixTokenBudget=150 is chosen so
+// 150 tokens * ~4 chars/token lands in the same ballpark as the old 600-char
+// cap (anti-drift: same order of magnitude, not a silent budget regression),
+// while ALSO fixing the old approach's mid-line truncation: every kept line
+// must now be a complete, unaltered original line (top-N-complete
+// semantics), never a partial/mid-word cut.
+func TestFormatRecallFixCompact_TokenParityWithOldCharCap(t *testing.T) {
+	var hits []store.SearchResult
+	for i := 0; i < 10; i++ {
+		hits = append(hits, store.SearchResult{Observation: store.Observation{
+			ID:    int64(i + 1),
+			Title: "Fixed cart crash variant " + strconv.Itoa(i),
+			Content: "**Learned**: `panic: runtime error: index out of range [" + strconv.Itoa(i) +
+				"] with length 2` " + strings.Repeat("detail ", 15),
+		}})
+	}
+
+	out := formatRecallFixCompact(hits, maxRecallFixTokenBudget)
+	if out == "" {
+		t.Fatal("expected non-empty output for 10 oversized hits")
+	}
+	if len(out) > 700 {
+		t.Fatalf("expected output size in the same ballpark as the old ~600-char cap (with slack), got %d chars: %q", len(out), out)
+	}
+
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "obs #") {
+			t.Fatalf("expected every kept line to be a COMPLETE formatted hit line (top-N-complete, no mid-line truncation), got a partial/malformed line: %q", line)
+		}
+	}
+
+	// Extended case (silent-empty regression fix, recall_fix.go:22-23 doc
+	// contract — hits exist => output must NEVER be empty): Title has no
+	// length cap in the save path, so a single hit can produce ONE
+	// formatted line that alone exceeds maxRecallFixTokenBudget.
+	// token.TrimToBudget correctly refuses to force that line in (its own
+	// contract: never force-include over budget), so
+	// formatRecallFixCompact itself must force-keep the first line —
+	// bounded to ~600 runes (the old truncate(out,600) envelope) so a
+	// pathological title can't crowd out the context.
+	oversizedTitleHits := []store.SearchResult{{Observation: store.Observation{
+		ID:      99,
+		Title:   strings.Repeat("Extremely Long Untruncated Title Segment ", 40),
+		Content: "**Learned**: fix details",
+	}}}
+	oversizedOut := formatRecallFixCompact(oversizedTitleHits, maxRecallFixTokenBudget)
+	if oversizedOut == "" {
+		t.Fatal("expected non-empty output for a single oversized-title hit (empty means NO fix exists per recall_fix.go doc contract) — got \"\"")
+	}
+	if strings.Contains(oversizedOut, "\n") {
+		t.Fatalf("expected exactly one forced line for a single hit, got multiple: %q", oversizedOut)
+	}
+	if n := utf8.RuneCountInString(oversizedOut); n > 620 {
+		t.Fatalf("expected the forced line bounded to ~600 runes (old truncate(out,600) envelope), got %d runes", n)
+	}
+	if !strings.HasPrefix(oversizedOut, "obs #99 ") {
+		t.Fatalf("expected forced line to be the complete formatted hit line (not empty/malformed), got: %q", oversizedOut)
+	}
+}
+
+// TestFormatRecallFixCompact_NeverEmptyWhenHitsExist (silent-empty
+// regression fix): before this fix, token.TrimToBudget breaking on the
+// FIRST oversized line meant kept == nil, so formatRecallFixCompact
+// returned "" even though hits existed — post-tool-error-recall.sh reads
+// "" as "no proven prior fix" and injects nothing. That violates the doc
+// contract at recall_fix.go:22-23 (empty means NO fix exists) and isn't
+// gated by any flag. This test seeds exactly one hit and asserts the
+// output is never empty when hits exist.
+func TestFormatRecallFixCompact_NeverEmptyWhenHitsExist(t *testing.T) {
+	hits := []store.SearchResult{{Observation: store.Observation{
+		ID:      1,
+		Title:   strings.Repeat("Pathologically Long Title With No Cap ", 50),
+		Content: "**Learned**: the fix that matters",
+	}}}
+
+	out := formatRecallFixCompact(hits, maxRecallFixTokenBudget)
+	if out == "" {
+		t.Fatal("expected non-empty output when hits exist, even if the first formatted line alone exceeds the token budget")
+	}
+
+	lines := strings.Split(out, "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly one forced line, got %d: %q", len(lines), out)
+	}
+	if !strings.HasPrefix(lines[0], "obs #1 ") {
+		t.Fatalf("expected forced line to be the formatted hit line, got: %q", lines[0])
+	}
+	if n := utf8.RuneCountInString(lines[0]); n > 620 {
+		t.Fatalf("expected forced line bounded to ~600 runes, got %d runes: %q", n, lines[0])
+	}
+}
+
+// TestFormatRecallFixCompact_NormalPathUnchangedWhenFirstLineFits ensures
+// the fix's force-keep path only engages when the first line alone
+// exceeds the budget — when it fits, behavior is identical to
+// token.TrimToBudget's normal top-N-complete output (no forced
+// truncation of a line that already fits).
+func TestFormatRecallFixCompact_NormalPathUnchangedWhenFirstLineFits(t *testing.T) {
+	hits := []store.SearchResult{{Observation: store.Observation{
+		ID:      1,
+		Title:   "Short title",
+		Content: "**Learned**: a short fix",
+	}}}
+
+	out := formatRecallFixCompact(hits, maxRecallFixTokenBudget)
+	if out == "" {
+		t.Fatal("expected non-empty output for a normal-sized single hit")
+	}
+	if strings.Contains(out, "...") {
+		t.Fatalf("expected the normal path to leave a fitting line untouched (no forced truncation marker), got: %q", out)
+	}
+	want := "obs #1 [unverified] Short title — a short fix"
+	if out != want {
+		t.Fatalf("expected %q, got %q", want, out)
 	}
 }
 

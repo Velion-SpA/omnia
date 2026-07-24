@@ -55,19 +55,19 @@ Chain strategy: stacked-to-main
 **Files touched**: `internal/mcp/token_budget.go` (new), `internal/mcp/token_budget_test.go` (new), `internal/mcp/preemption_invariant_test.go` (new, shared), `internal/mcp/mcp.go` (wiring, ~1289 preview loop area), `internal/config/config.go` (`InjectionConfig`, `TokenBudgetConfig`, `applyDefaults`), `internal/mcp/mcp.go` (`MCPConfig.Injection`), `cmd/omnia/main.go` (wiring cfg.Injection into MCPConfig), `cmd/omnia/recall_fix.go` (migrate `maxRecallFixTotalChars`), `cmd/omnia/recall_fix_test.go` (parity test).
 **Dependencies on previous PRs**: PR1 (`internal/token`).
 
-- [ ] 2.1 RED: `internal/mcp/preemption_invariant_test.go` (new shared file) — table-driven test asserting sentinel (`Rank == exactSentinelRank`) and `SignatureMatch` rows are always present and always ordered before non-pre-empted rows, for `ApplyTokenBudget` under adversarial params (`MaxTokens=1`). Structure this file so PR4/PR5 extend the same table with their own passes.
-- [ ] 2.2 RED: `internal/mcp/token_budget_test.go` — `ApplyTokenBudget` trims a 20-item result set to fit `MaxTokens`, keeping top-ranked items complete and dropping the rest entirely (no partial truncation).
-- [ ] 2.3 RED: `internal/mcp/token_budget_test.go` — no-op byte-for-byte test: `cfg.Enabled=false` → output identical to input (golden equality).
-- [ ] 2.4 RED: `internal/mcp/token_budget_test.go` — sentinel/signature rows excluded from budget accounting: tiny budget smaller than smallest eligible item → pre-empted rows still returned complete, non-pre-empted rows dropped, no error.
-- [ ] 2.5 RED: `cmd/omnia/recall_fix_test.go` — token-parity test: recall-fix output using `token.TrimToBudget` with `maxRecallFixTokenBudget≈150` produces ~same size as the old 600-char cap.
-- [ ] 2.6 GREEN: implement `ApplyTokenBudget(results []store.SearchResult, cfg config.TokenBudgetConfig) []store.SearchResult` in `internal/mcp/token_budget.go` — gated no-op (`!cfg.Enabled || cfg.MaxTokens<=0 || len(results)==0`); partition `preempted`/`rest`; `previewTokens(r) = token.EstimateTokens(truncate(r.Content, 300))`; `token.TrimToBudget(rest, previewTokens, cfg.MaxTokens)`; `out = append(preempted, kept...)`.
-- [ ] 2.7 GREEN: add `InjectionConfig` + `TokenBudgetConfig` structs to `internal/config/config.go`, `Config.Injection InjectionConfig` field, `applyDefaults` sets `MaxTokens→1500` when zero (mirrors Ranking-weights idiom).
-- [ ] 2.8 Wiring: add `MCPConfig.Injection config.InjectionConfig` (value type) in `internal/mcp/mcp.go`; call `ApplyTokenBudget` as the LAST pass in the handleSearch pipeline (after `RankResults`/`ApplyStalenessDownrank`, before the ~1289 display/preview loop).
-- [ ] 2.9 Wiring: `cmd/omnia/main.go` passes `cfg.Injection` into `MCPConfig.Injection` at composition root.
-- [ ] 2.10 GREEN: migrate `cmd/omnia/recall_fix.go` from `maxRecallFixTotalChars=600` + `truncate(out,600)` to `token.TrimToBudget(hitLines, token.EstimateTokens, maxRecallFixTokenBudget)` with `maxRecallFixTokenBudget = 150`.
-- [ ] 2.11 Docs: update `internal/config` doc comment / README config reference noting the new `injection.budget` block, default-off, default `max_tokens=1500`.
-- [ ] 2.12 Verify: `CGO_ENABLED=0 go test ./...` + `go build ./...` + `go vet ./...` + `gofmt -l .` all clean.
-- [ ] 2.13 PR: branch `feat/injection-token-budget`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR1).
+- [x] 2.1 RED: `internal/mcp/preemption_invariant_test.go` (new shared file) — table-driven test asserting sentinel (`Rank == exactSentinelRank`) and `SignatureMatch` rows are always present and always ordered before non-pre-empted rows, for `ApplyTokenBudget` under adversarial params (`MaxTokens=1`). Structure this file so PR4/PR5 extend the same table with their own passes.
+- [x] 2.2 RED: `internal/mcp/token_budget_test.go` — `ApplyTokenBudget` trims a 20-item result set to fit `MaxTokens`, keeping top-ranked items complete and dropping the rest entirely (no partial truncation).
+- [x] 2.3 RED: `internal/mcp/token_budget_test.go` — no-op byte-for-byte test: `cfg.Enabled=false` → output identical to input (golden equality).
+- [x] 2.4 RED: `internal/mcp/token_budget_test.go` — sentinel/signature rows excluded from budget accounting: tiny budget smaller than smallest eligible item → pre-empted rows still returned complete, non-pre-empted rows dropped, no error.
+- [x] 2.5 RED: `cmd/omnia/recall_fix_test.go` — token-parity test: recall-fix output using `token.TrimToBudget` with `maxRecallFixTokenBudget≈150` produces ~same size as the old 600-char cap.
+- [x] 2.6 GREEN: implement `ApplyTokenBudget(results []store.SearchResult, cfg config.TokenBudgetConfig) []store.SearchResult` in `internal/mcp/token_budget.go` — gated no-op (`!cfg.Enabled || cfg.MaxTokens<=0 || len(results)==0`); partition `preempted`/`rest`; `previewTokens(r) = token.EstimateTokens(truncate(r.Content, 300))`; `token.TrimToBudget(rest, previewTokens, cfg.MaxTokens)`; `out = append(preempted, kept...)`.
+- [x] 2.7 GREEN: add `InjectionConfig` + `TokenBudgetConfig` structs to `internal/config/config.go`, `Config.Injection InjectionConfig` field, `applyDefaults` sets `MaxTokens→1500` when zero (mirrors Ranking-weights idiom).
+- [x] 2.8 Wiring: add `MCPConfig.Injection config.InjectionConfig` (value type) in `internal/mcp/mcp.go`; call `ApplyTokenBudget` as the LAST pass in the handleSearch pipeline (after `RankResults`/`ApplyStalenessDownrank`, before the ~1289 display/preview loop).
+- [x] 2.9 Wiring: `cmd/omnia/main.go` passes `cfg.Injection` into `MCPConfig.Injection` at composition root.
+- [x] 2.10 GREEN: migrate `cmd/omnia/recall_fix.go` from `maxRecallFixTotalChars=600` + `truncate(out,600)` to `token.TrimToBudget(hitLines, token.EstimateTokens, maxRecallFixTokenBudget)` with `maxRecallFixTokenBudget = 150`.
+- [x] 2.11 Docs: update `internal/config` doc comment / README config reference noting the new `injection.budget` block, default-off, default `max_tokens=1500`.
+- [x] 2.12 Verify: `CGO_ENABLED=0 go test ./...` + `go build ./...` + `go vet ./...` + `gofmt -l .` all clean.
+- [ ] 2.13 PR: branch `feat/injection-token-budget`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR1). (Left unchecked — sdd-apply does not create branches/commits/PRs per orchestrator instruction; orchestrator handles git.)
 
 ---
 
