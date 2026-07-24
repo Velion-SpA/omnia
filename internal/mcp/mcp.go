@@ -129,6 +129,17 @@ type MCPConfig struct {
 	// domain). Built by cmd/omnia/main.go from config.ProceduralConfig only
 	// when Enabled is true.
 	Procedural *ProceduralWiring
+
+	// Injection configures Omnia v0.3's "Context Economy" family of optional
+	// re-sort/trim passes over handleSearch's already-ranked results (design
+	// obs #1643, spec obs #1642): ApplyTokenBudget (this slice, PR2) is the
+	// LAST pass in the pipeline, after RankResults/ApplyStalenessDownrank.
+	// The zero value (Injection.Budget.Enabled=false) is the default:
+	// handleSearch's response stays byte-for-byte identical to pre-v0.3
+	// output even though ApplyTokenBudget is unconditionally called — it is
+	// a pure no-op when Injection.Budget.Enabled is false (spec REQ6),
+	// mirroring RecallRanking/StructuralForgetting's own convention above.
+	Injection config.InjectionConfig
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -1277,6 +1288,29 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			normalizedRelevance = MinMaxNormalizeRelevance(nonSentinel, relevance)
 		}
 
+		// Omnia v0.3 Context Economy (design obs #1643, spec obs #1642
+		// injection-budget domain): ApplyTokenBudget is the LAST pass in the
+		// pipeline, after RankResults/ApplyStalenessDownrank above and
+		// before the display/preview loop below, so trimming reflects the
+		// FINAL ranked/downranked/(PR4/PR5: diversified/lens-boosted) order.
+		// A pure no-op when cfg.Injection.Budget.Enabled is false (the
+		// default), keeping handleSearch's response byte-for-byte identical
+		// to pre-v0.3 output (Requirement: Disabled by Default, No-Op When
+		// Off). Runs AFTER explain's normalizedRelevance above so a
+		// score_breakdown reflects what RankResults computed over the full
+		// (pre-trim) batch, not a batch already narrowed by the budget.
+		//
+		// PR2 review fix (WARNING): capture the pre-trim count so a genuine
+		// budget-driven cut can be surfaced below — "Found 0 memories" after
+		// ApplyTokenBudget silently drops every real hit is otherwise
+		// indistinguishable from a true no-match response.
+		preTrimCount := len(results)
+		results = ApplyTokenBudget(results, cfg.Injection.Budget)
+		budgetTrimmed := 0
+		if cfg.Injection.Budget.Enabled {
+			budgetTrimmed = preTrimCount - len(results)
+		}
+
 		var b strings.Builder
 		fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))
 		anyTruncated := false
@@ -1408,11 +1442,22 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			fmt.Fprintf(&b, "---\nResults above are previews (300 chars). To read the full content of a specific memory, call mem_get_observation(id: <ID>).\n")
 		}
 
+		// PR2 review fix (WARNING): trim-transparency footer + envelope
+		// field, ONLY when the budget pass is enabled AND actually trimmed
+		// something — flag-off and enabled-but-nothing-trimmed stay
+		// byte-for-byte identical to pre-v0.3 output.
+		if budgetTrimmed > 0 {
+			fmt.Fprintf(&b, "---\n%d more result(s) matched but were trimmed by the injection token budget (injection.budget.max_tokens). Raise the budget or refine the query.\n", budgetTrimmed)
+		}
+
 		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
 			b.WriteString(nudge)
 		}
 
 		envelope := map[string]any{"results": structuredResults}
+		if budgetTrimmed > 0 {
+			envelope["budget_trimmed"] = budgetTrimmed
+		}
 
 		// omnia-procedural-memory (design obs #1602 / spec obs #1606), PR2
 		// Phase 7: attach a contrastive procedure card (top trusted playbook

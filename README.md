@@ -204,6 +204,8 @@ Config lives at `~/.config/omnia/config.yaml` (`cp config.example.yaml` to start
 | `recall.ranking.enabled` | `false` | Enable the recency × importance × relevance re-ranking pass over `mem_search`/`omnia search` output (byte-for-byte identical to today's order when off) |
 | `recall.ranking.weights.recency` / `.importance` / `.relevance` | `1.0` / `1.0` / `1.0` | Per-component multipliers in the weighted-sum ranking score |
 | `recall.ranking.recency_half_life_days` | `14` | Days until the recency component decays to `0.5`; never reaches `0`, so recency alone can never exclude a result |
+| `injection.budget.enabled` | `false` | Enable `mem_search`'s token-based injection budget (top-ranked results kept complete, in order, until the next one would exceed the budget — no partial truncation; byte-for-byte identical output when off) |
+| `injection.budget.max_tokens` | `1500` | Estimated-token ceiling for `injection.budget`; the topic_key exact-match sentinel and error-signature-match rows are always emitted complete and never count against this budget |
 
 Cloud env vars use the `OMNIA_CLOUD_*` prefix (legacy `ENGRAM_CLOUD_*` also accepted).
 

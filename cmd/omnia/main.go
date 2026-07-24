@@ -1149,6 +1149,10 @@ func cmdMCP(cfg store.Config) {
 		// handleSearch's stale-anchor downrank + receipt is opt-in per the
 		// config flag (default false, backward-compatible).
 		mcpCfg.StructuralForgetting = appCfg.StructuralForgetting
+		// Omnia v0.3 Context Economy (design obs #1643, spec obs #1642):
+		// thread injection.* through so handleSearch's ApplyTokenBudget pass
+		// is opt-in per config.yaml (default false, backward-compatible).
+		mcpCfg.Injection = appCfg.Injection
 		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
 		// enabled, run the worker on the same ctx cancelled at shutdown so
 		// mem_save embeds new memories out-of-band. nil when disabled.

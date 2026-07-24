@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/velion/omnia/internal/store"
+	"github.com/velion/omnia/internal/token"
 )
 
 // ─── omnia recall-fix (#1399 slice 2 — forced activation) ────────────────────
@@ -21,16 +22,24 @@ import (
 // This is the confidence gate the PostToolUse hook relies on: empty output
 // here means "no proven prior fix for this error", so the hook injects
 // nothing. Output is capped to the top maxRecallFixHits hits and an overall
-// maxRecallFixTotalChars character budget so a forced injection never
-// crowds out the agent's context — lazy-expand via mem_get_observation is
-// the intended follow-up, not a full memory dump here.
+// maxRecallFixTokenBudget TOKEN budget (Omnia v0.3 Context Economy, design
+// obs #1643 decision 2 / spec obs #1642 injection-budget REQ4) so a forced
+// injection never crowds out the agent's context — lazy-expand via
+// mem_get_observation is the intended follow-up, not a full memory dump
+// here.
 const (
 	// maxRecallFixHits caps how many signature-matched hits are surfaced.
 	maxRecallFixHits = 3
 
-	// maxRecallFixTotalChars is the hard cap on the whole compact block
+	// maxRecallFixTokenBudget is the hard cap, in estimated tokens (shared
+	// internal/token.EstimateTokens primitive), on the whole compact block
 	// (all hit lines combined), independent of the per-line snippet cap.
-	maxRecallFixTotalChars = 600
+	// Migrated from the pre-v0.3 flat maxRecallFixTotalChars=600 char cap:
+	// 150 tokens * ~4 chars/token lands in the same ballpark as the old
+	// 600-char cap (anti-drift), while fixing that approach's mid-line
+	// truncation — token.TrimToBudget keeps only COMPLETE hit lines
+	// (top-N-complete), never cutting one in half.
+	maxRecallFixTokenBudget = 150
 
 	// recallFixSnippetLen caps the "first ~120 chars of the fix/Learned"
 	// portion of each compact hit line.
@@ -41,6 +50,14 @@ const (
 	// the signature lane itself is small/precise, so this only needs enough
 	// headroom to not truncate away real matches before filtering.
 	recallFixSearchFetchLimit = 20
+
+	// recallFixForcedLineMaxRunes bounds the force-kept first line
+	// (formatRecallFixCompact's "hits exist => never empty" guarantee) when
+	// that single line alone exceeds maxRecallFixTokenBudget — e.g. an
+	// observation Title, which has no length cap in the save path. Matches
+	// the old pre-v0.3 truncate(out, 600) envelope, so a pathological title
+	// can't crowd out the context.
+	recallFixForcedLineMaxRunes = 600
 )
 
 func cmdRecallFix(cfg store.Config) {
@@ -109,7 +126,7 @@ func cmdRecallFix(cfg store.Config) {
 		return
 	}
 
-	out := formatRecallFixCompact(hits, maxRecallFixTotalChars)
+	out := formatRecallFixCompact(hits, maxRecallFixTokenBudget)
 	if out == "" {
 		return
 	}
@@ -153,10 +170,25 @@ func recallFixSearch(s *store.Store, rawErrorText string, project string, limit 
 //
 //	obs #<id> [<outcome>] <title> — <snippet>
 //
-// joined by newlines, then hard-capped to maxTotalChars for the whole
-// block. Returns "" for zero hits — callers must treat that as "inject
-// nothing", not as an empty-but-present block.
-func formatRecallFixCompact(hits []store.SearchResult, maxTotalChars int) string {
+// then trims to maxTokenBudget estimated tokens via the shared
+// internal/token.TrimToBudget primitive (Omnia v0.3 Context Economy, design
+// obs #1643 decision 2 / spec obs #1642 injection-budget REQ2/REQ4): whole
+// lines are kept in order until the next line would exceed the budget — no
+// line is ever partially truncated, unlike the pre-v0.3 flat
+// maxRecallFixTotalChars char cap this replaces.
+//
+// GUARANTEE: when hits is non-empty, the return value is NEVER "" — this is
+// the confidence gate recall_fix.go:22-23 documents (empty output means "no
+// proven prior fix exists"), so an empty string must never be produced just
+// because a formatted line happened to be oversized. An observation's Title
+// has no length cap in the save path, so token.TrimToBudget (which correctly
+// never force-includes an over-budget item) can legitimately keep zero
+// lines when even the FIRST line alone exceeds maxTokenBudget. In that case
+// this function force-keeps that first line anyway, rune-truncated to
+// recallFixForcedLineMaxRunes (matching the old truncate(out, 600)
+// envelope) so a pathological title can't crowd out the context. Only
+// len(hits) == 0 returns "".
+func formatRecallFixCompact(hits []store.SearchResult, maxTokenBudget int) string {
 	if len(hits) == 0 {
 		return ""
 	}
@@ -171,11 +203,13 @@ func formatRecallFixCompact(hits []store.SearchResult, maxTotalChars int) string
 		lines = append(lines, fmt.Sprintf("obs #%d [%s] %s — %s", h.ID, outcome, h.Title, snippet))
 	}
 
-	out := strings.Join(lines, "\n")
-	if len(out) > maxTotalChars {
-		out = truncate(out, maxTotalChars)
+	kept, _ := token.TrimToBudget(lines, token.EstimateTokens, maxTokenBudget)
+	if len(kept) == 0 {
+		// Hits exist but not even the first line fit the budget — force-keep
+		// it, bounded, rather than silently returning "".
+		kept = []string{truncate(lines[0], recallFixForcedLineMaxRunes)}
 	}
-	return out
+	return strings.Join(kept, "\n")
 }
 
 // recallFixSnippet extracts a compact, single-line preview of the "fix"
