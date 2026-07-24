@@ -1889,7 +1889,21 @@ func cmdExport(cfg store.Config) {
 func cmdImport(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: omnia import <file.json>")
+		fmt.Fprintln(os.Stderr, "       omnia import claude-memory <dir> [--project P] [--dry-run]")
 		exitFunc(1)
+		return
+	}
+
+	// Omnia v0.3.1 Write Hygiene (design obs #1668 D10, spec obs #1666
+	// claude-memory-import domain), PR10: a new submode bridging Claude
+	// Code's `~/.claude/projects/*/memory/*.md` files into omnia
+	// observations. Branches BEFORE the existing JSON-file path so the
+	// pre-existing `omnia import <file.json>` behavior below stays
+	// byte-for-byte untouched (see import_claude_memory_test.go's
+	// TestCmdImport_JSONPathUntouchedByClaudeMemoryDispatch).
+	if os.Args[2] == "claude-memory" {
+		cmdImportClaudeMemory(cfg)
+		return
 	}
 
 	inFile := os.Args[2]
@@ -3166,6 +3180,12 @@ Commands:
   stats              Show memory system statistics
   export [file]      Export all memories to JSON (default: omnia-export.json)
   import <file>      Import memories from a JSON export file
+  import claude-memory <dir>
+                     Import Claude Code's ~/.claude/projects/*/memory/*.md files
+                       as omnia observations [--project P] [--dry-run]
+                       Skips MEMORY.md (index); routes every file through the
+                       same write-gate as mem_save (design D10) — re-running
+                       over an unchanged dir creates zero new observations.
   projects list      List all projects with observation, session, and prompt counts
   projects consolidate [--all] [--dry-run]
                      Merge similar project names into one canonical name

@@ -454,7 +454,7 @@ Est. lines: ~260.
 Design slice 8 · Branch `feat/import-claude-memory` · Base: `main` (after PR9) ·
 `type:feature` · Depends on: PR3/PR4 (routes through the gate) · Capability: claude-memory-import
 
-- [ ] 10.1 RED: add `cmd/omnia/import_claude_memory_test.go`: dir containing
+- [x] 10.1 RED: add `cmd/omnia/import_claude_memory_test.go`: dir containing
       only `MEMORY.md` → zero observations, no error; dir with `MEMORY.md` +
       N memory files → only the N files considered, MEMORY.md skipped; each
       imported observation carries a `source="claude-memory"` provenance tag;
@@ -465,7 +465,7 @@ Design slice 8 · Branch `feat/import-claude-memory` · Base: `main` (after PR9)
       documentation case: `write_hygiene.enabled:false` → plain v0.3 save
       semantics apply and idempotency does NOT hold (duplicates possible) —
       assert this is the documented, non-silent behavior, not a bug.
-- [ ] 10.2 GREEN: create `cmd/omnia/import_claude_memory.go`: discover
+- [x] 10.2 GREEN: create `cmd/omnia/import_claude_memory.go`: discover
       `<dir>/*.md` skipping `MEMORY.md`; parse frontmatter with the existing
       `yaml.v3` dep (split leading `---`…`---`, unmarshal, body = remainder);
       map `description` (fallback `name`) → title, body → content,
@@ -473,15 +473,15 @@ Design slice 8 · Branch `feat/import-claude-memory` · Base: `main` (after PR9)
       default→manual), `name` slug → `topic_key = "claude-memory/"+name`,
       `source = "claude-memory"`; route every import through
       `store.SaveObservation`.
-- [ ] 10.3 GREEN: wire `import claude-memory <dir>` dispatch — branch inside
+- [x] 10.3 GREEN: wire `import claude-memory <dir>` dispatch — branch inside
       `cmd/omnia/main.go`'s existing `case "import":`/`cmdImport` on
       `os.Args[2]=="claude-memory"` before falling through to the existing
       `omnia import <file.json>` path.
-- [ ] 10.4 Kill-switch/backward-compat check: `omnia import <file.json>`
+- [x] 10.4 Kill-switch/backward-compat check: `omnia import <file.json>`
       (existing JSON export/import) behaves byte-for-byte unchanged — add a
       regression test asserting the pre-existing `cmdImport` JSON path is
       untouched by the new dispatch branch.
-- [ ] 10.5 Docs: add `omnia import claude-memory <dir>` usage + provenance
+- [x] 10.5 Docs: add `omnia import claude-memory <dir>` usage + provenance
       mapping table to `DOCS.md`.
 
 Files: `cmd/omnia/import_claude_memory.go` (new), `cmd/omnia/import_claude_memory_test.go` (new), `cmd/omnia/main.go` (modify), docs (modify).

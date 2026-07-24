@@ -575,6 +575,31 @@ Candidate generation reuses the same FTS-blocked pre-filter shape as the write-g
 
 Within a cluster, the proposed canonical survivor is the NEWEST observation by creation timestamp (tie-break: highest id) — every other member is a proposed "loser." Cluster ids are derived from the cluster's smallest member id (not scan order), so the same underlying data always proposes the same cluster id across repeated runs.
 
+### Claude Memory Import CLI (admin)
+
+`omnia import claude-memory <dir>` bridges Claude Code's per-project `~/.claude/projects/*/memory/*.md` files into omnia observations (design `omnia-0.3.1-write-hygiene` D10, spec `claude-memory-import`).
+
+```
+omnia import claude-memory <dir> [--project <name>] [--dry-run]
+```
+
+- Discovers every `*.md` file directly inside `<dir>`, skipping `MEMORY.md` (Claude Code's own index file, never itself a memory) and any non-markdown file.
+- Each remaining file is expected to carry Claude Code's frontmatter shape (`name`, `description`, `metadata.type`) followed by a markdown body, parsed with the existing `yaml.v3` dependency — no new deps. A file with missing/unclosed frontmatter delimiters, invalid YAML, or a missing `name` field is **skipped with a warning on stderr** — it never aborts the rest of the batch.
+- `--project <name>` (optional): tag every imported observation with this project.
+- `--dry-run`: lists what each file WOULD do without writing anything — no `storeNew`/session/save call is made at all in this mode.
+
+Mapping (`metadata.type` → omnia observation type):
+
+| `metadata.type` | omnia type |
+|---|---|
+| `reference` | `discovery` |
+| `note` | `discovery` |
+| *(anything else, incl. absent)* | `manual` |
+
+Every import carries `source = "claude-memory"` (a provenance/attribution tag, not a trust judgment — an unrecognized `source` value classifies as `trust_tag = "unverified"`, same as any other unrecognized source). `name` is slugified and namespaced into `topic_key = "claude-memory/"+slug`, which drives the EXISTING topic_key upsert step inside `Store.SaveObservation` — every import is routed through the same write-gate `mem_save` uses (dogfooding, zero drift). This makes re-import **idempotent**: re-running over an unchanged directory creates zero new observations (the topic_key match revises the existing row in place instead); editing a file and re-importing updates that same row rather than duplicating it. With `write_hygiene.enabled: false` this idempotency guarantee does not hold (plain v0.3.1 save semantics apply) — documented, not a bug.
+
+The pre-existing `omnia import <file.json>` path (JSON export/import) is unchanged — this is a new submode, dispatched only when the first argument after `import` is literally `claude-memory`.
+
 ### Eval Harness CLI (admin)
 
 `omnia eval` runs the memory-quality eval harness (spec `sdd/omnia-eval-harness`): a token-cost-normalized measuring stick over a corpus of real, dogfooded memory cases, segmented by capability (Recall, Causal, State-Update/Staleness, State-Abstraction) and by query language (EN/ES), plus a distinct retrieval-only recall@k section. It is NOT for end users — it is a maintainer/CI tool for judging embedding-model and recall-config changes.
