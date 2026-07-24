@@ -2710,11 +2710,26 @@ const (
 	defaultWriteGateUpdateThreshold = 0.9
 	defaultWriteGateShrinkGuard     = 0.9
 	defaultWriteGateCandidateLimit  = 10
-	// writeGateCandidateBM25Floor mirrors FindCandidates' own default
-	// BM25Floor (-2.0, relations.go) — candidates ranked worse than this are
-	// excluded from Jaccard scoring entirely (BM25 scores are negative;
-	// closer to 0 is a better match).
-	writeGateCandidateBM25Floor = -2.0
+	// writeGateCandidateBM25Floor is deliberately far more permissive than
+	// FTS5's tight-looking default (-2.0, mirrored from FindCandidates'
+	// own default in relations.go) would suggest. Real-data validation
+	// (obs #1683, battery I) found the -2.0 floor filtered out EVERY
+	// candidate on the real ~1681-observation corpus — measured bm25 there
+	// ranged -4.3 to -31, all more negative than the floor — silently
+	// making NOOP/AUTO-UPDATE inert in production while every synthetic
+	// test still passed, because tiny fixture corpora happen to yield bm25
+	// scores well above -2.0. BM25's IDF component grows with corpus size
+	// for any genuinely RARE (but real) title term, which pushes a true
+	// near-duplicate pair's score arbitrarily negative at real-corpus scale
+	// even though it is exactly the kind of match this ladder exists to
+	// catch. This mirrors cmd/omnia/dedupe.go's own
+	// dedupeCandidateBM25Floor, which independently hit and fixed the
+	// identical defect for the offline dedupe-scan path first: the
+	// per-request CandidateLimit (not this floor) is what bounds cost —
+	// relaxing the floor only widens WHICH of the already-capped candidates
+	// are considered, it does not change this function's
+	// O(candidate_limit) complexity.
+	writeGateCandidateBM25Floor = -1000.0
 	// defaultSaveNormalizationMinLength mirrors internal/config's own
 	// WriteHygieneConfig.MinContentLength default (save-normalization spec
 	// REQ "Non-Blocking Junk Warnings").

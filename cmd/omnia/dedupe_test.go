@@ -110,7 +110,7 @@ func TestRunDedupeScanClustersNearDuplicatesAboveThreshold(t *testing.T) {
 	}
 	defer s.Close()
 
-	report, err := runDedupeScan(s, "dedupeclusterproj")
+	report, err := runDedupeScan(s, "dedupeclusterproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestRunDedupeScanCrossTypePairsNotClustered(t *testing.T) {
 	}
 	defer s.Close()
 
-	report, err := runDedupeScan(s, "dedupecrosstypeproj")
+	report, err := runDedupeScan(s, "dedupecrosstypeproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestRunDedupeScanEmptyDBNoClusters(t *testing.T) {
 	}
 	defer s.Close()
 
-	report, err := runDedupeScan(s, "dedupeemptyproj")
+	report, err := runDedupeScan(s, "dedupeemptyproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestRunDedupeScanNoClustersWhenAllDistinct(t *testing.T) {
 	}
 	defer s.Close()
 
-	report, err := runDedupeScan(s, "dedupedistinctproj")
+	report, err := runDedupeScan(s, "dedupedistinctproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestRunDedupeScanExcludesDeletedObservations(t *testing.T) {
 		t.Fatalf("DeleteObservationWithActor: %v", err)
 	}
 
-	report, err := runDedupeScan(s, "dedupedeletedproj")
+	report, err := runDedupeScan(s, "dedupedeletedproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan: %v", err)
 	}
@@ -268,11 +268,11 @@ func TestRunDedupeScanDeterministicAcrossRuns(t *testing.T) {
 	}
 	defer s.Close()
 
-	report1, err := runDedupeScan(s, "dedupedetermproj")
+	report1, err := runDedupeScan(s, "dedupedetermproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan (1st): %v", err)
 	}
-	report2, err := runDedupeScan(s, "dedupedetermproj")
+	report2, err := runDedupeScan(s, "dedupedetermproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan (2nd): %v", err)
 	}
@@ -295,7 +295,7 @@ func TestRunDedupeScanDeterministicAcrossRuns(t *testing.T) {
 		"Dedupe Determinism Delta",
 		"This service handles user login and session validation for the auth module dedupe-fixture-marker!!!",
 		"project")
-	report3, err := runDedupeScan(s, "dedupedetermproj")
+	report3, err := runDedupeScan(s, "dedupedetermproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan (3rd, after new member joins): %v", err)
 	}
@@ -351,6 +351,171 @@ func TestCmdDedupeJSONOutputStableShape(t *testing.T) {
 	stdout2, _ := captureOutput(t, func() { cmdDedupe(cfg) })
 	if stdout != stdout2 {
 		t.Fatalf("expected byte-identical --json output across runs:\n1st: %s\n2nd: %s", stdout, stdout2)
+	}
+}
+
+// ─── Real-data validation (obs #1683 battery I, issue #171 / PR13) ──────────
+
+// TestRunDedupeScanCrossProjectDuplicatesRequireAllProjectsFlag reproduces
+// battery I's HIGH product-gap finding (obs #1683): 6 REAL byte-identical
+// duplicate pairs sat invisible in the real corpus — the same GitHub PR
+// ingested under two different project keys — because candidate generation
+// never widened across projects. The default scan (project == "") already
+// LISTS observations from every project (AllObservations' own "" == no
+// filter convention), but each observation's own candidate query still only
+// ever matched within its own project. The same near-duplicate pair, seeded
+// under two DIFFERENT project keys here, must be invisible to the default
+// scan and found as exactly one cluster once --all-projects widens
+// candidate generation — the exact "invisible without, one cluster with it"
+// shape the battery found.
+func TestRunDedupeScanCrossProjectDuplicatesRequireAllProjectsFlag(t *testing.T) {
+	cfg := testConfig(t)
+	idA := mustSeedObservation(t, cfg, "s1", "dedupecrossproj1", "discovery",
+		"Cross Project Duplicate Alpha",
+		"This service handles user login and session validation for the auth module dedupe-fixture-marker.",
+		"project")
+	idB := mustSeedObservation(t, cfg, "s1", "dedupecrossproj2", "discovery",
+		"Cross Project Duplicate Beta",
+		"This service handles user login, and session validation for the auth module dedupe-fixture-marker!",
+		"project")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	// Default: project == "" already scans BOTH observations (no project
+	// filter), but candidate generation stays siloed per each observation's
+	// own project — battery I's exact "invisible" shape.
+	defaultReport, err := runDedupeScan(s, "", false)
+	if err != nil {
+		t.Fatalf("runDedupeScan (default): %v", err)
+	}
+	if defaultReport.Scanned != 2 {
+		t.Fatalf("expected 2 scanned observations, got %d", defaultReport.Scanned)
+	}
+	if defaultReport.ClustersFound != 0 {
+		t.Fatalf("expected the cross-project duplicate to stay INVISIBLE without --all-projects, got %d cluster(s): %+v",
+			defaultReport.ClustersFound, defaultReport.Clusters)
+	}
+
+	// --all-projects: candidate generation widens across every project —
+	// the same pair now clusters.
+	widenedReport, err := runDedupeScan(s, "", true)
+	if err != nil {
+		t.Fatalf("runDedupeScan (--all-projects): %v", err)
+	}
+	if !widenedReport.AllProjects {
+		t.Fatalf("expected report.AllProjects=true, got false")
+	}
+	if widenedReport.ClustersFound != 1 {
+		t.Fatalf("expected exactly 1 cluster once --all-projects widens candidate matching, got %d: %+v",
+			widenedReport.ClustersFound, widenedReport.Clusters)
+	}
+	cluster := widenedReport.Clusters[0]
+	if len(cluster.Members) != 2 {
+		t.Fatalf("expected 2 cluster members, got %d", len(cluster.Members))
+	}
+	gotProjects := dedupeClusterProjects(cluster.Members)
+	if len(gotProjects) != 2 || gotProjects[0] != "dedupecrossproj1" || gotProjects[1] != "dedupecrossproj2" {
+		t.Fatalf("expected members annotated with BOTH distinct projects, got %v", gotProjects)
+	}
+	var sawA, sawB bool
+	for _, m := range cluster.Members {
+		if m.ID == idA {
+			sawA = true
+			if m.Project != "dedupecrossproj1" {
+				t.Fatalf("expected member #%d annotated with its own project %q, got %q", idA, "dedupecrossproj1", m.Project)
+			}
+		}
+		if m.ID == idB {
+			sawB = true
+			if m.Project != "dedupecrossproj2" {
+				t.Fatalf("expected member #%d annotated with its own project %q, got %q", idB, "dedupecrossproj2", m.Project)
+			}
+		}
+	}
+	if !sawA || !sawB {
+		t.Fatalf("expected both known members present in the cross-project cluster: %+v", cluster.Members)
+	}
+}
+
+// TestCmdDedupeAllProjectsAndProjectFlagsAreMutuallyExclusive pins the CLI
+// validation: --all-projects widens matching across every project, --project
+// narrows the scan to exactly one — combining both is self-contradictory and
+// must be rejected before the store is ever opened.
+func TestCmdDedupeAllProjectsAndProjectFlagsAreMutuallyExclusive(t *testing.T) {
+	cfg := testConfig(t)
+	exitCode := stubExit(t)
+
+	withArgs(t, "omnia", "dedupe", "--all-projects", "--project", "someproj")
+	_, stderr := captureOutput(t, func() { cmdDedupe(cfg) })
+
+	if *exitCode != 1 {
+		t.Errorf("exitCode = %d; want 1", *exitCode)
+	}
+	if !strings.Contains(stderr, "cannot be combined") {
+		t.Errorf("expected --all-projects/--project conflict error, got: %s", stderr)
+	}
+}
+
+// TestCmdDedupeApplyRefusesCrossProjectCluster pins the conservative product
+// decision for --apply on a cross-project cluster (design note, obs #1683
+// battery I / issue #171): merging across projects changes ownership
+// semantics, so --apply REFUSES with a clear message instead of merging —
+// report-only for that case, with NO mutation performed.
+func TestCmdDedupeApplyRefusesCrossProjectCluster(t *testing.T) {
+	cfg := testConfig(t)
+	idA := mustSeedObservation(t, cfg, "s1", "dedupecrossapplyA", "discovery",
+		"Cross Project Apply Alpha",
+		"This service handles user login and session validation for the auth module dedupe-fixture-marker.",
+		"project")
+	idB := mustSeedObservation(t, cfg, "s1", "dedupecrossapplyB", "discovery",
+		"Cross Project Apply Beta",
+		"This service handles user login, and session validation for the auth module dedupe-fixture-marker!",
+		"project")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	report, err := runDedupeScan(s, "", true)
+	if err != nil {
+		t.Fatalf("runDedupeScan (--all-projects): %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close scan store: %v", err)
+	}
+	if report.ClustersFound != 1 {
+		t.Fatalf("expected exactly 1 cross-project cluster to apply against, got %d: %+v", report.ClustersFound, report.Clusters)
+	}
+	clusterID := report.Clusters[0].ClusterID
+
+	exitCode := stubExit(t)
+	withArgs(t, "omnia", "dedupe", "--all-projects", "--apply", clusterID)
+	_, stderr := captureOutput(t, func() { cmdDedupe(cfg) })
+
+	if *exitCode != 1 {
+		t.Errorf("exitCode = %d; want 1", *exitCode)
+	}
+	if !strings.Contains(stderr, "cross-project merges change ownership; not supported") {
+		t.Errorf("expected the cross-project refusal message, got: %s", stderr)
+	}
+
+	s2, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New (verify): %v", err)
+	}
+	defer s2.Close()
+	for _, id := range []int64{idA, idB} {
+		obs, err := s2.GetObservation(id)
+		if err != nil {
+			t.Fatalf("GetObservation(#%d): %v", id, err)
+		}
+		if obs.DeletedAt != nil {
+			t.Fatalf("cross-project refusal must not mutate anything, but observation #%d was deleted", id)
+		}
 	}
 }
 
@@ -422,7 +587,7 @@ func TestRunDedupeScanCandidatePreFilterBoundedAtScale(t *testing.T) {
 	}
 	defer s2.Close()
 
-	report, err := runDedupeScan(s2, "dedupescaleproj")
+	report, err := runDedupeScan(s2, "dedupescaleproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan: %v", err)
 	}
@@ -570,7 +735,7 @@ func TestCmdDedupeApplyIsolatesNamedClusterOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	report, err := runDedupeScan(s, "dedupeisolateproj")
+	report, err := runDedupeScan(s, "dedupeisolateproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan: %v", err)
 	}
@@ -627,7 +792,7 @@ func TestCmdDedupeApplyIdempotentReApplyRefusesCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	report, err := runDedupeScan(s, "dedupeidemproj")
+	report, err := runDedupeScan(s, "dedupeidemproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan: %v", err)
 	}
@@ -696,7 +861,7 @@ func TestCmdDedupeApplyCreatesSupersedeRelationAndSoftDeletesLoser(t *testing.T)
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	report, err := runDedupeScan(s, "dedupeapplyrelproj")
+	report, err := runDedupeScan(s, "dedupeapplyrelproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan: %v", err)
 	}
@@ -799,7 +964,7 @@ func TestCmdDedupeApplyJSONReportsClusterCanonicalAndLosers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	report, err := runDedupeScan(s, "dedupeapplyjsonproj")
+	report, err := runDedupeScan(s, "dedupeapplyjsonproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan: %v", err)
 	}
@@ -856,7 +1021,7 @@ func TestCmdDedupeApplyRefusesWhenClusterMembershipChangedAfterReview(t *testing
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	report, err := runDedupeScan(s, "dedupetoctouproj")
+	report, err := runDedupeScan(s, "dedupetoctouproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan: %v", err)
 	}
@@ -886,7 +1051,7 @@ func TestCmdDedupeApplyRefusesWhenClusterMembershipChangedAfterReview(t *testing
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	freshReport, err := runDedupeScan(s2, "dedupetoctouproj")
+	freshReport, err := runDedupeScan(s2, "dedupetoctouproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan (fresh, after join): %v", err)
 	}
@@ -960,7 +1125,7 @@ func TestCmdDedupeApplyPrintsPartialProgressBeforeFatalOnMidClusterError(t *test
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	report, err := runDedupeScan(s, "dedupepartialproj")
+	report, err := runDedupeScan(s, "dedupepartialproj", false)
 	if err != nil {
 		t.Fatalf("runDedupeScan: %v", err)
 	}
