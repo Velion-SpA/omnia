@@ -1033,6 +1033,74 @@ except `internal/mcp`'s SAME 10 pre-existing `unknown_project`/
 confirmed pre-existing across every prior PR in this chain (unaffected by
 PR12 — 0 overlap with `save_normalization_envelope_test.go`).
 
+## PR13 — Real-Data Fixes (closes issue #171, real-data validation obs #1683 battery I)
+
+Branch (suggested) `fix/v031-realdata-battery-i` · Base: `main` (`bb9e91a`,
+all 11 prior PRs + PR12 remediation merged) · `type:bug` · Depends on: none
+(fixes gaps in already-merged work) · Capability: write-gate, dedupe-scan
+
+Closes both source-verified bugs from battery I's real-data validation
+(engram obs #1683): 1 CRITICAL (write-gate inert at production scale), 1
+HIGH (dedupe blind to cross-project duplicates).
+
+- [x] 13.1 CRITICAL — `evaluateWriteGate`'s hardcoded BM25 floor `-2.0`
+      (`internal/store/store.go`, `writeGateCandidateBM25Floor`) filtered out
+      EVERY candidate on the real ~1681-observation corpus (measured bm25
+      -4.3 to -31), making NOOP/AUTO-UPDATE inert in production — a
+      near-verbatim re-save silently duplicated. `cmd/omnia/dedupe.go` had
+      already independently hit and fixed the identical defect with
+      `dedupeCandidateBM25Floor = -1000.0`; mirrored that exact value +
+      rationale comment into the write-gate. RED→GREEN, strict TDD: new
+      `TestSaveObservation_LadderNoopFiresAtRealisticCorpusScale`
+      (`internal/store/write_gate_test.go`) seeds 1650 filler rows (gate
+      off, mirrors `dedupe_test.go`'s own proven 1650-filler scale fixture)
+      + 1 marker observation, reopens with the gate on, and re-saves a
+      near-verbatim variant. RED confirmed against the unfixed floor: `got
+      "save" (reason: "no candidate found")` instead of `"noop"`. GREEN
+      after the floor fix: `noop`, correct `TargetID`, row count unchanged
+      at 1651. Files: `internal/store/store.go` (+~25L, constant + full
+      rationale comment), `internal/store/write_gate_test.go` (new test,
+      ~108L).
+- [x] 13.2 HIGH — `runDedupeScan`'s per-observation `FindCandidates` call
+      never widened across projects even when the scan itself already lists
+      every project's observations (`project == ""`) — 6 real
+      byte-identical pairs (same GitHub PR under two project keys) stayed
+      invisible. Fix: new `CandidateOptions.AllProjects bool`
+      (`internal/store/relations.go`, default false = zero behavior change
+      for every other caller) + new `omnia dedupe --all-projects` flag
+      (mutually exclusive with `--project`) that widens candidate matching
+      across all projects; cluster members were already annotated with
+      their own project (`dedupeClusterMember.Project`, pre-existing
+      field). `--apply` on a cluster spanning MORE THAN ONE project REFUSES
+      before any mutation ("cross-project merges change ownership; not
+      supported") — a conservative, documented product boundary; a
+      same-project cluster found via `--all-projects` still applies
+      normally. Default (no flag) scan/apply behavior is byte-for-byte
+      unchanged (16 existing test call sites in `dedupe_test.go` updated to
+      pass explicit `false`). RED→GREEN, strict TDD: 3 new tests —
+      `TestRunDedupeScanCrossProjectDuplicatesRequireAllProjectsFlag` (0
+      clusters default, 1 cluster with the flag, both projects annotated
+      correctly), `TestCmdDedupeAllProjectsAndProjectFlagsAreMutuallyExclusive`,
+      `TestCmdDedupeApplyRefusesCrossProjectCluster` (real cluster id from
+      an `--all-projects` scan, `--apply` refuses with the exact message,
+      zero mutation verified). Files: `internal/store/relations.go`
+      (+~36L, `AllProjects` field + `FindCandidates` query refactor),
+      `cmd/omnia/dedupe.go` (+~106L, flag/refusal/helper/plumbing),
+      `cmd/omnia/dedupe_test.go` (+~197L incl. mechanical rename).
+
+Files: see 13.1/13.2 above; `DOCS.md` (+11L, dedupe `--all-projects`
+section + apply-refusal paragraph + write-gate BM25 floor note).
+Est./actual lines: 438 insertions / 45 deletions across 6 files (~483
+changed lines).
+
+Verification: `CGO_ENABLED=0 go build ./...` clean. `CGO_ENABLED=0 go vet
+./...` clean. `gofmt -l` empty on every touched file.
+`CGO_ENABLED=0 go test ./internal/store/... ./cmd/omnia/...` both green.
+Full-repo `CGO_ENABLED=0 go test ./...`: every package green except
+`internal/mcp`'s SAME 10 pre-existing `unknown_project` failures (confirmed
+via `rg -c "^--- FAIL"` = 10, matching the pre-flagged flake count; zero
+overlap with any PR13 file).
+
 ---
 
 ## Review Workload Forecast

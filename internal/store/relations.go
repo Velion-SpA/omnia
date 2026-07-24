@@ -86,6 +86,13 @@ type CandidateOptions struct {
 	// When true, candidates are returned but NO rows are written to memory_relations.
 	// Default false preserves the existing behavior (rows are inserted).
 	SkipInsert bool
+	// AllProjects disables project filtering entirely: candidates are drawn
+	// from every project, not just the saved observation's own (or Project's)
+	// project. Default false preserves existing same-project-only behavior
+	// for every caller (real-data validation obs #1683 battery I / issue
+	// #171: dedupe-scan's own --all-projects flag is the only caller that
+	// sets this true).
+	AllProjects bool
 }
 
 // ─── Phase 3 types ────────────────────────────────────────────────────────────
@@ -445,9 +452,19 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		return nil, nil
 	}
 
-	// FTS5 query: same project, same scope, exclude just-saved row, exclude soft-deleted.
+	// FTS5 query: same scope, exclude just-saved row, exclude soft-deleted —
+	// same project TOO, unless opts.AllProjects widens the match (real-data
+	// validation obs #1683 battery I, issue #171: candidate generation was
+	// structurally blind to cross-project duplicates — a byte-identical row
+	// ingested under two different project keys could never become a
+	// candidate for the other, since every caller either left opts.Project
+	// empty, defaulting back to the saved observation's OWN project below,
+	// or passed one specific project). AllProjects is opt-in and defaults
+	// false, so every existing caller (the live write-gate's own inline
+	// query, ScanProject, and dedupe-scan's default invocation) keeps its
+	// current same-project-only behavior byte-for-byte.
 	// BM25 floor filtering is done in Go after scanning.
-	rows, err := s.db.Query(`
+	query := `
 		SELECT o.id, ifnull(o.sync_id,'') as sync_id, o.title, o.type, o.topic_key,
 		       fts.rank
 		FROM observations_fts fts
@@ -455,11 +472,16 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		WHERE observations_fts MATCH ?
 		  AND o.id != ?
 		  AND o.deleted_at IS NULL
-		  AND ifnull(o.project,'') = ifnull(?,'')
-		  AND o.scope = ?
-		ORDER BY fts.rank
-		LIMIT ?
-	`, ftsQuery, savedID, project, scope, limit*3) // fetch extra rows to allow floor filtering
+	`
+	args := []any{ftsQuery, savedID}
+	if !opts.AllProjects {
+		query += " AND ifnull(o.project,'') = ifnull(?,'')"
+		args = append(args, project)
+	}
+	query += " AND o.scope = ? ORDER BY fts.rank LIMIT ?"
+	args = append(args, scope, limit*3) // fetch extra rows to allow floor filtering
+
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("FindCandidates: FTS5 query: %w", err)
 	}

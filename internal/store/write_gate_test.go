@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -618,5 +619,112 @@ func TestSaveObservation_TypeMismatchDowngradesNoopToRelate(t *testing.T) {
 	}
 	if n := countObservations(t, s, "wgproject"); n != 2 {
 		t.Fatalf("expected both rows to exist (2 total), got %d", n)
+	}
+}
+
+// ─── Real-data validation (obs #1683 battery I, issue #171 / PR13) ──────────
+
+// TestSaveObservation_LadderNoopFiresAtRealisticCorpusScale pins the fix for
+// battery I's flagship CRITICAL finding (obs #1683): evaluateWriteGate's BM25
+// floor must stay permissive enough that NOOP/AUTO-UPDATE still fire once the
+// FTS index holds a realistic number of rows, not just a handful of fixture
+// rows. Every write-gate test above passes even with a tight floor because
+// tiny fixture corpora yield bm25 scores well above -2.0 — the defect only
+// surfaces once corpus size pushes BM25's IDF component far enough negative,
+// exactly like the real ~1681-observation base battery I measured (-4.3 to
+// -31, all more negative than the old -2.0 floor, so EVERY candidate was
+// excluded and a near-verbatim re-save silently duplicated instead of
+// NOOPing). This mirrors cmd/omnia/dedupe_test.go's own
+// TestRunDedupeScanCandidatePreFilterBoundedAtScale fixture (1650 filler
+// rows, the same real mechanism that led dedupe.go to its own
+// dedupeCandidateBM25Floor=-1000 fix) — exercised here through the LIVE
+// evaluateWriteGate path instead of the offline dedupe scan.
+func TestSaveObservation_LadderNoopFiresAtRealisticCorpusScale(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large-scale write-gate test in -short mode")
+	}
+
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.DedupeWindow = time.Hour
+
+	// Seed phase: gate OFF (Config zero value) so 1650 filler rows insert as
+	// fast plain saves — the corpus-size effect on BM25 comes from FTS5's
+	// global IDF statistics, not from the gate itself, so seeding never needs
+	// the gate active. The store is reopened below (same DataDir/sqlite
+	// file) with the gate ON for the actual assertion, mirroring
+	// cmd/omnia/dedupe_test.go's own two-store-handle scale fixture.
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	if err := s.CreateSession("wg-scale-sess", "wgscaleproj", "/tmp/wgscale"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	const fillerCount = 1650
+	for i := 0; i < fillerCount; i++ {
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "wg-scale-sess",
+			Type:      "discovery",
+			Title:     fmt.Sprintf("Filler Entry %d", i),
+			Content:   fmt.Sprintf("system log entry number %d for project telemetry batch", i),
+			Project:   "wgscaleproj",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("seed filler %d: %v", i, err)
+		}
+	}
+
+	existingID, err := s.AddObservation(AddObservationParams{
+		SessionID: "wg-scale-sess",
+		Type:      "discovery",
+		Title:     "Auth Module Nil Pointer Crash Writeup",
+		Content:   "Fixed the null pointer crash in the login handler by adding a nil check before dereferencing the session token wg-scale-fixture-marker.",
+		Project:   "wgscaleproj",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("seed existing observation: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close seeding store: %v", err)
+	}
+
+	// Reopen the SAME DataDir with the gate ON — this is the path a real
+	// mem_save/omnia-save call takes in production.
+	gateCfg := cfg
+	gateEnabledDefaults(&gateCfg)
+	s2, err := New(gateCfg)
+	if err != nil {
+		t.Fatalf("new store (gate on): %v", err)
+	}
+	defer s2.Close()
+
+	// Same words, different case/punctuation only — Jaccard 1.0 against the
+	// existing row, the exact "near-verbatim re-save" shape battery I
+	// reproduced against the real DB (real memory #1451/#1360 duplicated
+	// with the gate ON).
+	got, err := s2.SaveObservation(AddObservationParams{
+		SessionID: "wg-scale-sess",
+		Type:      "discovery",
+		Title:     "Auth Module Nil Pointer Crash Notes",
+		Content:   "fixed the null pointer crash in the login handler by adding a nil check before dereferencing the session token wg-scale-fixture-marker",
+		Project:   "wgscaleproj",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("SaveObservation: %v", err)
+	}
+
+	if got.Decision != WriteGateDecisionNoop {
+		t.Fatalf("expected %q at realistic corpus scale (%d rows), got %q (reason: %q, similarity %.4f) — the write-gate's BM25 floor excluded the real candidate, exactly battery I's inert-gate finding (obs #1683)",
+			WriteGateDecisionNoop, fillerCount+1, got.Decision, got.Reason, got.Similarity)
+	}
+	if got.TargetID == nil || *got.TargetID != existingID {
+		t.Fatalf("expected TargetID=%d, got %v", existingID, got.TargetID)
+	}
+	if n := countObservations(t, s2, "wgscaleproj"); n != fillerCount+1 {
+		t.Fatalf("expected NOOP to skip inserting a new row (total %d), got %d", fillerCount+1, n)
 	}
 }

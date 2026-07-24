@@ -134,6 +134,24 @@ type dedupeCluster struct {
 	Evidence    []dedupeClusterEvidence `json:"evidence"`
 }
 
+// dedupeClusterProjects returns the sorted, deduplicated set of distinct
+// project names among a cluster's members (real-data validation obs #1683
+// battery I / issue #171: --apply's cross-project refusal check). Members
+// are already annotated with their own project (dedupeClusterMember.Project,
+// populated regardless of scan mode), so this needs no store access.
+func dedupeClusterProjects(members []dedupeClusterMember) []string {
+	seen := map[string]bool{}
+	var projects []string
+	for _, m := range members {
+		if !seen[m.Project] {
+			seen[m.Project] = true
+			projects = append(projects, m.Project)
+		}
+	}
+	sort.Strings(projects)
+	return projects
+}
+
 // dedupeReport is the full `omnia dedupe` proposal (and `--json` payload).
 type dedupeReport struct {
 	Project       string          `json:"project,omitempty"`
@@ -142,6 +160,10 @@ type dedupeReport struct {
 	Clusters      []dedupeCluster `json:"clusters"`
 	DryRun        bool            `json:"dry_run"`
 	Note          string          `json:"note"`
+	// AllProjects mirrors the --all-projects flag that produced this report
+	// (real-data validation obs #1683 battery I / issue #171): omitted
+	// (false) keeps existing --json output byte-for-byte unchanged.
+	AllProjects bool `json:"all_projects,omitempty"`
 
 	// PairsScored is a diagnostic proving candidate generation stayed
 	// FTS-blocked (O(n*dedupeCandidateLimit)) rather than all-pairs
@@ -225,17 +247,32 @@ func dedupeClusterID(sortedIDs []int64) string {
 // scan path (only the write-gate's own spec does, for the live save path) —
 // this is a deliberate consistency choice with that already-spec'd,
 // existing behavior, not a silent, undocumented departure invented here.
-func runDedupeScan(s *store.Store, project string) (dedupeReport, error) {
+//
+// allProjects (real-data validation obs #1683 battery I / issue #171)
+// widens candidate generation to match across EVERY project, not just each
+// observation's own — the fix for a real, source-verified gap: even the
+// pre-existing default (project == "") already scans observations from every
+// project (AllObservations' own "" == no filter convention), but the
+// PER-OBSERVATION candidate query still only ever matched within that
+// observation's own project, because it never overrode CandidateOptions.
+// Project. That silently hid genuine cross-project duplicates (battery I
+// found 6 real byte-identical pairs: the same GitHub PR ingested under two
+// different project keys) from every prior scan, --all-projects or not.
+// False (the default) preserves that same-project-only candidate behavior
+// byte-for-byte; project must be "" when allProjects is true (enforced by
+// cmdDedupe before this function is ever called).
+func runDedupeScan(s *store.Store, project string, allProjects bool) (dedupeReport, error) {
 	observations, err := s.AllObservations(project, "", dedupeScanLimit)
 	if err != nil {
 		return dedupeReport{}, fmt.Errorf("runDedupeScan: list observations: %w", err)
 	}
 
 	report := dedupeReport{
-		Project: project,
-		Scanned: len(observations),
-		DryRun:  true,
-		Note:    dedupeDryRunNote,
+		Project:     project,
+		Scanned:     len(observations),
+		DryRun:      true,
+		Note:        dedupeDryRunNote,
+		AllProjects: allProjects,
 	}
 	if len(observations) == 0 {
 		return report, nil
@@ -261,9 +298,10 @@ func runDedupeScan(s *store.Store, project string) (dedupeReport, error) {
 
 	for _, obs := range observations {
 		candidates, err := s.FindCandidates(obs.ID, store.CandidateOptions{
-			Limit:      dedupeCandidateLimit,
-			BM25Floor:  &dedupeCandidateBM25Floor,
-			SkipInsert: true,
+			Limit:       dedupeCandidateLimit,
+			BM25Floor:   &dedupeCandidateBM25Floor,
+			SkipInsert:  true,
+			AllProjects: allProjects,
 		})
 		if err != nil {
 			// Candidate-detection failure must never fail the whole scan —
@@ -433,8 +471,19 @@ func newDedupeRelationSyncID() string {
 // from a genuine mid-loop failure ONCE a valid, freshly-matched cluster's
 // per-loser loop has begun (see the loop below and cmdDedupe's partial-
 // progress printing) — that is a distinct case from staleness.
-func applyDedupeCluster(s *store.Store, project, clusterID string) (dedupeApplyResult, error) {
-	report, err := runDedupeScan(s, project)
+//
+// Cross-project refusal (real-data validation obs #1683 battery I / issue
+// #171): a cluster whose members span MORE THAN ONE distinct project can
+// only ever be found via an allProjects=true fresh scan — refused here,
+// BEFORE any mutation call, with a clear message. Merging across projects
+// changes ownership semantics (which project "owns" the surviving canonical
+// row) that this conservative product decision deliberately leaves
+// unsupported; --apply stays report-only for that case. A same-project
+// cluster discovered via an allProjects=true scan applies normally — the
+// widened scan is a strict superset of the default one, so it can also
+// surface clusters that happen to already share one project.
+func applyDedupeCluster(s *store.Store, project, clusterID string, allProjects bool) (dedupeApplyResult, error) {
+	report, err := runDedupeScan(s, project, allProjects)
 	if err != nil {
 		return dedupeApplyResult{}, fmt.Errorf("apply: re-scan failed: %w", err)
 	}
@@ -450,6 +499,13 @@ func applyDedupeCluster(s *store.Store, project, clusterID string) (dedupeApplyR
 		return dedupeApplyResult{}, fmt.Errorf(
 			"cluster %q not found in a fresh scan — its membership may have changed, or it may have been fully or partially applied; run `omnia dedupe` again and use the new cluster id to review/finish any remaining merge.",
 			clusterID,
+		)
+	}
+
+	if projects := dedupeClusterProjects(target.Members); len(projects) > 1 {
+		return dedupeApplyResult{}, fmt.Errorf(
+			"cluster %q spans %d different projects (%s) — cross-project merges change ownership; not supported. Review each project's members separately, or apply only same-project clusters.",
+			clusterID, len(projects), strings.Join(projects, ", "),
 		)
 	}
 
@@ -560,6 +616,7 @@ func cmdDedupe(cfg store.Config) {
 	projectFlag := ""
 	jsonOut := false
 	dryRunFlag := false
+	allProjectsFlag := false
 	applySeen := false
 	applyClusterID := ""
 	for i := 0; i < len(args); i++ {
@@ -573,6 +630,8 @@ func cmdDedupe(cfg store.Config) {
 			jsonOut = true
 		case "--dry-run":
 			dryRunFlag = true
+		case "--all-projects":
+			allProjectsFlag = true
 		case "--apply":
 			applySeen = true
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -587,6 +646,16 @@ func cmdDedupe(cfg store.Config) {
 	// opening the store.
 	if applySeen && dryRunFlag {
 		fatal(fmt.Errorf("omnia dedupe: --apply and --dry-run cannot be combined — --apply always mutates, --dry-run explicitly never does; pick one"))
+		return
+	}
+
+	// Safety: --all-projects and --project are mutually exclusive.
+	// --all-projects widens candidate matching across EVERY project
+	// (real-data validation obs #1683 battery I / issue #171);
+	// --project narrows the scanned set to exactly one. Combining them is
+	// self-contradictory, so reject it before ever opening the store.
+	if allProjectsFlag && projectFlag != "" {
+		fatal(fmt.Errorf("omnia dedupe: --all-projects and --project cannot be combined — --all-projects widens candidate matching across every project; pick one"))
 		return
 	}
 
@@ -614,7 +683,7 @@ func cmdDedupe(cfg store.Config) {
 	defer s.Close()
 
 	if applySeen {
-		result, err := applyDedupeCluster(s, projectFlag, applyClusterID)
+		result, err := applyDedupeCluster(s, projectFlag, applyClusterID, allProjectsFlag)
 		if err != nil {
 			// Review fix (partial-apply observability): a mid-cluster error
 			// must never silently discard progress already made on this
@@ -655,7 +724,7 @@ func cmdDedupe(cfg store.Config) {
 		return
 	}
 
-	report, err := runDedupeScan(s, projectFlag)
+	report, err := runDedupeScan(s, projectFlag, allProjectsFlag)
 	if err != nil {
 		fatal(err)
 		return
@@ -671,9 +740,18 @@ func cmdDedupe(cfg store.Config) {
 		return
 	}
 
-	if projectFlag != "" {
+	switch {
+	case projectFlag != "":
 		fmt.Printf("Dedupe Scan (project: %s)\n", projectFlag)
-	} else {
+	case allProjectsFlag:
+		// Distinct header from the plain "(all projects)" default below —
+		// --all-projects ALSO widens per-observation candidate matching
+		// across every project (real-data validation obs #1683 battery I /
+		// issue #171); the default without this flag only scans rows from
+		// every project but still matches candidates within each
+		// observation's own project only.
+		fmt.Println("Dedupe Scan (all projects, cross-project matching)")
+	default:
 		fmt.Println("Dedupe Scan (all projects)")
 	}
 	fmt.Printf("  scanned:        %d\n", report.Scanned)
