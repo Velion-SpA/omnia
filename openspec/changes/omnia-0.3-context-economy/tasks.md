@@ -78,16 +78,16 @@ Chain strategy: stacked-to-main
 **Files touched**: `internal/store/store.go` (`Config.ContextTokenBudget`, `FormatContext` at line 3916, `DefaultConfig`/`FallbackConfig`), `internal/store/store_test.go`, `cmd/omnia/main.go` (wiring).
 **Dependencies on previous PRs**: PR1 (`internal/token`). Independent of PR2's handleSearch wiring but shares the same `InjectionConfig` block already added in PR2.
 
-- [ ] 3.1 RED: `internal/store/store_test.go` — uncapped-bug regression test: large synthetic dataset (many sessions/pinned/recent-obs/prompts) with `ContextTokenBudget` set → today's code (pre-fix) produces unbounded output; post-fix output stays within budget.
-- [ ] 3.2 RED: `internal/store/store_test.go` — no-op-off test: `ContextTokenBudget=0` → `FormatContext` output byte-for-byte identical to pre-v0.3 behavior.
-- [ ] 3.3 RED: `internal/store/store_test.go` — priority allocation test: pinned bucket never starved when overall budget is tight and prompts bucket would otherwise consume it all.
-- [ ] 3.4 GREEN: add `ContextTokenBudget int` field to `store.Config` (0 = disabled); update `DefaultConfig()`/`FallbackConfig()` to leave it 0 by default.
-- [ ] 3.5 GREEN: modify `FormatContext` (`internal/store/store.go:3916`) to consume budget in priority order — pinned → recent observations → recent sessions → recent prompts — calling `token.TrimToBudget(items, itemTokens, remaining)` per bucket against a running remainder; keep existing per-item 200/300-char truncation unchanged (bounds each line; budget bounds the sum).
-- [ ] 3.6 Wiring: `cmd/omnia/main.go` sets `store.Config.ContextTokenBudget = cfg.Injection.ContextBudget.MaxTokens` only when `cfg.Injection.ContextBudget.Enabled`, else 0.
-- [ ] 3.7 GREEN: add `ContextBudget TokenBudgetConfig` field to `InjectionConfig` in `internal/config/config.go` (added in PR2) with its own `applyDefaults` default `MaxTokens→1500`.
-- [ ] 3.8 Docs: update config reference documenting `injection.context_budget` block and the FormatContext uncapped-bug fix.
-- [ ] 3.9 Verify: `CGO_ENABLED=0 go test ./...` + `go build ./...` + `go vet ./...` + `gofmt -l .` all clean.
-- [ ] 3.10 PR: branch `fix/formatcontext-token-budget`, reference approved issue, `type:bug` label (fixes the pre-existing uncapped-bucket defect), squash-merge to main (base: main, after PR2).
+- [x] 3.1 RED: `internal/store/store_test.go` — uncapped-bug regression test: large synthetic dataset (many sessions/pinned/recent-obs/prompts) with `ContextTokenBudget` set → today's code (pre-fix) produces unbounded output; post-fix output stays within budget.
+- [x] 3.2 RED: `internal/store/store_test.go` — no-op-off test: `ContextTokenBudget=0` → `FormatContext` output byte-for-byte identical to pre-v0.3 behavior.
+- [x] 3.3 RED: `internal/store/store_test.go` — priority allocation test: pinned bucket never starved when overall budget is tight and prompts bucket would otherwise consume it all.
+- [x] 3.4 GREEN: add `ContextTokenBudget int` field to `store.Config` (0 = disabled); update `DefaultConfig()`/`FallbackConfig()` to leave it 0 by default.
+- [x] 3.5 GREEN: modify `FormatContext` (`internal/store/store.go:3916`) to consume budget in priority order — pinned → recent observations → recent sessions → recent prompts — calling `token.TrimToBudget(items, itemTokens, remaining)` per bucket against a running remainder; keep existing per-item 200/300-char truncation unchanged (bounds each line; budget bounds the sum).
+- [x] 3.6 Wiring: `cmd/omnia/main.go` sets `store.Config.ContextTokenBudget = cfg.Injection.ContextBudget.MaxTokens` only when `cfg.Injection.ContextBudget.Enabled`, else 0. (Threaded in all three FormatContext consumers — `cmdContext`, `cmdMCP`, `cmdServe` — with config load hoisted before `storeNew` since `s.cfg` is immutable after construction; covered by `cmd/omnia/context_budget_wiring_test.go`.)
+- [x] 3.7 GREEN: add `ContextBudget TokenBudgetConfig` field to `InjectionConfig` in `internal/config/config.go` (added in PR2) with its own `applyDefaults` default `MaxTokens→1500`.
+- [x] 3.8 Docs: update config reference documenting `injection.context_budget` block and the FormatContext uncapped-bug fix.
+- [x] 3.9 Verify: `CGO_ENABLED=0 go test ./...` + `go build ./...` + `go vet ./...` + `gofmt -l .` all clean.
+- [ ] 3.10 PR: branch `fix/formatcontext-token-budget`, reference approved issue, `type:bug` label (fixes the pre-existing uncapped-bucket defect), squash-merge to main (base: main, after PR2). (Left unchecked — sdd-apply does not create branches/commits/PRs per orchestrator instruction; orchestrator handles git.)
 
 ---
 

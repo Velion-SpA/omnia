@@ -85,15 +85,27 @@ type Config struct {
 }
 
 // InjectionConfig is the parent block for every Context Economy sub-gate
-// (design obs #1643). Each field is its own independently-gated pass; only
-// Budget exists as of PR2 — ContextBudget/Diversity/TypeLens are added by
-// PR3/PR4/PR5 respectively.
+// (design obs #1643). Each field is its own independently-gated pass; Budget
+// and ContextBudget exist as of PR2/PR3 — Diversity/TypeLens are added by
+// PR4/PR5 respectively.
 type InjectionConfig struct {
 	// Budget gates handleSearch's token-based injection budget (spec
 	// injection-budget, ApplyTokenBudget in internal/mcp/token_budget.go).
 	// Disabled by default: handleSearch's response stays byte-for-byte
 	// identical to pre-v0.3 output when unset (spec REQ6).
 	Budget TokenBudgetConfig `yaml:"budget"`
+	// ContextBudget gates FormatContext's own aggregate token budget across
+	// its four buckets (pinned / recent observations / recent sessions /
+	// recent prompts) — spec injection-budget REQ3, internal/store's
+	// Config.ContextTokenBudget. This is a SEPARATE gate from Budget above
+	// (different consumer, FormatContext vs handleSearch) even though it
+	// shares the same TokenBudgetConfig shape and the same
+	// internal/token.TrimToBudget primitive underneath (spec REQ4 — one
+	// shared estimator, no drift). Disabled by default: FormatContext stays
+	// byte-for-byte identical to today's pre-existing unbounded-aggregate
+	// behavior when unset (spec REQ6) — enabling this is what actually FIXES
+	// that pre-existing defect.
+	ContextBudget TokenBudgetConfig `yaml:"context_budget"`
 }
 
 // TokenBudgetConfig gates a single token-based budget pass (spec
@@ -479,6 +491,28 @@ func injectionBudgetMaxTokensKeyPresent(data []byte) bool {
 	return probe.Injection.Budget.MaxTokens != nil
 }
 
+// injectionContextBudgetMaxTokensKeyPresent is
+// injectionBudgetMaxTokensKeyPresent's sibling probe for the PR3
+// `injection.context_budget.max_tokens` key — same explicit-vs-absent
+// rationale (see that func's doc comment): TokenBudgetConfig.MaxTokens is a
+// plain int, so an operator's explicit `max_tokens: 0` (deliberately
+// reaching FormatContext's ContextTokenBudget<=0 "disabled" branch) must be
+// distinguishable from the key being entirely absent (which should still
+// default to 1500).
+func injectionContextBudgetMaxTokensKeyPresent(data []byte) bool {
+	var probe struct {
+		Injection struct {
+			ContextBudget struct {
+				MaxTokens *int `yaml:"max_tokens"`
+			} `yaml:"context_budget"`
+		} `yaml:"injection"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	return probe.Injection.ContextBudget.MaxTokens != nil
+}
+
 func applyDefaults(cfg *Config, data []byte) {
 	if cfg.Engram.BaseURL == "" {
 		cfg.Engram.BaseURL = "http://127.0.0.1:7437"
@@ -599,6 +633,17 @@ func applyDefaults(cfg *Config, data []byte) {
 	// — without this probe that branch is unreachable from real config.
 	if cfg.Injection.Budget.MaxTokens == 0 && !injectionBudgetMaxTokensKeyPresent(data) {
 		cfg.Injection.Budget.MaxTokens = 1500
+	}
+	// Injection.ContextBudget.Enabled intentionally has NO default override —
+	// its zero value (false) IS the default, same convention as
+	// Injection.Budget.Enabled above (FormatContext's pre-existing unbounded
+	// behavior is unchanged until an operator opts in). Only MaxTokens gets a
+	// default, gated the same explicit-vs-absent way as Injection.Budget.MaxTokens
+	// (injectionContextBudgetMaxTokensKeyPresent) so an explicit
+	// `max_tokens: 0` reaches FormatContext's own "disabled" branch instead
+	// of being silently overridden.
+	if cfg.Injection.ContextBudget.MaxTokens == 0 && !injectionContextBudgetMaxTokensKeyPresent(data) {
+		cfg.Injection.ContextBudget.MaxTokens = 1500
 	}
 }
 

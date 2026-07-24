@@ -27,6 +27,7 @@ import (
 	"github.com/velion/omnia/internal/datadir"
 	"github.com/velion/omnia/internal/projectname"
 	"github.com/velion/omnia/internal/timeutil"
+	"github.com/velion/omnia/internal/token"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -535,6 +536,18 @@ type Config struct {
 	ProceduralTrustThreshold  int
 	ProceduralConfidenceFloor float64
 	ProceduralReviewAfterDays int
+	// ContextTokenBudget bounds the AGGREGATE estimated-token size across
+	// FormatContext's four buckets (pinned / recent observations / recent
+	// sessions / recent prompts), fixing a pre-existing unbounded-growth
+	// defect: each bucket's items were individually per-item truncated
+	// (200/300 chars) but the SUM across buckets/items was never capped
+	// (omnia-0.3-context-economy design D8/PR3, spec injection-budget REQ3).
+	// Zero (the value DefaultConfig/FallbackConfig leave it at) disables the
+	// cap entirely — FormatContext then behaves byte-for-byte like
+	// pre-v0.3, today's uncapped output (spec REQ6). The composition root
+	// (cmd/omnia) sets this from injection.context_budget.max_tokens only
+	// when injection.context_budget.enabled is true in config.yaml.
+	ContextTokenBudget int
 }
 
 func DefaultConfig() (Config, error) {
@@ -547,6 +560,9 @@ func DefaultConfig() (Config, error) {
 		ProceduralTrustThreshold:  defaultProceduralTrustThreshold,
 		ProceduralConfidenceFloor: defaultProceduralConfidenceFloor,
 		ProceduralReviewAfterDays: defaultProceduralReviewAfterDays,
+		// ContextTokenBudget intentionally left at its zero value (disabled)
+		// here — see the field's own doc comment on Config. The composition
+		// root opts it in explicitly from injection.context_budget.
 	}, nil
 }
 
@@ -3913,6 +3929,46 @@ SELECT 1 FROM (
 
 // ─── Context Formatting ─────────────────────────────────────────────────────
 
+// formatSessionLine renders a single RecentSessions row exactly as
+// FormatContext writes it. Shared by FormatContext's render pass AND its
+// token-budget accounting (formatSessionLineTokens) so the two can never
+// drift apart (omnia-0.3-context-economy design D8/PR3).
+func formatSessionLine(sess SessionSummary) string {
+	summary := ""
+	if sess.Summary != nil {
+		summary = fmt.Sprintf(": %s", truncate(*sess.Summary, 200))
+	}
+	return fmt.Sprintf("- **%s** (%s)%s [%d observations]\n",
+		sess.Project, timeutil.FormatLocal(sess.StartedAt), summary, sess.ObservationCount)
+}
+
+// formatPromptLine renders a single RecentPrompts row exactly as
+// FormatContext writes it (see formatSessionLine's doc comment).
+func formatPromptLine(p Prompt) string {
+	return fmt.Sprintf("- %s: %s\n", timeutil.FormatLocal(p.CreatedAt), truncate(p.Content, 200))
+}
+
+// formatObservationLine renders a single Observation row (used by both the
+// Pinned and Recent Observations buckets, which share the exact same line
+// shape) exactly as FormatContext writes it (see formatSessionLine's doc
+// comment).
+func formatObservationLine(obs Observation) string {
+	return fmt.Sprintf("- [%s] **%s**: %s\n", obs.Type, obs.Title, truncate(obs.Content, 300))
+}
+
+// formatSessionLineTokens/formatPromptLineTokens/formatObservationLineTokens
+// estimate the token cost of a bucket item using the SAME rendered line
+// formatSessionLine/formatPromptLine/formatObservationLine produce — the
+// budget is honest about what actually reaches the agent (spec
+// injection-budget REQ1), not some other measure of the raw content.
+func formatSessionLineTokens(sess SessionSummary) int {
+	return token.EstimateTokens(formatSessionLine(sess))
+}
+func formatPromptLineTokens(p Prompt) int { return token.EstimateTokens(formatPromptLine(p)) }
+func formatObservationLineTokens(obs Observation) int {
+	return token.EstimateTokens(formatObservationLine(obs))
+}
+
 func (s *Store) FormatContext(project, scope string) (string, error) {
 	sessions, err := s.RecentSessions(project, 5)
 	if err != nil {
@@ -3934,6 +3990,28 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 		return "", err
 	}
 
+	// Omnia v0.3 Context Economy (design D8/PR3, spec injection-budget
+	// REQ3): aggregate token cap across all four buckets, consumed in
+	// PRIORITY order — pinned (the pre-emption analog, never starved) first,
+	// then recent observations, then recent sessions, then recent prompts
+	// last — regardless of the buckets' DISPLAY order below. Each bucket's
+	// existing per-item 200/300-char truncation is unchanged (it bounds each
+	// LINE); this bounds the SUM, which is exactly the missing aggregate cap
+	// (the pre-existing unbounded-growth defect). ContextTokenBudget<=0 (the
+	// default) is a total no-op: every bucket keeps its full, untrimmed set,
+	// byte-for-byte pre-v0.3 behavior (spec REQ6).
+	if s.cfg.ContextTokenBudget > 0 {
+		remaining := s.cfg.ContextTokenBudget
+		var used int
+		pinned, used = token.TrimToBudget(pinned, formatObservationLineTokens, remaining)
+		remaining -= used
+		observations, used = token.TrimToBudget(observations, formatObservationLineTokens, remaining)
+		remaining -= used
+		sessions, used = token.TrimToBudget(sessions, formatSessionLineTokens, remaining)
+		remaining -= used
+		prompts, _ = token.TrimToBudget(prompts, formatPromptLineTokens, remaining)
+	}
+
 	if len(sessions) == 0 && len(pinned) == 0 && len(observations) == 0 && len(prompts) == 0 {
 		return "", nil
 	}
@@ -3944,12 +4022,7 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 	if len(sessions) > 0 {
 		b.WriteString("### Recent Sessions\n")
 		for _, sess := range sessions {
-			summary := ""
-			if sess.Summary != nil {
-				summary = fmt.Sprintf(": %s", truncate(*sess.Summary, 200))
-			}
-			fmt.Fprintf(&b, "- **%s** (%s)%s [%d observations]\n",
-				sess.Project, timeutil.FormatLocal(sess.StartedAt), summary, sess.ObservationCount)
+			b.WriteString(formatSessionLine(sess))
 		}
 		b.WriteString("\n")
 	}
@@ -3957,7 +4030,7 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 	if len(prompts) > 0 {
 		b.WriteString("### Recent User Prompts\n")
 		for _, p := range prompts {
-			fmt.Fprintf(&b, "- %s: %s\n", timeutil.FormatLocal(p.CreatedAt), truncate(p.Content, 200))
+			b.WriteString(formatPromptLine(p))
 		}
 		b.WriteString("\n")
 	}
@@ -3965,8 +4038,7 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 	if len(pinned) > 0 {
 		b.WriteString("### Pinned\n")
 		for _, obs := range pinned {
-			fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
-				obs.Type, obs.Title, truncate(obs.Content, 300))
+			b.WriteString(formatObservationLine(obs))
 		}
 		b.WriteString("\n")
 	}
@@ -3974,8 +4046,7 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 	if len(observations) > 0 {
 		b.WriteString("### Recent Observations\n")
 		for _, obs := range observations {
-			fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
-				obs.Type, obs.Title, truncate(obs.Content, 300))
+			b.WriteString(formatObservationLine(obs))
 		}
 		b.WriteString("\n")
 	}
