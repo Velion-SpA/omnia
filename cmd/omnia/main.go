@@ -878,6 +878,14 @@ func cmdServe(cfg store.Config) {
 		cfg.UpdateThreshold = appCfg.WriteHygiene.UpdateThreshold
 		cfg.ShrinkGuard = appCfg.WriteHygiene.ShrinkGuard
 		cfg.CandidateLimit = appCfg.WriteHygiene.CandidateLimit
+		// Omnia v0.3.1 PR7 follow-up (design obs #1668 D7, spec fts-recall):
+		// thread the FTS zero-hit relaxation ladder's kill-switch into
+		// store.Config. Config.DisableFTSRelax is INVERTED (see its own doc)
+		// so this line only ever needs to flip it to true — the ladder stays
+		// ON by default with zero wiring, matching the "strictly-additive fix"
+		// rationale, but an operator's explicit `enabled:false` now actually
+		// reaches Store.Search instead of being silently ignored.
+		cfg.DisableFTSRelax = !appCfg.Recall.FTSRelaxOnZero
 	}
 
 	s, err := storeNew(cfg)
@@ -1161,6 +1169,12 @@ func cmdMCP(cfg store.Config) {
 		cfg.UpdateThreshold = appCfg.WriteHygiene.UpdateThreshold
 		cfg.ShrinkGuard = appCfg.WriteHygiene.ShrinkGuard
 		cfg.CandidateLimit = appCfg.WriteHygiene.CandidateLimit
+		// Omnia v0.3.1 PR7 follow-up (design obs #1668 D7, spec fts-recall):
+		// thread the FTS zero-hit relaxation ladder's kill-switch into
+		// store.Config — see cmdServe's identical block for the full
+		// rationale (inverted field, ladder stays ON with zero wiring,
+		// explicit `enabled:false` now actually reaches Store.Search).
+		cfg.DisableFTSRelax = !appCfg.Recall.FTSRelaxOnZero
 	}
 
 	s, err := storeNew(cfg)
@@ -1477,6 +1491,12 @@ func cmdSave(cfg store.Config) {
 		cfg.UpdateThreshold = appCfg.WriteHygiene.UpdateThreshold
 		cfg.ShrinkGuard = appCfg.WriteHygiene.ShrinkGuard
 		cfg.CandidateLimit = appCfg.WriteHygiene.CandidateLimit
+		// Omnia v0.3.1 PR7 follow-up (design obs #1668 D7, spec fts-recall):
+		// thread the FTS zero-hit relaxation ladder's kill-switch into
+		// store.Config — see cmdServe's identical block for the full
+		// rationale (inverted field, ladder stays ON with zero wiring,
+		// explicit `enabled:false` now actually reaches Store.Search).
+		cfg.DisableFTSRelax = !appCfg.Recall.FTSRelaxOnZero
 	}
 
 	s, err := storeNew(cfg)
@@ -1808,6 +1828,12 @@ func cmdContext(cfg store.Config) {
 		cfg.UpdateThreshold = appCfg.WriteHygiene.UpdateThreshold
 		cfg.ShrinkGuard = appCfg.WriteHygiene.ShrinkGuard
 		cfg.CandidateLimit = appCfg.WriteHygiene.CandidateLimit
+		// Omnia v0.3.1 PR7 follow-up (design obs #1668 D7, spec fts-recall):
+		// thread the FTS zero-hit relaxation ladder's kill-switch into
+		// store.Config — see cmdServe's identical block for the full
+		// rationale (inverted field, ladder stays ON with zero wiring,
+		// explicit `enabled:false` now actually reaches Store.Search).
+		cfg.DisableFTSRelax = !appCfg.Recall.FTSRelaxOnZero
 	}
 
 	s, err := storeNew(cfg)

@@ -330,27 +330,275 @@ Design slice 6 (independent) · Branch `fix/fts-zero-hit-relaxation` ·
 Base: `main` (after PR6) · `type:bug` · Depends on: PR2 (config flag pattern) ·
 Capability: fts-recall
 
-- [ ] 7.1 RED: add `internal/store` tests: strict-AND baseline with ≥1 hit →
+- [x] 7.1 RED: add `internal/store` tests: strict-AND baseline with ≥1 hit →
       relaxation ladder MUST NOT fire (non-zero-hit-path kill-switch case);
       0 strict hits + stopword removal yields hits → `Diag.Relaxed=true,
       Step=1`; step 1 also 0 hits → OR-mode (step 2) tried, `Step=2`; all
       levels exhausted → empty result, `Diag` reflects exhaustion, no infinite
-      retry.
-- [ ] 7.2 RED: add config test — `recall.fts_relax_on_zero: false` → `Search`
+      retry. — COMPLETE (see PR7 Apply Notes below; also added all-stopword,
+      single-term-duplicate-retry, and topic_key/signature composition pins
+      beyond the task's literal list).
+- [x] 7.2 RED: add config test — `recall.fts_relax_on_zero: false` → `Search`
       returns the pre-PR7 zero-hit behavior byte-for-byte (explicit gate-off
-      case).
-- [ ] 7.3 GREEN: add `recall.fts_relax_on_zero` (default true) to
+      case). — COMPLETE. Initially landed as a config-package-only test with
+      no runtime consumer (flagged by sdd-verify as an unacceptable "config
+      key that does nothing"); FOLLOW-UP FIX (same session) wired it end to
+      end via `store.Config.DisableFTSRelax` + cmd/omnia threading — see
+      "PR7 Follow-up Fix" below. `Search` now genuinely returns the pre-PR7
+      zero-hit behavior byte-for-byte when the flag is explicitly false.
+- [x] 7.3 GREEN: add `recall.fts_relax_on_zero` (default true) to
       `internal/config/config.go` (zero-value-default idiom, default true via
-      key-present probe since default differs from Go zero value).
-- [ ] 7.4 GREEN: add `SearchDiag` struct (`Relaxed bool`, `Step int`) and an
+      key-present probe since default differs from Go zero value). — COMPLETE.
+- [x] 7.4 GREEN: add `SearchDiag` struct (`Relaxed bool`, `Step int`) and an
       optional `Diag *SearchDiag` field on `SearchOptions`; implement the
       bounded ladder (strict AND → drop EN+ES stopwords → OR-of-terms) inside
-      `Store.Search`, additive-only (never reorders/removes existing hits).
-- [ ] 7.5 GREEN: surface `extra["fts_relaxed"]`/`extra["fts_relax_step"]` in
-      `handleSearch` (`internal/mcp/mcp.go`) when `Diag.Relaxed`.
+      `Store.Search`, additive-only (never reorders/removes existing hits). —
+      COMPLETE; `SearchDiag` also gained an `Exhausted bool` field beyond the
+      task's literal 2-field list (see PR7 Apply Notes).
+- [x] 7.5 GREEN: surface `extra["fts_relaxed"]`/`extra["fts_relax_step"]` in
+      `handleSearch` (`internal/mcp/mcp.go`) when `Diag.Relaxed`. — COMPLETE
+      (FTS-only path only; hybrid recall path gets the ladder's underlying
+      fix for free via Store.Search but not this transparency surfacing yet —
+      see PR7 Apply Notes).
 
 Files: `internal/store/store.go` (modify), `internal/config/config.go` (modify), `internal/mcp/mcp.go` (modify), test files (modify/new).
 Est. lines: ~260.
+
+## PR7 Apply Notes (2026-07-24)
+
+STATUS: COMPLETE. Worktree `wt-fts`, branch `feat/v031-fts-fallback`, off
+main `224a68b` (PR1-PR6+PR11 already merged). NOT committed (apply step
+only; commit/PR is a separate delivery step). Strict TDD throughout: every
+RED test confirmed failing (`go vet`/`go test`) against the pre-PR7 baseline
+before any production code landed, then GREEN after.
+
+Sub-tasks delivered (5, matching design D7 / tasks.md 7.1-7.5):
+- Store.Search's strict AND-of-every-term FTS5 pass was extracted into a new
+  `runFTSQuery(ftsQuery, opts, limit)` helper (byte-for-byte the same SQL/
+  filter logic as before, just parameterized by the MATCH argument) so the
+  strict pass and the ladder's step 1/step 2 retries share one code path.
+  `zeroHitRelax(words, opts, limit)` implements the bounded 2-step ladder,
+  gated in `Search` on `len(ftsResults) == 0` from the strict pass ONLY —
+  the pre-existing topic_key sentinel and error-signature lanes are
+  untouched, unconditional, and run earlier in `Search` against the
+  ORIGINAL query, exactly as before; pinned via
+  `TestSearch_TopicKeySentinelUnaffectedWhenLadderNeverFires` and
+  `TestSearch_RelaxedTermsNeverLeakIntoTopicKeyLane`.
+- `SearchDiag{Relaxed bool, Step int, Exhausted bool}` — `Exhausted` is an
+  addition beyond the task's literal 2-field description, needed to
+  distinguish "strict pass already succeeded, ladder never ran" (Diag stays
+  zero-value either way) from "the ladder ran through every level and still
+  found zero rows" (Exhausted=true) — both leave `Relaxed=false`, and
+  `handleSearch`/callers need to tell them apart for anything beyond the
+  binary "did relaxation help" signal (e.g. deciding whether to suggest
+  simpler keywords only when relaxation genuinely exhausted itself).
+- Two duplicate-query guards keep the ladder bounded/deterministic: (1) if
+  dropping stopwords changes nothing (no stopword present), step 1 is
+  skipped outright — it would be byte-identical to the strict pass — but
+  step 2 (a real AND→OR relaxation) still runs when >1 term remains; (2) if
+  exactly one non-stopword term remains, step 2 is skipped too, since
+  AND-of-one-term and OR-of-one-term are the same query (already tried
+  either at step 1 or the strict pass). An all-stopword query has no
+  relaxed query left to construct at all and exhausts immediately with
+  neither step attempted.
+- `internal/config`: `RecallConfig.FTSRelaxOnZero bool` (yaml
+  `fts_relax_on_zero`), default TRUE via `ftsRelaxOnZeroKeyPresent`'s
+  explicit-vs-absent probe (mirrors `writeHygieneEnabledKeyPresent` exactly,
+  inverted from `recallEnabledKeyPresent`). RESOLVED (was a scope gap in the
+  first apply pass, fixed same session per sdd-coordinator instruction — see
+  "PR7 Follow-up Fix" below): this flag is now genuinely wired end to end
+  via `store.Config.DisableFTSRelax` + `cmd/omnia` threading at
+  cmdServe/cmdMCP/cmdContext/cmdSave, so an operator's explicit
+  `fts_relax_on_zero: false` actually reaches `Store.Search` instead of
+  being silently ignored.
+- `internal/mcp`: `handleSearch`'s FTS-only path (`cfg.Recall == nil`)
+  passes `Diag: &ftsDiag` and, when `ftsDiag.Relaxed`, adds
+  `extra["fts_relaxed"]=true` + `extra["fts_relax_step"]=N` — omitted
+  entirely (not even `false`/`0`) on every other path, preserving byte-for-
+  byte output there. SCOPE NOTE: the hybrid recall path
+  (`cfg.Recall != nil`, `StoreLexicalSearcher.Search` in
+  `recall_adapter.go`) does NOT forward a `Diag` pointer through
+  `recall.LexicalSearchOptions` in this PR, so it gets the ladder's
+  underlying fix for free (the ladder lives inside the one `Store.Search`
+  entry point `StoreLexicalSearcher` itself calls) but never surfaces the
+  `fts_relaxed` transparency fields — spec fts-recall's REQ "Fallback
+  Transparency" doesn't scope hybrid vs. FTS-only, so wiring `Diag` through
+  `recall_adapter.go` too is a reasonable, low-risk follow-up, just not
+  required to satisfy PR7's own task list (`internal/mcp/mcp.go` only,
+  not `internal/mcp/recall_adapter.go` or `internal/recall`).
+- REAL-BATTERY-SHAPE regression fix (found via full-suite verification, not
+  a task-list item): two PRE-EXISTING tests,
+  `TestMemSave_ExplicitBackedProjectRejectsAmbiguousNormalizationCollision`
+  and `TestMemSave_ExplicitProjectRejectsCollapsedStoreBucket`
+  (`internal/mcp/mcp_test.go`), asserted "a rejected save wrote nothing" via
+  `s.Search(<rejected title text>, ...)` returning 0 rows. PR7's OR-mode
+  step 2 now legitimately surfaces an unrelated, already-seeded observation
+  in each test via a single shared non-stopword term (e.g. "explicit"),
+  making that Search()-based non-persistence proxy a false positive for
+  "nothing new was written" — confirmed by reverting to clean `224a68b`
+  (`git stash`) and re-running both tests in isolation: they pass on clean
+  main and fail only with PR7's changes applied. Fixed by switching both
+  assertions to an exact `Store.Stats().TotalObservations` before/after
+  comparison — a check entirely independent of `Search`'s own matching
+  algorithm — rather than weakening the OR-mode relaxation itself (the
+  loose match is intended, designed-for behavior, not a defect).
+
+RED→GREEN evidence: `internal/store/fts_relax_test.go` (new, 8 tests)
+confirmed RED via `CGO_ENABLED=0 go vet ./internal/store/...` →
+`vet: internal/store/fts_relax_test.go:37:11: undefined: SearchDiag` before
+any production code existed; GREEN after `SearchDiag`/`Diag`/`runFTSQuery`/
+`zeroHitRelax`/`ftsStopwords`/`sanitizeFTSTerms`/`sanitizeFTSTermsOR` landed
+in `store.go` — all 8 new tests + the full pre-existing `internal/store`
+suite pass (6.661s). `internal/config/fts_relax_config_test.go` (new, 4
+tests) confirmed RED via `go vet ./internal/config/...` →
+`cfg.Recall.FTSRelaxOnZero undefined`; GREEN after `RecallConfig.
+FTSRelaxOnZero` + `ftsRelaxOnZeroKeyPresent` + the `applyDefaults` fill-in
+landed — full `internal/config` suite green. `internal/mcp/
+fts_relax_envelope_test.go` (new, 3 tests) confirmed RED via `go test -run`
+(handler ran and found the result via the store-level ladder already, but
+the envelope carried no `fts_relaxed` key yet); GREEN after the `handleSearch`
+wiring landed.
+
+Full verification: `CGO_ENABLED=0 go build ./...` clean. `CGO_ENABLED=0 go
+vet ./...` clean. `gofmt -l` on all touched/new files empty (no formatting
+diffs). `CGO_ENABLED=0 go test ./internal/store/... ./internal/config/...`
+both fully green. `CGO_ENABLED=0 go test ./internal/mcp/...` — exactly the
+SAME 10 pre-existing `unknown_project`/`TestHandleCapturePassiveDefaults
+SourceAndSession` failures already confirmed pre-existing across every
+prior PR in this chain (PR1-PR4/PR11), re-confirmed pre-existing HERE TOO
+via `git stash` back to clean `224a68b` and re-running — same 10 failures,
+0 PR7 files present. Full-repo `CGO_ENABLED=0 go test ./...`: every other
+package green; `internal/mcp` shows only those same 10 pre-existing
+failures.
+
+Line count actuals vs ~260L estimate (FIRST apply pass, before the follow-up
+fix below): production code — `internal/store/store.go` +258/-33 (net ~225:
+`runFTSQuery` extraction + `SearchDiag`/`zeroHitRelax`/stopword list/
+term-builders), `internal/config/config.go` +47, `internal/mcp/mcp.go` +22.
+Test code — `internal/store/fts_relax_test.go` 376L (new, 8 tests),
+`internal/config/fts_relax_config_test.go` 88L (new, 4 tests),
+`internal/mcp/fts_relax_envelope_test.go` 147L (new, 3 tests),
+`internal/mcp/mcp_test.go` +41 (2 pre-existing tests hardened against the
+new OR-mode relaxation, see above). Total ≈946 insertions/33 deletions —
+well over the ~260L estimate, same over-estimate pattern PR3 (989 vs
+360)/PR4 (343 vs 200)/PR11 (545 vs 280) all hit, driven by the same cause
+(thorough RED/GREEN coverage per edge case, not scope creep into unassigned
+features).
+
+## PR7 Follow-up Fix (2026-07-24, same session) — wire `recall.fts_relax_on_zero` end to end
+
+STATUS: COMPLETE. Same worktree `wt-fts`, branch `feat/v031-fts-fallback`,
+still uncommitted. Triggered by an sdd-coordinator review that correctly
+rejected the first apply pass's scope decision: a config key that parses
+and defaults but has no runtime consumer is "an API lie" — an operator
+setting `fts_relax_on_zero: false` was silently ignored, and (unlike
+write-hygiene's PR2→PR3/PR4 staging) no later PR was planned to wire this
+one in. Fixed via strict TDD in the same session, not deferred further.
+
+Field shape chosen: `store.Config.DisableFTSRelax bool` — INVERTED relative
+to `WriteHygieneEnabled`/`ContextTokenBudget`'s own positive-named,
+off-by-default convention. Rationale: the zero-hit relaxation ladder is
+strictly additive (fires ONLY on exactly zero strict hits, never reorders
+or removes an existing hit), so it should protect every install out of the
+box — including a bare `store.Config{}` literal and any composition root
+that hasn't wired this field — without requiring explicit opt-in. Making
+the Go zero value (`false`) mean "ladder ACTIVE" achieves that for free;
+only an explicit `recall.fts_relax_on_zero: false` in a successfully-loaded
+config.yaml, threaded by the composition root, sets `DisableFTSRelax=true`
+and restores pre-PR7 zero-hit behavior byte-for-byte. This is the opposite
+polarity from write-hygiene's "missing config degrades to off" convention
+by design: here, missing config.yaml (or a zero-value `store.Config{}` in
+any caller/test) must degrade to "ladder ON", not off.
+
+Sub-tasks delivered:
+- `internal/store/store.go`: added `Config.DisableFTSRelax bool` (doc
+  comment explains the inversion). `Search`'s ladder gate changed from
+  `len(ftsResults) == 0` to `len(ftsResults) == 0 && !s.cfg.DisableFTSRelax`
+  — the ONLY change to the gate condition; `zeroHitRelax`/`runFTSQuery`
+  themselves are untouched.
+- `internal/store/fts_relax_test.go`: new golden test
+  `TestSearch_DisableFTSRelaxKillSwitchRestoresPrePR7BehaviorByteForByte`
+  (+ `newTestStoreWithDisableFTSRelax` helper) — reuses the EXACT SAME
+  fixture/query as `TestSearch_ZeroHitStopwordRelaxationFindsResult` (which
+  finds the doc via step 1 with the ladder active) and asserts that with
+  `DisableFTSRelax=true`, results stay empty and `Diag` stays entirely
+  zero-value (not even `Exhausted=true` — the ladder never runs at all, it
+  doesn't "exhaust").
+- `cmd/omnia/main.go`: one line added inside each of the 4 EXISTING
+  write-hygiene wiring blocks (cmdServe, cmdMCP, cmdSave, cmdContext) —
+  `cfg.DisableFTSRelax = !appCfg.Recall.FTSRelaxOnZero` — reusing the same
+  `appCfg`/`appCfgErr` already loaded there for `write_hygiene.*`/
+  `ContextTokenBudget`, no second `config.Load` call. `cmdSearch` (the
+  `omnia search` CLI) was intentionally NOT wired, mirroring write-hygiene's
+  own precedent of only wiring the 4 named sites.
+- `cmd/omnia/fts_relax_wiring_test.go` (new): mirrors
+  `write_hygiene_wiring_test.go`'s pattern exactly, reusing its
+  `withCapturedStoreConfig`/`testConfig`/`withArgs`/`stubRuntimeHooks`
+  helpers. 4 wiring test functions (one per site) each with an
+  "enabled:true (default) keeps DisableFTSRelax false" + "enabled:false
+  flows through to DisableFTSRelax true" pair; `cmdContext`'s also gets a
+  third "missing config.yaml keeps the ladder ON" subtest (the
+  inverted-polarity case that most needed pinning). Plus
+  `TestFTSRelaxWiring_EndToEnd_ProductionSearchPath`: drives the REAL
+  `loadAppConfigWithRecallAutodetect → cmdContext → storeNew` production
+  path (no hand-built `store.Config` literal), reopens the resulting store,
+  and issues a real `Store.Search` call — proving the wiring produces 1
+  result with the flag on (default) and 0 results + zero-value `Diag` with
+  the flag off (the golden case, end to end through production wiring).
+
+RED→GREEN evidence: `cmd/omnia/fts_relax_wiring_test.go` confirmed RED via
+`CGO_ENABLED=0 go vet ./cmd/omnia/...` →
+`captured.DisableFTSRelax undefined (type *store.Config has no field or
+method DisableFTSRelax)` before any production code changed; the
+"enabled:false" subtests at each of the 4 sites additionally failed
+functionally even after the type existed but before the wiring line
+landed (`expected recall.fts_relax_on_zero:false to set
+store.Config.DisableFTSRelax true, got false`), confirming the RED wasn't
+just a compile error. `internal/store/fts_relax_test.go`'s new golden test
+confirmed RED via `go vet` → `cfg.DisableFTSRelax undefined (type Config
+has no field or method DisableFTSRelax)`. GREEN after the `Config` field +
+gate condition + 4 wiring lines landed — all new tests pass, plus the full
+pre-existing `internal/store`/`cmd/omnia` suites.
+
+Full verification (after the fix): `CGO_ENABLED=0 go build ./...` clean.
+`CGO_ENABLED=0 go vet ./...` clean. `gofmt -l` empty on all touched/new
+files (`store.go`, `fts_relax_test.go`, `main.go`,
+`fts_relax_wiring_test.go`). `CGO_ENABLED=0 go test ./internal/store/...
+./internal/config/... ./cmd/omnia/...` all green. Full-repo
+`CGO_ENABLED=0 go test ./...`: every package green except `internal/mcp`'s
+SAME 10 pre-existing `unknown_project`/
+`TestHandleCapturePassiveDefaultsSourceAndSession` failures already
+confirmed pre-existing (re-verified against clean `224a68b` in the first
+apply pass, unaffected by this follow-up fix since it touches no
+`internal/mcp` files).
+
+Updated line count actuals (git diff --stat, exact): `internal/store/
+store.go` now +280/-33 total (follow-up added ~22 lines: `Config` field +
+doc comment + gate condition change), `internal/store/fts_relax_test.go`
+now 445L total (follow-up added 69 lines: golden test + helper),
+`cmd/omnia/main.go` +26 (4× wiring blocks, one line of code + a short
+comment each), `cmd/omnia/fts_relax_wiring_test.go` 273L (new, 4 wiring
+test functions + 1 end-to-end test). PR7 GRAND TOTAL (first pass + this
+follow-up fix, all 5 touched/new production+test files): 383 insertions/33
+deletions across tracked files (`store.go`/`config.go`/`mcp.go`/
+`mcp_test.go`/`main.go`) + 953 lines across 4 new test files
+(`fts_relax_test.go` 445, `fts_relax_config_test.go` 88,
+`fts_relax_envelope_test.go` 147, `fts_relax_wiring_test.go` 273) = 1336
+insertions/33 deletions vs the original ~260L estimate. The
+config-key-with-no-consumer gap that made the first pass already look
+"done" at ~946L is exactly why this follow-up was necessary; the extra
+~390L is the genuine cost of making the rollback flag actually roll
+something back, not scope creep.
+
+REMAINING ACCEPTED FOLLOW-UP (no code change, explicitly deferred per
+sdd-coordinator instruction): the hybrid recall path's `fts_relaxed`
+transparency fields (`internal/mcp/recall_adapter.go`'s
+`StoreLexicalSearcher` doesn't forward a `Diag` pointer through
+`recall.LexicalSearchOptions`) remain unwired. This is accepted as fine to
+defer — UNLIKE the config-flag gap just fixed — because the underlying fix
+(the ladder itself) already applies on the hybrid path for free (it shares
+the one `Store.Search` entry point `StoreLexicalSearcher` calls); only the
+optional transparency surfacing is missing there, not the fix.
 
 ---
 

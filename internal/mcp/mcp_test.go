@@ -4626,6 +4626,19 @@ func TestMemSave_ExplicitBackedProjectRejectsAmbiguousNormalizationCollision(t *
 		t.Fatalf("seed observation: %v", err)
 	}
 
+	// Captured before the rejected save, and re-checked via an EXACT count
+	// (not a Search() call) after: PR7's zero-hit relaxation ladder can
+	// legitimately surface the unrelated SEEDED observation above via
+	// OR-mode partial-term overlap (it shares the word "explicit" with the
+	// query below), which would make a Search()-based "found nothing"
+	// assertion a false positive for "nothing new was written" — the
+	// stronger, relaxation-proof check is that the total observation count
+	// is UNCHANGED by the rejected save.
+	before, statsErr := s.Stats()
+	if statsErr != nil {
+		t.Fatalf("stats before: %v", statsErr)
+	}
+
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "explicit backed collision must fail",
@@ -4642,9 +4655,12 @@ func TestMemSave_ExplicitBackedProjectRejectsAmbiguousNormalizationCollision(t *
 	if body["error_code"] != "project_name_collision" {
 		t.Fatalf("expected project_name_collision, got %v", body)
 	}
-	obs, searchErr := s.Search("explicit backed collision must fail", store.SearchOptions{Project: "foo-bar", Limit: 10})
-	if searchErr != nil || len(obs) != 0 {
-		t.Fatalf("explicit collision must not write to collapsed bucket, obs=%d err=%v", len(obs), searchErr)
+	after, statsErr := s.Stats()
+	if statsErr != nil {
+		t.Fatalf("stats after: %v", statsErr)
+	}
+	if after.TotalObservations != before.TotalObservations {
+		t.Fatalf("explicit collision must not write to collapsed bucket, before=%d after=%d", before.TotalObservations, after.TotalObservations)
 	}
 }
 
@@ -4667,6 +4683,16 @@ func TestMemSave_ExplicitProjectRejectsCollapsedStoreBucket(t *testing.T) {
 		t.Fatalf("seed observation: %v", err)
 	}
 
+	// See TestMemSave_ExplicitBackedProjectRejectsAmbiguousNormalizationCollision
+	// above for why this uses an exact Stats() count rather than Search():
+	// PR7's zero-hit relaxation ladder can legitimately OR-match the seeded
+	// observation via shared vocabulary, which would make a Search()-based
+	// "found nothing" assertion unreliable here.
+	before, statsErr := s.Stats()
+	if statsErr != nil {
+		t.Fatalf("stats before: %v", statsErr)
+	}
+
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "collapsed store bucket must fail",
@@ -4684,9 +4710,12 @@ func TestMemSave_ExplicitProjectRejectsCollapsedStoreBucket(t *testing.T) {
 	if body["error_code"] != "project_name_collision" {
 		t.Fatalf("expected project_name_collision, got %v", body)
 	}
-	obs, searchErr := s.Search("collapsed store bucket must fail", store.SearchOptions{Project: "foo-bar", Limit: 10})
-	if searchErr != nil || len(obs) != 0 {
-		t.Fatalf("collapsed store bucket must not receive writes, obs=%d err=%v", len(obs), searchErr)
+	after, statsErr := s.Stats()
+	if statsErr != nil {
+		t.Fatalf("stats after: %v", statsErr)
+	}
+	if after.TotalObservations != before.TotalObservations {
+		t.Fatalf("collapsed store bucket must not receive writes, before=%d after=%d", before.TotalObservations, after.TotalObservations)
 	}
 }
 

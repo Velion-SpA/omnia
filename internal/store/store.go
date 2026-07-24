@@ -204,6 +204,42 @@ type SearchOptions struct {
 	Project string `json:"project,omitempty"`
 	Scope   string `json:"scope,omitempty"`
 	Limit   int    `json:"limit,omitempty"`
+	// Diag, when non-nil, receives the outcome of the zero-hit FTS
+	// relaxation ladder (design obs #1668 D7, spec fts-recall) for this
+	// call — an output parameter, not a request field, so it is never
+	// JSON-serialized. nil (the default) means the caller doesn't care;
+	// Search still runs the ladder either way, it just skips writing into
+	// it. See SearchDiag's own doc for field semantics.
+	Diag *SearchDiag `json:"-"`
+}
+
+// SearchDiag records whether Store.Search's bounded zero-hit relaxation
+// ladder (design obs #1668 D7, spec fts-recall, repro obs #1659/#1662)
+// fired for a given call, and how far it had to go. The ladder ONLY ever
+// runs when the strict AND-of-every-term FTS5 pass returns exactly zero
+// rows — any call whose strict pass already found ≥1 hit leaves Diag at
+// its zero value, byte-for-byte the same as before this ladder existed.
+type SearchDiag struct {
+	// Relaxed is true when a relaxation level beyond the strict pass (step
+	// 1 or step 2) produced a non-empty result set that Search returned.
+	Relaxed bool
+	// Step is the relaxation level that produced results when Relaxed is
+	// true (1 = stopwords dropped, still AND-of-remaining-terms; 2 =
+	// OR-of-remaining-terms). When Relaxed is false, Step reflects how far
+	// the ladder actually got before giving up: 0 means either the strict
+	// pass already had hits (Exhausted also false) or there was no
+	// distinct relaxed query left to try at all (an all-stopword or
+	// single-term query — Exhausted true); 1 or 2 means that level was
+	// genuinely attempted and still returned zero rows before the ladder
+	// stopped (Exhausted true).
+	Step int
+	// Exhausted is true when the ladder determined there was nothing more
+	// useful to retry — either every relaxation level that could produce a
+	// DIFFERENT query from one already tried was attempted and still
+	// returned zero rows, or no relaxed query could even be constructed
+	// (all-stopword / single-term queries) — and false when the strict
+	// pass already succeeded (the ladder never needed to run at all).
+	Exhausted bool
 }
 
 type AddObservationParams struct {
@@ -569,6 +605,23 @@ type Config struct {
 	UpdateThreshold     float64
 	ShrinkGuard         float64
 	CandidateLimit      int
+	// DisableFTSRelax is the kill-switch for Search's zero-hit relaxation
+	// ladder (design obs #1668 D7, spec fts-recall, mirrors
+	// internal/config.RecallConfig.FTSRelaxOnZero — duplicated here, not
+	// imported, same convention as every other field on this struct).
+	// UNLIKE WriteHygieneEnabled/ContextTokenBudget above (positive-named
+	// fields whose Go zero value IS the disabled/no-op state), this field
+	// is deliberately INVERTED: the ladder is a strictly-additive fix (it
+	// only ever runs when the strict AND-of-every-term pass found exactly
+	// zero rows, and never reorders or removes an existing hit), so it
+	// should protect every install out of the box — including a bare
+	// Config{} literal and any composition root that hasn't wired this
+	// field at all — without requiring explicit opt-in. Zero value (false)
+	// means the ladder is ACTIVE; only an explicit `recall.fts_relax_on_zero:
+	// false` in a successfully-loaded config.yaml, threaded by the
+	// composition root (cmd/omnia's cmdServe/cmdMCP/cmdContext/cmdSave), sets
+	// this true and restores the pre-PR7 zero-hit behavior byte-for-byte.
+	DisableFTSRelax bool
 }
 
 func DefaultConfig() (Config, error) {
@@ -4232,6 +4285,82 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	// Sanitize query for FTS5 — wrap each term in quotes to avoid syntax errors
 	ftsQuery := sanitizeFTS(query)
 
+	ftsResults, err := s.runFTSQuery(ftsQuery, opts, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	// ── Zero-hit relaxation ladder (design obs #1668 D7, spec fts-recall,
+	// repro obs #1659/#1662) ────────────────────────────────────────────
+	// Fires ONLY when the strict AND-of-every-term pass above returned
+	// exactly zero rows — any non-zero-hit path is left completely
+	// untouched (golden-test contract). See zeroHitRelax's own doc for the
+	// bounded 2-step ladder and its duplicate-query guards. Gated on
+	// !s.cfg.DisableFTSRelax (the kill-switch, off/false by default — see
+	// Config.DisableFTSRelax's own doc for why it is inverted): when the
+	// operator has explicitly disabled it, the ladder never runs at all,
+	// restoring the pre-PR7 zero-hit behavior byte-for-byte (Diag stays
+	// entirely zero-value, not even Exhausted=true).
+	var diag SearchDiag
+	if len(ftsResults) == 0 && !s.cfg.DisableFTSRelax {
+		if words := strings.Fields(query); len(words) > 0 {
+			relaxed, d, rerr := s.zeroHitRelax(words, opts, limit)
+			if rerr != nil {
+				return nil, rerr
+			}
+			diag = d
+			ftsResults = relaxed
+		}
+	}
+	if opts.Diag != nil {
+		*opts.Diag = diag
+	}
+
+	var results []SearchResult
+	results = append(results, directResults...)
+	results = append(results, signatureResults...)
+	for _, sr := range ftsResults {
+		if !seen[sr.ID] {
+			results = append(results, sr)
+			seen[sr.ID] = true
+		}
+	}
+
+	// ── Outcome ranking (design obs #1498 / audit #1497, slice 1) ───────────
+	// Additive nudge: a proven fix (outcome=worked) ranks above one with no
+	// recorded outcome for the same match tier; a fix known NOT to have
+	// worked ranks below. Existing rows have outcome=NULL (no adjustment),
+	// so this is a no-op for all pre-existing data. Explicit topic_key
+	// sentinel results (Rank == topicKeySentinelRank) are excluded so the
+	// external -1000 "Exact" contract (recall_adapter.go, internal/recall)
+	// stays intact even when the semantic/RRF path is enabled.
+	for i := range results {
+		if results[i].Rank == topicKeySentinelRank || results[i].Outcome == nil {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(*results[i].Outcome)) {
+		case OutcomeWorked:
+			results[i].Rank -= outcomeWorkedRankBoost
+		case OutcomeDidNotWork:
+			results[i].Rank += outcomeDidNotWorkRankPenalty
+		}
+	}
+	sort.SliceStable(results, func(i, j int) bool { return results[i].Rank < results[j].Rank })
+
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
+// runFTSQuery executes a single FTS5 MATCH pass against observations_fts
+// with the given pre-built query string (already phrase-quoted/AND'd or
+// OR'd — see sanitizeFTS/sanitizeFTSTerms/sanitizeFTSTermsOR), applying
+// Search's own opts.Type/Project/Scope filters and limit. It is the one
+// place that shape of query lives, so Search's strict pass and the zero-hit
+// relaxation ladder's step 1/step 2 retries all go through identical
+// SQL/filter logic — only the MATCH argument itself differs between calls.
+func (s *Store) runFTSQuery(ftsQuery string, opts SearchOptions, limit int) ([]SearchResult, error) {
 	sqlQ := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
 		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
@@ -4267,9 +4396,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	}
 	defer rows.Close()
 
-	var results []SearchResult
-	results = append(results, directResults...)
-	results = append(results, signatureResults...)
+	var out []SearchResult
 	for rows.Next() {
 		var sr SearchResult
 		if err := rows.Scan(
@@ -4282,40 +4409,139 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			return nil, err
 		}
 		normalizeTrustTag(&sr.Observation)
-		if !seen[sr.ID] {
-			results = append(results, sr)
-			seen[sr.ID] = true
-		}
+		out = append(out, sr)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	return out, nil
+}
 
-	// ── Outcome ranking (design obs #1498 / audit #1497, slice 1) ───────────
-	// Additive nudge: a proven fix (outcome=worked) ranks above one with no
-	// recorded outcome for the same match tier; a fix known NOT to have
-	// worked ranks below. Existing rows have outcome=NULL (no adjustment),
-	// so this is a no-op for all pre-existing data. Explicit topic_key
-	// sentinel results (Rank == topicKeySentinelRank) are excluded so the
-	// external -1000 "Exact" contract (recall_adapter.go, internal/recall)
-	// stays intact even when the semantic/RRF path is enabled.
-	for i := range results {
-		if results[i].Rank == topicKeySentinelRank || results[i].Outcome == nil {
-			continue
-		}
-		switch strings.ToLower(strings.TrimSpace(*results[i].Outcome)) {
-		case OutcomeWorked:
-			results[i].Rank -= outcomeWorkedRankBoost
-		case OutcomeDidNotWork:
-			results[i].Rank += outcomeDidNotWorkRankPenalty
+// ftsStopwords is a small, fixed EN+ES stopword list used ONLY by the
+// zero-hit relaxation ladder's step 1 (design obs #1668 D7). It is
+// intentionally small and hand-picked — not a general linguistic stopword
+// list — just the handful of common function words that turn an otherwise
+// perfectly matchable natural-language query into a strict AND-of-every-term
+// query no real document satisfies (repro obs #1659/#1662: a query like
+// "cómo limpia el sistema las memorias duplicadas" fails outright because
+// "cómo" never occurs verbatim in the stored text, even though every other
+// word does).
+var ftsStopwords = map[string]bool{
+	// English
+	"a": true, "an": true, "the": true, "of": true, "in": true, "on": true,
+	"to": true, "for": true, "and": true, "or": true, "is": true, "are": true,
+	"was": true, "were": true, "be": true, "with": true, "at": true, "by": true,
+	"that": true, "this": true, "it": true, "as": true,
+	// Spanish
+	"el": true, "la": true, "los": true, "las": true, "de": true, "del": true,
+	"que": true, "y": true, "o": true, "en": true, "un": true, "una": true,
+	"es": true, "son": true, "por": true, "para": true, "con": true, "lo": true,
+	"al": true, "se": true, "su": true, "sus": true, "como": true, "cómo": true,
+}
+
+// sanitizeFTSTerms builds an AND-of-terms FTS5 query — the same implicit-AND
+// phrase-quoting shape sanitizeFTS produces from a raw query string — from
+// an explicit, already-filtered term slice. Used by the zero-hit relaxation
+// ladder's step 1, once stopwords have been removed from the word list.
+func sanitizeFTSTerms(words []string) string {
+	quoted := make([]string, 0, len(words))
+	for _, w := range words {
+		w = strings.ReplaceAll(w, `"`, "")
+		if w != "" {
+			quoted = append(quoted, `"`+w+`"`)
 		}
 	}
-	sort.SliceStable(results, func(i, j int) bool { return results[i].Rank < results[j].Rank })
+	return strings.Join(quoted, " ")
+}
 
-	if len(results) > limit {
-		results = results[:limit]
+// sanitizeFTSTermsOR builds an OR-of-terms FTS5 query from an explicit term
+// slice — mirrors sanitizeFTSCandidates' OR-join shape (relations.go), but
+// operates on an already-filtered term list rather than re-splitting a raw
+// title string. Used by the zero-hit relaxation ladder's step 2.
+func sanitizeFTSTermsOR(words []string) string {
+	quoted := make([]string, 0, len(words))
+	for _, w := range words {
+		w = strings.ReplaceAll(w, `"`, "")
+		if w != "" {
+			quoted = append(quoted, `"`+w+`"`)
+		}
 	}
-	return results, nil
+	return strings.Join(quoted, " OR ")
+}
+
+// zeroHitRelax implements the bounded 2-step relaxation ladder (design obs
+// #1668 D7, spec fts-recall) Search falls back to when its strict
+// AND-of-all-terms FTS5 pass returns exactly zero rows. It NEVER runs
+// otherwise (see Search's own call site: gated on len(ftsResults) == 0).
+//
+// Step 1 drops ftsStopwords from the term set and retries with the SAME
+// implicit-AND semantics as the strict pass. Step 2 (reached only if step 1
+// also returns zero, or was skipped as a guaranteed duplicate) loosens the
+// SAME remaining term set from AND to OR: any one surviving term matching
+// is enough.
+//
+// Two duplicate-query guards keep the ladder bounded and deterministic,
+// never re-running a query byte-identical to one already tried:
+//   - if dropping stopwords changed nothing (no stopword was present in the
+//     query), step 1 would be identical to the strict pass and is skipped
+//     outright — step 2 (a genuinely different AND→OR relaxation) still
+//     runs as long as more than one term remains;
+//   - if exactly one non-stopword term remains, AND-of-one-term and
+//     OR-of-one-term are the SAME query, so step 2 is skipped too whenever
+//     it would just repeat a query already tried (step 1 if it ran, the
+//     strict pass itself if step 1 was skipped).
+//
+// An all-stopword query (no term survives the stopword filter) has no
+// relaxed query left to construct at all and exhausts immediately, without
+// attempting either step.
+func (s *Store) zeroHitRelax(words []string, opts SearchOptions, limit int) ([]SearchResult, SearchDiag, error) {
+	nonStop := make([]string, 0, len(words))
+	for _, w := range words {
+		if !ftsStopwords[strings.ToLower(w)] {
+			nonStop = append(nonStop, w)
+		}
+	}
+
+	if len(nonStop) == 0 {
+		// All-stopword query: nothing left to relax with.
+		return nil, SearchDiag{Exhausted: true}, nil
+	}
+
+	stopwordsDropped := len(nonStop) != len(words)
+
+	if stopwordsDropped {
+		step1Query := sanitizeFTSTerms(nonStop)
+		step1Results, err := s.runFTSQuery(step1Query, opts, limit)
+		if err != nil {
+			return nil, SearchDiag{}, err
+		}
+		if len(step1Results) > 0 {
+			return step1Results, SearchDiag{Relaxed: true, Step: 1}, nil
+		}
+	}
+
+	if len(nonStop) == 1 {
+		// AND-of-one-term and OR-of-one-term are the same query. If step 1
+		// ran (stopwordsDropped), it already tried this exact query and
+		// found nothing. If step 1 was skipped (single term, no stopword
+		// dropped), the strict pass already tried this exact query. Either
+		// way, step 2 would be a byte-identical duplicate retry — skip it.
+		step := 0
+		if stopwordsDropped {
+			step = 1
+		}
+		return nil, SearchDiag{Exhausted: true, Step: step}, nil
+	}
+
+	step2Query := sanitizeFTSTermsOR(nonStop)
+	step2Results, err := s.runFTSQuery(step2Query, opts, limit)
+	if err != nil {
+		return nil, SearchDiag{}, err
+	}
+	if len(step2Results) > 0 {
+		return step2Results, SearchDiag{Relaxed: true, Step: 2}, nil
+	}
+	return nil, SearchDiag{Exhausted: true, Step: 2}, nil
 }
 
 // ─── Stats ───────────────────────────────────────────────────────────────────
