@@ -502,6 +502,94 @@ func TestFormatContextTokenBudgetDisabledIsByteForByteNoOp(t *testing.T) {
 	}
 }
 
+// TestFormatContextGoldenRenderedOutput pins the LITERAL rendered output of
+// FormatContext (ContextTokenBudget disabled, the default) for a small fixed
+// fixture as a hardcoded golden string. This closes a gap left by
+// TestFormatContextTokenBudgetDisabledIsByteForByteNoOp above: that test
+// builds its `want` by calling the very same
+// formatSessionLine/formatPromptLine/formatObservationLine helpers the code
+// under test also calls, so a format-string typo inside one of those helpers
+// lands in both `want` and `got` and the test passes silently. This test
+// hardcodes the expected markdown independently of those helpers, so a typo
+// in any of them changes `got` but not the literal `want` (PR3 review
+// finding, omnia-0.3-polish micro-debt #144).
+func TestFormatContextGoldenRenderedOutput(t *testing.T) {
+	oldTZ := os.Getenv("OMNIA_TIMEZONE")
+	t.Cleanup(func() { os.Setenv("OMNIA_TIMEZONE", oldTZ) })
+	os.Setenv("OMNIA_TIMEZONE", "UTC")
+
+	s := newTestStore(t)
+
+	if err := s.CreateSession("golden-s1", "goldenctx", "/tmp/goldenctx"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`,
+		"2025-06-15 09:00:00", "golden-s1"); err != nil {
+		t.Fatalf("pin session started_at: %v", err)
+	}
+
+	pinnedID, err := s.AddObservation(AddObservationParams{
+		SessionID: "golden-s1",
+		Type:      "decision",
+		Title:     "Pinned Decision",
+		Content:   "Pinned content body",
+		Project:   "goldenctx",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add pinned observation: %v", err)
+	}
+	if err := s.PinObservation(pinnedID); err != nil {
+		t.Fatalf("pin observation: %v", err)
+	}
+
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "golden-s1",
+		Type:      "bugfix",
+		Title:     "Recent Fix",
+		Content:   "Recent content body",
+		Project:   "goldenctx",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add recent observation: %v", err)
+	}
+
+	promptID, err := s.AddPrompt(AddPromptParams{
+		SessionID: "golden-s1",
+		Content:   "What is the plan?",
+		Project:   "goldenctx",
+	})
+	if err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE user_prompts SET created_at = ? WHERE id = ?`,
+		"2025-06-15 09:05:00", promptID); err != nil {
+		t.Fatalf("pin prompt created_at: %v", err)
+	}
+
+	const want = "## Memory from Previous Sessions\n\n" +
+		"### Recent Sessions\n" +
+		"- **goldenctx** (2025-06-15 09:00:00) [2 observations]\n" +
+		"\n" +
+		"### Recent User Prompts\n" +
+		"- 2025-06-15 09:05:00: What is the plan?\n" +
+		"\n" +
+		"### Pinned\n" +
+		"- [decision] **Pinned Decision**: Pinned content body\n" +
+		"\n" +
+		"### Recent Observations\n" +
+		"- [bugfix] **Recent Fix**: Recent content body\n" +
+		"\n"
+
+	got, err := s.FormatContext("goldenctx", "project")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+	if got != want {
+		t.Fatalf("FormatContext output drifted from golden fixture\ngot:\n%q\nwant:\n%q", got, want)
+	}
+}
+
 // TestFormatContextTokenBudgetUncappedBugRegressionAndBoundedWhenEnabled
 // pins BOTH halves of the fix in one test: (a) the pre-existing unbounded
 // behavior is preserved verbatim when the flag stays off (compat — the

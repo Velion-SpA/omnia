@@ -3,6 +3,7 @@ package anchor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -477,5 +478,99 @@ func TestLocate_FindsSymbolViaRealGitGrep(t *testing.T) {
 	}
 	if file != "foo.go" || line != 5 {
 		t.Errorf("expected foo.go:5 (the func Add decl), got %s:%d", file, line)
+	}
+}
+
+// localeInstalled reports whether `locale -a` lists name as available on
+// this machine. Used to skip locale-dependent tests on minimal images
+// (common in CI containers) that ship no non-C locale data, rather than
+// false-passing there.
+func localeInstalled(t *testing.T, name string) bool {
+	t.Helper()
+	out, err := exec.Command("locale", "-a").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestLocate_GitGrepLocaleIsPinnedDeterministic pins the fix for PR #125's
+// review finding: git grep -E's POSIX character classes ([[:alnum:]], used
+// by declarationPattern) are locale-aware, so a symbol touching a non-ASCII
+// letter with no ASCII separator between them can match under one locale
+// and miss under another, while Go's RE2 (see
+// TestDeclarationPattern_EmulatesWordBoundaryWithoutBackslashB above) is
+// always ASCII-only for the exact same pattern. defaultRunGit pins
+// LC_ALL=C on every grep subprocess so git's classification is ASCII-only
+// too — Locate's result must be identical no matter what LANG/LC_ALL the
+// calling (parent test) process happens to run under.
+//
+// Only run when en_US.UTF-8 is actually installed (verified empirically:
+// under LC_ALL=C this fixture's declaration matches; under
+// LC_ALL=en_US.UTF-8 it does not, because "Á" is classified as alnum there).
+// A bare "C.UTF-8" alias common on minimal Linux images does NOT reproduce
+// this — its ctype tables stay ASCII-only, same as "C" — so this test
+// cannot be made to exercise the divergence on every machine; skipping
+// there is the documented, deliberate tradeoff (task instructions allow
+// this when a cross-platform case isn't feasible).
+func TestLocate_GitGrepLocaleIsPinnedDeterministic(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	if !localeInstalled(t, "en_US.UTF-8") {
+		t.Skip("en_US.UTF-8 locale not installed on this machine; cannot exercise the locale-dependent git grep classification this test guards against")
+	}
+
+	dir := t.TempDir()
+	for _, kv := range [][2]string{
+		{"GIT_AUTHOR_NAME", "T"}, {"GIT_AUTHOR_EMAIL", "t@e.co"},
+		{"GIT_COMMITTER_NAME", "T"}, {"GIT_COMMITTER_EMAIL", "t@e.co"},
+	} {
+		t.Setenv(kv[0], kv[1])
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	// "Á" sits directly against "Add" with no ASCII separator between
+	// them — the exact shape where a locale-aware [[:alnum:]] (treating "Á"
+	// as a letter under en_US.UTF-8) and the ASCII-only C-locale
+	// classification (treating its UTF-8 bytes as raw non-alnum bytes)
+	// disagree about whether declarationPattern's boundary right before
+	// "Add" is satisfied.
+	src := "package foo\n\nfunc ÁAdd(a, b int) int {\n\treturn a + b\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "foo.go"), []byte(src), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	runGit("init", "-q")
+	runGit("add", "foo.go")
+	runGit("commit", "-q", "-m", "init")
+
+	results := make(map[string]string)
+	for _, loc := range []string{"C", "en_US.UTF-8"} {
+		t.Setenv("LANG", loc)
+		t.Setenv("LC_ALL", loc)
+		file, line, err := NewProbe().Locate(context.Background(), dir, "foo.go", "Add")
+		if err != nil {
+			results[loc] = "not found: " + err.Error()
+			continue
+		}
+		results[loc] = fmt.Sprintf("%s:%d", file, line)
+	}
+
+	if results["C"] != results["en_US.UTF-8"] {
+		t.Fatalf("Locate result must be identical regardless of the parent process's ambient LANG/LC_ALL (defaultRunGit must pin LC_ALL=C on the git grep subprocess); got a divergence instead: %#v", results)
+	}
+	if got := results["C"]; got != "foo.go:3" {
+		t.Errorf("expected foo.go:3 (the func ÁAdd decl), got %q (all results: %#v)", got, results)
 	}
 }
