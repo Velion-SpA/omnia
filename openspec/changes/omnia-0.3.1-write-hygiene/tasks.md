@@ -359,23 +359,60 @@ Est. lines: ~260.
 Design slice 7a · Branch `feat/dedupe-scan` · Base: `main` (after PR7) ·
 `type:feature` · Depends on: PR1 (similarity) · Capability: dedupe-scan
 
-- [ ] 8.1 RED: add `cmd/omnia/dedupe_test.go`: bare `omnia dedupe` invocation
+- [x] 8.1 RED: add `cmd/omnia/dedupe_test.go`: bare `omnia dedupe` invocation
       leaves DB unchanged (propose-only default); FTS-blocked candidate
       pre-filter used (not O(n²) all-pairs) at a synthetic 1600+-row scale;
       union-find clusters pairs with Jaccard ≥0.9; canonical = newest
       (`created_at` max, tie-break max id) within each cluster; deterministic
       dry-run output (cluster id, canonical #N, losers, scores) and stable
       `--json` shape.
-- [ ] 8.2 GREEN: create `cmd/omnia/dedupe.go`: reuse `Store.ScanProject`/
+      DONE: confirmed RED via `go vet ./cmd/omnia/...` → `undefined:
+      cmdDedupe` before any production code landed. Also added explicit
+      empty-DB, all-distinct-content, cross-type-pair, and soft-deleted-row
+      exclusion cases beyond the ones listed above.
+- [x] 8.2 GREEN: create `cmd/omnia/dedupe.go`: reuse `Store.ScanProject`/
       `Store.FindCandidates` (FTS `MATCH`, never all-pairs) for candidate
       generation; union-find clustering over pairs with content
       `similarity.Jaccard ≥ 0.9`; per-cluster canonical selection; deterministic
       `--dry-run` (default) text + optional `--json` proposal output.
-- [ ] 8.3 GREEN: wire `case "dedupe":` dispatch in `cmd/omnia/main.go`.
-- [ ] 8.4 Docs: add `omnia dedupe` usage to `DOCS.md`/CLI help.
+      DONE via `runDedupeScan` (testable core) + `cmdDedupe` (flag parsing +
+      human/`--json` print, mirroring `cmdReviewDue`'s shape). Uses
+      `Store.AllObservations` (not `ScanProject`, which is single-project-only
+      and can't serve the "no `--project` = all projects" case) +
+      `Store.FindCandidates(..., SkipInsert:true)` per observation for the
+      FTS-blocked pre-filter. Cross-type pairs are never clustered (mirrors
+      the write-gate's own type-gating precedent — not stated explicitly by
+      the dedupe-scan spec/design, a deliberate consistency choice, noted in
+      code comments). Candidate retrieval uses an explicit, more permissive
+      `BM25Floor` than `FindCandidates`' own default (-2.0): at 1600+-row
+      scale with genuinely rare title terms, BM25's IDF component can push a
+      true near-duplicate pair's score below a tight floor even though the
+      per-observation candidate LIMIT (not the floor) is what bounds
+      complexity; false positives from a wider floor are cheap since they
+      still must clear the separate, stricter content-Jaccard≥0.9 test.
+      Cluster ids are derived from each cluster's smallest member id (not
+      union-find's internal root, not scan order) so the same DB always
+      proposes the same cluster id across runs — pinned by a determinism
+      test (`TestRunDedupeScanDeterministicAcrossRuns`) and a 1650-filler-row
+      scale test (`TestRunDedupeScanCandidatePreFilterBoundedAtScale`)
+      asserting `PairsScored <= scanned*candidateLimit`.
+- [x] 8.3 GREEN: wire `case "dedupe":` dispatch in `cmd/omnia/main.go`.
+      DONE, plus a `printUsage()` entry.
+- [x] 8.4 Docs: add `omnia dedupe` usage to `DOCS.md`/CLI help.
+      DONE: new "Dedupe Scan CLI (admin)" section in `DOCS.md` (mirrors the
+      "Forget Scan CLI (admin)" section's structure) + `printUsage()` entry
+      in `cmd/omnia/main.go`.
 
-Files: `cmd/omnia/dedupe.go` (new), `cmd/omnia/dedupe_test.go` (new), `cmd/omnia/main.go` (modify), docs (modify).
-Est. lines: ~300.
+Files: `cmd/omnia/dedupe.go` (new, 391 lines), `cmd/omnia/dedupe_test.go`
+(new, 421 lines), `cmd/omnia/main.go` (modify, +8 lines: dispatch + usage),
+`DOCS.md` (modify, +17 lines). Est. lines: ~300. ACTUAL: ~416 net new
+production + docs lines (excluding the test file, which the tasks.md
+estimate convention treats separately per PR3/PR4/PR5/PR11 precedent) —
+somewhat over estimate, driven by the same thorough-doc-comment pattern
+those PRs hit (candidate-limit/BM25-floor rationale, cross-type-clustering
+precedent, cluster-id-determinism rationale — all load-bearing for a future
+PR9 `--apply`, not filler); no `size:exception` needed, still comfortably
+under the 400-line/PR budget on its own.
 
 ---
 

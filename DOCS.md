@@ -558,6 +558,23 @@ Classification per anchor (travel is always attempted before any staleness verdi
 
 Set `structural_forgetting.enabled: true` in config to have `mem_search` downrank stale-anchored memories and surface a receipt line — see the `mem_search` `score_breakdown.staleness_penalty` / `anchor_receipt` docs above. The flag defaults to `false` (backward-compatible: a fresh install/upgrade that never mentions `structural_forgetting` sees zero behavior change). `mem_save`'s `code_anchors` capture and `omnia forget-scan` itself are never gated by this flag either way — it only controls the recall-side downrank/receipt.
 
+### Dedupe Scan CLI (admin)
+
+`omnia dedupe` is an offline, candidate-filtered near-duplicate scan over the EXISTING observation base (design `omnia-0.3.1-write-hygiene` D9, spec `dedupe-scan`). It exists for the corpus of memories that predates the write-gate (or was inserted through a path that bypassed it, e.g. `import`/`sync`) — the live per-save write-gate (see `mem_save`'s `write_gate` envelope, below) only prevents NEW duplicates going forward; `omnia dedupe` finds duplicate clusters already sitting in the base.
+
+```
+omnia dedupe [--project <name>] [--json]
+```
+
+**This release is propose-only: there is no mutation code path at all.** `omnia dedupe` never merges, deletes, or otherwise changes any observation — it only prints a proposal. `--apply <cluster-id>` is a separate, later release; every run's output ends with an explicit footer stating this.
+
+- `--project <name>` (optional): scope the scan to one project. Omitted means all projects (unlike `forget-scan`/`conflicts scan`, which require a project — `dedupe` mirrors `review-due`'s "no filter = everything" convention).
+- `--json`: emit the full proposal as JSON instead of the human-readable report. Both shapes are deterministic — the same DB state always proposes the same cluster ids/report.
+
+Candidate generation reuses the same FTS-blocked pre-filter shape as the write-gate/`ScanProject` (FTS5 `MATCH` on title, same project+scope, bounded per-observation candidate cap) — this is what keeps the scan `O(n * candidate_limit)`, never an all-pairs `O(n^2)` comparison, at real-corpus scale (1600+ observations completes in a few seconds). Candidates are then scored by the same content-Jaccard primitive the write-gate uses (`internal/similarity`); pairs scoring `>= 0.9` are unioned via union-find into clusters. Only same-type pairs are ever clustered together — a high-similarity match against a DIFFERENT observation type is treated as a related-but-distinct fact, not a duplicate (mirrors the write-gate's own type-gating precedent). Soft-deleted observations are never scanned or surfaced as candidates.
+
+Within a cluster, the proposed canonical survivor is the NEWEST observation by creation timestamp (tie-break: highest id) — every other member is a proposed "loser." Cluster ids are derived from the cluster's smallest member id (not scan order), so the same underlying data always proposes the same cluster id across repeated runs.
+
 ### Eval Harness CLI (admin)
 
 `omnia eval` runs the memory-quality eval harness (spec `sdd/omnia-eval-harness`): a token-cost-normalized measuring stick over a corpus of real, dogfooded memory cases, segmented by capability (Recall, Causal, State-Update/Staleness, State-Abstraction) and by query language (EN/ES), plus a distinct retrieval-only recall@k section. It is NOT for end users — it is a maintainer/CI tool for judging embedding-model and recall-config changes.
