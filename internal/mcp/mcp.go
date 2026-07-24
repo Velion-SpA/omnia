@@ -1206,6 +1206,17 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		// alongside results below so both branches populate it consistently.
 		relevance := make(map[int64]float64)
 
+		// ftsDiag receives Store.Search's zero-hit relaxation ladder outcome
+		// (design obs #1668 D7, spec fts-recall REQ "Fallback Transparency",
+		// omnia-0.3.1-write-hygiene PR7) on the plain FTS5-only path below.
+		// It stays zero-value on the hybrid recall path (cfg.Recall != nil):
+		// StoreLexicalSearcher (recall_adapter.go) doesn't forward a Diag
+		// pointer through recall.LexicalSearchOptions today — the ladder
+		// itself still runs either way (it lives inside Store.Search, the
+		// hybrid path's own lexical arm), only this transparency surfacing
+		// is FTS-only-path-scoped for now.
+		var ftsDiag store.SearchDiag
+
 		var results []store.SearchResult
 		if cfg.Recall != nil {
 			// RecallFetchLimit over-fetches candidates (beyond the caller's
@@ -1236,6 +1247,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 				Project: searchProject,
 				Scope:   scope,
 				Limit:   limit,
+				Diag:    &ftsDiag,
 			})
 			if serr != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", serr)), nil
@@ -1535,6 +1547,16 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		envelope := map[string]any{"results": structuredResults}
 		if budgetTrimmed > 0 {
 			envelope["budget_trimmed"] = budgetTrimmed
+		}
+
+		// omnia-0.3.1-write-hygiene PR7 (design obs #1668 D7, spec fts-recall
+		// REQ "Fallback Transparency"): surface which relaxation level
+		// produced results ONLY when the ladder actually fired. Every other
+		// path (strict pass already hit, or fully exhausted with 0 results)
+		// carries neither key — byte-for-byte identical to pre-PR7 output.
+		if ftsDiag.Relaxed {
+			envelope["fts_relaxed"] = true
+			envelope["fts_relax_step"] = ftsDiag.Step
 		}
 
 		// omnia-procedural-memory (design obs #1602 / spec obs #1606), PR2

@@ -318,6 +318,23 @@ type RecallConfig struct {
 	// Importance). See RankingConfig's own doc for the D7-style rollback
 	// guarantee this mirrors.
 	Ranking RankingConfig `yaml:"ranking"`
+	// FTSRelaxOnZero is the rollback lever for Store.Search's bounded
+	// zero-hit relaxation ladder (design obs #1668 D7, spec fts-recall,
+	// omnia-0.3.1-write-hygiene PR7, repro obs #1659/#1662): when the
+	// strict AND-of-every-term FTS5 pass returns exactly zero rows, the
+	// ladder retries with stopwords dropped, then with the remaining terms
+	// OR'd together, before giving up. UNLIKE Enabled above (the hybrid
+	// fusion gate, default OFF), FTSRelaxOnZero defaults to TRUE — this is
+	// the one FTS-only-path fix every install should have out of the box,
+	// mirroring write_hygiene.enabled's own default-ON convention (and
+	// needing the same writeHygieneEnabledKeyPresent-shaped explicit-vs-
+	// absent probe: a plain bool zero-check would make an explicit
+	// `fts_relax_on_zero: false` indistinguishable from "never set" and
+	// silently re-enable the ladder). It lives under `recall:` because the
+	// ladder is part of the same lexical-search surface this whole config
+	// block documents, not because it depends on Enabled/hybrid fusion —
+	// see TestRecall_FTSRelaxOnZero_IndependentOfRecallEnabled.
+	FTSRelaxOnZero bool `yaml:"fts_relax_on_zero"`
 }
 
 // RankingConfig configures Omnia's optional recency x importance x relevance
@@ -588,6 +605,27 @@ func writeHygieneEnabledKeyPresent(data []byte) bool {
 	return probe.WriteHygiene.Enabled != nil
 }
 
+// ftsRelaxOnZeroKeyPresent reports whether the loaded YAML explicitly set
+// `recall.fts_relax_on_zero` — the INVERTED sibling of recallEnabledKeyPresent
+// above, mirroring writeHygieneEnabledKeyPresent's own rationale exactly:
+// FTSRelaxOnZero defaults to TRUE (design obs #1668 D7), so applyDefaults
+// must only fill it in when the key is genuinely ABSENT; an operator's
+// explicit `fts_relax_on_zero: false` (the rollback lever) must stick and
+// never be defaulted back to true. Unparseable YAML counts as absent (falls
+// through to default-ON, consistent with Load having already rejected truly
+// broken files).
+func ftsRelaxOnZeroKeyPresent(data []byte) bool {
+	var probe struct {
+		Recall struct {
+			FTSRelaxOnZero *bool `yaml:"fts_relax_on_zero"`
+		} `yaml:"recall"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	return probe.Recall.FTSRelaxOnZero != nil
+}
+
 // injectionBudgetMaxTokensKeyPresent reports whether the loaded YAML
 // explicitly set `injection.budget.max_tokens` (to any integer, including
 // 0), as opposed to the key being entirely absent. Mirrors
@@ -703,6 +741,15 @@ func applyDefaults(cfg *Config, data []byte) {
 	}
 	if cfg.Recall.MaxResults == 0 {
 		cfg.Recall.MaxResults = 50
+	}
+	// FTSRelaxOnZero (v0.3.1 PR7, design obs #1668 D7) is the one DEFAULT-ON
+	// flag in this block, mirroring WriteHygiene.Enabled's own convention
+	// below rather than Recall.Enabled/Ranking.Enabled's off-by-default one:
+	// applyDefaults only fills FTSRelaxOnZero=true when the key is genuinely
+	// ABSENT (ftsRelaxOnZeroKeyPresent); an operator's explicit
+	// `fts_relax_on_zero: false` sticks.
+	if !cfg.Recall.FTSRelaxOnZero && !ftsRelaxOnZeroKeyPresent(data) {
+		cfg.Recall.FTSRelaxOnZero = true
 	}
 	// Ranking.Enabled intentionally has NO default override — its zero value
 	// (false) IS the default, mirroring Recall.Enabled's own convention
