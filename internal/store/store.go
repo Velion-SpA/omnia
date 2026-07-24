@@ -2929,6 +2929,32 @@ func (s *Store) ObservationsNeedingReview(project string, limit int) ([]Observat
 	return s.queryObservations(query, args...)
 }
 
+// CountObservationsNeedingReview is a cheap COUNT-only sibling of
+// ObservationsNeedingReview (spaced-review / Play G, design D11's
+// mem_context due-count nudge): no row hydration, content is never
+// touched. An empty project counts across all projects, mirroring
+// ObservationsNeedingReview's own convention.
+func (s *Store) CountObservationsNeedingReview(project string) (int, error) {
+	project, _ = NormalizeProject(project)
+	query := `
+		SELECT COUNT(*)
+		FROM observations o
+		WHERE o.deleted_at IS NULL
+		  AND o.review_after IS NOT NULL
+		  AND datetime(o.review_after) <= datetime('now')
+	`
+	args := []any{}
+	if project != "" {
+		query += " AND LOWER(o.project) = ?"
+		args = append(args, project)
+	}
+	var count int
+	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // MarkReviewed resets an observation's review_after using its type's configured decay offset.
 // Types without a decay offset return to a NULL review_after value.
 // This lifecycle reset is intentionally local-only until the sync wire format includes review_after.
