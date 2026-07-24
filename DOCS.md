@@ -563,17 +563,28 @@ Set `structural_forgetting.enabled: true` in config to have `mem_search` downran
 `omnia dedupe` is an offline, candidate-filtered near-duplicate scan over the EXISTING observation base (design `omnia-0.3.1-write-hygiene` D9, spec `dedupe-scan`). It exists for the corpus of memories that predates the write-gate (or was inserted through a path that bypassed it, e.g. `import`/`sync`) — the live per-save write-gate (see `mem_save`'s `write_gate` envelope, below) only prevents NEW duplicates going forward; `omnia dedupe` finds duplicate clusters already sitting in the base.
 
 ```
-omnia dedupe [--project <name>] [--json]
+omnia dedupe [--project <name>] [--json] [--dry-run]
+omnia dedupe --apply <cluster-id> [--project <name>] [--json]
 ```
 
-**This release is propose-only: there is no mutation code path at all.** `omnia dedupe` never merges, deletes, or otherwise changes any observation — it only prints a proposal. `--apply <cluster-id>` is a separate, later release; every run's output ends with an explicit footer stating this.
+**Default (or explicit `--dry-run`) is propose-only: no mutation code runs at all.** `omnia dedupe` never merges, deletes, or otherwise changes any observation on this path — it only prints a proposal; every run's output ends with an explicit footer stating this.
 
 - `--project <name>` (optional): scope the scan to one project. Omitted means all projects (unlike `forget-scan`/`conflicts scan`, which require a project — `dedupe` mirrors `review-due`'s "no filter = everything" convention).
-- `--json`: emit the full proposal as JSON instead of the human-readable report. Both shapes are deterministic — the same DB state always proposes the same cluster ids/report.
+- `--json`: emit the full proposal (or, with `--apply`, the apply result) as JSON instead of the human-readable report. Both shapes are deterministic — the same DB state always proposes the same cluster ids/report.
+- `--dry-run`: explicit, no-op flag confirming the propose-only path (this is already the default with no flags at all). Cannot be combined with `--apply` — the combination is rejected outright.
 
 Candidate generation reuses the same FTS-blocked pre-filter shape as the write-gate/`ScanProject` (FTS5 `MATCH` on title, same project+scope, bounded per-observation candidate cap) — this is what keeps the scan `O(n * candidate_limit)`, never an all-pairs `O(n^2)` comparison, at real-corpus scale (1600+ observations completes in a few seconds). Candidates are then scored by the same content-Jaccard primitive the write-gate uses (`internal/similarity`); pairs scoring `>= 0.9` are unioned via union-find into clusters. Only same-type pairs are ever clustered together — a high-similarity match against a DIFFERENT observation type is treated as a related-but-distinct fact, not a duplicate (mirrors the write-gate's own type-gating precedent). Soft-deleted observations are never scanned or surfaced as candidates.
 
-Within a cluster, the proposed canonical survivor is the NEWEST observation by creation timestamp (tie-break: highest id) — every other member is a proposed "loser." Cluster ids are derived from the cluster's smallest member id (not scan order), so the same underlying data always proposes the same cluster id across repeated runs.
+Within a cluster, the proposed canonical survivor is the NEWEST observation by creation timestamp (tie-break: highest id) — every other member is a proposed "loser." Cluster ids are CONTENT-ADDRESSED: a short hash over the cluster's full, sorted member-id set (not just the smallest member id, and not scan order), so the same underlying data always proposes the same cluster id across repeated runs — and, just as importantly, ANY membership change (a new near-duplicate joining, or a member leaving/being soft-deleted) always changes the id. This closes a membership-drift race: an id that only tracked the smallest member could stay unchanged even after a brand-new duplicate joined a cluster an operator had already reviewed, letting `--apply` silently merge a member no one ever saw.
+
+**`--apply <cluster-id>` is the ONLY mutation path — there is no `--apply all`.** It takes exactly one explicit cluster id from a prior (or the same) scan's output and merges that cluster only:
+
+1. Re-runs the scan fresh and looks up the named cluster id in the CURRENT result. If it is not found — the cluster's membership changed (a new near-duplicate joined, or a member left/was soft-deleted) since the id was minted, or it has already been fully or partially applied — `--apply` refuses cleanly with no partial mutation; run `omnia dedupe` again and use the new cluster id to review/finish any remaining merge.
+2. For each loser in the cluster: inserts a `supersedes` relation (canonical → loser, `marked_by_actor="system:dedupe"`, `marked_by_kind="system"`, judged) using the same relation-creation machinery `mem_judge` uses, then soft-deletes the loser via the existing `Store.DeleteObservationWithActor` path (never hard-deletes) — the loser's content and its supersede relation both stay queryable/restorable ("referenced history"), just excluded from active recall and from any future `omnia dedupe` scan.
+3. The canonical observation is never touched.
+4. Bare `--apply` (no cluster id) and `--apply all` both error with usage guidance before the store is even opened; `--apply` and `--dry-run` together are also rejected.
+5. Re-running `--apply` on an already-applied cluster id is a safe, clean refusal (step 1) — never a double-supersede.
+6. If an error occurs partway through merging a multi-loser cluster, whatever was ALREADY merged before the error (id, title, relation, per loser) is printed first, so you know the exact state before the command exits non-zero — never a silently discarded partial result.
 
 ### Claude Memory Import CLI (admin)
 

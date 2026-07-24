@@ -282,6 +282,29 @@ func TestRunDedupeScanDeterministicAcrossRuns(t *testing.T) {
 	if len(report1.Clusters) == 0 || report1.Clusters[0].ClusterID == "" {
 		t.Fatalf("expected a non-empty, non-blank cluster id, got %+v", report1)
 	}
+	stableClusterID := report1.Clusters[0].ClusterID
+
+	// Regression pin (review fix: membership-drift TOCTOU). A cluster id
+	// must stay STABLE across reruns of an UNCHANGED DB (asserted above via
+	// report1 == report2) but MUST CHANGE the moment a new near-duplicate
+	// joins the same cluster — the id is content-addressed over the FULL
+	// member set (dedupeClusterID), not just the smallest member id, so a
+	// stale `--apply` using the pre-join id can never still match
+	// afterward.
+	mustSeedObservation(t, cfg, "s1", "dedupedetermproj", "discovery",
+		"Dedupe Determinism Delta",
+		"This service handles user login and session validation for the auth module dedupe-fixture-marker!!!",
+		"project")
+	report3, err := runDedupeScan(s, "dedupedetermproj")
+	if err != nil {
+		t.Fatalf("runDedupeScan (3rd, after new member joins): %v", err)
+	}
+	if report3.ClustersFound != 1 || len(report3.Clusters[0].Members) != 3 {
+		t.Fatalf("expected the new member to join the SAME cluster (now 3 members), got %+v", report3.Clusters)
+	}
+	if report3.Clusters[0].ClusterID == stableClusterID {
+		t.Fatalf("expected cluster id to CHANGE once membership changes (content-addressed id), got the same id %q before and after the join", stableClusterID)
+	}
 }
 
 func TestCmdDedupeJSONOutputStableShape(t *testing.T) {
@@ -417,5 +440,583 @@ func TestRunDedupeScanCandidatePreFilterBoundedAtScale(t *testing.T) {
 	}
 	if report.Clusters[0].CanonicalID != newerID {
 		t.Fatalf("expected canonical=#%d in the scale test, got #%d", newerID, report.Clusters[0].CanonicalID)
+	}
+}
+
+// ─── PR9: `omnia dedupe --apply <cluster-id>` ───────────────────────────────
+//
+// Fixture convention carried over from PR8's tests above: fixture pairs use
+// DIFFERENT titles (so the pre-existing 15-minute exact-title hash-window
+// dedupe never collapses them before dedupe-scan gets to run) and hyphen-free
+// project identifiers (FTS5 tokenizer gotcha, see TEST FIXTURE GOTCHA note in
+// apply-progress obs #1674 / tasks.md PR8 notes).
+
+// seedDedupePair seeds a canonical/loser near-duplicate pair in the given
+// project (both type "discovery"), backdates the loser 48h so canonical
+// selection ("newest survives") never depends on real wall-clock delay
+// between two AddObservation calls, and returns (canonicalID, loserID).
+func seedDedupePair(t *testing.T, cfg store.Config, project, marker string) (canonicalID, loserID int64) {
+	t.Helper()
+	canonicalID = mustSeedObservation(t, cfg, "s1", project, "discovery",
+		"Dedupe Apply "+marker+" New",
+		"This service handles user login and session validation for the auth module "+marker+"-dedupe-fixture-marker.",
+		"project")
+	loserID = mustSeedObservation(t, cfg, "s1", project, "discovery",
+		"Dedupe Apply "+marker+" Old",
+		"This service handles user login, and session validation for the auth module "+marker+"-dedupe-fixture-marker!",
+		"project")
+	backdateObservationCreatedAt(t, cfg, loserID, time.Now().UTC().Add(-48*time.Hour))
+	return canonicalID, loserID
+}
+
+// stubExit installs a non-panicking exitFunc stub (mirrors
+// TestCmdProcedure_UnknownSubcommand's convention) and returns the captured
+// exit code by pointer, restoring the original exitFunc via t.Cleanup.
+func stubExit(t *testing.T) *int {
+	t.Helper()
+	old := exitFunc
+	code := 0
+	exitFunc = func(c int) { code = c }
+	t.Cleanup(func() { exitFunc = old })
+	return &code
+}
+
+// ─── 9.1 RED cases ───────────────────────────────────────────────────────────
+
+func TestCmdDedupeApplyBareFlagRequiresExplicitClusterID(t *testing.T) {
+	cfg := testConfig(t)
+	exitCode := stubExit(t)
+
+	withArgs(t, "omnia", "dedupe", "--apply")
+	_, stderr := captureOutput(t, func() { cmdDedupe(cfg) })
+
+	if *exitCode != 1 {
+		t.Errorf("exitCode = %d; want 1", *exitCode)
+	}
+	if !strings.Contains(stderr, "requires an explicit cluster id") {
+		t.Errorf("expected explicit-cluster-id usage error, got: %s", stderr)
+	}
+}
+
+func TestCmdDedupeApplyAllIsNotSupported(t *testing.T) {
+	cfg := testConfig(t)
+	exitCode := stubExit(t)
+
+	withArgs(t, "omnia", "dedupe", "--apply", "all")
+	_, stderr := captureOutput(t, func() { cmdDedupe(cfg) })
+
+	if *exitCode != 1 {
+		t.Errorf("exitCode = %d; want 1", *exitCode)
+	}
+	if !strings.Contains(stderr, "--apply all is not supported") {
+		t.Errorf("expected --apply-all-not-supported error, got: %s", stderr)
+	}
+}
+
+func TestCmdDedupeApplyAndDryRunAreMutuallyExclusive(t *testing.T) {
+	cfg := testConfig(t)
+	exitCode := stubExit(t)
+
+	withArgs(t, "omnia", "dedupe", "--apply", "d1", "--dry-run")
+	_, stderr := captureOutput(t, func() { cmdDedupe(cfg) })
+
+	if *exitCode != 1 {
+		t.Errorf("exitCode = %d; want 1", *exitCode)
+	}
+	if !strings.Contains(stderr, "cannot be combined") {
+		t.Errorf("expected --apply/--dry-run conflict error, got: %s", stderr)
+	}
+}
+
+func TestCmdDedupeApplyStaleClusterIDFailsCleanlyNoMutation(t *testing.T) {
+	cfg := testConfig(t)
+	soloID := mustSeedObservation(t, cfg, "s1", "dedupestaleproj", "discovery",
+		"Dedupe Stale Solo", "A single unrelated observation, no duplicate pair exists at all.", "project")
+	exitCode := stubExit(t)
+
+	withArgs(t, "omnia", "dedupe", "--project", "dedupestaleproj", "--apply", "d999999")
+	_, stderr := captureOutput(t, func() { cmdDedupe(cfg) })
+
+	if *exitCode != 1 {
+		t.Errorf("exitCode = %d; want 1", *exitCode)
+	}
+	if !strings.Contains(stderr, "not found") {
+		t.Errorf("expected a clean 'not found' refusal, got: %s", stderr)
+	}
+	if !strings.Contains(stderr, "membership may have changed") || !strings.Contains(stderr, "fully or partially applied") {
+		t.Errorf("expected the refusal to name BOTH possibilities (membership change, fully/partially applied) and a recovery step, got: %s", stderr)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+	obs, err := s.GetObservation(soloID)
+	if err != nil {
+		t.Fatalf("expected the untouched observation still active, got err: %v", err)
+	}
+	if obs.DeletedAt != nil {
+		t.Fatalf("stale --apply must not mutate anything, but observation #%d was deleted", soloID)
+	}
+}
+
+func TestCmdDedupeApplyIsolatesNamedClusterOnly(t *testing.T) {
+	cfg := testConfig(t)
+	aCanonicalID, aLoserID := seedDedupePair(t, cfg, "dedupeisolateproj", "Alpha")
+	bCanonicalID, bLoserID := seedDedupePair(t, cfg, "dedupeisolateproj", "Bravo")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	report, err := runDedupeScan(s, "dedupeisolateproj")
+	if err != nil {
+		t.Fatalf("runDedupeScan: %v", err)
+	}
+	if report.ClustersFound != 2 {
+		t.Fatalf("expected 2 independent clusters (Alpha, Bravo), got %d: %+v", report.ClustersFound, report.Clusters)
+	}
+	var clusterAID string
+	for _, c := range report.Clusters {
+		if c.CanonicalID == aCanonicalID {
+			clusterAID = c.ClusterID
+		}
+	}
+	if clusterAID == "" {
+		t.Fatalf("could not locate cluster A (canonical #%d) in scan: %+v", aCanonicalID, report.Clusters)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close scanning store: %v", err)
+	}
+
+	withArgs(t, "omnia", "dedupe", "--project", "dedupeisolateproj", "--apply", clusterAID)
+	_, stderr := captureOutput(t, func() { cmdDedupe(cfg) })
+	if stderr != "" {
+		t.Fatalf("unexpected stderr: %s", stderr)
+	}
+
+	s2, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s2.Close()
+
+	// Cluster A: loser soft-deleted, canonical untouched.
+	if _, err := s2.GetObservation(aLoserID); err == nil {
+		t.Fatalf("expected cluster A's loser #%d to be soft-deleted (excluded from GetObservation)", aLoserID)
+	}
+	if _, err := s2.GetObservation(aCanonicalID); err != nil {
+		t.Fatalf("expected cluster A's canonical #%d to remain active: %v", aCanonicalID, err)
+	}
+
+	// Cluster B: FULLY untouched (explicit per-cluster isolation).
+	if _, err := s2.GetObservation(bCanonicalID); err != nil {
+		t.Fatalf("cluster B canonical #%d must remain untouched: %v", bCanonicalID, err)
+	}
+	if _, err := s2.GetObservation(bLoserID); err != nil {
+		t.Fatalf("cluster B loser #%d must remain untouched — --apply must isolate the named cluster only: %v", bLoserID, err)
+	}
+}
+
+func TestCmdDedupeApplyIdempotentReApplyRefusesCleanly(t *testing.T) {
+	cfg := testConfig(t)
+	canonicalID, loserID := seedDedupePair(t, cfg, "dedupeidemproj", "Idem")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	report, err := runDedupeScan(s, "dedupeidemproj")
+	if err != nil {
+		t.Fatalf("runDedupeScan: %v", err)
+	}
+	if report.ClustersFound != 1 {
+		t.Fatalf("expected exactly 1 cluster, got %d: %+v", report.ClustersFound, report.Clusters)
+	}
+	clusterID := report.Clusters[0].ClusterID
+	if err := s.Close(); err != nil {
+		t.Fatalf("close scanning store: %v", err)
+	}
+
+	// 1st apply: succeeds.
+	withArgs(t, "omnia", "dedupe", "--project", "dedupeidemproj", "--apply", clusterID)
+	_, stderr1 := captureOutput(t, func() { cmdDedupe(cfg) })
+	if stderr1 != "" {
+		t.Fatalf("unexpected stderr on 1st apply: %s", stderr1)
+	}
+
+	// 2nd apply on the SAME (now-consumed) cluster id: must refuse cleanly,
+	// never double-supersede.
+	exitCode := stubExit(t)
+	withArgs(t, "omnia", "dedupe", "--project", "dedupeidemproj", "--apply", clusterID)
+	_, stderr2 := captureOutput(t, func() { cmdDedupe(cfg) })
+	if *exitCode != 1 {
+		t.Errorf("exitCode = %d; want 1 on idempotent re-apply", *exitCode)
+	}
+	if !strings.Contains(stderr2, "not found") {
+		t.Errorf("expected a clean 'not found' refusal on re-apply, got: %s", stderr2)
+	}
+	if !strings.Contains(stderr2, "membership may have changed") || !strings.Contains(stderr2, "fully or partially applied") {
+		t.Errorf("expected the refusal to name BOTH possibilities (membership change, fully/partially applied) and a recovery step, got: %s", stderr2)
+	}
+
+	s2, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s2.Close()
+	canonicalObs, err := s2.GetObservation(canonicalID)
+	if err != nil {
+		t.Fatalf("GetObservation(canonical): %v", err)
+	}
+	rels, err := s2.GetRelationsForObservations([]string{canonicalObs.SyncID})
+	if err != nil {
+		t.Fatalf("GetRelationsForObservations: %v", err)
+	}
+	supersedeCount := 0
+	for _, r := range rels[canonicalObs.SyncID].AsSource {
+		if r.Relation == store.RelationSupersedes {
+			supersedeCount++
+		}
+	}
+	if supersedeCount != 1 {
+		t.Fatalf("expected exactly 1 supersedes relation (never double-supersede), got %d", supersedeCount)
+	}
+	_ = loserID
+}
+
+// ─── 9.2 RED cases ───────────────────────────────────────────────────────────
+
+func TestCmdDedupeApplyCreatesSupersedeRelationAndSoftDeletesLoser(t *testing.T) {
+	cfg := testConfig(t)
+	canonicalID, loserID := seedDedupePair(t, cfg, "dedupeapplyrelproj", "Rel")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	report, err := runDedupeScan(s, "dedupeapplyrelproj")
+	if err != nil {
+		t.Fatalf("runDedupeScan: %v", err)
+	}
+	if report.ClustersFound != 1 {
+		t.Fatalf("expected exactly 1 cluster, got %d: %+v", report.ClustersFound, report.Clusters)
+	}
+	clusterID := report.Clusters[0].ClusterID
+	canonicalBefore, err := s.GetObservation(canonicalID)
+	if err != nil {
+		t.Fatalf("GetObservation(canonical) before apply: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close scanning store: %v", err)
+	}
+
+	withArgs(t, "omnia", "dedupe", "--project", "dedupeapplyrelproj", "--apply", clusterID)
+	stdout, stderr := captureOutput(t, func() { cmdDedupe(cfg) })
+	if stderr != "" {
+		t.Fatalf("unexpected stderr: %s", stderr)
+	}
+	if !strings.Contains(stdout, fmt.Sprintf("#%d", loserID)) {
+		t.Fatalf("expected apply output to report the merged loser #%d, got: %s", loserID, stdout)
+	}
+	if !strings.Contains(stdout, fmt.Sprintf("#%d", canonicalID)) {
+		t.Fatalf("expected apply output to report the surviving canonical #%d, got: %s", canonicalID, stdout)
+	}
+
+	s2, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s2.Close()
+
+	// Canonical untouched: same updated_at as before the apply.
+	canonicalAfter, err := s2.GetObservation(canonicalID)
+	if err != nil {
+		t.Fatalf("GetObservation(canonical) after apply: %v", err)
+	}
+	if canonicalAfter.UpdatedAt != canonicalBefore.UpdatedAt {
+		t.Fatalf("expected canonical #%d untouched (same updated_at), before=%q after=%q",
+			canonicalID, canonicalBefore.UpdatedAt, canonicalAfter.UpdatedAt)
+	}
+
+	// Loser soft-deleted (not hard-deleted): row still present with
+	// deleted_at set and content intact — "referenced history".
+	var deletedAt *string
+	var loserContent string
+	if err := s2.DB().QueryRow(`SELECT deleted_at, content FROM observations WHERE id = ?`, loserID).
+		Scan(&deletedAt, &loserContent); err != nil {
+		t.Fatalf("query loser row directly: %v", err)
+	}
+	if deletedAt == nil || *deletedAt == "" {
+		t.Fatalf("expected loser #%d to have deleted_at set (soft-deleted), got nil/empty", loserID)
+	}
+	if loserContent == "" {
+		t.Fatalf("expected loser #%d content to remain intact (referenced history, not hard-deleted)", loserID)
+	}
+
+	// Supersede relation: canonical -> loser, judged, marked_by system:dedupe.
+	rels, err := s2.GetRelationsForObservations([]string{canonicalAfter.SyncID})
+	if err != nil {
+		t.Fatalf("GetRelationsForObservations: %v", err)
+	}
+	var found *store.Relation
+	for i, r := range rels[canonicalAfter.SyncID].AsSource {
+		if r.Relation == store.RelationSupersedes {
+			found = &rels[canonicalAfter.SyncID].AsSource[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected a supersedes relation with canonical #%d as source, got: %+v", canonicalID, rels)
+	}
+	if found.JudgmentStatus != store.JudgmentStatusJudged {
+		t.Errorf("expected judgment_status=judged, got %q", found.JudgmentStatus)
+	}
+	if found.MarkedByActor == nil || *found.MarkedByActor != dedupeApplyActor {
+		t.Errorf("expected marked_by_actor=%q, got %v", dedupeApplyActor, found.MarkedByActor)
+	}
+	if found.MarkedByKind == nil || *found.MarkedByKind != "system" {
+		t.Errorf("expected marked_by_kind=system, got %v", found.MarkedByKind)
+	}
+	if !found.TargetMissing {
+		// GetRelationsForObservations' own doc comment: "Missing or
+		// soft-deleted observations set the corresponding *Missing flag to
+		// true" — TargetMissing=true here just means "not currently active",
+		// same as any soft-deleted row; it is NOT the same signal as
+		// judgment_status='orphaned' (which only a HARD delete ever sets —
+		// asserted separately above via JudgmentStatus==judged). The relation
+		// row itself, and the loser's content, remain fully present/queryable
+		// — this is the "referenced history" contract, not erasure.
+		t.Errorf("expected TargetMissing=true (target is soft-deleted, per GetRelationsForObservations' own contract)")
+	}
+}
+
+func TestCmdDedupeApplyJSONReportsClusterCanonicalAndLosers(t *testing.T) {
+	cfg := testConfig(t)
+	canonicalID, loserID := seedDedupePair(t, cfg, "dedupeapplyjsonproj", "JSON")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	report, err := runDedupeScan(s, "dedupeapplyjsonproj")
+	if err != nil {
+		t.Fatalf("runDedupeScan: %v", err)
+	}
+	clusterID := report.Clusters[0].ClusterID
+	if err := s.Close(); err != nil {
+		t.Fatalf("close scanning store: %v", err)
+	}
+
+	withArgs(t, "omnia", "dedupe", "--project", "dedupeapplyjsonproj", "--apply", clusterID, "--json")
+	stdout, stderr := captureOutput(t, func() { cmdDedupe(cfg) })
+	if stderr != "" {
+		t.Fatalf("unexpected stderr: %s", stderr)
+	}
+
+	var result dedupeApplyResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unmarshal apply result: %v\noutput: %s", err, stdout)
+	}
+	if result.ClusterID != clusterID {
+		t.Errorf("cluster_id = %q; want %q", result.ClusterID, clusterID)
+	}
+	if result.CanonicalID != canonicalID {
+		t.Errorf("canonical_id = %d; want %d", result.CanonicalID, canonicalID)
+	}
+	if !result.Applied {
+		t.Errorf("expected applied=true")
+	}
+	if len(result.Losers) != 1 {
+		t.Fatalf("expected exactly 1 loser reported, got %d: %+v", len(result.Losers), result.Losers)
+	}
+	if result.Losers[0].ID != loserID {
+		t.Errorf("loser id = %d; want %d", result.Losers[0].ID, loserID)
+	}
+	if result.Losers[0].RelationSyncID == "" {
+		t.Errorf("expected a non-empty relation_sync_id for the merged loser")
+	}
+}
+
+// ─── PR9 review fix: membership-drift TOCTOU + partial-apply observability ──
+
+// TestCmdDedupeApplyRefusesWhenClusterMembershipChangedAfterReview reproduces
+// the adversarial-review scenario verbatim: an operator reviews a 2-member
+// cluster (recording its cluster id), then a THIRD near-duplicate joins that
+// SAME cluster before --apply runs (the TOCTOU window) — --apply using the
+// id the operator actually reviewed MUST refuse, never silently merge the
+// never-reviewed joiner. Before the content-addressed cluster-id fix, this
+// scenario merged all 3 members under the unchanged "smallest member id"
+// cluster id; it now refuses via the ordinary "cluster not found" path.
+func TestCmdDedupeApplyRefusesWhenClusterMembershipChangedAfterReview(t *testing.T) {
+	cfg := testConfig(t)
+	canonicalID, loserID := seedDedupePair(t, cfg, "dedupetoctouproj", "Toctou")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	report, err := runDedupeScan(s, "dedupetoctouproj")
+	if err != nil {
+		t.Fatalf("runDedupeScan: %v", err)
+	}
+	if report.ClustersFound != 1 || len(report.Clusters[0].Members) != 2 {
+		t.Fatalf("expected exactly 1 two-member cluster before the join, got %+v", report.Clusters)
+	}
+	reviewedClusterID := report.Clusters[0].ClusterID
+
+	// A THIRD near-duplicate joins the SAME cluster AFTER the operator
+	// reviewed the 2-member proposal above but BEFORE --apply runs.
+	// Backdated (but less than the existing loser) so the canonical
+	// selection (newest survives) stays exactly what was reviewed — this
+	// test is about membership drift, not a canonical flip.
+	joinerID := mustSeedObservation(t, cfg, "s1", "dedupetoctouproj", "discovery",
+		"Dedupe Apply Toctou Joiner",
+		"This service handles user login and session validation for the auth module Toctou-dedupe-fixture-marker???",
+		"project")
+	backdateObservationCreatedAt(t, cfg, joinerID, time.Now().UTC().Add(-24*time.Hour))
+	if err := s.Close(); err != nil {
+		t.Fatalf("close scanning store: %v", err)
+	}
+
+	// Sanity: confirm the joiner really did land in the SAME cluster the
+	// operator reviewed (now 3 members) — otherwise this test would not be
+	// exercising the TOCTOU scenario at all.
+	s2, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	freshReport, err := runDedupeScan(s2, "dedupetoctouproj")
+	if err != nil {
+		t.Fatalf("runDedupeScan (fresh, after join): %v", err)
+	}
+	if err := s2.Close(); err != nil {
+		t.Fatalf("close fresh-scan store: %v", err)
+	}
+	if freshReport.ClustersFound != 1 || len(freshReport.Clusters[0].Members) != 3 {
+		t.Fatalf("expected the joiner to land in a single 3-member cluster, got %+v", freshReport.Clusters)
+	}
+	if freshReport.Clusters[0].CanonicalID != canonicalID {
+		t.Fatalf("expected canonical to remain #%d (unaffected by the join), got #%d", canonicalID, freshReport.Clusters[0].CanonicalID)
+	}
+
+	// The operator now runs --apply using the id THEY reviewed (2 members).
+	// This MUST refuse — never silently merge the un-reviewed joiner.
+	exitCode := stubExit(t)
+	withArgs(t, "omnia", "dedupe", "--project", "dedupetoctouproj", "--apply", reviewedClusterID)
+	_, stderr := captureOutput(t, func() { cmdDedupe(cfg) })
+	if *exitCode != 1 {
+		t.Errorf("exitCode = %d; want 1 — membership drift must refuse, never silently merge", *exitCode)
+	}
+	if !strings.Contains(stderr, "not found") {
+		t.Errorf("expected a clean 'not found' refusal on membership drift, got: %s", stderr)
+	}
+	if !strings.Contains(stderr, "membership may have changed") {
+		t.Errorf("expected the refusal to name membership change as a possibility, got: %s", stderr)
+	}
+
+	s3, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s3.Close()
+	for _, id := range []int64{canonicalID, loserID, joinerID} {
+		obs, err := s3.GetObservation(id)
+		if err != nil {
+			t.Fatalf("expected observation #%d to remain untouched by the refused apply, got err: %v", id, err)
+		}
+		if obs.DeletedAt != nil {
+			t.Fatalf("observation #%d was mutated by a stale --apply — membership-drift TOCTOU reproduced", id)
+		}
+	}
+}
+
+// TestCmdDedupeApplyPrintsPartialProgressBeforeFatalOnMidClusterError pins
+// the review fix: when the per-loser loop errors partway through a
+// multi-loser cluster, cmdDedupe must print what was ALREADY merged (id,
+// title, relation) before the fatal error line and non-zero exit — never
+// silently discard that progress. Uses dedupeApplyLoserFault, a test-only
+// seam (see its doc comment), since applyDedupeCluster's own fresh re-scan
+// makes a genuine mid-loop failure impossible to trigger deterministically
+// from a single-threaded test otherwise.
+func TestCmdDedupeApplyPrintsPartialProgressBeforeFatalOnMidClusterError(t *testing.T) {
+	cfg := testConfig(t)
+	canonicalID := mustSeedObservation(t, cfg, "s1", "dedupepartialproj", "discovery",
+		"Dedupe Apply Partial New",
+		"This service handles user login and session validation for the auth module partial-dedupe-fixture-marker.",
+		"project")
+	loserAID := mustSeedObservation(t, cfg, "s1", "dedupepartialproj", "discovery",
+		"Dedupe Apply Partial OldA",
+		"This service handles user login, and session validation for the auth module partial-dedupe-fixture-marker!",
+		"project")
+	loserBID := mustSeedObservation(t, cfg, "s1", "dedupepartialproj", "discovery",
+		"Dedupe Apply Partial OldB",
+		"This service handles user login and session validation for the auth module partial-dedupe-fixture-marker???",
+		"project")
+	backdateObservationCreatedAt(t, cfg, loserAID, time.Now().UTC().Add(-48*time.Hour))
+	backdateObservationCreatedAt(t, cfg, loserBID, time.Now().UTC().Add(-47*time.Hour))
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	report, err := runDedupeScan(s, "dedupepartialproj")
+	if err != nil {
+		t.Fatalf("runDedupeScan: %v", err)
+	}
+	if report.ClustersFound != 1 || len(report.Clusters[0].Members) != 3 {
+		t.Fatalf("expected 1 three-member cluster, got %+v", report.Clusters)
+	}
+	if report.Clusters[0].CanonicalID != canonicalID {
+		t.Fatalf("expected canonical #%d, got #%d", canonicalID, report.Clusters[0].CanonicalID)
+	}
+	clusterID := report.Clusters[0].ClusterID
+	if err := s.Close(); err != nil {
+		t.Fatalf("close scanning store: %v", err)
+	}
+
+	old := dedupeApplyLoserFault
+	dedupeApplyLoserFault = func(loserID int64) error {
+		if loserID == loserBID {
+			return fmt.Errorf("forced failure for test")
+		}
+		return nil
+	}
+	t.Cleanup(func() { dedupeApplyLoserFault = old })
+
+	exitCode := stubExit(t)
+	withArgs(t, "omnia", "dedupe", "--project", "dedupepartialproj", "--apply", clusterID)
+	stdout, stderr := captureOutput(t, func() { cmdDedupe(cfg) })
+
+	if *exitCode != 1 {
+		t.Errorf("exitCode = %d; want 1 on forced mid-cluster failure", *exitCode)
+	}
+	if !strings.Contains(stderr, "forced failure for test") {
+		t.Errorf("expected the underlying error surfaced, got stderr: %s", stderr)
+	}
+	if !strings.Contains(stdout, "Partial apply") {
+		t.Errorf("expected a partial-apply progress header on stdout, got: %s", stdout)
+	}
+	if !strings.Contains(stdout, fmt.Sprintf("#%d", loserAID)) {
+		t.Errorf("expected partial-progress output to report the already-merged loser #%d, got stdout: %s", loserAID, stdout)
+	}
+	if strings.Contains(stdout, fmt.Sprintf("#%d", loserBID)) {
+		t.Errorf("loser B caused the failure and was never merged — must NOT appear in the partial-progress report, got: %s", stdout)
+	}
+
+	s2, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s2.Close()
+	if _, err := s2.GetObservation(loserAID); err == nil {
+		t.Fatalf("expected loser A to be soft-deleted (excluded from GetObservation) after the partial apply")
+	}
+	obsB, err := s2.GetObservation(loserBID)
+	if err != nil {
+		t.Fatalf("expected loser B to remain untouched (the fault fired before its mutation), got err: %v", err)
+	}
+	if obsB.DeletedAt != nil {
+		t.Fatalf("loser B must not have been mutated by the forced failure")
 	}
 }

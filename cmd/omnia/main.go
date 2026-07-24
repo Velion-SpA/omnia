@@ -3195,12 +3195,16 @@ Commands:
                        project/type + id/title, never full content.
                        Quiet ("0 memories due") when nothing is due.
                        Resolve via: mem_review mark_reviewed <id>
-  dedupe             Propose near-duplicate merge clusters [--project P] [--json]
+  dedupe             Propose/apply near-duplicate merge clusters
+                       [--project P] [--json] [--dry-run] [--apply CLUSTER_ID]
                        Offline, FTS-blocked candidate scan (never all-pairs).
-                       Dry-run only in this release: proposes clusters (cluster
-                       id, canonical survivor = newest, losers, jaccard scores)
-                       but never merges/deletes anything. --apply is not yet
-                       implemented.
+                       Default (or --dry-run): proposes clusters (cluster id,
+                       canonical survivor = newest, losers, jaccard scores),
+                       mutates nothing. --apply CLUSTER_ID is the ONLY
+                       mutation path: merges exactly one named cluster
+                       (supersede relation + soft-delete per loser, canonical
+                       untouched) — there is no --apply all; --apply and
+                       --dry-run cannot be combined.
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
   context [project]  Show recent context from previous sessions
   stats              Show memory system statistics
