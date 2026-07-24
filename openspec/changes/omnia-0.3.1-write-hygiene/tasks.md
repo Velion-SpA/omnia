@@ -54,24 +54,24 @@ Design slice 2 · Branch `feat/write-hygiene-config` · Base: `main` (after PR1)
 `type:feature` · Depends on: PR1 (none functionally, sequential base only) ·
 Capability: write-gate (config surface), injection-budget
 
-- [ ] 2.1 RED: add `internal/config/config_test.go` cases: (a) unset
+- [x] 2.1 RED: add `internal/config/config_test.go` cases: (a) unset
       `write_hygiene` block → `Enabled=true`, `NoopThreshold=0.98`,
       `UpdateThreshold=0.9`, `ShrinkGuard=0.9`, `CandidateLimit=10`; (b) explicit
       `enabled: false` sticks; (c) unset `injection.budget.max_tokens` →
       `400`; (d) explicit `1500` sticks (kill-switch/byte-for-byte case).
-- [ ] 2.2 GREEN: add `WriteHygieneConfig` struct + `WriteHygiene` field on
+- [x] 2.2 GREEN: add `WriteHygieneConfig` struct + `WriteHygiene` field on
       `Config` in `internal/config/config.go`.
-- [ ] 2.3 GREEN: add `writeHygieneEnabledKeyPresent(data []byte) bool`
+- [x] 2.3 GREEN: add `writeHygieneEnabledKeyPresent(data []byte) bool`
       mirroring `recallEnabledKeyPresent` (inverted: default-true unless an
       explicit `enabled: false` key is present in raw YAML).
-- [ ] 2.4 GREEN: wire defaults in `applyDefaults`: `if !cfg.WriteHygiene.Enabled
+- [x] 2.4 GREEN: wire defaults in `applyDefaults`: `if !cfg.WriteHygiene.Enabled
       && !writeHygieneEnabledKeyPresent(data) { cfg.WriteHygiene.Enabled = true
       }`; zero-check defaults for `NoopThreshold`/`UpdateThreshold`/
       `ShrinkGuard`/`CandidateLimit` (same idiom as `Diversity.Lambda`).
-- [ ] 2.5 GREEN: change the `cfg.Injection.Budget.MaxTokens = 1500` literal at
+- [x] 2.5 GREEN: change the `cfg.Injection.Budget.MaxTokens = 1500` literal at
       `config.go:681` to `400`; leave `injectionBudgetMaxTokensKeyPresent` guard
       and `ContextBudget.MaxTokens = 1500` (unchanged) untouched.
-- [ ] 2.6 Docs: update config reference (README/DOCS.md config section) with
+- [x] 2.6 Docs: update config reference (README/DOCS.md config section) with
       the new `write_hygiene` block and the 400 default + migration note
       (explicit `1500` configs keep 1500).
 
