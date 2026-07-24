@@ -880,6 +880,8 @@ Exact duplicate saves are deduplicated in a rolling time window using a normaliz
 When `topic_key` is provided, `mem_save` upserts the latest observation in the same `project + scope + topic_key`, incrementing `revision_count`.
 Save responses include lifecycle metadata for the saved observation: computed `state` (`active` or `needs_review`) and `review_after` when the observation type has a review cycle.
 
+When `write_hygiene.enabled` is `true` (the default), save responses also include a `write_gate` object: `{decision, target_id, similarity, reason}`. `decision` is one of `save` | `noop` | `update` | `relate`; `target_id` names the matched/existing observation for `noop`/`update`/`relate` and is omitted for a plain `save` (no candidate found). On `noop`, nothing new is stored — the top-level `id` is the existing observation's ID and the result text reads "identical to existing #N — nothing new stored". On `update` (auto-update, including a `topic_key` upsert), the result text reads "updated #N instead of duplicating". `relate` keeps the pre-existing `judgment_required`/`candidates` conflict-review flow byte-identical; `write_gate` is additive/informational there. With `write_hygiene.enabled: false`, the `write_gate` key is never present and save responses are byte-for-byte identical to pre-v0.3.1 output (see the `write_hygiene.*` config reference table in README.md).
+
 ### mem_update
 
 Update an observation by ID. Public schema supports partial updates for `title`, `content`, `type`, `scope`, and `topic_key`. For legacy/raw MCP clients, a non-empty `project` argument is still tolerated by the handler even though it is not exposed in the schema.
