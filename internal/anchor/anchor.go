@@ -100,6 +100,24 @@ func (e *gitExitError) Error() string {
 func defaultRunGit(ctx context.Context, dir string, args []string, stdin string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	if len(args) > 0 && args[0] == "grep" {
+		// git grep's `-E` POSIX character classes (e.g. [[:alnum:]], used by
+		// declarationPattern below) are locale-aware: whether a non-ASCII
+		// letter counts as "alnum" for word-boundary purposes depends on the
+		// active LC_ALL/LC_CTYPE/LANG, while Go's RE2 — compiled from the
+		// exact same pattern string by tests such as
+		// TestDeclarationPattern_EmulatesWordBoundaryWithoutBackslashB — is
+		// always ASCII-only for [[:alnum:]] regardless of locale. Left
+		// unpinned (no cmd.Env at all previously means "inherit the caller's
+		// environment as-is"), matching near non-ASCII identifiers was
+		// nondeterministic across machines (PR #125 review finding). Pinning
+		// LC_ALL=C makes git grep's classification ASCII-only too, matching
+		// RE2's semantics. Scoped to grep only — blame/hash-object/rev-parse
+		// below already emit machine-parseable (porcelain/raw) output with
+		// no locale-dependent classification to pin, so widening this to
+		// every git subcommand would be unnecessary blast radius.
+		cmd.Env = envWithLocaleC(os.Environ())
+	}
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -115,6 +133,25 @@ func defaultRunGit(ctx context.Context, dir string, args []string, stdin string)
 		return nil, err
 	}
 	return out, nil
+}
+
+// envWithLocaleC returns base with any existing LC_ALL entries stripped and
+// a single "LC_ALL=C" appended, so the child process's effective locale is
+// deterministic regardless of what LC_ALL (if any) the calling process
+// already has set. Leaving a duplicate LC_ALL entry in place instead (e.g.
+// naively appending) would be unreliable: most libc getenv()
+// implementations return the FIRST match when scanning the environment
+// array, so an existing "LC_ALL=<something>" earlier in os.Environ() would
+// silently win over an appended "LC_ALL=C", defeating the pin.
+func envWithLocaleC(base []string) []string {
+	env := make([]string, 0, len(base)+1)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "LC_ALL=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "LC_ALL=C")
 }
 
 // translateGitError maps a raw runGit error into the graceful-degradation
@@ -399,7 +436,13 @@ func (p *Probe) Capture(ctx context.Context, dir, file, symbol string, start, en
 // This stays a loose best-effort heuristic, not an AST parse: it still admits
 // a same-line non-declaration use (e.g. a field/key inside a one-line struct
 // literal). Word classes are ASCII-oriented; matching near non-ASCII
-// identifiers is git-locale-dependent (Go RE2's [[:alnum:]] is always ASCII).
+// identifiers used to be git-locale-dependent (Go RE2's [[:alnum:]], as
+// exercised directly by TestDeclarationPattern_EmulatesWordBoundaryWithoutBackslashB,
+// is always ASCII-only, but git grep -E's own [[:alnum:]] classification
+// depends on the active LC_ALL/LC_CTYPE/LANG). defaultRunGit now pins
+// LC_ALL=C on every grep invocation, so git's classification is ASCII-only
+// too — deterministic and consistent with RE2, regardless of the machine's
+// ambient locale.
 func declarationPattern(symbol string) string {
 	return fmt.Sprintf(
 		`(^|[^[:alnum:]_])(func|def|class|type|const|var|let)[^[:alnum:]_](.*[^[:alnum:]_])?%s([^[:alnum:]_]|$)`,
