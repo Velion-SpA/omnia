@@ -1043,6 +1043,18 @@ func (s *Store) GetRelationsForObservations(syncIDs []string) (map[string]Observ
 // Using implicit AND (sanitizeFTS) is too strict for candidate detection:
 // the full saved title would require every word to appear in candidates.
 // OR semantics give broader recall; BM25 score still captures relevance.
+//
+// Every double-quote character is stripped from each word (not just
+// leading/trailing ones) before it is phrase-quoted. An edge-only trim used to leave
+// INTERNAL quotes untouched — a title like `foo"bar baz` or a function-call
+// title with a stray quote (e.g. `getUserId("foo)`) then produced an
+// unbalanced-quote FTS5 phrase, which SQLite rejects with a syntax error
+// ("unterminated string" / "fts5: syntax error near ..."). Titles are
+// adversarial input (any observation title can end up here), so this must
+// tolerate arbitrary quote placement — stripping every quote character keeps
+// the phrase well-formed for any input, at the cost of losing the quote
+// character itself from the FTS match term (the persisted title is never
+// touched by this — sanitization is query-construction only).
 func sanitizeFTSCandidates(title string) string {
 	words := strings.Fields(title)
 	if len(words) == 0 {
@@ -1050,7 +1062,7 @@ func sanitizeFTSCandidates(title string) string {
 	}
 	quoted := make([]string, 0, len(words))
 	for _, w := range words {
-		w = strings.Trim(w, `"`)
+		w = strings.ReplaceAll(w, `"`, "")
 		if w != "" {
 			quoted = append(quoted, `"`+w+`"`)
 		}

@@ -85,11 +85,11 @@ Est. lines: ~180.
 Design slice 3a · Branch `feat/write-gate-core` · Base: `main` (after PR2) ·
 `type:feature` · Depends on: PR1 (similarity), PR2 (config) · Capability: write-gate, save-normalization
 
-- [ ] 3.1 RED: add `internal/store/write_gate_test.go`. First case: kill-switch
+- [x] 3.1 RED: add `internal/store/write_gate_test.go`. First case: kill-switch
       off (`write_hygiene.enabled:false`) with identical content saved twice →
       TWO rows exist, byte-for-byte v0.3 hash-window/topic_key behavior only —
       confirm this fails against not-yet-existing gate wiring.
-- [ ] 3.2 RED (same file): add failing cases for the full ladder ahead of
+- [x] 3.2 RED (same file): add failing cases for the full ladder ahead of
       implementation: NOOP (Jaccard ≥0.98 → skip insert, `duplicate_count++`,
       returns existing ID); AUTO-UPDATE (Jaccard >0.9 → in-place UPDATE,
       `revision_count++`); 0.9 boundary (Jaccard == exactly 0.9 → falls to
@@ -99,24 +99,28 @@ Design slice 3a · Branch `feat/write-gate-core` · Base: `main` (after PR2) ·
       ≤0.9 → insert + existing `FindCandidates`/`judgment_required` flow
       unchanged); SAVE (no candidate → plain insert); determinism (same input
       twice with gate on, non-hash/non-topic_key path → same classification).
-- [ ] 3.3 GREEN: add `store.Config` fields (`WriteHygieneEnabled`,
+      Also added a `candidate_limit` edge-case test (BM25-top-ranked-but-
+      unrelated candidate excludes a lower-ranked, higher-Jaccard one when the
+      limit is 1, but reaches it once the limit widens) and an
+      `AddObservation` thin-wrapper regression test (task 3.6).
+- [x] 3.3 GREEN: add `store.Config` fields (`WriteHygieneEnabled`,
       `NoopThreshold`, `UpdateThreshold`, `ShrinkGuard`, `CandidateLimit`) next
       to `ProceduralTrustThreshold`/`ContextTokenBudget` in
       `internal/store/store.go`.
-- [ ] 3.4 GREEN: add `SaveResult` type (`ID int64`, `Decision string`,
+- [x] 3.4 GREEN: add `SaveResult` type (`ID int64`, `Decision string`,
       `TargetID *int64`, `Similarity float64`, `Reason string`) and decision
       constants (`noop`/`update`/`relate`/`save`).
-- [ ] 3.5 GREEN: implement `SaveObservation(p AddObservationParams) (SaveResult,
+- [x] 3.5 GREEN: implement `SaveObservation(p AddObservationParams) (SaveResult,
       error)` inside the existing `AddObservation` core — gate runs AFTER the
       existing topic_key upsert (step 1, unchanged) and 15-min hash window
       (step 2, unchanged), ONLY when `WriteHygieneEnabled`. Candidate retrieval
       reuses `FindCandidates`'s shape (FTS `MATCH` on title, same
       project+scope, BM25 floor, top-`CandidateLimit`, never all-pairs), scored
       via `similarity.Tokenize`/`similarity.Jaccard` on normalized content.
-- [ ] 3.6 GREEN: keep `AddObservation(p) (int64, error)` as a thin wrapper
+- [x] 3.6 GREEN: keep `AddObservation(p) (int64, error)` as a thin wrapper
       calling `SaveObservation` and returning `.ID` — no existing caller
       signature breaks.
-- [ ] 3.7 Validation (write-gate calibration, obs #1662 real clusters): add a
+- [x] 3.7 Validation (write-gate calibration, obs #1662 real clusters): add a
       replay-style fixture test (`internal/store/write_gate_replay_test.go`)
       using representative pairs modeled on the real duplicate/near-duplicate
       clusters found in obs #1662: (a) the #1360/#1359 same-incident,
@@ -129,9 +133,24 @@ Design slice 3a · Branch `feat/write-gate-core` · Base: `main` (after PR2) ·
       the closest pair triggers AUTO-UPDATE, not silent duplication. If
       `noop_threshold=0.98` misfires on any fixture, adjust and document the
       final value here (resolves design's open question 1) before merge.
+      RESULT: defaults (0.98/0.9/0.9) classify all three fixtures correctly
+      with real margin — no threshold change needed. Observed scores: (a)
+      0.2458 (well below 0.9, correctly falls to relate); (b) 1.0000 (fires
+      NOOP); (c) closest pair 0.9535 (fires AUTO-UPDATE). See
+      `write_gate_replay_test.go` doc comments for the full pairwise matrix.
 
 Files: `internal/store/store.go` (modify), `internal/store/write_gate_test.go` (new), `internal/store/write_gate_replay_test.go` (new).
-Est. lines: ~360.
+Est. lines: ~360. ACTUAL: 387 (store.go: +387/-7, net new logic) + 453
+(write_gate_test.go) + 149 (write_gate_replay_test.go) = ~989 changed lines —
+significantly over the ~360 estimate (flagged as a review-workload risk, same
+pattern PR11 hit: 545L vs 280L estimate). Per explicit instruction, tests were
+NOT cut to fit the estimate — the calibration test (3.7) and the full ladder
+edge-case matrix (3.2, incl. candidate_limit) are the highest-value coverage
+in the whole change and the store-layer implementation itself is fully
+production code (no filler). Delivery-step owner should decide whether to
+split `write_gate_test.go`/`write_gate_replay_test.go` into a follow-up
+commit within the same PR, or accept `size:exception` given this is the
+"highest single-PR risk" slice the tasks doc already called out in advance.
 
 ---
 

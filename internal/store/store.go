@@ -26,6 +26,7 @@ import (
 
 	"github.com/velion/omnia/internal/datadir"
 	"github.com/velion/omnia/internal/projectname"
+	"github.com/velion/omnia/internal/similarity"
 	"github.com/velion/omnia/internal/timeutil"
 	"github.com/velion/omnia/internal/token"
 	sqlite "modernc.org/sqlite"
@@ -548,6 +549,26 @@ type Config struct {
 	// (cmd/omnia) sets this from injection.context_budget.max_tokens only
 	// when injection.context_budget.enabled is true in config.yaml.
 	ContextTokenBudget int
+	// WriteHygieneEnabled/NoopThreshold/UpdateThreshold/ShrinkGuard/
+	// CandidateLimit mirror internal/config.WriteHygieneConfig's Enabled/
+	// NoopThreshold/UpdateThreshold/ShrinkGuard/CandidateLimit fields
+	// (duplicated here, not imported — internal/store must not depend on
+	// internal/config, same convention as ProceduralTrustThreshold/
+	// ContextTokenBudget above). WriteHygieneEnabled's zero value (false)
+	// disables the write-gate decision ladder entirely: SaveObservation then
+	// runs ONLY the pre-existing topic_key-upsert and dedupe-hash-window
+	// steps, byte-for-byte like pre-v0.3.1 AddObservation (kill-switch
+	// default-safe for a bare Config{} literal — the composition root wires
+	// the real values from cfg.WriteHygiene in a later PR). The four numeric
+	// fields fall back to the design's documented defaults (0.98/0.9/0.9/10)
+	// inside the ladder itself whenever they are <= 0, so enabling the gate
+	// without explicitly setting every threshold still behaves sanely
+	// (design obs #1668 D3/D5).
+	WriteHygieneEnabled bool
+	NoopThreshold       float64
+	UpdateThreshold     float64
+	ShrinkGuard         float64
+	CandidateLimit      int
 }
 
 func DefaultConfig() (Config, error) {
@@ -2600,7 +2621,298 @@ func (s *Store) SessionObservations(sessionID string, limit int) ([]Observation,
 
 // ─── Observations ────────────────────────────────────────────────────────────
 
-func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
+// Write-gate decision values (design obs #1668 D2-D4, spec write-gate REQ
+// "Decision Ladder Precedence" + "Envelope Transparency"). SaveResult.Decision
+// is always one of these four strings. The pre-existing topic_key-upsert step
+// (unchanged since before v0.3.1) surfaces as WriteGateDecisionUpdate — an
+// explicit topic_key match IS a caller-intended revision, the same
+// user-facing shape as the new similarity-triggered auto-update. The
+// pre-existing dedupe-hash-window step surfaces as WriteGateDecisionNoop — an
+// exact normalized-hash match within the window IS a duplicate, the same
+// user-facing shape as the new Jaccard>=noop_threshold classification. Both
+// pre-existing steps run UNCONDITIONALLY regardless of WriteHygieneEnabled
+// (they predate write-hygiene and are untouched by it); only the ladder below
+// (steps 3-6) is gated.
+const (
+	WriteGateDecisionSave   = "save"
+	WriteGateDecisionNoop   = "noop"
+	WriteGateDecisionUpdate = "update"
+	WriteGateDecisionRelate = "relate"
+)
+
+// Defaults for the four write-gate thresholds/limit (design obs #1668
+// D3/D5), used inside the ladder whenever the corresponding store.Config
+// field is <= 0 — mirrors the zero-check idiom Diversity.Lambda and similar
+// config fields already use elsewhere in this codebase.
+const (
+	defaultWriteGateNoopThreshold   = 0.98
+	defaultWriteGateUpdateThreshold = 0.9
+	defaultWriteGateShrinkGuard     = 0.9
+	defaultWriteGateCandidateLimit  = 10
+	// writeGateCandidateBM25Floor mirrors FindCandidates' own default
+	// BM25Floor (-2.0, relations.go) — candidates ranked worse than this are
+	// excluded from Jaccard scoring entirely (BM25 scores are negative;
+	// closer to 0 is a better match).
+	writeGateCandidateBM25Floor = -2.0
+)
+
+// SaveResult is returned by SaveObservation and carries the write-gate's
+// classification alongside the observation ID it resolved to (design obs
+// #1668 D2/D3, spec write-gate REQ "Envelope Transparency"). AddObservation
+// is a thin wrapper that discards everything but ID, so every existing
+// caller keeps compiling and behaving exactly as before.
+type SaveResult struct {
+	// ID is the row this call resolved to: the newly inserted row for
+	// "save"/"relate", or the existing/matched row's ID for "noop"/"update".
+	ID int64
+	// Decision is one of WriteGateDecisionSave/Noop/Update/Relate.
+	Decision string
+	// TargetID is the existing observation's ID for "noop"/"update" (equal
+	// to ID in those two cases). It is ALSO set for "relate" — naming the
+	// below-threshold candidate that was found, even though ID there is the
+	// newly inserted row, not TargetID — so a caller can still surface which
+	// candidate triggered the relate path. It is nil ONLY for "save" (no
+	// candidate was found at all).
+	TargetID *int64
+	// Similarity is the token-set Jaccard score against the matched/best
+	// candidate. Zero for "save" with no candidate, and for the pre-existing
+	// topic_key/dedupe-hash-window paths (steps 1-2), which classify by
+	// exact match rather than by a Jaccard score.
+	Similarity float64
+	// Reason is a short, human-readable note for the caller/envelope, e.g.
+	// "topic_key match", "near-duplicate of #42 (jaccard 0.990)", "candidate
+	// #42 below update threshold (jaccard 0.640)", "no candidate found".
+	Reason string
+}
+
+// writeGateAction identifies which branch of the decision ladder fired
+// (design obs #1668 D3, steps 3-6). Unexported: internal to ladder
+// evaluation only — SaveObservation translates it into the public
+// WriteGateDecision* string via SaveResult.Decision.
+type writeGateAction int
+
+const (
+	writeGateActionSave writeGateAction = iota
+	writeGateActionRelate
+	writeGateActionNoop
+	writeGateActionUpdate
+)
+
+// writeGateVerdict is evaluateWriteGate's read-only classification: which
+// action to take, against which candidate (targetID is 0 for
+// writeGateActionSave, meaning "no candidate"), the Jaccard score that
+// produced the call, and a short reason string reused verbatim in
+// SaveResult.Reason.
+type writeGateVerdict struct {
+	action     writeGateAction
+	targetID   int64
+	similarity float64
+	reason     string
+}
+
+// evaluateWriteGate runs steps 3-6 of the write-gate decision ladder (design
+// obs #1668 D3, spec write-gate REQ "Decision Ladder Precedence"): NOOP at
+// Jaccard >= NoopThreshold; AUTO-UPDATE at Jaccard STRICTLY > UpdateThreshold
+// AND the shrink-guard is satisfied (the 0.9 boundary is deliberately
+// exclusive — exactly 0.9 falls through to RELATE, per the locked business
+// rule ">0.9"); otherwise RELATE (a candidate existed but scored too low to
+// auto-merge) or SAVE (no candidate at all). This function performs NO
+// writes — it is read-only classification; the caller (SaveObservation)
+// applies the resulting action inside the SAME transaction.
+//
+// Type-gating (adversarial-review fix, conservative-thresholds spirit): NOOP
+// and AUTO-UPDATE both additionally require the best candidate's stored type
+// to match the incoming save's newType. A high-Jaccard match against a
+// DIFFERENT type is downgraded to RELATE instead — for AUTO-UPDATE this
+// prevents an in-place update from silently reclassifying an existing
+// observation across categories (e.g. decision -> bugfix, confirmed
+// empirically); for NOOP this treats a near-identical-content-but-different-
+// type candidate as a genuinely new (if related) fact rather than silently
+// bumping duplicate_count against a row of the wrong type. Neither downgrade
+// loses anything: RELATE always proceeds with a normal insert.
+//
+// Candidate retrieval reuses FindCandidates' shape (relations.go): FTS5
+// MATCH on title (OR-of-terms via sanitizeFTSCandidates), scoped to the same
+// project+scope, a BM25 floor, and a hard CandidateLimit cap — an FTS-blocked
+// pre-filter, NEVER an all-pairs scan, so it stays cheap at real-corpus scale
+// (obs #1662: 1660+ observations). Unlike FindCandidates, this call happens
+// BEFORE the observation is inserted (there is no savedID yet), so it
+// queries directly by title/project/scope instead of by ID, and it never
+// writes memory_relations rows itself. It MUST run against tx, never s.db —
+// this store enforces SetMaxOpenConns(1), so a second connection-level query
+// from inside an open transaction would deadlock.
+func (s *Store) evaluateWriteGate(tx *sql.Tx, project, scope, title, content, newType string) (writeGateVerdict, error) {
+	limit := s.cfg.CandidateLimit
+	if limit <= 0 {
+		limit = defaultWriteGateCandidateLimit
+	}
+
+	ftsQuery := sanitizeFTSCandidates(title)
+	if ftsQuery == "" {
+		return writeGateVerdict{action: writeGateActionSave, reason: "no candidate found"}, nil
+	}
+
+	rows, err := tx.Query(`
+		SELECT o.id, o.content, o.type, fts.rank
+		FROM observations_fts fts
+		JOIN observations o ON o.id = fts.rowid
+		WHERE observations_fts MATCH ?
+		  AND o.deleted_at IS NULL
+		  AND ifnull(o.project, '') = ifnull(?, '')
+		  AND o.scope = ?
+		ORDER BY fts.rank
+		LIMIT ?
+	`, ftsQuery, nullableString(project), scope, limit*3) // fetch extra rows to allow floor filtering, mirrors FindCandidates
+	if err != nil {
+		return writeGateVerdict{}, fmt.Errorf("evaluateWriteGate: FTS candidate query: %w", err)
+	}
+
+	type gateCandidate struct {
+		id      int64
+		content string
+		docType string
+	}
+	var candidates []gateCandidate
+	for rows.Next() {
+		var id int64
+		var candContent string
+		var candType string
+		var score float64
+		if err := rows.Scan(&id, &candContent, &candType, &score); err != nil {
+			if closeErr := rows.Close(); closeErr != nil {
+				return writeGateVerdict{}, fmt.Errorf("evaluateWriteGate: scan: %w; close rows: %v", err, closeErr)
+			}
+			return writeGateVerdict{}, fmt.Errorf("evaluateWriteGate: scan: %w", err)
+		}
+		if score < writeGateCandidateBM25Floor {
+			continue
+		}
+		candidates = append(candidates, gateCandidate{id: id, content: candContent, docType: candType})
+		if len(candidates) >= limit {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		if closeErr := rows.Close(); closeErr != nil {
+			return writeGateVerdict{}, fmt.Errorf("evaluateWriteGate: rows error: %w; close rows: %v", err, closeErr)
+		}
+		return writeGateVerdict{}, fmt.Errorf("evaluateWriteGate: rows error: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return writeGateVerdict{}, fmt.Errorf("evaluateWriteGate: close rows: %w", err)
+	}
+
+	if len(candidates) == 0 {
+		return writeGateVerdict{action: writeGateActionSave, reason: "no candidate found"}, nil
+	}
+
+	// Score every FTS-narrowed candidate by content Jaccard (save-normalization
+	// spec REQ "Canonical Normalization For Comparison": Tokenize's lowercase
+	// + [\p{L}\p{N}]+ extraction already IS the case/whitespace/punctuation-
+	// insensitive comparison the spec requires — no separate normalization
+	// step is needed, and the persisted content is never touched by it). The
+	// candidate with the HIGHEST Jaccard score wins, not necessarily the best
+	// BM25 rank — FTS only narrows the pool. Type is NOT part of candidate
+	// selection itself (selection stays purely Jaccard-driven); it only gates
+	// the NOOP/AUTO-UPDATE outcome below.
+	newTokens := similarity.Tokenize(content)
+	var best gateCandidate
+	bestScore := -1.0
+	for _, c := range candidates {
+		score := similarity.Jaccard(newTokens, similarity.Tokenize(c.content))
+		if score > bestScore {
+			bestScore = score
+			best = c
+		}
+	}
+
+	noopThreshold := s.cfg.NoopThreshold
+	if noopThreshold <= 0 {
+		noopThreshold = defaultWriteGateNoopThreshold
+	}
+	updateThreshold := s.cfg.UpdateThreshold
+	if updateThreshold <= 0 {
+		updateThreshold = defaultWriteGateUpdateThreshold
+	}
+	shrinkGuard := s.cfg.ShrinkGuard
+	if shrinkGuard <= 0 {
+		shrinkGuard = defaultWriteGateShrinkGuard
+	}
+
+	if bestScore >= noopThreshold {
+		if best.docType != newType {
+			return writeGateVerdict{
+				action:     writeGateActionRelate,
+				targetID:   best.id,
+				similarity: bestScore,
+				reason:     fmt.Sprintf("type mismatch with #%d (%s vs %s) at noop-level similarity (jaccard %.3f); downgraded to relate", best.id, best.docType, newType, bestScore),
+			}, nil
+		}
+		return writeGateVerdict{
+			action:     writeGateActionNoop,
+			targetID:   best.id,
+			similarity: bestScore,
+			reason:     fmt.Sprintf("near-duplicate of #%d (jaccard %.3f)", best.id, bestScore),
+		}, nil
+	}
+
+	if bestScore > updateThreshold {
+		if best.docType != newType {
+			return writeGateVerdict{
+				action:     writeGateActionRelate,
+				targetID:   best.id,
+				similarity: bestScore,
+				reason:     fmt.Sprintf("type mismatch with #%d (%s vs %s); downgraded from auto-update to relate (jaccard %.3f)", best.id, best.docType, newType, bestScore),
+			}, nil
+		}
+		// Superset/shrink guard (design D3, step 4 only — the pre-existing
+		// topic_key path keeps its unconditional overwrite): only accept the
+		// new content as canonical when it is not meaningfully SHORTER than
+		// what it would replace. A shorter "update" would silently discard
+		// detail from the richer existing row, so downgrade to NOOP instead
+		// (duplicate_count++, existing content untouched) rather than lose
+		// information.
+		if len(content) >= int(shrinkGuard*float64(len(best.content))) {
+			return writeGateVerdict{
+				action:     writeGateActionUpdate,
+				targetID:   best.id,
+				similarity: bestScore,
+				reason:     fmt.Sprintf("extends #%d (jaccard %.3f)", best.id, bestScore),
+			}, nil
+		}
+		return writeGateVerdict{
+			action:     writeGateActionNoop,
+			targetID:   best.id,
+			similarity: bestScore,
+			reason:     fmt.Sprintf("shrink-guard blocked update of #%d (jaccard %.3f); kept richer existing content", best.id, bestScore),
+		}, nil
+	}
+
+	// bestScore <= updateThreshold: includes the exact 0.9 boundary case,
+	// which the spec's "Similarity exactly at threshold does not auto-update"
+	// scenario requires to fall through here, NOT into the branch above
+	// (the comparison above is strict >, so == lands here).
+	return writeGateVerdict{
+		action:     writeGateActionRelate,
+		targetID:   best.id,
+		similarity: bestScore,
+		reason:     fmt.Sprintf("candidate #%d below update threshold (jaccard %.3f)", best.id, bestScore),
+	}, nil
+}
+
+// SaveObservation is the ONE shared save core every save entry point (MCP
+// handleSave, CLI save, import, backfill, sync) is meant to funnel through
+// (design obs #1668 "Technical Approach": "zero drift", the #140 lesson). It
+// runs, in order, inside a SINGLE transaction: (1) the pre-existing
+// topic_key-upsert step, UNCHANGED; (2) the pre-existing dedupe-hash-window
+// step, UNCHANGED; then, ONLY when WriteHygieneEnabled and neither (1) nor
+// (2) already resolved the call, (3)-(6) the NEW write-gate decision ladder
+// (evaluateWriteGate + NOOP/AUTO-UPDATE application) before falling through
+// to the same plain INSERT pre-v0.3.1 AddObservation always used. With
+// WriteHygieneEnabled false (the store.Config zero value), this function is
+// byte-for-byte identical to the old AddObservation body — the kill-switch
+// (spec write-gate REQ "Default-On With Kill-Switch").
+func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 	// Normalize project name (lowercase + trim) before any persistence
 	p.Project, _ = NormalizeProject(p.Project)
 
@@ -2631,7 +2943,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 	// check (see below) needs to line up against.
 	outcome, err := normalizeOutcome(p.Outcome)
 	if err != nil {
-		return 0, err
+		return SaveResult{}, err
 	}
 	var errSig string
 	if strings.TrimSpace(p.ErrorSignature) != "" {
@@ -2654,7 +2966,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		trustTagForRevision = classifyTrust(p.Source)
 	}
 
-	var observationID int64
+	var result SaveResult
 	err = s.withTx(func(tx *sql.Tx) error {
 		var obs *Observation
 		if topicKey != "" {
@@ -2708,7 +3020,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 				if err != nil {
 					return err
 				}
-				observationID = existingID
+				result = SaveResult{ID: existingID, Decision: WriteGateDecisionUpdate, TargetID: &existingID, Reason: "topic_key match"}
 				return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 			}
 			if err != sql.ErrNoRows {
@@ -2746,11 +3058,99 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 			if err != nil {
 				return err
 			}
-			observationID = existingID
+			result = SaveResult{ID: existingID, Decision: WriteGateDecisionNoop, TargetID: &existingID, Reason: "exact duplicate within dedupe window"}
 			return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 		}
 		if err != sql.ErrNoRows {
 			return err
+		}
+
+		// ── Write-gate decision ladder (NEW, design obs #1668 D2/D3) ────────
+		// Gated entirely behind WriteHygieneEnabled: when false (the
+		// store.Config zero value), `ladder` stays writeGateActionSave and
+		// every call below falls straight through to the same plain insert
+		// pre-v0.3.1 AddObservation always ran — byte-for-byte kill-switch
+		// (spec write-gate REQ "Default-On With Kill-Switch").
+		ladder := writeGateVerdict{action: writeGateActionSave, reason: "write_hygiene disabled"}
+		if s.cfg.WriteHygieneEnabled {
+			verdict, gateErr := s.evaluateWriteGate(tx, p.Project, scope, title, content, p.Type)
+			if gateErr != nil {
+				// Hygiene must NEVER block a save (spec write-gate REQ "hygiene
+				// never blocks a save"): a gate evaluation failure (e.g. an
+				// adversarial title that defeats FTS5 query construction, or a
+				// transient candidate-query error) degrades to a plain SAVE
+				// instead of aborting the whole transaction/insert. The failure
+				// is recorded in Reason for envelope visibility, mirroring the
+				// log-only convention internal/mcp/mcp.go already uses for
+				// FindCandidates errors (detection failure never fails the save).
+				log.Printf("[store] evaluateWriteGate error (non-fatal, degrading to plain save): %v", gateErr)
+				ladder = writeGateVerdict{action: writeGateActionSave, reason: fmt.Sprintf("write_gate_error: %v", gateErr)}
+			} else {
+				switch verdict.action {
+				case writeGateActionNoop:
+					if _, err := s.execHook(tx,
+						`UPDATE observations
+						 SET duplicate_count = duplicate_count + 1,
+						     last_seen_at = datetime('now'),
+						     updated_at = datetime('now')
+						 WHERE id = ?`,
+						verdict.targetID,
+					); err != nil {
+						return err
+					}
+					obs, err = s.getObservationTx(tx, verdict.targetID)
+					if err != nil {
+						return err
+					}
+					targetID := verdict.targetID
+					result = SaveResult{ID: targetID, Decision: WriteGateDecisionNoop, TargetID: &targetID, Similarity: verdict.similarity, Reason: verdict.reason}
+					return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
+				case writeGateActionUpdate:
+					if _, err := s.execHook(tx,
+						`UPDATE observations
+						 SET type = ?,
+						     title = ?,
+						     content = ?,
+						     tool_name = ?,
+						     topic_key = COALESCE(NULLIF(?, ''), topic_key),
+						     normalized_hash = ?,
+						     error_signature = COALESCE(NULLIF(?, ''), error_signature),
+						     outcome = COALESCE(NULLIF(?, ''), outcome),
+						     source = COALESCE(NULLIF(?, ''), source),
+						     trust_tag = COALESCE(NULLIF(?, ''), trust_tag),
+						     revision_count = revision_count + 1,
+						     last_seen_at = datetime('now'),
+						     updated_at = datetime('now')
+						 WHERE id = ?`,
+						p.Type,
+						title,
+						content,
+						nullableString(p.ToolName),
+						topicKey,
+						normHash,
+						errSig,
+						outcome,
+						p.Source,
+						trustTagForRevision,
+						verdict.targetID,
+					); err != nil {
+						return err
+					}
+					obs, err = s.getObservationTx(tx, verdict.targetID)
+					if err != nil {
+						return err
+					}
+					targetID := verdict.targetID
+					result = SaveResult{ID: targetID, Decision: WriteGateDecisionUpdate, TargetID: &targetID, Similarity: verdict.similarity, Reason: verdict.reason}
+					return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
+				default:
+					// writeGateActionSave / writeGateActionRelate: fall through
+					// to the plain insert below. `ladder` carries the verdict
+					// forward so `result` can be finished once the new row's ID
+					// is known.
+					ladder = verdict
+				}
+			}
 		}
 
 		// New-row inserts always classify: classifyTrust("") already returns
@@ -2769,7 +3169,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		if err != nil {
 			return err
 		}
-		observationID, err = res.LastInsertId()
+		observationID, err := res.LastInsertId()
 		if err != nil {
 			return err
 		}
@@ -2791,12 +3191,35 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		if err != nil {
 			return err
 		}
+
+		if ladder.action == writeGateActionRelate {
+			// RELATE still names the candidate that was found (even though
+			// it scored below the update threshold) — useful, and not
+			// prohibited by design D4 (D4 only mandates that SAVE, the
+			// no-candidate-at-all case, omits target_id).
+			candidateID := ladder.targetID
+			result = SaveResult{ID: observationID, Decision: WriteGateDecisionRelate, TargetID: &candidateID, Similarity: ladder.similarity, Reason: ladder.reason}
+		} else {
+			result = SaveResult{ID: observationID, Decision: WriteGateDecisionSave, Similarity: ladder.similarity, Reason: ladder.reason}
+		}
 		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 	})
 	if err != nil {
+		return SaveResult{}, err
+	}
+	return result, nil
+}
+
+// AddObservation is a thin wrapper over SaveObservation (design obs #1668
+// D2) for the many existing callers that only need the resulting ID and have
+// no use for the write-gate's classification. No existing caller signature
+// breaks.
+func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
+	result, err := s.SaveObservation(p)
+	if err != nil {
 		return 0, err
 	}
-	return observationID, nil
+	return result.ID, nil
 }
 
 func (s *Store) RecentObservations(project, scope string, limit int) ([]Observation, error) {
