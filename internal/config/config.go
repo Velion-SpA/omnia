@@ -130,6 +130,13 @@ type WriteHygieneConfig struct {
 	UpdateThreshold float64 `yaml:"update_threshold"`
 	ShrinkGuard     float64 `yaml:"shrink_guard"`
 	CandidateLimit  int     `yaml:"candidate_limit"`
+	// MinContentLength (default 10) is save-normalization's minimum content
+	// length in characters (spec save-normalization REQ "Non-Blocking Junk
+	// Warnings"): content shorter than this after trimming whitespace is
+	// warned as "below minimum length" — never blocked. Zero-check default,
+	// same idiom as NoopThreshold/UpdateThreshold/ShrinkGuard/CandidateLimit
+	// above.
+	MinContentLength int `yaml:"min_content_length"`
 }
 
 // InjectionConfig is the parent block for every Context Economy sub-gate
@@ -872,6 +879,9 @@ func applyDefaults(cfg *Config, data []byte) {
 	}
 	if cfg.WriteHygiene.CandidateLimit == 0 {
 		cfg.WriteHygiene.CandidateLimit = 10
+	}
+	if cfg.WriteHygiene.MinContentLength == 0 {
+		cfg.WriteHygiene.MinContentLength = 10
 	}
 }
 

@@ -47,6 +47,9 @@ func TestWriteHygiene_DefaultsEnabledTrueWhenAbsent(t *testing.T) {
 	if cfg.WriteHygiene.CandidateLimit != 10 {
 		t.Errorf("WriteHygiene.CandidateLimit default: got %v, want 10", cfg.WriteHygiene.CandidateLimit)
 	}
+	if cfg.WriteHygiene.MinContentLength != 10 {
+		t.Errorf("WriteHygiene.MinContentLength default: got %v, want 10", cfg.WriteHygiene.MinContentLength)
+	}
 }
 
 // TestWriteHygiene_ExplicitFalseSticks is the kill-switch case: an operator
@@ -97,7 +100,8 @@ func TestWriteHygiene_ParsesThresholdOverrides(t *testing.T) {
 		"  noop_threshold: 0.95\n"+
 		"  update_threshold: 0.85\n"+
 		"  shrink_guard: 0.8\n"+
-		"  candidate_limit: 5\n")
+		"  candidate_limit: 5\n"+
+		"  min_content_length: 25\n")
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -113,5 +117,8 @@ func TestWriteHygiene_ParsesThresholdOverrides(t *testing.T) {
 	}
 	if cfg.WriteHygiene.CandidateLimit != 5 {
 		t.Errorf("WriteHygiene.CandidateLimit: got %v, want 5", cfg.WriteHygiene.CandidateLimit)
+	}
+	if cfg.WriteHygiene.MinContentLength != 25 {
+		t.Errorf("WriteHygiene.MinContentLength: got %v, want 25", cfg.WriteHygiene.MinContentLength)
 	}
 }

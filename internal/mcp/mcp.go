@@ -1886,6 +1886,16 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		if similarWarning != "" {
 			msg += "\n" + similarWarning
 		}
+		// Save-normalization junk warnings (spec save-normalization REQ
+		// "Warnings Are Itemized In The Envelope"), gated on
+		// cfg.WriteHygieneEnabled — same kill-switch as write_gate below, so
+		// the two can never drift (both are wired from the same
+		// appCfg.WriteHygiene.Enabled value in cmd/omnia/main.go).
+		if cfg.WriteHygieneEnabled {
+			for _, w := range saveResult.Warnings {
+				msg += fmt.Sprintf("\n⚠ Hygiene warning: %s", w)
+			}
+		}
 
 		// Post-transaction conflict candidate detection (REQ-001).
 		// Errors are logged and swallowed — detection failure never fails the save.
@@ -1910,6 +1920,16 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 				writeGate["target_id"] = *saveResult.TargetID
 			}
 			extra["write_gate"] = writeGate
+		}
+
+		// Save-normalization warnings (spec save-normalization REQ "Warnings
+		// Are Itemized In The Envelope"): additive/informational, itemized
+		// list of non-blocking hygiene notices about the SUBMITTED content.
+		// Gated by cfg.WriteHygieneEnabled — same kill-switch as write_gate
+		// above — and only added when at least one warning fired, so a clean
+		// save's envelope carries no empty array key.
+		if cfg.WriteHygieneEnabled && len(saveResult.Warnings) > 0 {
+			extra["save_warnings"] = saveResult.Warnings
 		}
 
 		// Soft searchability lint (non-blocking): nudge toward findable memories.
