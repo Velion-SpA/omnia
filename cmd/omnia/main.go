@@ -878,6 +878,7 @@ func cmdServe(cfg store.Config) {
 		cfg.UpdateThreshold = appCfg.WriteHygiene.UpdateThreshold
 		cfg.ShrinkGuard = appCfg.WriteHygiene.ShrinkGuard
 		cfg.CandidateLimit = appCfg.WriteHygiene.CandidateLimit
+		cfg.MinContentLength = appCfg.WriteHygiene.MinContentLength
 		// Omnia v0.3.1 PR7 follow-up (design obs #1668 D7, spec fts-recall):
 		// thread the FTS zero-hit relaxation ladder's kill-switch into
 		// store.Config. Config.DisableFTSRelax is INVERTED (see its own doc)
@@ -1169,6 +1170,7 @@ func cmdMCP(cfg store.Config) {
 		cfg.UpdateThreshold = appCfg.WriteHygiene.UpdateThreshold
 		cfg.ShrinkGuard = appCfg.WriteHygiene.ShrinkGuard
 		cfg.CandidateLimit = appCfg.WriteHygiene.CandidateLimit
+		cfg.MinContentLength = appCfg.WriteHygiene.MinContentLength
 		// Omnia v0.3.1 PR7 follow-up (design obs #1668 D7, spec fts-recall):
 		// thread the FTS zero-hit relaxation ladder's kill-switch into
 		// store.Config — see cmdServe's identical block for the full
@@ -1491,6 +1493,7 @@ func cmdSave(cfg store.Config) {
 		cfg.UpdateThreshold = appCfg.WriteHygiene.UpdateThreshold
 		cfg.ShrinkGuard = appCfg.WriteHygiene.ShrinkGuard
 		cfg.CandidateLimit = appCfg.WriteHygiene.CandidateLimit
+		cfg.MinContentLength = appCfg.WriteHygiene.MinContentLength
 		// Omnia v0.3.1 PR7 follow-up (design obs #1668 D7, spec fts-recall):
 		// thread the FTS zero-hit relaxation ladder's kill-switch into
 		// store.Config — see cmdServe's identical block for the full
@@ -1828,6 +1831,7 @@ func cmdContext(cfg store.Config) {
 		cfg.UpdateThreshold = appCfg.WriteHygiene.UpdateThreshold
 		cfg.ShrinkGuard = appCfg.WriteHygiene.ShrinkGuard
 		cfg.CandidateLimit = appCfg.WriteHygiene.CandidateLimit
+		cfg.MinContentLength = appCfg.WriteHygiene.MinContentLength
 		// Omnia v0.3.1 PR7 follow-up (design obs #1668 D7, spec fts-recall):
 		// thread the FTS zero-hit relaxation ladder's kill-switch into
 		// store.Config — see cmdServe's identical block for the full

@@ -611,6 +611,20 @@ Every import carries `source = "claude-memory"` (a provenance/attribution tag, n
 
 The pre-existing `omnia import <file.json>` path (JSON export/import) is unchanged — this is a new submode, dispatched only when the first argument after `import` is literally `claude-memory`.
 
+### Review Due CLI (admin)
+
+`omnia review-due` (spaced-review / Play G, design `omnia-0.3.1-write-hygiene` D11, spec `spaced-review`) is a read-only wrapper over the existing `Store.ObservationsNeedingReview` — the CLI counterpart to `mem_review`'s `action=list`. It introduces no new mutation path: resolution still flows through the existing `mem_review action=mark_reviewed` tool.
+
+```
+omnia review-due [--project <name>] [--json]
+```
+
+- `--project <name>` (optional): scope to one project. Omitted means all projects — like `dedupe`, unlike `forget-scan`/`conflicts scan` (which require one).
+- `--json`: emit `{count, groups, observations}` instead of the human-readable report. `groups` counts by project then type; `observations` lists `id`/`project`/`type`/`title` only — the `content` field is never read or printed, consistent with the token-economy principle applied elsewhere in write-hygiene.
+- Nothing due prints a quiet `0 memories due for review.` and exits cleanly; some due prints a grouped count breakdown followed by a compact `[n] #ID (type) project — Title` list and a `Resolve: mem_review mark_reviewed <id>` hint line.
+
+A separate, DEFAULT-OFF `review.due_nudge` config flag gates a due-count nudge appended to `mem_context`'s response: when `false` (the zero-value default), `mem_context` output is byte-for-byte identical to pre-spaced-review behavior — no new key, no new text, regardless of how many memories are actually due. When `true`, a due observation count triggers `extra["review_due_count"]` plus one appended text line (`"N memories due for review — run \`omnia review-due\` to see them."`), computed via a cheap `COUNT`-only query (`Store.CountObservationsNeedingReview`) — no row hydration, no LLM/embedding call, every other `mem_context` field untouched.
+
 ### Eval Harness CLI (admin)
 
 `omnia eval` runs the memory-quality eval harness (spec `sdd/omnia-eval-harness`): a token-cost-normalized measuring stick over a corpus of real, dogfooded memory cases, segmented by capability (Recall, Causal, State-Update/Staleness, State-Abstraction) and by query language (EN/ES), plus a distinct retrieval-only recall@k section. It is NOT for end users — it is a maintainer/CI tool for judging embedding-model and recall-config changes.
@@ -934,6 +948,8 @@ When `topic_key` is provided, `mem_save` upserts the latest observation in the s
 Save responses include lifecycle metadata for the saved observation: computed `state` (`active` or `needs_review`) and `review_after` when the observation type has a review cycle.
 
 When `write_hygiene.enabled` is `true` (the default), save responses also include a `write_gate` object: `{decision, target_id, similarity, reason}`. `decision` is one of `save` | `noop` | `update` | `relate`; `target_id` names the matched/existing observation for `noop`/`update`/`relate` and is omitted for a plain `save` (no candidate found). On `noop`, nothing new is stored — the top-level `id` is the existing observation's ID and the result text reads "identical to existing #N — nothing new stored". On `update` (auto-update, including a `topic_key` upsert), the result text reads "updated #N instead of duplicating". `relate` keeps the pre-existing `judgment_required`/`candidates` conflict-review flow byte-identical; `write_gate` is additive/informational there. With `write_hygiene.enabled: false`, the `write_gate` key is never present and save responses are byte-for-byte identical to pre-v0.3.1 output (see the `write_hygiene.*` config reference table in README.md).
+
+Also gated on `write_hygiene.enabled` (same kill-switch): a `save_warnings` array itemizing non-blocking hygiene notices about the submitted content — `empty content`, `content below minimum length (...)`, `missing Keywords section`, and/or `content exceeds maximum size (...)` — present only when at least one fires. These NEVER block, reject, or affect `decision` in any way; the save always completes. Each triggered warning also appends a `⚠ Hygiene warning: ...` line to the result text.
 
 ### mem_update
 

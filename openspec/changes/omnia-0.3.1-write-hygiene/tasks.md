@@ -303,24 +303,37 @@ Design slice 5 (independent) · Branch `fix/session-hook-project-override` ·
 Base: `main` (after PR5) · `type:bug` · Depends on: none (can ship anytime) ·
 Capability: session-hooks
 
-- [ ] 6.1 RED: add tests mirroring `update_project_resolution_test.go`'s
+- [x] 6.1 RED: add tests mirroring `update_project_resolution_test.go`'s
       `cfg.DefaultProject` assertions for (a) `resolveSessionStartProject`'s
       empty-directory branch and (b) `handleSessionEnd` — both currently call
       bare `resolveWriteProject()` (confirmed at `internal/mcp/mcp.go:2596` and
       `:2611`), so with a process-level `cfg.DefaultProject` override set, the
       resolved project MUST match `handleSave`'s resolution — this fails today.
-- [ ] 6.2 GREEN: replace `resolveWriteProject()` with
+- [x] 6.2 GREEN: replace `resolveWriteProject()` with
       `resolveWriteProjectWithProcessOverride(cfg.DefaultProject)` in both
       `resolveSessionStartProject`'s empty-dir branch and `handleSessionEnd`
       (`internal/mcp/mcp.go`), matching the `#403`/`#413`/`handleCapturePassive`
       precedent exactly. Explicit-directory and basename-fallback branches stay
       unchanged.
-- [ ] 6.3 Regression check: existing `resolveSessionStartProject`/
+- [x] 6.3 Regression check: existing `resolveSessionStartProject`/
       `handleSessionEnd` tests for explicit-directory and basename-fallback
       paths still pass unchanged.
 
 Files: `internal/mcp/mcp.go` (modify, 2 call sites), test file (modify).
 Est. lines: ~90.
+
+## PR6 Apply Notes (reconciled retroactively, PR12 remediation, obs #1682 CRITICAL finding #2)
+
+STATUS: COMPLETE and MERGED to main — `fix(mcp): session start and end honor
+the process project override (#160)`, commit `a8947ff`, closes issue #147.
+Confirmed via `TestHandleSessionStart_HonorsProcessOverrideWhenDirectoryEmpty`,
+`TestHandleSessionEnd_HonorsProcessOverride`,
+`TestHandleSaveThenUpdate_ProjectResolutionSymmetryUnderProcessOverride` — all
+present and passing in `internal/mcp/mcp_test.go` on main `2011e72`. This
+tasks.md file's checkboxes were left unchecked after the original apply pass
+(tracked as sdd-verify report obs #1682's CRITICAL finding #2); reconciled
+here with no code change — the feature itself required none, it was already
+shipped and merged before this remediation began.
 
 ---
 
@@ -874,39 +887,151 @@ Design slice 9 (independent — touches no write-gate files) · Branch
 `feat/spaced-review-due` · Base: `main` (after PR10) · `type:feature` ·
 Depends on: none · Capability: spaced-review
 
-- [ ] 11.1 RED: add `cmd/omnia/review_due_test.go`: nothing due → quiet "0
+- [x] 11.1 RED: add `cmd/omnia/review_due_test.go`: nothing due → quiet "0
       memories due for review" clean-exit summary; some due → compact grouped
       output (project → type → `#ID Title, #ID Title`), NEVER dumps any
       observation's `content` field.
-- [ ] 11.2 RED: add `internal/store` test for a new
+- [x] 11.2 RED: add `internal/store` test for a new
       `CountObservationsNeedingReview(project string) (int, error)` — cheap
       `COUNT` query, no row hydration.
-- [ ] 11.3 RED: add `internal/mcp` test for `handleContext`: with
+- [x] 11.3 RED: add `internal/mcp` test for `handleContext`: with
       `review.due_nudge` at its zero-value default (off), `mem_context`
       response is byte-identical to pre-PR11 output (no `review_due_count`
       key at all); with the flag on, `extra["review_due_count"]=N` plus one
       text line, no other existing field altered.
-- [ ] 11.4 GREEN: add `Store.CountObservationsNeedingReview` in
+- [x] 11.4 GREEN: add `Store.CountObservationsNeedingReview` in
       `internal/store/store.go` reusing the existing `decayReviewAfterMonths`/
       `ObservationsNeedingReview` query shape.
-- [ ] 11.5 GREEN: create `cmd/omnia/review_due.go` — read-only wrapper over
+- [x] 11.5 GREEN: create `cmd/omnia/review_due.go` — read-only wrapper over
       `ObservationsNeedingReview`, grouped by project then type, compact
       ID+title output, resolution hint line pointing at existing
       `mem_review mark_reviewed <id>` (no new mutation surface).
-- [ ] 11.6 GREEN: wire `case "review-due":` dispatch in `cmd/omnia/main.go`.
-- [ ] 11.7 GREEN: add `review.due_nudge` (bool, zero-value-false default, no
+- [x] 11.6 GREEN: wire `case "review-due":` dispatch in `cmd/omnia/main.go`.
+- [x] 11.7 GREEN: add `review.due_nudge` (bool, zero-value-false default, no
       key-present probe needed — mirrors `TypeLensConfig`) to
       `internal/config/config.go`; gate the nudge addition in `handleContext`
       (`internal/mcp/mcp.go`) behind it.
-- [ ] 11.8 Resolution round-trip check: confirm existing `mem_review
+- [x] 11.8 Resolution round-trip check: confirm existing `mem_review
       action=mark_reviewed` (`Store.MarkReviewed`) still bumps `review_after`
       per the (unchanged) type-decay map — no new mutation path introduced by
       this PR.
-- [ ] 11.9 Docs: add `omnia review-due` usage + `review.due_nudge` flag to
-      `DOCS.md`.
+- [x] 11.9 Docs: add `omnia review-due` usage + `review.due_nudge` flag to
+      `DOCS.md`. DONE IN PR12 (see PR12 section below) — this was the one
+      genuinely missing sub-task (sdd-verify report obs #1682 WARNING
+      finding): new "Review Due CLI (admin)" section added to `DOCS.md`.
 
 Files: `cmd/omnia/review_due.go` (new), `cmd/omnia/review_due_test.go` (new), `internal/store/store.go` (modify), `internal/config/config.go` (modify), `internal/mcp/mcp.go` (modify), `cmd/omnia/main.go` (modify), docs (modify).
 Est. lines: ~280.
+
+## PR11 Apply Notes (reconciled retroactively, PR12 remediation, obs #1682 CRITICAL finding #2)
+
+STATUS: 11.1-11.8 COMPLETE and MERGED to main — `feat(review): omnia
+review-due surface and gated due-count nudge (#162)`, commit `575cfa4`.
+Confirmed via `cmd/omnia/review_due.go`/`review_due_test.go`,
+`Store.CountObservationsNeedingReview` (`internal/store/store.go`),
+`ReviewConfig.DueNudge` (`internal/config/config.go`), and the gated nudge in
+`handleContext` (`internal/mcp/mcp.go`) — all present and passing on main
+`2011e72`. This tasks.md file's checkboxes were left unchecked after the
+original apply pass, and the prior apply-progress artifact (engram obs
+#1673) incorrectly claimed this reconciliation had already happened
+(sdd-verify report obs #1682's CRITICAL finding #2 flags both). 11.9 (DOCS.md
+usage) was the one sub-task genuinely never done — closed in PR12 below.
+
+---
+
+## PR12 — Verify Remediation (closes sdd-verify report obs #1682)
+
+Branch (suggested) `fix/v031-verify-remediation` · Base: `main` (`2011e72`,
+all 11 prior PRs merged) · `type:bug` · Depends on: none (closes gaps in
+already-merged work) · Capability: save-normalization, spaced-review, docs
+
+Closes all 4 findings from the sdd-verify report (engram obs #1682): 2
+CRITICAL, 1 WARNING, 1 SUGGESTION.
+
+- [x] 12.1 CRITICAL — save-normalization spec REQs "Non-Blocking Junk
+      Warnings" + "Warnings Are Itemized In The Envelope" (silently dropped
+      between proposal and design — obs #1682 root-cause trace). RED→GREEN,
+      strict TDD: `internal/store/save_normalization_test.go` (new) confirmed
+      RED via `go vet` (`undefined: detectSaveNormalizationWarnings`) before
+      any production code landed. GREEN: pure helper
+      `detectSaveNormalizationWarnings(content, minLength, maxLength) []string`
+      (`internal/store/store.go`) detecting exactly the 4 spec-named
+      conditions — empty/whitespace-only content (short-circuits to a single
+      "empty content" warning), content below `MinContentLength` (new
+      `store.Config`/`WriteHygieneConfig.MinContentLength` field, default 10,
+      same zero-check idiom as `NoopThreshold`/etc.), a missing `"keywords:"`
+      substring (case-insensitive), and content above the PRE-EXISTING
+      `MaxObservationLength` (reused as-is — this IS the "configured maximum
+      size" the spec means; no new max-size config introduced). `SaveResult`
+      gained a `Warnings []string` field, computed once on the SUBMITTED
+      content before the pre-existing truncation clamp runs, attached to
+      `result` after the transaction succeeds so every Decision branch
+      (NOOP/UPDATE/RELATE/SAVE) carries it uniformly. Gated entirely behind
+      `WriteHygieneEnabled` — same kill-switch as `write_gate` (design D2/D4
+      precedent) — confirmed via
+      `TestSaveObservation_WriteHygieneDisabledSkipsJunkWarnings`. Never-blocks
+      proof: `TestSaveObservation_JunkWarningsNeverBlockSave` (empty content
+      still persists a row). Itemization proof:
+      `TestSaveObservation_JunkWarningsItemizedForMultipleConditions` (2
+      simultaneous warnings). `internal/mcp/mcp.go`'s `handleSave` surfaces
+      `extra["save_warnings"]` + appended `"⚠ Hygiene warning: ..."` notice
+      lines, gated on `cfg.MCPConfig.WriteHygieneEnabled` (mirrors
+      `write_gate`'s own independent gating exactly) — RED confirmed via
+      `internal/mcp/save_normalization_envelope_test.go`
+      (`TestHandleSaveSurfacesSaveWarningsWhenHygieneEnabled` failed
+      pre-implementation: "expected save_warnings array in envelope, got
+      nil"). Wired `MinContentLength` at all 4 existing `write_hygiene.*`
+      wiring call sites in `cmd/omnia/main.go` (cmdServe/cmdMCP/cmdContext/
+      cmdSave) — confirmed RED by temporarily reverting just those 4 lines
+      and re-running `cmd/omnia`'s wiring test (`MinContentLength = 0, want
+      10` at all 4 sites), then GREEN after restoring.
+      DEVIATION (documented, locked at apply time): the spec's "oversized
+      warns but saves untruncated" scenario wording is NOT literally
+      satisfied — the PRE-EXISTING, unrelated `MaxObservationLength`
+      truncation clamp (predates write-hygiene, still tested/relied upon
+      elsewhere) still truncates oversized content exactly as before; this
+      remediation's new warning mechanism itself never truncates or mutates
+      content, it only adds an advisory notice alongside whatever the
+      pre-existing clamp does. Changing that clamp's behavior was out of
+      scope for a 2-REQ gap closure and would have risked regressing
+      unrelated, already-shipped behavior.
+      Files: `internal/store/store.go` (+~65L incl. doc comments),
+      `internal/store/save_normalization_test.go` (new, ~175L),
+      `internal/config/config.go` (+~10L), `internal/config/write_hygiene_config_test.go`
+      (+~10L), `cmd/omnia/main.go` (+4L, 4 sites), `cmd/omnia/write_hygiene_wiring_test.go`
+      (+~10L), `internal/mcp/mcp.go` (+~20L), `internal/mcp/save_normalization_envelope_test.go`
+      (new, ~65L), `DOCS.md` (+2L, mem_save section), `README.md` (+1L, config table).
+- [x] 12.2 WARNING — PR11 task 11.9: added "Review Due CLI (admin)" section
+      to `DOCS.md` documenting `omnia review-due [--project][--json]` +
+      `review.due_nudge` (mirrors PR8/PR9/PR10's Dedupe/Claude-Memory-Import
+      section style).
+- [x] 12.3 tasks.md reconciliation: checked off PR6 (6.1-6.3) and PR11
+      (11.1-11.9) sub-tasks with retroactive Apply Notes citing their real
+      merged commits (`a8947ff` #160, `575cfa4` #162) — both were fully
+      shipped and tested on main but left unchecked (obs #1682 CRITICAL
+      finding #2).
+- [x] 12.4 SUGGESTION — spec metadata fix: the engram spec artifact's own
+      "## Totals" summary claimed "42 requirements, 41 scenarios"; real
+      per-domain counts (counted directly from `### Requirement:`/
+      `#### Scenario:` headers in the on-disk `specs/*/spec.md` files —
+      these numbers never existed in any on-disk file, only in the engram
+      artifact's own text) total 28 requirements / 45 scenarios. Fixed via
+      `mem_update` on engram obs #1666 (topic_key
+      `sdd/omnia-0.3.1-write-hygiene/spec`) — every per-domain sub-total plus
+      the grand total corrected; zero requirement/scenario TEXT changed.
+
+Files: see 12.1 above; `DOCS.md` (12.2, +~10L); `openspec/changes/omnia-0.3.1-write-hygiene/tasks.md`
+(12.3, this file); engram obs #1666 (12.4, no on-disk file).
+Est./actual lines: ~230 (code+tests+docs, excl. bookkeeping-only 12.3/12.4).
+
+Verification: `CGO_ENABLED=0 go build ./...` clean. `CGO_ENABLED=0 go vet
+./...` clean. `gofmt -l` empty on every touched/new file.
+`CGO_ENABLED=0 go test ./internal/store/... ./internal/config/... ./cmd/omnia/...`
+all green. Full-repo `CGO_ENABLED=0 go test ./...`: every package green
+except `internal/mcp`'s SAME 10 pre-existing `unknown_project`/
+`TestHandleCapturePassiveDefaultsSourceAndSession` failures already
+confirmed pre-existing across every prior PR in this chain (unaffected by
+PR12 — 0 overlap with `save_normalization_envelope_test.go`).
 
 ---
 

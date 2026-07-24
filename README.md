@@ -219,6 +219,7 @@ Config lives at `~/.config/omnia/config.yaml` (`cp config.example.yaml` to start
 | `write_hygiene.update_threshold` | `0.9` | Similarity STRICTLY above which (with the shrink-guard satisfied) an incoming save auto-updates the matched observation instead of duplicating it; exactly 0.9 does not update |
 | `write_hygiene.shrink_guard` | `0.9` | Auto-update refuses to replace content with a candidate shorter than this fraction of the existing content's length — more info never silently becomes less info |
 | `write_hygiene.candidate_limit` | `10` | FTS-prefiltered candidates the write-gate scores per save; the gate never scans the whole store |
+| `write_hygiene.min_content_length` | `10` | Save-normalization's minimum content length in characters (after trimming whitespace); shorter content is warned as "below minimum length" in `mem_save`'s `save_warnings` — never blocked |
 
 Cloud env vars use the `OMNIA_CLOUD_*` prefix (legacy `ENGRAM_CLOUD_*` also accepted).
 

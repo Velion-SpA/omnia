@@ -52,22 +52,27 @@ func assertWriteHygieneWired(t *testing.T, captured *store.Config, wh config.Wri
 	if captured.CandidateLimit != wh.CandidateLimit {
 		t.Errorf("CandidateLimit = %v, want %v", captured.CandidateLimit, wh.CandidateLimit)
 	}
+	if captured.MinContentLength != wh.MinContentLength {
+		t.Errorf("MinContentLength = %v, want %v", captured.MinContentLength, wh.MinContentLength)
+	}
 }
 
 var writeHygieneEnabledFixture = config.WriteHygieneConfig{
-	Enabled:         true,
-	NoopThreshold:   0.98,
-	UpdateThreshold: 0.9,
-	ShrinkGuard:     0.9,
-	CandidateLimit:  10,
+	Enabled:          true,
+	NoopThreshold:    0.98,
+	UpdateThreshold:  0.9,
+	ShrinkGuard:      0.9,
+	CandidateLimit:   10,
+	MinContentLength: 10,
 }
 
 var writeHygieneKillSwitchFixture = config.WriteHygieneConfig{
-	Enabled:         false,
-	NoopThreshold:   0.98,
-	UpdateThreshold: 0.9,
-	ShrinkGuard:     0.9,
-	CandidateLimit:  10,
+	Enabled:          false,
+	NoopThreshold:    0.98,
+	UpdateThreshold:  0.9,
+	ShrinkGuard:      0.9,
+	CandidateLimit:   10,
+	MinContentLength: 10,
 }
 
 func TestCmdContext_ThreadsWriteHygieneFromConfig(t *testing.T) {

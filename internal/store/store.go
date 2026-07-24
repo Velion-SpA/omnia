@@ -605,6 +605,14 @@ type Config struct {
 	UpdateThreshold     float64
 	ShrinkGuard         float64
 	CandidateLimit      int
+	// MinContentLength mirrors internal/config.WriteHygieneConfig's
+	// MinContentLength field (save-normalization spec REQ "Non-Blocking Junk
+	// Warnings"): content shorter than this (after trimming whitespace) is
+	// warned as "below minimum length". <=0 falls back to
+	// defaultSaveNormalizationMinLength inside detectSaveNormalizationWarnings
+	// — same zero-check idiom as NoopThreshold/UpdateThreshold/ShrinkGuard
+	// above. Gated by WriteHygieneEnabled, same kill-switch.
+	MinContentLength int
 	// DisableFTSRelax is the kill-switch for Search's zero-hit relaxation
 	// ladder (design obs #1668 D7, spec fts-recall, mirrors
 	// internal/config.RecallConfig.FTSRelaxOnZero — duplicated here, not
@@ -2707,7 +2715,44 @@ const (
 	// excluded from Jaccard scoring entirely (BM25 scores are negative;
 	// closer to 0 is a better match).
 	writeGateCandidateBM25Floor = -2.0
+	// defaultSaveNormalizationMinLength mirrors internal/config's own
+	// WriteHygieneConfig.MinContentLength default (save-normalization spec
+	// REQ "Non-Blocking Junk Warnings").
+	defaultSaveNormalizationMinLength = 10
 )
+
+// detectSaveNormalizationWarnings evaluates save-normalization spec REQ
+// "Non-Blocking Junk Warnings" against the SUBMITTED content: empty/
+// whitespace-only content, content below minLength, a missing "Keywords:"
+// section (the repo-wide convention every mem_save content block ends with,
+// per the Engram memory-save contract), and content above maxLength. Pure
+// and read-only — this NEVER rejects a save (spec: "Warnings MUST NEVER
+// block, reject, or refuse a save"), it only produces itemized advisory
+// notices (spec REQ "Warnings Are Itemized In The Envelope").
+//
+// Empty content short-circuits to a single "empty content" warning: it
+// trivially satisfies "below minimum length" and "missing Keywords section"
+// too, so reporting only the most specific condition avoids three redundant
+// warnings for the exact same underlying fact. minLength/maxLength <= 0
+// disable that specific check.
+func detectSaveNormalizationWarnings(content string, minLength, maxLength int) []string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return []string{"empty content"}
+	}
+
+	var warnings []string
+	if minLength > 0 && len(trimmed) < minLength {
+		warnings = append(warnings, fmt.Sprintf("content below minimum length (%d chars, minimum %d)", len(trimmed), minLength))
+	}
+	if !strings.Contains(strings.ToLower(content), "keywords:") {
+		warnings = append(warnings, "missing Keywords section")
+	}
+	if maxLength > 0 && len(content) > maxLength {
+		warnings = append(warnings, fmt.Sprintf("content exceeds maximum size (%d chars, maximum %d)", len(content), maxLength))
+	}
+	return warnings
+}
 
 // SaveResult is returned by SaveObservation and carries the write-gate's
 // classification alongside the observation ID it resolved to (design obs
@@ -2736,6 +2781,15 @@ type SaveResult struct {
 	// "topic_key match", "near-duplicate of #42 (jaccard 0.990)", "candidate
 	// #42 below update threshold (jaccard 0.640)", "no candidate found".
 	Reason string
+	// Warnings carries save-normalization's non-blocking junk-warning
+	// itemization (spec save-normalization REQ "Non-Blocking Junk Warnings" /
+	// "Warnings Are Itemized In The Envelope"): zero or more distinct,
+	// human-readable notices about the submitted content. Warnings NEVER
+	// affect Decision — a save always completes regardless of how many fire.
+	// Set for every Decision value (NOOP/UPDATE/RELATE/SAVE) since junk
+	// content can trigger any of them. Always nil when WriteHygieneEnabled is
+	// false (kill-switch: zero new behavior).
+	Warnings []string
 }
 
 // writeGateAction identifies which branch of the decision ladder fired
@@ -2972,6 +3026,26 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 	// Strip <private>...</private> tags before persisting ANYTHING
 	title := stripPrivateTags(p.Title)
 	content := stripPrivateTags(p.Content)
+
+	// Save-normalization junk warnings (spec save-normalization REQ
+	// "Non-Blocking Junk Warnings"), evaluated on the SUBMITTED content
+	// BEFORE the pre-existing MaxObservationLength truncation below, so
+	// "oversized" always reflects what the caller actually sent — not the
+	// already-clamped result. This truncation clamp predates write-hygiene
+	// and is unrelated/orthogonal to it (unchanged here): the new warning
+	// mechanism itself never truncates or otherwise mutates content: it only
+	// adds an advisory notice alongside whatever the pre-existing clamp does.
+	// Gated behind WriteHygieneEnabled — same kill-switch as the write_gate
+	// envelope (design obs #1668 D2/D4) — so a disabled gate produces zero
+	// new v0.3.1 behavior, byte-for-byte pre-v0.3.1 SaveObservation.
+	var saveWarnings []string
+	if s.cfg.WriteHygieneEnabled {
+		minLength := s.cfg.MinContentLength
+		if minLength <= 0 {
+			minLength = defaultSaveNormalizationMinLength
+		}
+		saveWarnings = detectSaveNormalizationWarnings(content, minLength, s.cfg.MaxObservationLength)
+	}
 
 	if len(content) > s.cfg.MaxObservationLength {
 		content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
@@ -3260,6 +3334,11 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 	if err != nil {
 		return SaveResult{}, err
 	}
+	// Warnings are computed once, outside the transaction, from the submitted
+	// content only — attached here so every Decision branch above (NOOP via
+	// topic_key/hash-window/ladder, UPDATE, RELATE, SAVE) carries them
+	// uniformly without threading a parameter through six return points.
+	result.Warnings = saveWarnings
 	return result, nil
 }
 
