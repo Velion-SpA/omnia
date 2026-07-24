@@ -5,8 +5,8 @@ package mcp
 // (design obs #1643 section 5, spec obs #1642 injection-budget REQ5 /
 // injection-diversity REQ4 / type-as-lens REQ5): every pass wired into
 // handleSearch's pipeline AFTER RankResults/ApplyStalenessDownrank —
-// ApplyTokenBudget (PR2, this file's only entry so far), ApplyMMR (PR4),
-// ApplyTypeLens (PR5) — MUST keep the topic_key exact-match sentinel
+// ApplyTokenBudget (PR2), ApplyMMR (PR4), ApplyTypeLens (PR5, this file's
+// newest entry) — MUST keep the topic_key exact-match sentinel
 // (Rank == exactSentinelRank) and any SignatureMatch row present, COMPLETE
 // (never trimmed/altered), and ordered strictly before every non-pre-empted
 // row, no matter how adversarially that pass is configured.
@@ -61,6 +61,43 @@ var preemptionInvariantCases = []preemptionInvariantCase{
 			// first, budget last), each under its own most adversarial
 			// config — the invariant must survive the composition, not just
 			// each pass in isolation.
+			results = ApplyMMR(results, nil, config.DiversityConfig{Enabled: true, Lambda: 0.01, SimilarityThreshold: 0.01})
+			return ApplyTokenBudget(results, config.TokenBudgetConfig{Enabled: true, MaxTokens: 1})
+		},
+	},
+	{
+		name: "ApplyTypeLens",
+		apply: func(results []store.SearchResult) []store.SearchResult {
+			// lensType "manual" deliberately matches the sentinel row's own
+			// Type (see preemptionFixture) — the most hostile config
+			// possible: even when the boost target coincides with a
+			// pre-empted row's type, pre-emption must still win outright;
+			// the sentinel/signature rows never compete for, or lose to,
+			// the lens partition.
+			return ApplyTypeLens(results, "manual", config.TypeLensConfig{Enabled: true})
+		},
+	},
+	{
+		name: "ApplyTypeLens_lensMatchesSignatureType",
+		apply: func(results []store.SearchResult) []store.SearchResult {
+			// The sibling hostile case: lensType "bugfix" matches the
+			// SIGNATURE row's own Type (see preemptionFixture) — the
+			// signature row must stay in the pre-empted partition (second,
+			// after the sentinel), never double-lifted into the lens'
+			// matches bucket (adversarial-review coverage gap, v0.3).
+			return ApplyTypeLens(results, "bugfix", config.TypeLensConfig{Enabled: true})
+		},
+	},
+	{
+		name: "ApplyTypeLens_then_ApplyMMR_then_ApplyTokenBudget",
+		apply: func(results []store.SearchResult) []store.SearchResult {
+			// The FULL v0.3 pipeline exactly as handleSearch chains it
+			// (type-lens -> MMR -> budget, design section 2's final order),
+			// each under its own most adversarial config — the invariant
+			// must survive the complete composition, not just each pass in
+			// isolation or the MMR+budget pair alone (see
+			// ApplyMMR_then_ApplyTokenBudget above, PR4).
+			results = ApplyTypeLens(results, "manual", config.TypeLensConfig{Enabled: true})
 			results = ApplyMMR(results, nil, config.DiversityConfig{Enabled: true, Lambda: 0.01, SimilarityThreshold: 0.01})
 			return ApplyTokenBudget(results, config.TokenBudgetConfig{Enabled: true, MaxTokens: 1})
 		},

@@ -211,6 +211,7 @@ Config lives at `~/.config/omnia/config.yaml` (`cp config.example.yaml` to start
 | `injection.diversity.enabled` | `false` | Enable an MMR (maximal marginal relevance) read-time diversity pass over `mem_search` results: demotes/hard-drops rows near-duplicating an already-selected higher-ranked row using a cheap token-set Jaccard similarity over hydrated content (no new embedding calls, no new model dependency); byte-for-byte identical output when off |
 | `injection.diversity.lambda` | `0.7` | Relevance-vs-diversity balance in the greedy MMR reselection `argmax[lambda*rel(d) - (1-lambda)*maxSim(d, selected)]`; higher favors relevance, lower favors diversity |
 | `injection.diversity.similarity_threshold` | `0.9` | Jaccard similarity hard-drop cutoff; a candidate whose similarity to an already-selected row meets or exceeds this is dropped entirely as a near-duplicate, not merely reordered |
+| `injection.type_lens.enabled` | `false` | Enable a situational type boost over `mem_search` results: infers a likely-relevant memory type from the query text (e.g. an error/panic/crash-ish query implies `bugfix`, a decide/tradeoff-ish query implies `decision`) and lifts matching-type rows above non-matching ones, on top of the existing importance-tier ordering — a boost, never a hard filter; an explicit `type` argument on the search always stands the lens down; byte-for-byte identical output when off |
 
 Cloud env vars use the `OMNIA_CLOUD_*` prefix (legacy `ENGRAM_CLOUD_*` also accepted).
 

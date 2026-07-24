@@ -114,6 +114,15 @@ type InjectionConfig struct {
 	// byte-for-byte identical to pre-v0.3 output when unset (spec REQ6 —
 	// Disabled by Default, No-Op When Off).
 	Diversity DiversityConfig `yaml:"diversity"`
+	// TypeLens gates handleSearch's situational type-as-lens boost (spec
+	// type-as-lens, InferLensType/ApplyTypeLens in internal/mcp/type_lens.go,
+	// PR5): a read-time stable-partition re-rank that lifts rows whose Type
+	// matches a situational signal inferred from the query (e.g. an
+	// error-ish query lifts bugfix-type rows) ABOVE non-matching rows,
+	// without excluding anything. Disabled by default: handleSearch's
+	// response stays byte-for-byte identical to pre-v0.3 output when unset
+	// (spec REQ6 — Disabled by Default, No-Op When Off).
+	TypeLens TypeLensConfig `yaml:"type_lens"`
 }
 
 // TokenBudgetConfig gates a single token-based budget pass (spec
@@ -144,6 +153,17 @@ type DiversityConfig struct {
 	Enabled             bool    `yaml:"enabled"`
 	Lambda              float64 `yaml:"lambda"`
 	SimilarityThreshold float64 `yaml:"similarity_threshold"`
+}
+
+// TypeLensConfig gates ApplyTypeLens (spec type-as-lens, design obs #1643
+// section 3.5/ADR-6). Unlike TokenBudgetConfig/DiversityConfig, there is no
+// numeric field to tune — InferLensType's signal->type table is a fixed,
+// code-level rule list (design section 3.5), not a config-surfaced
+// parameter — so Enabled is the entire gate, and its zero value (false) IS
+// the default (spec REQ6), same convention as every other Context Economy
+// gate above.
+type TypeLensConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // ProceduralConfig gates and tunes the procedural-memory governance gate
@@ -689,6 +709,12 @@ func applyDefaults(cfg *Config, data []byte) {
 	if cfg.Injection.Diversity.SimilarityThreshold == 0 {
 		cfg.Injection.Diversity.SimilarityThreshold = 0.9
 	}
+	// Injection.TypeLens.Enabled intentionally has NO default override —
+	// its zero value (false) IS the default, same convention as every other
+	// Context Economy gate above. Unlike Diversity/Budget, TypeLensConfig
+	// has no other field: InferLensType's signal table is fixed code, not a
+	// tunable config value, so there is nothing else for applyDefaults to
+	// fill in here.
 }
 
 // legacyEmbeddingsDBPath is the historic global default for Omnia's own
