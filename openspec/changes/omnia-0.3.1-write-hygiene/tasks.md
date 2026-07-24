@@ -669,7 +669,7 @@ under the 400-line/PR budget on its own.
 Design slice 7b · Branch `feat/dedupe-apply` · Base: `main` (after PR8) ·
 `type:feature` · Depends on: PR8 · Capability: dedupe-scan
 
-- [ ] 9.1 RED: add cases to `cmd/omnia/dedupe_test.go`: `--apply <id>` on
+- [x] 9.1 RED: add cases to `cmd/omnia/dedupe_test.go`: `--apply <id>` on
       cluster A leaves cluster B fully untouched (explicit per-cluster
       isolation); **no `--apply all` flag exists — invoking `--apply` without
       a concrete cluster id errors with usage, per the resolved scope
@@ -678,22 +678,153 @@ Design slice 7b · Branch `feat/dedupe-apply` · Base: `main` (after PR8) ·
       (already applied, or an underlying observation changed) fails cleanly
       with no partial/silent mutation; idempotent re-apply of an already-applied
       cluster is a safe no-op/clear error, never a double-supersede.
-- [ ] 9.2 RED: assert a successful `--apply <id>` inserts a JUDGED
+      DONE: 6 tests (bare `--apply`, `--apply all`, `--apply`+`--dry-run`
+      combo, stale/never-existed cluster id, cluster-A-vs-cluster-B
+      isolation, idempotent re-apply refusal + single-supersede assertion).
+- [x] 9.2 RED: assert a successful `--apply <id>` inserts a JUDGED
       `memory_relations` row (`canonical supersedes loser`, `marked_by
       "system:dedupe"`) per loser, and soft-deletes each loser via
       `Store.DeleteObservationWithActor(loserID, false, "system:dedupe")`
       (referenced history: queryable/restorable, out of active recall) — while
       the canonical row is untouched.
-- [ ] 9.3 GREEN: extend `cmd/omnia/dedupe.go` with `--apply <cluster-id>`
+      DONE: 2 tests (relation+soft-delete shape assertions via
+      `GetRelationsForObservations`/raw `deleted_at`+`content` query,
+      `--json` apply-result round-trip).
+- [x] 9.3 GREEN: extend `cmd/omnia/dedupe.go` with `--apply <cluster-id>`
       flag parsing (reject bare `--apply`/`--apply all`), stale-cluster
       re-validation against current DB state before mutating, and the
       supersede+soft-delete mutation using the existing relation-insert +
       `DeleteObservationWithActor` primitives.
-- [ ] 9.4 Docs: update `omnia dedupe` usage to document `--apply <cluster-id>`
+      DONE (see PR9 Apply Notes below).
+- [x] 9.4 Docs: update `omnia dedupe` usage to document `--apply <cluster-id>`
       as the ONLY mutation path (no all-clusters shortcut).
+      DONE: `DOCS.md`'s "Dedupe Scan CLI (admin)" section + `main.go`'s
+      `printUsage()` entry both updated with the `--apply`/`--dry-run` shape.
 
-Files: `cmd/omnia/dedupe.go` (modify), `cmd/omnia/dedupe_test.go` (modify), docs (modify).
-Est. lines: ~260.
+Files: `cmd/omnia/dedupe.go` (modify, +251/-21 net), `cmd/omnia/dedupe_test.go`
+(modify, +389 new test lines), `cmd/omnia/main.go` (modify, usage text),
+`DOCS.md` (modify, docs). Est. lines: ~260. ACTUAL: ~281 net shipped
+production+docs lines (dedupe.go+main.go+DOCS.md, excl. test file per
+PR3/PR4/PR8/PR11 convention) — somewhat over estimate, same thorough-doc-
+comment pattern every prior PR in this chain hit; comfortably under the
+400-line/PR budget on shipped code alone, no `size:exception` needed.
+
+## PR9 Apply Notes (2026-07-24)
+
+STATUS: COMPLETE — implemented in worktree wt-apply, branch
+feat/v031-dedupe-apply, off main ff86676 (PR1+PR2+PR11+PR3+PR4+PR5+PR8 all
+merged). NOT committed (apply step only; commit/PR left to the delivery
+step). Strict TDD: RED confirmed via `git stash push -- cmd/omnia/dedupe.go`
+(reverting to the pre-PR9, PR8-only baseline) then
+`CGO_ENABLED=0 go vet ./cmd/omnia/...` → `vet: cmd/omnia/dedupe_test.go:746:59:
+undefined: dedupeApplyActor`; restored via `git stash pop`, then GREEN.
+
+Sub-tasks delivered (4, matching design D9/tasks 9.1-9.4):
+- Flag parsing: `--apply <cluster-id>` requires an explicit value (bare
+  `--apply` errors with usage before the store opens); `--apply all` is
+  explicitly rejected (the resolved scope decision — no all-clusters
+  shortcut); `--apply` + `--dry-run` together is rejected (mutually
+  exclusive safety check, also before the store opens).
+- Staleness handling (`applyDedupeCluster`): re-runs `runDedupeScan` FRESH
+  against current DB state and looks up the named cluster id in that fresh
+  result — no separate "proposal snapshot" is ever stored between `omnia
+  dedupe` and `omnia dedupe --apply`, so a fresh scan IS the staleness
+  check. Both staleness cases (already-applied; underlying data changed)
+  collapse onto the same "cluster id not found in a fresh scan" error path
+  with no special-casing needed, since cluster ids are derived entirely
+  from current DB state (see runDedupeScan's own doc comment). This also
+  makes idempotent re-apply a natural refusal: once a cluster is applied,
+  its losers are soft-deleted and excluded from every future
+  `AllObservations`-backed scan, so the same cluster id can never
+  recompute again.
+- Mutation (per loser, canonical untouched): `Store.SaveRelation` (insert
+  pending) + `Store.JudgeRelation` (mark judged, `relation=supersedes`,
+  explicit `MarkedByActor="system:dedupe"`/`MarkedByKind="system"`) — this
+  two-step path was chosen over the simpler one-call `Store.JudgeBySemantic`
+  specifically because `JudgeBySemantic` hardcodes
+  `marked_by_actor="engram"`/`marked_by_kind="system"` with no override,
+  and design D9 requires `marked_by "system:dedupe"` verbatim;
+  `SaveRelation`+`JudgeRelation` is the exact same two-step path an
+  ordinary `mem_judge` verdict already takes, so this reuses the existing
+  relation machinery rather than inventing a new one. Then
+  `Store.DeleteObservationWithActor(loserID, false, "system:dedupe")`
+  (soft-delete, confirmed reused verbatim — same actor string on both
+  halves of the mutation).
+- Docs: `DOCS.md`'s existing "Dedupe Scan CLI (admin)" section (from PR8)
+  extended with the `--apply`/`--dry-run` usage line + a 5-point mutation
+  behavior list; `main.go`'s `printUsage()` `dedupe` entry updated to the
+  same shape.
+
+**Implementation decisions not spelled out verbatim in design/tasks,
+resolved during apply** (all documented in code comments in `dedupe.go`):
+1. `memory_relations.sync_id` for the new supersede relation is generated
+   locally in `cmd/omnia` (`newDedupeRelationSyncID`, same `"rel-<16hex>"`
+   shape as `internal/store`'s own unexported `newSyncID` generator) rather
+   than calling `internal/store`'s private helper directly — `SaveRelation`'s
+   `SyncID` field is an exported, caller-supplied contract (the DB's UNIQUE
+   constraint is the only real requirement), so this is using that contract
+   as designed, not inventing a new ID scheme.
+2. Relation created BEFORE soft-delete (not after) — order doesn't affect
+   correctness here (soft-delete never touches `sync_id` or triggers the
+   hard-delete-only orphaning branch), but creating the attribution record
+   first means a mutation that fails partway through never leaves a
+   soft-deleted loser with no supersede record explaining why.
+3. Confirmed via a dedicated test
+   (`TestCmdDedupeApplyCreatesSupersedeRelationAndSoftDeletesLoser`) that
+   `GetRelationsForObservations`' `TargetMissing` flag is `true` for a
+   soft-deleted (not hard-deleted) loser — its own doc comment says
+   "Missing OR soft-deleted... set the flag to true"; this is a distinct
+   signal from `judgment_status='orphaned'` (hard-delete-only, asserted
+   separately as staying `'judged'`). Flagging this so sdd-verify doesn't
+   mistake `TargetMissing=true` for the relation having been orphaned or
+   the loser being unreachable — the loser's content and the relation row
+   are both still directly queryable, exactly the "referenced history"
+   contract design D9 requires.
+4. Sequential, stop-on-first-error apply across a cluster's losers (no
+   cross-loser transaction spanning multiple `Store` calls, since `Store`
+   does not expose a public cross-method transaction primitive to
+   `cmd/omnia`): documented as a known limitation, not silently glossed
+   over. The spec's own "no partial/silent mutation" requirement is scoped
+   to the STALE-cluster-apply case specifically (verified: the fresh-scan
+   staleness check runs BEFORE any mutation call, so a stale/unknown
+   cluster id is always a full no-op) — it is not a cross-loser atomicity
+   guarantee within an otherwise-valid multi-loser apply, which no existing
+   `cmd/omnia` command with multi-row mutation currently provides either.
+
+RED→GREEN evidence: all 8 new PR9 tests
+(`TestCmdDedupeApplyBareFlagRequiresExplicitClusterID`,
+`TestCmdDedupeApplyAllIsNotSupported`,
+`TestCmdDedupeApplyAndDryRunAreMutuallyExclusive`,
+`TestCmdDedupeApplyStaleClusterIDFailsCleanlyNoMutation`,
+`TestCmdDedupeApplyIsolatesNamedClusterOnly`,
+`TestCmdDedupeApplyIdempotentReApplyRefusesCleanly`,
+`TestCmdDedupeApplyCreatesSupersedeRelationAndSoftDeletesLoser`,
+`TestCmdDedupeApplyJSONReportsClusterCanonicalAndLosers`) written first,
+confirmed RED via `git stash` of the pre-PR9 `dedupe.go` (see STATUS above),
+then GREEN after the implementation landed — one iterative fix needed
+during GREEN (not a production bug): the `TargetMissing` test assertion
+initially expected `false` for a soft-deleted target; corrected to `true`
+per `GetRelationsForObservations`' own documented contract (see decision #3
+above).
+
+Full verification: `CGO_ENABLED=0 go build ./...` clean. `go vet ./...`
+clean. `gofmt -l cmd/omnia/dedupe.go cmd/omnia/dedupe_test.go cmd/omnia/main.go`
+empty (no formatting diffs). `CGO_ENABLED=0 go test ./cmd/omnia/...
+./internal/store/...` — both green (cmd/omnia 13.5s incl. all 17 dedupe
+tests + the 1650-row scale test, internal/store 7.8s untouched/no
+regression). Full-repo `CGO_ENABLED=0 go test ./...`: only failures are the
+SAME 10 pre-existing `internal/mcp` `unknown_project` test failures already
+confirmed pre-existing/unrelated across every prior PR in this chain
+(TestHandleSaveSuggestsTopicKeyWhenMissing,
+TestHandleSaveFallsBackToManualSaveWhenNoActiveSession,
+TestHandleSaveWithNilActivityStillSucceeds,
+TestHandleSavePromptCaptureFailureIsNonFatal,
+TestHandleSavePromptFeedsAutoCaptureContext,
+TestHandleSaveCapturePromptFalseSkipsCurrentPrompt,
+TestHandleSaveNoCurrentPromptStillSucceeds,
+TestHandleSaveDoesNotSuggestWhenTopicKeyProvided,
+TestHandleCapturePassiveDefaultsSourceAndSession,
+TestHandleSaveReturnsLifecycleState) — PR9 never touches `internal/mcp`.
 
 ---
 
