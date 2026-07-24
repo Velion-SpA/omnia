@@ -13,6 +13,19 @@
 # this, an agent that genuinely has nothing to save never resets the
 # last-save clock, so the reminder would fire on every single message forever.
 #
+# SIGNAL-GATED RECALL NUDGE (Play O, omnia v0.3 context economy): gated by
+# OMNIA_SIGNAL_RECALL (default unset/off). Bash cannot parse the project's
+# config.yaml, so this is a deliberate env-var exception to the config-file
+# gating the Go-side v0.3 passes use. When set to a truthy value, cheap
+# regex signals (new-topic / uncertainty, EN+ES) in the raw prompt trigger a
+# NUDGE instructing the agent to call mem_search — never auto-injected
+# results. Firing is limited by BOTH a per-topic dedup marker AND a 300s
+# per-session cooldown (so a rapid Q&A session cannot nudge every turn), and
+# a fired signal nudge is combined with the save-nudge below into a single
+# systemMessage when both are due that turn, rather than the signal nudge
+# preempting the save-nudge check entirely. See the SIGNAL-GATED RECALL
+# NUDGE section below for details.
+#
 # MUST exit 0 always and output valid JSON — otherwise Claude Code blocks the message.
 
 ENGRAM_PORT="${ENGRAM_PORT:-7437}"
@@ -166,94 +179,272 @@ if [ ! -f "$STATE_FILE" ]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SUBSEQUENT MESSAGES — existing save-nudge logic
+# SIGNAL-GATED RECALL NUDGE (Play O — omnia v0.3 context economy)
+#
+# When OFF (default): is_signal_recall_enabled returns false, this whole block
+# is skipped, and output falls through unaffected — byte-for-byte identical to
+# pre-v0.3 behavior.
+#
+# When ON: detects two cheap, LLM-free signals in the raw prompt text —
+# new-topic (prompt opens with an imperative verb, EN+ES) and uncertainty
+# (question words/markers or a trailing "?", EN+ES). On a hit, sets
+# SIGNAL_NUDGE_TEXT to a NUDGE instructing the agent to call mem_search with
+# extracted keywords — it does NOT print/exit here. This is deliberately an
+# INSTRUCTION, never injected search results — results must still flow
+# through the normal mem_search path so budget/diversity/type-lens gates
+# still apply; this hook only decides WHEN to suggest searching. The
+# save-nudge logic below still runs afterward (see compute_save_nudge) and
+# the two are combined into a single systemMessage if both fire the same
+# turn, instead of the signal nudge starving the save-nudge every time.
+#
+# Detection runs against a Spanish-accent-normalized copy of the prompt (see
+# normalize_es_accents) so matching is correct under ANY locale, including
+# LC_ALL=C/POSIX where bracket-expression accent classes (e.g. [oó]) do not
+# reliably match multi-byte UTF-8 characters. Extracted keywords are pulled
+# from the same normalized text for the same reason.
+#
+# Firing is gated by TWO independent limiters:
+#   1. Topic dedup (post-tool-error-recall.sh marker-file idiom): a checksum
+#      of (trigger-kind + extracted terms) keys a per-session marker file, so
+#      the SAME topic/uncertainty doesn't repeat within a session.
+#   2. Session cooldown: a separate per-session marker records the epoch of
+#      the last fired signal nudge; a NEW/different topic within
+#      OMNIA_SIGNAL_RECALL_COOLDOWN_SECS (default 300s) of the last one is
+#      still suppressed. Without this, distinct topic hashes (e.g. a rapid
+#      back-and-forth Q&A session, each question textually different) would
+#      each pass topic dedup and nudge on every turn — exactly what the
+#      "must not fire every turn" requirement forbids.
+#
+# New signal-recall marker/cooldown files live under ${TMPDIR:-/tmp} (not the
+# pre-existing save-nudge STATE_FILE, which stays as-is/out of scope), per
+# design.md's `${TMPDIR:-/tmp}/omnia-signal-recall-<session>-<hash>` format.
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Detect project only after the first-message path has had a chance to return.
-if [ -z "${PROJECT:-}" ]; then
-  PROJECT=$(detect_project "$CWD")
+is_signal_recall_enabled() {
+  case "${OMNIA_SIGNAL_RECALL:-}" in
+    1|true|TRUE|True|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Transliterate the small set of Spanish accented letters (both cases) to
+# their ASCII base letter by matching explicit UTF-8 byte sequences via sed.
+# This is locale-independent: matching a literal byte sequence does not
+# depend on LC_ALL/LANG being UTF-8-aware, so it is correct on both BSD sed
+# (macOS) and GNU sed even under LC_ALL=C/POSIX.
+normalize_es_accents() {
+  sed \
+    -e "s/$(printf '\303\241')/a/g" \
+    -e "s/$(printf '\303\251')/e/g" \
+    -e "s/$(printf '\303\255')/i/g" \
+    -e "s/$(printf '\303\263')/o/g" \
+    -e "s/$(printf '\303\272')/u/g" \
+    -e "s/$(printf '\303\261')/n/g" \
+    -e "s/$(printf '\303\201')/A/g" \
+    -e "s/$(printf '\303\211')/E/g" \
+    -e "s/$(printf '\303\215')/I/g" \
+    -e "s/$(printf '\303\223')/O/g" \
+    -e "s/$(printf '\303\232')/U/g" \
+    -e "s/$(printf '\303\221')/N/g"
+}
+
+# Returns success (0) if a signal nudge already fired within the cooldown
+# window recorded in $1 (the cooldown marker file), given window $2 seconds.
+signal_cooldown_active() {
+  local marker="$1" window="$2" last="" now
+  [ -f "$marker" ] || return 1
+  read -r last < "$marker" 2>/dev/null || last=""
+  case "$last" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  now=$(date "+%s")
+  [ "$(( now - last ))" -lt "$window" ]
+}
+
+SIGNAL_NUDGE_TEXT=""
+
+if is_signal_recall_enabled; then
+  PROMPT_TEXT=$(printf '%s' "$INPUT" | jq -r '.prompt // empty' 2>/dev/null)
+
+  if [ -n "$PROMPT_TEXT" ]; then
+    PROMPT_NORM=$(printf '%s' "$PROMPT_TEXT" | normalize_es_accents)
+    TRIGGER_KIND=""
+    APOS="'"
+
+    # New-topic: prompt opens with an imperative verb (EN+ES), case-insensitive.
+    # Spanish alternatives are written in their normalized (accent-stripped)
+    # form since PROMPT_NORM already went through normalize_es_accents.
+    if printf '%s' "$PROMPT_NORM" | grep -qiE '^[[:space:]]*(implement|add|fix|build|create|refactor|debug|investigate|explore|design|write|update|migrate|haceme|hace|arregla|implementa|agrega|crea|disena|arma|revisa)\b'; then
+      TRIGGER_KIND="new-topic"
+    else
+      # Uncertainty: question words/markers (EN+ES, per design.md §3.4) or a
+      # trailing question mark.
+      UNCERTAINTY_RE="\b(how|why|failing|not sure|stuck|what${APOS}?s|isn${APOS}?t working|no se|como|por que|no funciona|falla)\b|\?[[:space:]]*\$"
+      if printf '%s' "$PROMPT_NORM" | grep -qiE "$UNCERTAINTY_RE"; then
+        TRIGGER_KIND="uncertainty"
+      fi
+    fi
+
+    if [ -n "$TRIGGER_KIND" ]; then
+      # Cheap keyword extraction from the normalized text: lowercase, strip
+      # punctuation, drop a small EN+ES stopword list, keep the first 8
+      # remaining words. No LLM involved.
+      TERMS=$(printf '%s' "$PROMPT_NORM" \
+        | tr '[:upper:]' '[:lower:]' \
+        | tr -c '[:alnum:]' ' ' \
+        | tr -s ' ' \
+        | tr ' ' '\n' \
+        | grep -vE '^(the|a|an|to|of|in|on|for|and|or|is|are|it|this|that|with|please|el|la|los|las|de|que|un|una|y|o|es|para|con|por|favor)$' \
+        | head -n 8 \
+        | tr '\n' ' ' \
+        | sed 's/[[:space:]]*$//')
+
+      if [ -n "$TERMS" ]; then
+        SIGNAL_HASH=$(printf '%s' "${TRIGGER_KIND}:${TERMS}" | cksum | awk '{print $1}')
+        SIGNAL_STATE_DIR="${TMPDIR:-/tmp}"
+        SIGNAL_SESSION_ID="${SESSION_KEY#engram-claude-}"
+        SIGNAL_SESSION_ID="${SIGNAL_SESSION_ID%-tools-loaded}"
+        SIGNAL_MARKER_PREFIX="${SIGNAL_STATE_DIR}/omnia-signal-recall-${SIGNAL_SESSION_ID}"
+        SIGNAL_MARKER="${SIGNAL_MARKER_PREFIX}-${SIGNAL_HASH}"
+        SIGNAL_COOLDOWN_MARKER="${SIGNAL_MARKER_PREFIX}-last"
+        SIGNAL_COOLDOWN_SECS="${OMNIA_SIGNAL_RECALL_COOLDOWN_SECS:-300}"
+
+        # Dedup (same topic already nudged this session) AND cooldown (ANY
+        # signal nudge fired too recently) both gate firing.
+        if [ ! -f "$SIGNAL_MARKER" ] && ! signal_cooldown_active "$SIGNAL_COOLDOWN_MARKER" "$SIGNAL_COOLDOWN_SECS"; then
+          : > "$SIGNAL_MARKER" 2>/dev/null || true
+          SIGNAL_NOW_EPOCH=$(date "+%s")
+          # NOTE: must include the trailing newline — `read` returns non-zero
+          # on EOF-without-newline even though it populates the variable,
+          # which would trip the `read ... || reset` guard below and silently
+          # defeat the cooldown on every check.
+          printf '%s\n' "$SIGNAL_NOW_EPOCH" > "$SIGNAL_COOLDOWN_MARKER" 2>/dev/null || true
+
+          # Opportunistic, failure-silent cleanup of stale signal-recall
+          # marker files (older than 1 day) so /tmp does not accumulate them
+          # indefinitely across sessions.
+          find "$SIGNAL_STATE_DIR" -maxdepth 1 -name 'omnia-signal-recall-*' -type f -mtime +1 -delete 2>/dev/null || true
+
+          SIGNAL_NUDGE_TEXT="MEMORY NUDGE (${TRIGGER_KIND}): before answering, call mem_search with keywords: \"${TERMS}\" to check for related prior work."
+        fi
+      fi
+    fi
+  fi
 fi
 
-# Bail early if we can't determine the project
-if [ -z "$PROJECT" ]; then
-  echo "$OUTPUT"
-  exit 0
-fi
+# ──────────────────────────────────────────────────────────────────────────────
+# SUBSEQUENT MESSAGES — existing save-nudge logic
+#
+# Wrapped in a function (returns instead of exiting) so a signal nudge fired
+# above does not preempt this check — it is ALWAYS evaluated, and its result
+# (still in $OUTPUT, unchanged in shape/content from before this refactor) is
+# combined with any fired SIGNAL_NUDGE_TEXT below. Cooldown-state semantics
+# are unchanged: NUDGE_STATE_FILE is only written when the save-nudge itself
+# actually fires (same condition, same file, same value, as before).
+# ──────────────────────────────────────────────────────────────────────────────
 
-# Get session start time to check if session is > 5 minutes old
-SESSION_START=""
-if [ -n "$SESSION_ID" ]; then
-  SESSION_START=$(curl -sf "${ENGRAM_URL}/sessions/${SESSION_ID}" --max-time 0.2 2>/dev/null \
-    | jq -r '.started_at // empty' 2>/dev/null)
-fi
+compute_save_nudge() {
+  # Detect project only after the first-message path has had a chance to return.
+  if [ -z "${PROJECT:-}" ]; then
+    PROJECT=$(detect_project "$CWD")
+  fi
 
-# Check session age — skip nudge if session is new (< 5 minutes)
-if [ -n "$SESSION_START" ]; then
-  SESSION_START_EPOCH=$(parse_epoch "$SESSION_START")
-  if [ -z "$SESSION_START_EPOCH" ]; then
-    echo "$OUTPUT"
-    exit 0
+  # Bail early if we can't determine the project
+  if [ -z "$PROJECT" ]; then
+    return 0
+  fi
+
+  # Get session start time to check if session is > 5 minutes old
+  SESSION_START=""
+  if [ -n "$SESSION_ID" ]; then
+    SESSION_START=$(curl -sf "${ENGRAM_URL}/sessions/${SESSION_ID}" --max-time 0.2 2>/dev/null \
+      | jq -r '.started_at // empty' 2>/dev/null)
+  fi
+
+  # Check session age — skip nudge if session is new (< 5 minutes)
+  if [ -n "$SESSION_START" ]; then
+    SESSION_START_EPOCH=$(parse_epoch "$SESSION_START")
+    if [ -z "$SESSION_START_EPOCH" ]; then
+      return 0
+    fi
+    NOW_EPOCH=$(date "+%s")
+    SESSION_AGE_SECS=$(( NOW_EPOCH - SESSION_START_EPOCH ))
+
+    if [ "$SESSION_AGE_SECS" -lt 300 ]; then
+      # Session < 5 minutes old — no nudge yet
+      return 0
+    fi
+  fi
+
+  # Fetch the most recent observation for this project (any type)
+  ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
+  LAST_SAVE_JSON=$(curl -sf \
+    "${ENGRAM_URL}/observations?project=${ENCODED_PROJECT}&limit=1&sort=created_at:desc" \
+    --max-time 0.2 2>/dev/null)
+
+  if [ -z "$LAST_SAVE_JSON" ]; then
+    # Server not responding or slow — fail silently, no nudge
+    return 0
+  fi
+
+  LAST_SAVE_AT=$(echo "$LAST_SAVE_JSON" | jq -r '.[0].created_at // empty' 2>/dev/null)
+
+  if [ -z "$LAST_SAVE_AT" ]; then
+    # No observations yet — no nudge (session might just be starting)
+    return 0
+  fi
+
+  # Parse last save timestamp and compare to now
+  LAST_EPOCH=$(parse_epoch "$LAST_SAVE_AT")
+  if [ -z "$LAST_EPOCH" ]; then
+    return 0
   fi
   NOW_EPOCH=$(date "+%s")
-  SESSION_AGE_SECS=$(( NOW_EPOCH - SESSION_START_EPOCH ))
+  ELAPSED=$(( NOW_EPOCH - LAST_EPOCH ))
 
-  if [ "$SESSION_AGE_SECS" -lt 300 ]; then
-    # Session < 5 minutes old — no nudge yet
-    echo "$OUTPUT"
-    exit 0
+  # Nudge if last save was > 15 minutes ago (900 seconds), but debounce so we do
+  # not repeat the reminder on every message while the agent has nothing to save.
+  if [ "$ELAPSED" -gt 900 ]; then
+    NUDGE_COOLDOWN="${ENGRAM_NUDGE_COOLDOWN_SECS:-900}"
+    NUDGE_STATE_FILE="${STATE_FILE%-tools-loaded}-last-nudge"
+
+    LAST_NUDGE_EPOCH=""
+    if [ -f "$NUDGE_STATE_FILE" ]; then
+      read -r LAST_NUDGE_EPOCH < "$NUDGE_STATE_FILE" 2>/dev/null || LAST_NUDGE_EPOCH=""
+    fi
+    # Ignore a corrupt/non-numeric state file — treat as "never nudged".
+    case "$LAST_NUDGE_EPOCH" in
+      ''|*[!0-9]*) LAST_NUDGE_EPOCH="" ;;
+    esac
+
+    if [ -z "$LAST_NUDGE_EPOCH" ] || [ "$(( NOW_EPOCH - LAST_NUDGE_EPOCH ))" -ge "$NUDGE_COOLDOWN" ]; then
+      printf '%s' "$NOW_EPOCH" > "$NUDGE_STATE_FILE" 2>/dev/null || true
+      OUTPUT=$(jq -n \
+        '{"systemMessage": "MEMORY REMINDER: It'\''s been over 15 minutes since your last save. If you'\''ve made decisions, discoveries, or completed significant work, call mem_save now."}')
+    fi
   fi
-fi
 
-# Fetch the most recent observation for this project (any type)
-ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
-LAST_SAVE_JSON=$(curl -sf \
-  "${ENGRAM_URL}/observations?project=${ENCODED_PROJECT}&limit=1&sort=created_at:desc" \
-  --max-time 0.2 2>/dev/null)
+  return 0
+}
 
-if [ -z "$LAST_SAVE_JSON" ]; then
-  # Server not responding or slow — fail silently, no nudge
-  echo "$OUTPUT"
-  exit 0
-fi
+compute_save_nudge
 
-LAST_SAVE_AT=$(echo "$LAST_SAVE_JSON" | jq -r '.[0].created_at // empty' 2>/dev/null)
+# Combine a fired signal nudge with a fired save nudge into ONE systemMessage
+# when both are due this turn; emit the signal nudge alone when only it
+# fired; otherwise fall through to the save-nudge's own output ($OUTPUT,
+# "{}" when neither fired) — byte-for-byte identical to pre-v0.3 behavior
+# whenever SIGNAL_NUDGE_TEXT is empty (signal-gated recall OFF or no trigger).
+if [ -n "$SIGNAL_NUDGE_TEXT" ]; then
+  if [ "$OUTPUT" != "{}" ]; then
+    SAVE_NUDGE_TEXT=$(printf '%s' "$OUTPUT" | jq -r '.systemMessage')
+    COMBINED_TEXT="${SIGNAL_NUDGE_TEXT}
 
-if [ -z "$LAST_SAVE_AT" ]; then
-  # No observations yet — no nudge (session might just be starting)
-  echo "$OUTPUT"
-  exit 0
-fi
-
-# Parse last save timestamp and compare to now
-LAST_EPOCH=$(parse_epoch "$LAST_SAVE_AT")
-if [ -z "$LAST_EPOCH" ]; then
-  echo "$OUTPUT"
-  exit 0
-fi
-NOW_EPOCH=$(date "+%s")
-ELAPSED=$(( NOW_EPOCH - LAST_EPOCH ))
-
-# Nudge if last save was > 15 minutes ago (900 seconds), but debounce so we do
-# not repeat the reminder on every message while the agent has nothing to save.
-if [ "$ELAPSED" -gt 900 ]; then
-  NUDGE_COOLDOWN="${ENGRAM_NUDGE_COOLDOWN_SECS:-900}"
-  NUDGE_STATE_FILE="${STATE_FILE%-tools-loaded}-last-nudge"
-
-  LAST_NUDGE_EPOCH=""
-  if [ -f "$NUDGE_STATE_FILE" ]; then
-    read -r LAST_NUDGE_EPOCH < "$NUDGE_STATE_FILE" 2>/dev/null || LAST_NUDGE_EPOCH=""
+${SAVE_NUDGE_TEXT}"
+    jq -n --arg msg "$COMBINED_TEXT" '{"systemMessage": $msg}'
+  else
+    jq -n --arg msg "$SIGNAL_NUDGE_TEXT" '{"systemMessage": $msg}'
   fi
-  # Ignore a corrupt/non-numeric state file — treat as "never nudged".
-  case "$LAST_NUDGE_EPOCH" in
-    ''|*[!0-9]*) LAST_NUDGE_EPOCH="" ;;
-  esac
-
-  if [ -z "$LAST_NUDGE_EPOCH" ] || [ "$(( NOW_EPOCH - LAST_NUDGE_EPOCH ))" -ge "$NUDGE_COOLDOWN" ]; then
-    printf '%s' "$NOW_EPOCH" > "$NUDGE_STATE_FILE" 2>/dev/null || true
-    OUTPUT=$(jq -n \
-      '{"systemMessage": "MEMORY REMINDER: It'\''s been over 15 minutes since your last save. If you'\''ve made decisions, discoveries, or completed significant work, call mem_save now."}')
-  fi
+else
+  echo "$OUTPUT"
 fi
-
-echo "$OUTPUT"
 exit 0
