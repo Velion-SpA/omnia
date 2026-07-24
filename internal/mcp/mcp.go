@@ -143,6 +143,17 @@ type MCPConfig struct {
 	// REQ6), mirroring RecallRanking/StructuralForgetting's own convention
 	// above.
 	Injection config.InjectionConfig
+
+	// Review gates handleContext's spaced-review / Play G due-count nudge
+	// (design D11, spec spaced-review REQ "Existing-Tool Output Changes
+	// Gated Default-OFF"). The zero value (DueNudge=false) is the default:
+	// mem_context's response stays byte-for-byte identical to pre-spaced-
+	// review output — extra["review_due_count"] is never set and no nudge
+	// line is ever appended — even when due observations exist, mirroring
+	// every other Context Economy/write-hygiene gate's own off-by-default
+	// convention above. `omnia review-due` (cmd/omnia) is NOT gated by this
+	// flag; it is its own explicit, opt-in command.
+	Review config.ReviewConfig
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -2315,6 +2326,25 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		if cfg.Procedural != nil {
 			if card := BuildProcedureCardForProject(s, contextProject, scope); card != nil {
 				extra = map[string]any{"procedure_card": card}
+			}
+		}
+
+		// spaced-review / Play G (design D11): due-count nudge, gated
+		// DEFAULT-OFF via review.due_nudge. Off (the zero value) means this
+		// branch never runs — result/extra stay untouched, so mem_context's
+		// output is byte-for-byte identical to pre-spaced-review behavior
+		// regardless of how many observations are actually due.
+		if cfg.Review.DueNudge {
+			if due, dueErr := s.CountObservationsNeedingReview(contextProject); dueErr == nil && due > 0 {
+				label := "memories"
+				if due == 1 {
+					label = "memory"
+				}
+				result += fmt.Sprintf("\n\n%d %s due for review — run `omnia review-due` to see them.", due, label)
+				if extra == nil {
+					extra = map[string]any{}
+				}
+				extra["review_due_count"] = due
 			}
 		}
 

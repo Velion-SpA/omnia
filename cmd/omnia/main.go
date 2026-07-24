@@ -729,6 +729,8 @@ func main() {
 		cmdConflicts(cfg)
 	case "forget-scan":
 		cmdForgetScan(cfg)
+	case "review-due":
+		cmdReviewDue(cfg)
 	case "procedure-induct":
 		cmdProcedureInduct(cfg)
 	case "procedure":
@@ -1180,6 +1182,11 @@ func cmdMCP(cfg store.Config) {
 		// thread injection.* through so handleSearch's ApplyTokenBudget pass
 		// is opt-in per config.yaml (default false, backward-compatible).
 		mcpCfg.Injection = appCfg.Injection
+		// spaced-review / Play G (design D11): thread review.due_nudge
+		// through so mem_context's due-count nudge is opt-in per
+		// config.yaml (default false, backward-compatible — see
+		// MCPConfig.Review's own doc).
+		mcpCfg.Review = appCfg.Review
 		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
 		// enabled, run the worker on the same ctx cancelled at shutdown so
 		// mem_save embeds new memories out-of-band. nil when disabled.
@@ -3061,6 +3068,11 @@ Commands:
                        [--project P] [--repo PATH] [--apply] [--semantic] [--yes]
                        Dry-run by default: reports checked/traveled/staled counts, writes nothing.
                        Degrades gracefully with no git or outside a repo (reports 0 checked).
+  review-due         List memories past their spaced-review due date (Play G)
+                       [--project P] [--json]. Compact only: count per
+                       project/type + id/title, never full content.
+                       Quiet ("0 memories due") when nothing is due.
+                       Resolve via: mem_review mark_reviewed <id>
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
   context [project]  Show recent context from previous sessions
   stats              Show memory system statistics

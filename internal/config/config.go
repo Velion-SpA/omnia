@@ -95,6 +95,16 @@ type Config struct {
 	// writeHygieneEnabledKeyPresent's inverted explicit-vs-absent probe —
 	// disabling it restores byte-for-byte pre-v0.3.1 save behavior.
 	WriteHygiene WriteHygieneConfig `yaml:"write_hygiene"`
+
+	// Review gates the spaced-review / Play G due-count nudge appended to
+	// mem_context's output (design D11, spec spaced-review REQ "Existing-
+	// Tool Output Changes Gated Default-OFF"). Disabled by default: a fresh
+	// install/upgrade that never mentions `review` sees ZERO behavior
+	// change from pre-spaced-review mem_context output, mirroring every
+	// other write-hygiene/Context-Economy gate's own off-by-default
+	// convention. The standalone `omnia review-due` CLI is NOT gated by
+	// this flag — it is its own explicit, opt-in command.
+	Review ReviewConfig `yaml:"review"`
 }
 
 // WriteHygieneConfig is the v0.3.1 write-gate block (design obs #1668
@@ -202,6 +212,15 @@ type DiversityConfig struct {
 // gate above.
 type TypeLensConfig struct {
 	Enabled bool `yaml:"enabled"`
+}
+
+// ReviewConfig gates the spaced-review / Play G due-count nudge (design D11
+// section 3). Like TypeLensConfig, there is no numeric field to tune —
+// DueNudge is the entire gate, and its zero value (false) IS the default
+// (no explicit-vs-absent probe needed), same convention as every other
+// Context Economy/write-hygiene gate.
+type ReviewConfig struct {
+	DueNudge bool `yaml:"due_nudge"`
 }
 
 // ProceduralConfig gates and tunes the procedural-memory governance gate

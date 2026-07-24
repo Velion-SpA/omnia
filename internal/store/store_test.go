@@ -8348,6 +8348,77 @@ func TestObservationsNeedingReviewExcludesDeletedObservations(t *testing.T) {
 	}
 }
 
+// TestCountObservationsNeedingReview — omnia-0.3.1-write-hygiene PR11
+// (spaced-review / Play G, design D11): CountObservationsNeedingReview is a
+// cheap COUNT-only sibling of ObservationsNeedingReview feeding the
+// mem_context due-count nudge. Mirrors TestObservationsNeedingReview's
+// project-filter/all-projects fixture shape, plus the deleted-exclusion
+// check from TestObservationsNeedingReviewExcludesDeletedObservations —
+// folded into one test since the count-only query shares the exact same
+// WHERE clause as ObservationsNeedingReview.
+func TestCountObservationsNeedingReview(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("count-review-sess", "count-review-proj", "/tmp/review"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	staleID, err := s.AddObservation(AddObservationParams{SessionID: "count-review-sess", Type: "decision", Title: "stale", Content: "stale content", Project: "count-review-proj"})
+	if err != nil {
+		t.Fatalf("add stale: %v", err)
+	}
+	staleID2, err := s.AddObservation(AddObservationParams{SessionID: "count-review-sess", Type: "policy", Title: "stale2", Content: "stale2 content", Project: "count-review-proj"})
+	if err != nil {
+		t.Fatalf("add stale2: %v", err)
+	}
+	futureID, err := s.AddObservation(AddObservationParams{SessionID: "count-review-sess", Type: "decision", Title: "future", Content: "future content", Project: "count-review-proj"})
+	if err != nil {
+		t.Fatalf("add future: %v", err)
+	}
+	otherProjID, err := s.AddObservation(AddObservationParams{SessionID: "count-review-sess", Type: "decision", Title: "other", Content: "other content", Project: "other-count-proj"})
+	if err != nil {
+		t.Fatalf("add other: %v", err)
+	}
+
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	future := time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id IN (?, ?)`, past, staleID, staleID2); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, future, futureID); err != nil {
+		t.Fatalf("future review_after: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, otherProjID); err != nil {
+		t.Fatalf("other project review_after: %v", err)
+	}
+
+	count, err := s.CountObservationsNeedingReview("count-review-proj")
+	if err != nil {
+		t.Fatalf("CountObservationsNeedingReview(project): %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count review-proj = %d, want 2", count)
+	}
+
+	all, err := s.CountObservationsNeedingReview("")
+	if err != nil {
+		t.Fatalf("CountObservationsNeedingReview(all): %v", err)
+	}
+	if all != 3 {
+		t.Fatalf("count all = %d, want 3", all)
+	}
+
+	if err := s.DeleteObservation(staleID, false); err != nil {
+		t.Fatalf("delete observation: %v", err)
+	}
+	afterDelete, err := s.CountObservationsNeedingReview("count-review-proj")
+	if err != nil {
+		t.Fatalf("CountObservationsNeedingReview(project) after delete: %v", err)
+	}
+	if afterDelete != 1 {
+		t.Fatalf("count review-proj after delete = %d, want 1", afterDelete)
+	}
+}
+
 func TestMarkReviewedResetsReviewAfter(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("mark-reviewed-sess", "mark-reviewed-proj", "/tmp/review"); err != nil {
