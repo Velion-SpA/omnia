@@ -106,6 +106,14 @@ type InjectionConfig struct {
 	// behavior when unset (spec REQ6) — enabling this is what actually FIXES
 	// that pre-existing defect.
 	ContextBudget TokenBudgetConfig `yaml:"context_budget"`
+	// Diversity gates handleSearch's MMR (maximal marginal relevance)
+	// diversity pass (spec injection-diversity, ApplyMMR in
+	// internal/mcp/mmr.go, PR4): a read-time, token-set-Jaccard re-rank that
+	// demotes/hard-drops rows near-duplicating an already-selected
+	// higher-ranked row. Disabled by default: handleSearch's response stays
+	// byte-for-byte identical to pre-v0.3 output when unset (spec REQ6 —
+	// Disabled by Default, No-Op When Off).
+	Diversity DiversityConfig `yaml:"diversity"`
 }
 
 // TokenBudgetConfig gates a single token-based budget pass (spec
@@ -118,6 +126,24 @@ type InjectionConfig struct {
 type TokenBudgetConfig struct {
 	Enabled   bool `yaml:"enabled"`
 	MaxTokens int  `yaml:"max_tokens"`
+}
+
+// DiversityConfig gates and tunes ApplyMMR (spec injection-diversity, design
+// obs #1643 section 3.3/ADR-5). Lambda balances relevance against diversity
+// in the greedy argmax [Lambda*rel(d) - (1-Lambda)*maxSim(d, selected)]
+// reselection (higher Lambda favors relevance; lower favors diversity).
+// SimilarityThreshold is the hard-drop cutoff: any candidate whose maximum
+// Jaccard similarity to an already-selected row is >= SimilarityThreshold is
+// dropped entirely as a near-duplicate ("no dupes"), not merely
+// reordered. Enabled defaults to false (spec REQ6); Lambda/SimilarityThreshold
+// default to 0.7/0.9 (design section 4) via the SAME simple zero-check idiom
+// Recall.Ranking.Weights.* already uses — unlike TokenBudgetConfig.MaxTokens,
+// these two fields don't need an explicit-vs-absent probe (design section 4
+// says so explicitly: "mirroring the Ranking-weights default idiom").
+type DiversityConfig struct {
+	Enabled             bool    `yaml:"enabled"`
+	Lambda              float64 `yaml:"lambda"`
+	SimilarityThreshold float64 `yaml:"similarity_threshold"`
 }
 
 // ProceduralConfig gates and tunes the procedural-memory governance gate
@@ -644,6 +670,24 @@ func applyDefaults(cfg *Config, data []byte) {
 	// of being silently overridden.
 	if cfg.Injection.ContextBudget.MaxTokens == 0 && !injectionContextBudgetMaxTokensKeyPresent(data) {
 		cfg.Injection.ContextBudget.MaxTokens = 1500
+	}
+	// Injection.Diversity.Enabled intentionally has NO default override —
+	// its zero value (false) IS the default, same convention as every other
+	// Context Economy gate above. Lambda/SimilarityThreshold get the SIMPLE
+	// zero-check default (mirroring Recall.Ranking.Weights.*, NOT
+	// TokenBudgetConfig.MaxTokens' explicit-vs-absent probe): design section
+	// 4 explicitly calls for this simpler idiom here, since an operator who
+	// opts in by setting only `injection: { diversity: { enabled: true } }`
+	// should get sane MMR params (0.7/0.9) instead of zero-valued ones that
+	// would silently disable relevance weighting (Lambda=0) or hard-drop
+	// nothing useful (SimilarityThreshold=0 would hard-drop EVERY candidate,
+	// not "no threshold" — either zero value is the wrong-by-accident case
+	// this default guards against).
+	if cfg.Injection.Diversity.Lambda == 0 {
+		cfg.Injection.Diversity.Lambda = 0.7
+	}
+	if cfg.Injection.Diversity.SimilarityThreshold == 0 {
+		cfg.Injection.Diversity.SimilarityThreshold = 0.9
 	}
 }
 
