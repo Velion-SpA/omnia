@@ -43,6 +43,28 @@ var preemptionInvariantCases = []preemptionInvariantCase{
 			return ApplyTokenBudget(results, config.TokenBudgetConfig{Enabled: true, MaxTokens: 1})
 		},
 	},
+	{
+		name: "ApplyMMR",
+		apply: func(results []store.SearchResult) []store.SearchResult {
+			// Aggressive lambda (near-zero — almost pure diversity, no
+			// relevance weight) plus a near-zero similarity_threshold (hard-
+			// drops nearly everything as "too similar") is the most
+			// adversarial MMR config possible: it should still never touch,
+			// reorder, or drop the pre-empted sentinel/signature rows.
+			return ApplyMMR(results, nil, config.DiversityConfig{Enabled: true, Lambda: 0.01, SimilarityThreshold: 0.01})
+		},
+	},
+	{
+		name: "ApplyMMR_then_ApplyTokenBudget",
+		apply: func(results []store.SearchResult) []store.SearchResult {
+			// The composed pipeline exactly as handleSearch chains it (MMR
+			// first, budget last), each under its own most adversarial
+			// config — the invariant must survive the composition, not just
+			// each pass in isolation.
+			results = ApplyMMR(results, nil, config.DiversityConfig{Enabled: true, Lambda: 0.01, SimilarityThreshold: 0.01})
+			return ApplyTokenBudget(results, config.TokenBudgetConfig{Enabled: true, MaxTokens: 1})
+		},
+	},
 }
 
 // preemptionFixture builds a result set with one topic_key sentinel row, one

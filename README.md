@@ -208,6 +208,9 @@ Config lives at `~/.config/omnia/config.yaml` (`cp config.example.yaml` to start
 | `injection.budget.max_tokens` | `1500` | Estimated-token ceiling for `injection.budget`; the topic_key exact-match sentinel and error-signature-match rows are always emitted complete and never count against this budget |
 | `injection.context_budget.enabled` | `false` | Enable `FormatContext`'s (mem_context / `omnia context` / dashboard) aggregate token budget across its pinned/recent-observations/recent-sessions/recent-prompts buckets — fixes a pre-existing defect where each bucket was individually per-item truncated but never capped in total; byte-for-byte identical (today's uncapped) output when off |
 | `injection.context_budget.max_tokens` | `1500` | Estimated-token ceiling for `injection.context_budget`, consumed pinned-first (never starved), then recent observations, then recent sessions, then recent prompts last |
+| `injection.diversity.enabled` | `false` | Enable an MMR (maximal marginal relevance) read-time diversity pass over `mem_search` results: demotes/hard-drops rows near-duplicating an already-selected higher-ranked row using a cheap token-set Jaccard similarity over hydrated content (no new embedding calls, no new model dependency); byte-for-byte identical output when off |
+| `injection.diversity.lambda` | `0.7` | Relevance-vs-diversity balance in the greedy MMR reselection `argmax[lambda*rel(d) - (1-lambda)*maxSim(d, selected)]`; higher favors relevance, lower favors diversity |
+| `injection.diversity.similarity_threshold` | `0.9` | Jaccard similarity hard-drop cutoff; a candidate whose similarity to an already-selected row meets or exceeds this is dropped entirely as a near-duplicate, not merely reordered |
 
 Cloud env vars use the `OMNIA_CLOUD_*` prefix (legacy `ENGRAM_CLOUD_*` also accepted).
 

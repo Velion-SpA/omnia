@@ -44,12 +44,17 @@ Diversity re-ranking MUST NOT alter the always-first, complete status of sentine
 
 ### Requirement: No Unnecessary Change When Distinct
 
-When all non-preempted results are lexically distinct (below the similarity threshold), diversity re-ranking MUST NOT change their order.
+When all non-preempted results share zero lexical overlap (pairwise similarity 0), diversity re-ranking MUST NOT change their order. Results whose pairwise similarity is non-zero but below the similarity threshold MAY be legitimately re-ordered by the MMR objective (diversity trades off against relevance), but MUST NOT be dropped — the hard drop applies only at or above the threshold.
 
-#### Scenario: All-distinct set unchanged
-- GIVEN a result set with no pair above the similarity threshold
+#### Scenario: Zero-overlap set unchanged
+- GIVEN a result set where every pair has similarity 0
 - WHEN injection-diversity is enabled
 - THEN the result order is identical to the order before the diversity pass
+
+#### Scenario: Below-threshold overlap never drops
+- GIVEN a result set with pairs overlapping below the similarity threshold
+- WHEN injection-diversity is enabled
+- THEN every result survives the pass (re-ordering per the MMR objective is permitted)
 
 ### Requirement: Disabled by Default, No-Op When Off
 

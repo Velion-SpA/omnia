@@ -70,6 +70,17 @@ backfill_days: 30
 # enabled, the budget is consumed in PRIORITY order — pinned first (never
 # starved), then recent observations, then recent sessions, then recent
 # prompts last — regardless of their display order in the rendered text.
+#
+# diversity is an MMR (maximal marginal relevance) style read-time re-rank
+# that demotes/hard-drops mem_search rows near-duplicating an already-picked
+# higher-ranked row, using a cheap token-set Jaccard similarity over the
+# hydrated content (no new embedding calls, no new model dependency).
+# Disabled by default: off keeps handleSearch's order byte-for-byte
+# identical to today. lambda balances relevance against diversity in the
+# greedy reselection (higher = favor relevance, lower = favor diversity);
+# similarity_threshold is the hard-drop cutoff — a candidate whose
+# similarity to an already-picked row meets or exceeds it is dropped
+# entirely as a near-duplicate, not merely reordered.
 # injection:
 #   budget:
 #     enabled: true
@@ -77,3 +88,7 @@ backfill_days: 30
 #   context_budget:
 #     enabled: true
 #     max_tokens: 1500
+#   diversity:
+#     enabled: true
+#     lambda: 0.7
+#     similarity_threshold: 0.9

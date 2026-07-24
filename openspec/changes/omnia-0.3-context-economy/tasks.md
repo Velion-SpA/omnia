@@ -98,17 +98,17 @@ Chain strategy: stacked-to-main
 **Files touched**: `internal/mcp/mmr.go` (new), `internal/mcp/mmr_test.go` (new), `internal/mcp/preemption_invariant_test.go` (extend, from PR2), `internal/mcp/mcp.go` (wiring), `internal/config/config.go` (`DiversityConfig`, `applyDefaults`).
 **Dependencies on previous PRs**: PR1 (`internal/token`), PR2 (pipeline + `InjectionConfig` + shared invariant test file to extend).
 
-- [ ] 4.1 RED: extend `internal/mcp/preemption_invariant_test.go` — add `ApplyMMR` to the adversarial table (aggressive `lambda`/low `similarity_threshold`) asserting sentinel/signature rows always present and first.
-- [ ] 4.2 RED: `internal/mcp/mmr_test.go` — two near-identical rows (Jaccard similarity ≥ `similarity_threshold`) → lower-ranked one dropped/suppressed.
-- [ ] 4.3 RED: `internal/mcp/mmr_test.go` — all-distinct result set (similarity below threshold) → order unchanged pre/post pass.
-- [ ] 4.4 RED: `internal/mcp/mmr_test.go` — no-op byte-for-byte test: `cfg.Enabled=false` → output identical to input.
-- [ ] 4.5 RED: `internal/mcp/mmr_test.go` — λ-boundary ordering test: greedy `argmax[λ·rel(d) − (1−λ)·maxSim(d,selected)]` reselection produces expected order for a small fixture set.
-- [ ] 4.6 GREEN: implement token-set Jaccard similarity helper (`jaccardSimilarity(a, b []string) float64` over lowercased preview word tokens) in `internal/mcp/mmr.go`.
-- [ ] 4.7 GREEN: implement `ApplyMMR(results []store.SearchResult, relevance map[int64]float64, cfg config.DiversityConfig) []store.SearchResult` — gated no-op (`!cfg.Enabled || len(results)<2`); partition pre-empted out first; greedy MMR reselection over `rest` reusing `MinMaxNormalizeRelevance`; hard-drop candidates with `maxSim ≥ cfg.SimilarityThreshold`.
-- [ ] 4.8 GREEN: add `DiversityConfig{Enabled, Lambda, SimilarityThreshold}` to `InjectionConfig` in `internal/config/config.go`; `applyDefaults` sets `Lambda→0.7`, `SimilarityThreshold→0.9` when zero.
-- [ ] 4.9 Wiring: insert `ApplyMMR` call in `internal/mcp/mcp.go` handleSearch pipeline after type-lens (PR5 dependency note: if PR5 lands after PR4, insert MMR immediately before the token budget call from PR2; adjust order when PR5 merges), before `ApplyTokenBudget`.
-- [ ] 4.10 Docs: update config reference documenting `injection.diversity` block, defaults `lambda=0.7`, `similarity_threshold=0.9`.
-- [ ] 4.11 Verify: `CGO_ENABLED=0 go test ./...` + `go build ./...` + `go vet ./...` + `gofmt -l .` all clean.
+- [x] 4.1 RED: extend `internal/mcp/preemption_invariant_test.go` — add `ApplyMMR` to the adversarial table (aggressive `lambda`/low `similarity_threshold`) asserting sentinel/signature rows always present and first.
+- [x] 4.2 RED: `internal/mcp/mmr_test.go` — two near-identical rows (Jaccard similarity ≥ `similarity_threshold`) → lower-ranked one dropped/suppressed.
+- [x] 4.3 RED: `internal/mcp/mmr_test.go` — all-distinct result set (similarity below threshold) → order unchanged pre/post pass.
+- [x] 4.4 RED: `internal/mcp/mmr_test.go` — no-op byte-for-byte test: `cfg.Enabled=false` → output identical to input.
+- [x] 4.5 RED: `internal/mcp/mmr_test.go` — λ-boundary ordering test: greedy `argmax[λ·rel(d) − (1−λ)·maxSim(d,selected)]` reselection produces expected order for a small fixture set.
+- [x] 4.6 GREEN: implement token-set Jaccard similarity helper (`jaccardSimilarity(a, b []string) float64` over lowercased preview word tokens) in `internal/mcp/mmr.go`.
+- [x] 4.7 GREEN: implement `ApplyMMR(results []store.SearchResult, relevance map[int64]float64, cfg config.DiversityConfig) []store.SearchResult` — gated no-op (`!cfg.Enabled || len(results)<2`); partition pre-empted out first; greedy MMR reselection over `rest` reusing `MinMaxNormalizeRelevance`; hard-drop candidates with `maxSim ≥ cfg.SimilarityThreshold`.
+- [x] 4.8 GREEN: add `DiversityConfig{Enabled, Lambda, SimilarityThreshold}` to `InjectionConfig` in `internal/config/config.go`; `applyDefaults` sets `Lambda→0.7`, `SimilarityThreshold→0.9` when zero.
+- [x] 4.9 Wiring: insert `ApplyMMR` call in `internal/mcp/mcp.go` handleSearch pipeline after type-lens (PR5 dependency note: if PR5 lands after PR4, insert MMR immediately before the token budget call from PR2; adjust order when PR5 merges), before `ApplyTokenBudget`. (ApplyTypeLens/PR5 not merged yet — ApplyMMR wired directly after RankResults/ApplyStalenessDownrank/explain, immediately before ApplyTokenBudget, with an explicit PIPELINE-POSITION NOTE comment in mcp.go marking where PR5's ApplyTypeLens call must be inserted.)
+- [x] 4.10 Docs: update config reference documenting `injection.diversity` block, defaults `lambda=0.7`, `similarity_threshold=0.9`.
+- [x] 4.11 Verify: `CGO_ENABLED=0 go test ./...` + `go build ./...` + `go vet ./...` + `gofmt -l .` all clean.
 - [ ] 4.12 PR: branch `feat/injection-mmr-diversity`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR3).
 
 ---
