@@ -134,6 +134,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 ### Observations
 
 - `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`
+  - Write Hygiene (v0.3.1, default-ON): every save through this endpoint — and `mem_save`, `omnia save`, and the dashboard's save flow — runs the same deterministic write-gate (`write_hygiene` in `config.yaml`; see the config reference table in README.md for the full field list). Near-identical saves are auto-deduped (NOOP) or auto-updated in place instead of piling up as new rows. Opt out with an explicit `write_hygiene.enabled: false` in `config.yaml`, which restores byte-for-byte pre-v0.3.1 save behavior (every save becomes a brand-new row, no auto-dedup/auto-update).
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&scope=project|personal|global&limit=N`
 - `GET /observations/{id}` — Get single observation by ID

@@ -855,6 +855,29 @@ func cmdServe(cfg store.Config) {
 		cfg.ContextTokenBudget = appCfg.Injection.ContextBudget.MaxTokens
 	}
 
+	// Omnia v0.3.1 Write Hygiene (design obs #1668 D2/D5, spec obs #1666
+	// write-gate domain): thread write_hygiene.* into store.Config so
+	// POST /observations' save path (SaveObservation, PR3's decision
+	// ladder) runs with the operator's configured thresholds. Reuses the
+	// same appCfg/appCfgErr loaded above for ContextTokenBudget — no
+	// second config.Load call. Unlike ContextTokenBudget (opt-in, off by
+	// default), write_hygiene is the ONE default-ON gate: config.Load's
+	// own applyDefaults already resolved Enabled=true unless config.yaml
+	// explicitly set `enabled: false` (the kill-switch), so no extra
+	// "if .Enabled" guard is needed here the way ContextBudget's own
+	// opt-in flag requires above — appCfg.WriteHygiene.Enabled already
+	// carries the right value either way. A missing/unparseable
+	// config.yaml (appCfgErr != nil) degrades this gate to disabled too,
+	// matching every other config-driven gate's graceful-degradation
+	// convention.
+	if appCfgErr == nil {
+		cfg.WriteHygieneEnabled = appCfg.WriteHygiene.Enabled
+		cfg.NoopThreshold = appCfg.WriteHygiene.NoopThreshold
+		cfg.UpdateThreshold = appCfg.WriteHygiene.UpdateThreshold
+		cfg.ShrinkGuard = appCfg.WriteHygiene.ShrinkGuard
+		cfg.CandidateLimit = appCfg.WriteHygiene.CandidateLimit
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
@@ -1122,6 +1145,20 @@ func cmdMCP(cfg store.Config) {
 	appCfg, appCfgErr := loadAppConfigWithRecallAutodetect()
 	if appCfgErr == nil && appCfg.Injection.ContextBudget.Enabled {
 		cfg.ContextTokenBudget = appCfg.Injection.ContextBudget.MaxTokens
+	}
+
+	// Omnia v0.3.1 Write Hygiene (design obs #1668 D2/D5, spec obs #1666
+	// write-gate domain): thread write_hygiene.* into store.Config so
+	// mem_save's save path (SaveObservation, PR3's decision ladder) runs
+	// with the operator's configured thresholds — see cmdServe's
+	// identical block for the full rationale (default-ON gate, no extra
+	// ".Enabled" guard needed, missing config.yaml degrades to disabled).
+	if appCfgErr == nil {
+		cfg.WriteHygieneEnabled = appCfg.WriteHygiene.Enabled
+		cfg.NoopThreshold = appCfg.WriteHygiene.NoopThreshold
+		cfg.UpdateThreshold = appCfg.WriteHygiene.UpdateThreshold
+		cfg.ShrinkGuard = appCfg.WriteHygiene.ShrinkGuard
+		cfg.CandidateLimit = appCfg.WriteHygiene.CandidateLimit
 	}
 
 	s, err := storeNew(cfg)
@@ -1412,6 +1449,24 @@ func cmdSave(cfg store.Config) {
 				i++
 			}
 		}
+	}
+
+	// Omnia v0.3.1 Write Hygiene (design obs #1668 D2/D5, spec obs #1666
+	// write-gate domain): `omnia save` is a named production save entry
+	// point (design's "CLI save" — D2: "EVERY save entry point... gets
+	// identical dedup — zero drift (#140 lesson)"), so it needs the same
+	// write_hygiene.* wiring cmdMCP/cmdServe get even though it never
+	// needed ContextTokenBudget (that feature only matters for
+	// FormatContext, which this command never calls). Load config.yaml
+	// BEFORE storeNew (s.cfg is immutable after New) — see cmdServe's
+	// identical block for the full default-ON/graceful-degradation
+	// rationale.
+	if appCfg, appCfgErr := loadAppConfigWithRecallAutodetect(); appCfgErr == nil {
+		cfg.WriteHygieneEnabled = appCfg.WriteHygiene.Enabled
+		cfg.NoopThreshold = appCfg.WriteHygiene.NoopThreshold
+		cfg.UpdateThreshold = appCfg.WriteHygiene.UpdateThreshold
+		cfg.ShrinkGuard = appCfg.WriteHygiene.ShrinkGuard
+		cfg.CandidateLimit = appCfg.WriteHygiene.CandidateLimit
 	}
 
 	s, err := storeNew(cfg)
@@ -1724,8 +1779,25 @@ func cmdContext(cfg store.Config) {
 	// mem_context (cmdMCP) and the dashboard (cmdServe). Missing/unparseable
 	// config.yaml degrades silently to the pre-v0.3 uncapped default,
 	// matching every other `omnia` subcommand's config.Load convention.
-	if appCfg, cfgErr := loadAppConfigWithRecallAutodetect(); cfgErr == nil && appCfg.Injection.ContextBudget.Enabled {
+	// Hoisted to a statement (was an inline `if appCfg, cfgErr := ...; cond`)
+	// so the same appCfg/cfgErr can also be reused below for Write Hygiene
+	// wiring (v0.3.1 PR4) without a second config.Load call.
+	appCfg, cfgErr := loadAppConfigWithRecallAutodetect()
+	if cfgErr == nil && appCfg.Injection.ContextBudget.Enabled {
 		cfg.ContextTokenBudget = appCfg.Injection.ContextBudget.MaxTokens
+	}
+
+	// Omnia v0.3.1 Write Hygiene (design obs #1668 D2/D5, spec obs #1666
+	// write-gate domain): thread write_hygiene.* into store.Config — see
+	// cmdServe's identical block for the full rationale. `omnia context`
+	// itself never saves, but every storeNew call site gets the same
+	// Config regardless (zero drift, design D2/#140 lesson).
+	if cfgErr == nil {
+		cfg.WriteHygieneEnabled = appCfg.WriteHygiene.Enabled
+		cfg.NoopThreshold = appCfg.WriteHygiene.NoopThreshold
+		cfg.UpdateThreshold = appCfg.WriteHygiene.UpdateThreshold
+		cfg.ShrinkGuard = appCfg.WriteHygiene.ShrinkGuard
+		cfg.CandidateLimit = appCfg.WriteHygiene.CandidateLimit
 	}
 
 	s, err := storeNew(cfg)

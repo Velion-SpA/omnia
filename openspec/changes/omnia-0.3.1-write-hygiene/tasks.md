@@ -159,21 +159,70 @@ commit within the same PR, or accept `size:exception` given this is the
 Design slice 3b · Branch `feat/write-gate-wiring` · Base: `main` (after PR3) ·
 `type:feature` · Depends on: PR3 · Capability: write-gate
 
-- [ ] 4.1 RED: add/extend a `cmd/omnia` integration test (or
+- [x] 4.1 RED: add/extend a `cmd/omnia` integration test (or
       `internal/store` test using a config-loaded `Store`) asserting that a
       `write_hygiene:` block in `config.yaml` reaches `store.Config` fields at
       every `storeNew` call site — fails until wiring lands.
-- [ ] 4.2 GREEN: at each of the 3 `storeNew` call sites in
+      DONE: `cmd/omnia/write_hygiene_wiring_test.go` (new), mirroring
+      `context_budget_wiring_test.go`'s `withCapturedStoreConfig`/`withArgs`
+      pattern. Confirmed RED against unwired main.go: all 4 "enabled
+      propagates all thresholds" cases (cmdContext/cmdMCP/cmdServe/cmdSave)
+      failed with captured `WriteHygieneEnabled=false`/thresholds=0 (the
+      store.Config zero value), plus the end-to-end "gate on" case failed
+      with 2 rows instead of 1 — all for the right reason (wiring absent),
+      before any production-code edit landed.
+- [x] 4.2 GREEN: at each of the 3 `storeNew` call sites in
       `cmd/omnia/main.go` (mirroring the existing `cfg.ContextTokenBudget =
       appCfg.Injection.ContextBudget.MaxTokens` pattern), add
       `cfg.WriteHygieneEnabled = appCfg.WriteHygiene.Enabled` and the four
       threshold/limit fields.
-- [ ] 4.3 Kill-switch byte-for-byte check: with `write_hygiene.enabled:false`
+      DONE + SCOPE CORRECTION (per explicit apply-time instruction to find
+      EVERY production storeNew call site, not just the 3 ContextTokenBudget
+      sites): wired at cmdServe, cmdMCP, cmdContext (the 3 ContextTokenBudget
+      sites — cmdContext itself never saves, wired for consistency/zero-drift
+      per design D2) PLUS cmdSave (`omnia save` CLI — a genuine save path
+      named explicitly in design D2's "MCP handleSave, CLI save, import,
+      backfill, sync" entry-point list; had ZERO prior appCfg loading, so a
+      new `loadAppConfigWithRecallAutodetect()` call was added there).
+      Investigated and explicitly EXCLUDED: `cmdImport` (routes through
+      `Store.Import`, a raw-restore path that bypasses
+      AddObservation/SaveObservation entirely by existing v0.3 design) and
+      `cmdSync` (never calls AddObservation) — wiring store.Config fields on
+      either would be dead code with no behavioral effect. All other
+      `storeNew(cfg)` call sites in `cmd/omnia/main.go` (delete/timeline/
+      stats/export/search/TUI/conflicts/projects-*/obsidian-export) are
+      read-only or mutate-existing-rows-only and never reach the write-gate
+      either. cmdContext's inline `if appCfg, cfgErr := ...; cond` was
+      hoisted to a statement (`appCfg, cfgErr := ...` then a separate `if`)
+      so the same load can be reused for both ContextTokenBudget and
+      Write Hygiene wiring without a second `config.Load` call.
+- [x] 4.3 Kill-switch byte-for-byte check: with `write_hygiene.enabled:false`
       set explicitly in `config.yaml`, run the full existing dedup/save test
       suite (hash-window + topic_key tests) and confirm zero behavior change
       vs pre-PR3 baseline.
-- [ ] 4.4 Docs: note in `DOCS.md`/config reference that `write_hygiene` is
+      DONE via `TestWriteHygieneWiring_EndToEnd_ProductionSavePath` (new,
+      `cmd/omnia`): drives the REAL `omnia save` CLI dispatch twice through
+      the real config-wiring code path (no hand-built store.Config), reusing
+      `internal/store`'s own `TestSaveObservation_LadderNoop` fixture
+      (case/punctuation-only variant, Jaccard 1.0, different titles so the
+      pre-existing exact-title hash-window never fires either way — isolates
+      the write-gate steps 3-6 specifically). Default config (gate ON): 2nd
+      near-duplicate save NOOPs, 1 row total. `write_hygiene.enabled:false`:
+      2nd save duplicates exactly like pre-v0.3.1, 2 rows total. Full
+      `internal/store` suite (all pre-existing hash-window/topic_key/
+      write-gate/replay tests from PR3 + PR3-review-fixes) re-run green,
+      zero regressions.
+- [x] 4.4 Docs: note in `DOCS.md`/config reference that `write_hygiene` is
       default-on and how to opt out.
+      DONE: added a bullet under `DOCS.md`'s `### Observations` /
+      `POST /observations` entry naming every production save surface
+      (`mem_save`, `omnia save`, dashboard, `POST /observations`) as sharing
+      one write-gate, plus the `write_hygiene.enabled: false` opt-out and
+      what it restores (byte-for-byte pre-v0.3.1: every save is a brand-new
+      row). `README.md`'s config reference table already documented the
+      full `write_hygiene.*` field list + default-on/kill-switch semantics
+      from PR2 — this DOCS.md bullet is the narrative/wiring-complete
+      cross-reference, not a duplicate of the table.
 
 Files: `cmd/omnia/main.go` (modify, 3 call sites), test file (modify/new), docs (modify).
 Est. lines: ~200.
