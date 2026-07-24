@@ -81,6 +81,15 @@ backfill_days: 30
 # similarity_threshold is the hard-drop cutoff — a candidate whose
 # similarity to an already-picked row meets or exceeds it is dropped
 # entirely as a near-duplicate, not merely reordered.
+#
+# type_lens is a situational type boost: it infers a likely-relevant memory
+# type from the mem_search query text (e.g. an error/panic/crash-ish query
+# implies "bugfix"; a decide/tradeoff-ish query implies "decision") and
+# lifts matching-type rows above non-matching ones, on top of the existing
+# importance-tier ordering — it never excludes results, only re-orders.
+# Disabled by default: off keeps handleSearch's order byte-for-byte
+# identical to today. An explicit mem_search `type` argument always wins:
+# the lens stands down entirely for any type-scoped search.
 # injection:
 #   budget:
 #     enabled: true
@@ -92,3 +101,5 @@ backfill_days: 30
 #     enabled: true
 #     lambda: 0.7
 #     similarity_threshold: 0.9
+#   type_lens:
+#     enabled: true

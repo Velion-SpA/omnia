@@ -120,19 +120,19 @@ Chain strategy: stacked-to-main
 **Files touched**: `internal/mcp/type_lens.go` (new), `internal/mcp/type_lens_test.go` (new), `internal/mcp/preemption_invariant_test.go` (extend), `internal/mcp/mcp.go` (wiring), `internal/config/config.go` (`TypeLensConfig`).
 **Dependencies on previous PRs**: PR1, PR2 (pipeline + shared invariant test file). Independent of PR4's MMR logic but shares pipeline insertion point.
 
-- [ ] 5.1 RED: extend `internal/mcp/preemption_invariant_test.go` — add `ApplyTypeLens` to the adversarial table (hostile `lensType` matching a sentinel row's type) asserting sentinel/signature rows always present and first.
-- [ ] 5.2 RED: `internal/mcp/type_lens_test.go` — `InferLensType`: error/panic/exception/crash/stacktrace/falla query signals → `"bugfix"`; decide/tradeoff/elegir → `"decision"`; architecture/patrón/diseño → `"architecture"`; how-to/pasos/procedimiento → `"pattern"`; no match → `""`.
-- [ ] 5.3 RED: `internal/mcp/type_lens_test.go` — explicit-filter-wins: `InferLensType(query, explicitType)` with `explicitType != ""` → always returns `""` regardless of query signal.
-- [ ] 5.4 RED: `internal/mcp/type_lens_test.go` — `ApplyTypeLens`: error-signal query → `bugfix`-type rows lifted above non-matching rows (stable partition `[preempted, matchesLens, rest]`), relative order preserved within each partition.
-- [ ] 5.5 RED: `internal/mcp/type_lens_test.go` — no-op byte-for-byte test: `cfg.Enabled=false` OR `lensType==""` → output identical to input.
-- [ ] 5.6 RED: `internal/mcp/type_lens_test.go` — neutral context test: no situational signal detected → ranking unchanged from baseline.
-- [ ] 5.7 GREEN: implement `InferLensType(query, explicitType string) string` in `internal/mcp/type_lens.go` — returns `""` when `explicitType != ""`; else first-match ordered regex table (EN+ES) mapping query signals to `bugfix`/`decision`/`architecture`/`pattern`.
-- [ ] 5.8 GREEN: implement `ApplyTypeLens(results []store.SearchResult, lensType string, cfg config.TypeLensConfig) []store.SearchResult` — gated no-op (`!cfg.Enabled || lensType=="" || len(results)==0`); stable partition `[preempted, matchesLens, rest]`, mirroring `ApplyStalenessDownrank`'s sink shape but lifting instead of sinking.
-- [ ] 5.9 GREEN: add `TypeLensConfig{Enabled bool}` to `InjectionConfig` in `internal/config/config.go`.
-- [ ] 5.10 Wiring: insert `ApplyTypeLens` call in `internal/mcp/mcp.go` handleSearch pipeline BEFORE `ApplyMMR` (order: RankResults → ApplyStalenessDownrank → ApplyTypeLens → ApplyMMR → ApplyTokenBudget), reconciling PR4's provisional insertion point.
-- [ ] 5.11 Docs: update config reference documenting `injection.type_lens` block, default-off.
-- [ ] 5.12 Verify: `CGO_ENABLED=0 go test ./...` + `go build ./...` + `go vet ./...` + `gofmt -l .` all clean; confirm final pipeline order matches design section 2.
-- [ ] 5.13 PR: branch `feat/injection-type-lens`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR4).
+- [x] 5.1 RED: extend `internal/mcp/preemption_invariant_test.go` — add `ApplyTypeLens` to the adversarial table (hostile `lensType` matching a sentinel row's type) asserting sentinel/signature rows always present and first.
+- [x] 5.2 RED: `internal/mcp/type_lens_test.go` — `InferLensType`: error/panic/exception/crash/stacktrace/falla query signals → `"bugfix"`; decide/tradeoff/elegir → `"decision"`; architecture/patrón/diseño → `"architecture"`; how-to/pasos/procedimiento → `"pattern"`; no match → `""`.
+- [x] 5.3 RED: `internal/mcp/type_lens_test.go` — explicit-filter-wins: `InferLensType(query, explicitType)` with `explicitType != ""` → always returns `""` regardless of query signal.
+- [x] 5.4 RED: `internal/mcp/type_lens_test.go` — `ApplyTypeLens`: error-signal query → `bugfix`-type rows lifted above non-matching rows (stable partition `[preempted, matchesLens, rest]`), relative order preserved within each partition.
+- [x] 5.5 RED: `internal/mcp/type_lens_test.go` — no-op byte-for-byte test: `cfg.Enabled=false` OR `lensType==""` → output identical to input.
+- [x] 5.6 RED: `internal/mcp/type_lens_test.go` — neutral context test: no situational signal detected → ranking unchanged from baseline.
+- [x] 5.7 GREEN: implement `InferLensType(query, explicitType string) string` in `internal/mcp/type_lens.go` — returns `""` when `explicitType != ""`; else first-match ordered regex table (EN+ES) mapping query signals to `bugfix`/`decision`/`architecture`/`pattern`.
+- [x] 5.8 GREEN: implement `ApplyTypeLens(results []store.SearchResult, lensType string, cfg config.TypeLensConfig) []store.SearchResult` — gated no-op (`!cfg.Enabled || lensType=="" || len(results)==0`); stable partition `[preempted, matchesLens, rest]`, mirroring `ApplyStalenessDownrank`'s sink shape but lifting instead of sinking.
+- [x] 5.9 GREEN: add `TypeLensConfig{Enabled bool}` to `InjectionConfig` in `internal/config/config.go`.
+- [x] 5.10 Wiring: insert `ApplyTypeLens` call in `internal/mcp/mcp.go` handleSearch pipeline BEFORE `ApplyMMR` (order: RankResults → ApplyStalenessDownrank → ApplyTypeLens → ApplyMMR → ApplyTokenBudget), reconciling PR4's provisional insertion point.
+- [x] 5.11 Docs: update config reference documenting `injection.type_lens` block, default-off.
+- [x] 5.12 Verify: `CGO_ENABLED=0 go test ./...` + `go build ./...` + `go vet ./...` + `gofmt -l .` all clean; confirm final pipeline order matches design section 2.
+- [ ] 5.13 PR: branch `feat/injection-type-lens`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR4). (Left unchecked — sdd-apply does not create branches/commits/PRs per orchestrator instruction; orchestrator handles git.)
 
 ---
 

@@ -132,14 +132,16 @@ type MCPConfig struct {
 
 	// Injection configures Omnia v0.3's "Context Economy" family of optional
 	// re-sort/trim passes over handleSearch's already-ranked results (design
-	// obs #1643, spec obs #1642): ApplyMMR (PR4) runs after
-	// RankResults/ApplyStalenessDownrank to remove near-duplicates, then
-	// ApplyTokenBudget (PR2) is the LAST pass in the pipeline. The zero value
-	// (Injection.Budget.Enabled=false, Injection.Diversity.Enabled=false) is
+	// obs #1643, spec obs #1642), wired in this order: ApplyTypeLens (PR5)
+	// lifts situationally-relevant rows, then ApplyMMR (PR4) removes
+	// near-duplicates, then ApplyTokenBudget (PR2) is the LAST pass in the
+	// pipeline. The zero value (Injection.TypeLens.Enabled=false,
+	// Injection.Budget.Enabled=false, Injection.Diversity.Enabled=false) is
 	// the default: handleSearch's response stays byte-for-byte identical to
-	// pre-v0.3 output even though both passes are unconditionally called —
-	// each is a pure no-op when its own Enabled flag is false (spec REQ6),
-	// mirroring RecallRanking/StructuralForgetting's own convention above.
+	// pre-v0.3 output even though all three passes are unconditionally
+	// called — each is a pure no-op when its own Enabled flag is false (spec
+	// REQ6), mirroring RecallRanking/StructuralForgetting's own convention
+	// above.
 	Injection config.InjectionConfig
 }
 
@@ -1289,26 +1291,47 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			normalizedRelevance = MinMaxNormalizeRelevance(nonSentinel, relevance)
 		}
 
+		// Omnia v0.3 Context Economy — situational type-as-lens boost
+		// (design obs #1643 section 3.5, spec obs #1642 type-as-lens
+		// domain, PR5): infers a situational type from the query text
+		// (InferLensType) and lifts matching-Type rows above non-matching
+		// ones (ApplyTypeLens), on top of the existing importance-tier
+		// ordering. explicitType (typ, the caller's own opts.Type filter)
+		// always wins — InferLensType returns "" whenever typ != "" (spec:
+		// Explicit User Filter Always Wins), so the lens is a true no-op for
+		// any type-scoped search. Runs BEFORE ApplyMMR/ApplyTokenBudget
+		// (design section 2's final order: RankResults ->
+		// ApplyStalenessDownrank -> ApplyTypeLens -> ApplyMMR ->
+		// ApplyTokenBudget) because it changes which rows are "top" — MMR's
+		// dedup and the budget's trim must see the lens-boosted order, not
+		// the pre-lens one.
+		//
+		// A pure no-op when cfg.Injection.TypeLens.Enabled is false (the
+		// default) or lensType is "" (explicit filter stood down, or no
+		// situational signal detected), keeping handleSearch's response
+		// byte-for-byte identical to pre-v0.3 output (spec: Disabled by
+		// Default, No-Op When Off).
+		// The gate guards the CLASSIFIER call too, not just the re-rank:
+		// when type_lens is off, no regex scan of the (uncapped) query
+		// string runs on the hot path at all — matching the "near-zero work
+		// when disabled" idiom of the sibling ApplyMMR/ApplyTokenBudget
+		// passes (adversarial-review finding, v0.3).
+		if cfg.Injection.TypeLens.Enabled {
+			lensType := InferLensType(query, typ)
+			results = ApplyTypeLens(results, lensType, cfg.Injection.TypeLens)
+		}
+
 		// Omnia v0.3 Context Economy — MMR diversity (design obs #1643
 		// section 3.3, spec obs #1642 injection-diversity domain, PR4): a
 		// read-time token-set-Jaccard MMR re-rank that demotes/hard-drops
 		// rows near-duplicating an already-selected higher-ranked row. Runs
-		// AFTER RankResults/ApplyStalenessDownrank (priority is already
-		// decided) and AFTER explain's normalizedRelevance above (same
-		// "score_breakdown reflects the full pre-trim batch" rationale
-		// ApplyTokenBudget's own comment below documents), but BEFORE
-		// ApplyTokenBudget (dedup before trim — MMR removes redundancy so
-		// the budget is never spent on near-duplicates).
-		//
-		// PIPELINE-POSITION NOTE (task 4.9): design section 2's final order
-		// is RankResults -> ApplyStalenessDownrank -> ApplyTypeLens ->
-		// ApplyMMR -> ApplyTokenBudget. ApplyTypeLens does not exist yet
-		// (PR5, not merged) — ApplyMMR is wired directly after
-		// ApplyStalenessDownrank/explain for now. When PR5 lands, insert its
-		// ApplyTypeLens call BETWEEN this comment and the ApplyMMR call
-		// below (never after it) to reconcile the final order — a one-line
-		// insertion, not a reshuffle, since every pass here is an
-		// independent gated no-op over the same []store.SearchResult shape.
+		// AFTER RankResults/ApplyStalenessDownrank/ApplyTypeLens (priority,
+		// including the situational boost, is already decided) and AFTER
+		// explain's normalizedRelevance above (same "score_breakdown
+		// reflects the full pre-trim batch" rationale ApplyTokenBudget's own
+		// comment below documents), but BEFORE ApplyTokenBudget (dedup
+		// before trim — MMR removes redundancy so the budget is never spent
+		// on near-duplicates).
 		//
 		// A pure no-op when cfg.Injection.Diversity.Enabled is false (the
 		// default) or fewer than 2 results, keeping handleSearch's response
@@ -1318,16 +1341,16 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 
 		// Omnia v0.3 Context Economy (design obs #1643, spec obs #1642
 		// injection-budget domain): ApplyTokenBudget is the LAST pass in the
-		// pipeline, after RankResults/ApplyStalenessDownrank/ApplyMMR above
-		// and before the display/preview loop below, so trimming reflects
-		// the FINAL ranked/downranked/diversified/(PR5: lens-boosted) order.
-		// A pure no-op when cfg.Injection.Budget.Enabled is false (the
-		// default), keeping handleSearch's response byte-for-byte identical
-		// to pre-v0.3 output (Requirement: Disabled by Default, No-Op When
-		// Off). Runs AFTER explain's normalizedRelevance above so a
-		// score_breakdown reflects what RankResults computed over the full
-		// (pre-trim) batch, not a batch already narrowed by the budget or
-		// MMR.
+		// pipeline, after RankResults/ApplyStalenessDownrank/ApplyTypeLens/
+		// ApplyMMR above and before the display/preview loop below, so
+		// trimming reflects the FINAL ranked/downranked/lens-boosted/
+		// diversified order. A pure no-op when cfg.Injection.Budget.Enabled
+		// is false (the default), keeping handleSearch's response
+		// byte-for-byte identical to pre-v0.3 output (Requirement: Disabled
+		// by Default, No-Op When Off). Runs AFTER explain's
+		// normalizedRelevance above so a score_breakdown reflects what
+		// RankResults computed over the full (pre-trim) batch, not a batch
+		// already narrowed by the lens, MMR, or the budget itself.
 		//
 		// PR2 review fix (WARNING): capture the pre-trim count so a genuine
 		// budget-driven cut can be surfaced below — "Found 0 memories" after
