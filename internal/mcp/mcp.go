@@ -1930,6 +1930,17 @@ func handleSuggestTopicKey() server.ToolHandlerFunc {
 	}
 }
 
+// handleUpdate implements mem_update. Project semantics (issue #140):
+// mem_update NEVER resolves a project from cwd or the process override
+// (cfg.DefaultProject) the way mem_save does, and — per the write-tool
+// contract enforced by TestWriteSchema_ProjectFieldOnlyForAmbiguousRecovery
+// (REQ-308) — its schema does not accept an explicit "project" argument
+// either; only mem_save/mem_save_prompt expose that for ambiguous-project
+// recovery. An update always targets one specific existing observation by
+// id, so there is no ambiguity to resolve and no cwd-based guess to make:
+// the only safe outcome is to PRESERVE the observation's existing project,
+// unconditionally. The response envelope reflects that same, actual stored
+// project — never a fresh, unrelated cwd/override resolution.
 func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
@@ -1958,6 +1969,10 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		if v, ok := req.GetArguments()["outcome"].(string); ok {
 			update.Outcome = &v
 		}
+		// update.Project is deliberately never set here (see doc comment
+		// above) — store.UpdateObservation treats a nil Project as "preserve
+		// the existing value", which is the only project semantics this
+		// handler supports.
 
 		if update.Title == nil && update.Content == nil && update.Type == nil && update.Project == nil && update.Scope == nil && update.TopicKey == nil && update.Outcome == nil {
 			return mcp.NewToolResultError("provide at least one field to update"), nil
@@ -1985,8 +2000,25 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			msg += fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d chars. Consider splitting into smaller observations.", contentLen, s.MaxObservationLength())
 		}
 
-		// Auto-detect for envelope; tolerant — don't fail update on resolution error
-		detRes, detErr := resolveWriteProject()
+		// Envelope reflects the observation's ACTUAL (post-update) project —
+		// never a fresh cwd/process-override resolution. Previously this
+		// called the bare resolveWriteProject() here, which ignored
+		// cfg.DefaultProject entirely and reported whatever project the
+		// current cwd happened to auto-detect to, unrelated to where the
+		// observation actually lives. That diverged from mem_save's envelope
+		// for the same process override and could mislead a caller into
+		// believing the observation moved (issue #140).
+		detRes := projectpkg.DetectionResult{
+			Project: strFromPtr(obs.Project),
+			Source:  projectpkg.SourcePreserved,
+		}
+		var detErr error
+		if detRes.Project == "" {
+			// No stored project on the observation at all (legacy/edge data) —
+			// fall back to the same tolerant auto-detect used before, honoring
+			// the process override this time.
+			detRes, detErr = resolveWriteProjectWithProcessOverride(cfg.DefaultProject)
+		}
 		if detErr != nil {
 			// Still return success for the update itself.
 			return mcp.NewToolResultText(msg), nil
@@ -2610,7 +2642,13 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		source, _ := req.GetArguments()["source"].(string)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveWriteProject()
+		// Honour the process-level project override (cfg.DefaultProject),
+		// same as mem_save/mem_session_summary (#403/#413). This is a WRITE
+		// tool (PassiveCapture persists new observations below) — a bare
+		// resolveWriteProject() here ignored the override and silently wrote
+		// into whatever project cwd auto-detected to, the same bug class as
+		// issue #140.
+		detRes, err := resolveWriteProjectWithProcessOverride(cfg.DefaultProject)
 		if err != nil {
 			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
