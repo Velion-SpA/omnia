@@ -731,6 +731,8 @@ func main() {
 		cmdForgetScan(cfg)
 	case "review-due":
 		cmdReviewDue(cfg)
+	case "dedupe":
+		cmdDedupe(cfg)
 	case "procedure-induct":
 		cmdProcedureInduct(cfg)
 	case "procedure":
@@ -3153,6 +3155,12 @@ Commands:
                        project/type + id/title, never full content.
                        Quiet ("0 memories due") when nothing is due.
                        Resolve via: mem_review mark_reviewed <id>
+  dedupe             Propose near-duplicate merge clusters [--project P] [--json]
+                       Offline, FTS-blocked candidate scan (never all-pairs).
+                       Dry-run only in this release: proposes clusters (cluster
+                       id, canonical survivor = newest, losers, jaccard scores)
+                       but never merges/deletes anything. --apply is not yet
+                       implemented.
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
   context [project]  Show recent context from previous sessions
   stats              Show memory system statistics
