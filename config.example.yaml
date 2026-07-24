@@ -93,7 +93,7 @@ backfill_days: 30
 # injection:
 #   budget:
 #     enabled: true
-#     max_tokens: 1500
+#     max_tokens: 400   # v0.3.1 default (was 1500; explicit values are never migrated)
 #   context_budget:
 #     enabled: true
 #     max_tokens: 1500
@@ -103,3 +103,14 @@ backfill_days: 30
 #     similarity_threshold: 0.9
 #   type_lens:
 #     enabled: true
+
+# v0.3.1 Write Hygiene — the save-side gate (DEFAULT-ON, unlike every
+# injection.* gate above). Uncomment only to change thresholds or to turn
+# the gate OFF (the kill-switch): with `enabled: false`, save behavior is
+# byte-for-byte identical to pre-v0.3.1.
+# write_hygiene:
+#   enabled: true
+#   noop_threshold: 0.98    # >= : content-identical -> NOOP, returns existing ID
+#   update_threshold: 0.9   # >  : same fact, more info -> auto-update (never at exactly 0.9)
+#   shrink_guard: 0.9       # auto-update never shrinks content below this fraction
+#   candidate_limit: 10     # FTS-prefiltered candidates scored per save

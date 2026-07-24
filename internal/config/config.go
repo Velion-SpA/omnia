@@ -82,6 +82,44 @@ type Config struct {
 	// convention: a fresh install or upgrade that never mentions `injection`
 	// sees ZERO behavior change from pre-v0.3.
 	Injection InjectionConfig `yaml:"injection"`
+
+	// WriteHygiene configures Omnia v0.3.1's "Write Hygiene" save-side gate
+	// (design obs #1668 D5, spec obs #1666 write-gate domain): the
+	// deterministic NOOP / auto-update / save+relate decision ladder that
+	// runs on every save (the gate itself lands in PR3 — this block is
+	// config-only until then). UNLIKE every Context Economy gate above,
+	// write_hygiene defaults to ENABLED: it changes only what gets STORED
+	// (never what an agent receives at read time), its thresholds are
+	// deliberately conservative, and every decision is surfaced in the save
+	// envelope. The kill-switch is an explicit `enabled: false`, honored via
+	// writeHygieneEnabledKeyPresent's inverted explicit-vs-absent probe —
+	// disabling it restores byte-for-byte pre-v0.3.1 save behavior.
+	WriteHygiene WriteHygieneConfig `yaml:"write_hygiene"`
+}
+
+// WriteHygieneConfig is the v0.3.1 write-gate block (design obs #1668
+// D3/D5). Thresholds are similarity values in [0,1] over
+// internal/similarity's token-set Jaccard:
+//
+//   - NoopThreshold (default 0.98): at-or-above, an incoming save is treated
+//     as content-identical to an existing observation — nothing is stored
+//     and the existing observation's ID is returned (spec: NOOP returns the
+//     existing ID).
+//   - UpdateThreshold (default 0.9): STRICTLY above (the business rule says
+//     ">0.9", so exactly 0.9 does NOT update), with the shrink-guard
+//     satisfied, the incoming save AUTO-UPDATES the matched observation
+//     instead of duplicating it.
+//   - ShrinkGuard (default 0.9): the auto-update path refuses to replace
+//     content with a candidate shorter than this fraction of the existing
+//     content's length — "more info" never silently becomes "less info".
+//   - CandidateLimit (default 10): how many FTS-prefiltered candidates the
+//     gate scores per save — the gate never scans the whole store.
+type WriteHygieneConfig struct {
+	Enabled         bool    `yaml:"enabled"`
+	NoopThreshold   float64 `yaml:"noop_threshold"`
+	UpdateThreshold float64 `yaml:"update_threshold"`
+	ShrinkGuard     float64 `yaml:"shrink_guard"`
+	CandidateLimit  int     `yaml:"candidate_limit"`
 }
 
 // InjectionConfig is the parent block for every Context Economy sub-gate
@@ -510,6 +548,27 @@ func recallEnabledKeyPresent(data []byte) bool {
 	return probe.Recall.Enabled != nil
 }
 
+// writeHygieneEnabledKeyPresent reports whether the loaded YAML explicitly
+// set write_hygiene.enabled — the INVERTED sibling of recallEnabledKeyPresent
+// above. write_hygiene is the one default-ON gate (design obs #1668 D5), so
+// the probe protects the opposite transition: applyDefaults only fills
+// Enabled=true when the key is genuinely ABSENT; an operator's explicit
+// `enabled: false` (the kill-switch) must stick and never be "defaulted"
+// back to true. A plain bool zero-check could not tell those two states
+// apart. Unparseable YAML counts as absent (falls through to default-ON,
+// consistent with Load having already rejected truly broken files).
+func writeHygieneEnabledKeyPresent(data []byte) bool {
+	var probe struct {
+		WriteHygiene struct {
+			Enabled *bool `yaml:"enabled"`
+		} `yaml:"write_hygiene"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	return probe.WriteHygiene.Enabled != nil
+}
+
 // injectionBudgetMaxTokensKeyPresent reports whether the loaded YAML
 // explicitly set `injection.budget.max_tokens` (to any integer, including
 // 0), as opposed to the key being entirely absent. Mirrors
@@ -677,8 +736,17 @@ func applyDefaults(cfg *Config, data []byte) {
 	// writes `max_tokens: 0` is deliberately reaching ApplyTokenBudget's own
 	// MaxTokens<=0 "disabled" branch, not accidentally leaving the key unset
 	// — without this probe that branch is unreachable from real config.
+	// v0.3.1 recalibration (design obs #1668 D6, eval evidence obs #1659):
+	// the search-budget default drops 1500 → 400. The formal eval proved
+	// 1500 structurally inert on this path (pipelineFetchLimit×preview caps
+	// it near ~750 tokens) while ~300 cut ~70% of injected tokens with zero
+	// accuracy regression. The key-present probe keeps any EXPLICIT value —
+	// including a deliberate 1500 — byte-for-byte untouched; only genuinely
+	// absent keys pick up the new default. ContextBudget below keeps 1500:
+	// its consumer (FormatContext) aggregates four buckets and has no such
+	// structural ceiling.
 	if cfg.Injection.Budget.MaxTokens == 0 && !injectionBudgetMaxTokensKeyPresent(data) {
-		cfg.Injection.Budget.MaxTokens = 1500
+		cfg.Injection.Budget.MaxTokens = 400
 	}
 	// Injection.ContextBudget.Enabled intentionally has NO default override —
 	// its zero value (false) IS the default, same convention as
@@ -715,6 +783,30 @@ func applyDefaults(cfg *Config, data []byte) {
 	// has no other field: InferLensType's signal table is fixed code, not a
 	// tunable config value, so there is nothing else for applyDefaults to
 	// fill in here.
+
+	// WriteHygiene (v0.3.1, design obs #1668 D5) is the one DEFAULT-ON gate:
+	// Enabled fills to true only when the operator never wrote the key at
+	// all (writeHygieneEnabledKeyPresent — inverted explicit-vs-absent
+	// probe), so an explicit `enabled: false` kill-switch always sticks.
+	// Thresholds get plain zero-check defaults (the Diversity
+	// Lambda/SimilarityThreshold convention): they are always filled, even
+	// with the gate off, so a later `enabled: true` flip without restating
+	// thresholds is safe.
+	if !cfg.WriteHygiene.Enabled && !writeHygieneEnabledKeyPresent(data) {
+		cfg.WriteHygiene.Enabled = true
+	}
+	if cfg.WriteHygiene.NoopThreshold == 0 {
+		cfg.WriteHygiene.NoopThreshold = 0.98
+	}
+	if cfg.WriteHygiene.UpdateThreshold == 0 {
+		cfg.WriteHygiene.UpdateThreshold = 0.9
+	}
+	if cfg.WriteHygiene.ShrinkGuard == 0 {
+		cfg.WriteHygiene.ShrinkGuard = 0.9
+	}
+	if cfg.WriteHygiene.CandidateLimit == 0 {
+		cfg.WriteHygiene.CandidateLimit = 10
+	}
 }
 
 // legacyEmbeddingsDBPath is the historic global default for Omnia's own

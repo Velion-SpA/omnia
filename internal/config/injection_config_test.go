@@ -14,9 +14,11 @@ import (
 // TestInjectionBudget_DefaultsDisabled locks the same backward-compatible
 // rollback guarantee every other Context Economy gate shares: a config with
 // no `injection` section at all must default to Budget.Enabled=false, with
-// MaxTokens still filled to its documented default (1500) so an operator who
-// opts in with only `injection: { budget: { enabled: true } }` gets a sane
-// ceiling, not a zero-valued budget that would trim every result away.
+// MaxTokens still filled to its documented default — 400 as of v0.3.1
+// (design obs #1668 D6, eval obs #1659: 1500 proved structurally inert on
+// the search path, ~300 cut ~70% of tokens with zero accuracy loss) — so an
+// operator who opts in with only `injection: { budget: { enabled: true } }`
+// gets a ceiling that actually bites.
 func TestInjectionBudget_DefaultsDisabled(t *testing.T) {
 	path := writeTempConfig(t, "engram:\n  base_url: http://127.0.0.1:7437\n")
 	cfg, err := config.Load(path)
@@ -26,8 +28,28 @@ func TestInjectionBudget_DefaultsDisabled(t *testing.T) {
 	if cfg.Injection.Budget.Enabled {
 		t.Error("Injection.Budget.Enabled: got true, want false by default")
 	}
+	if cfg.Injection.Budget.MaxTokens != 400 {
+		t.Errorf("Injection.Budget.MaxTokens default: got %v, want 400 (v0.3.1 recalibration)", cfg.Injection.Budget.MaxTokens)
+	}
+}
+
+// TestInjectionBudget_ExplicitPreExistingValueStaysUnchanged is the v0.3.1
+// migration guarantee: an operator who explicitly configured the OLD default
+// (`max_tokens: 1500`) — or any other explicit value — keeps it byte-for-byte
+// through the 1500→400 default recalibration; only genuinely absent keys pick
+// up the new 400.
+func TestInjectionBudget_ExplicitPreExistingValueStaysUnchanged(t *testing.T) {
+	path := writeTempConfig(t, ""+
+		"injection:\n"+
+		"  budget:\n"+
+		"    enabled: true\n"+
+		"    max_tokens: 1500\n")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if cfg.Injection.Budget.MaxTokens != 1500 {
-		t.Errorf("Injection.Budget.MaxTokens default: got %v, want 1500", cfg.Injection.Budget.MaxTokens)
+		t.Errorf("explicit max_tokens: 1500 after recalibration: got %v, want 1500 (explicit values must never migrate)", cfg.Injection.Budget.MaxTokens)
 	}
 }
 
