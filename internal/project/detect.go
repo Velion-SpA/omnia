@@ -43,6 +43,12 @@ const (
 	SourceRequestBody                       = "request_body" // REQ-414: project came from the request body (server-side, no filesystem path)
 	SourceConfig                            = "config"       // derived from .engram/config.json project_name
 	SourceAllProjects                       = "all_projects" // caller asked for cross-project search (no single project resolved)
+	// SourcePreserved means the project was NOT re-resolved at all — it
+	// reflects an existing record's project as-is (issue #140: mem_update's
+	// envelope must report the observation's actual project, never a fresh
+	// cwd/process-override guess that has nothing to do with the record
+	// being edited).
+	SourcePreserved = "preserved"
 )
 
 // noiseSet lists directory names that are skipped during child-repo scanning.
