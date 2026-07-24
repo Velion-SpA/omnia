@@ -18,71 +18,30 @@ package mcp
 // near-duplicates).
 
 import (
-	"regexp"
-	"strings"
-
 	"github.com/velion/omnia/internal/config"
+	"github.com/velion/omnia/internal/similarity"
 	"github.com/velion/omnia/internal/store"
 )
 
-// mmrTokenRe extracts Unicode letter/digit runs as word tokens for
-// jaccardSimilarity — punctuation and whitespace are separators, not
-// content.
-var mmrTokenRe = regexp.MustCompile(`[\p{L}\p{N}]+`)
-
-// tokenizeForSimilarity splits s into lowercased word tokens (design section
-// 3.3: "token-set Jaccard on lowercased word tokens"). Case and punctuation
-// are deliberately insensitive: "Hello, World!" and "hello world" tokenize
-// identically, so near-duplicate detection isn't fooled by capitalization or
-// punctuation drift between two renderings of the same fact.
-//
-// KNOWN LIMITATION: scripts written without inter-word whitespace (Chinese,
-// Japanese, ...) tokenize as one giant letter-run per sentence, so two
-// near-duplicate CJK sentences look completely disjoint (Jaccard 0) unless
-// byte-identical — MMR dedup is effectively inert for such content. Accepted
-// for v0.3 (the corpus is ES/EN); a bigram fallback is the follow-up if CJK
-// content ever matters.
+// tokenizeForSimilarity is a thin alias over similarity.Tokenize. Omnia
+// v0.3.1 "Write Hygiene" PR1 (design obs #1668 D1) promoted the tokenizer/
+// Jaccard primitives out of this file into the shared internal/similarity
+// leaf so internal/store's write-time dedup gate can reuse them without
+// importing internal/mcp (store must never import mcp). The local copies of
+// the actual algorithm are deleted; this wrapper is kept — same name, same
+// behavior, no local logic — purely so mmr_test.go's existing unit tests
+// against these exact identifiers keep compiling and passing byte-for-byte
+// as the regression net proving the move changed nothing (kill-switch
+// check, PR1 task 1.4).
 func tokenizeForSimilarity(s string) []string {
-	return mmrTokenRe.FindAllString(strings.ToLower(s), -1)
+	return similarity.Tokenize(s)
 }
 
-// jaccardSimilarity returns the token-set Jaccard similarity |A∩B| / |A∪B|
-// between two already-tokenized word-token slices (design ADR-5): cheap,
-// deterministic, O(n+m), allocation-light, no new embeddings or model
-// dependency (spec: Cheap Lexical Similarity Only). Two token sets where
-// either is empty return 0, not 1 — a deliberate conservative choice so
-// empty/near-empty content never looks like a spurious "duplicate" of other
-// empty/near-empty content and gets dropped by accident.
+// jaccardSimilarity is a thin alias over similarity.Jaccard. See
+// tokenizeForSimilarity's doc comment above for why this wrapper exists
+// instead of a direct call at each use site.
 func jaccardSimilarity(a, b []string) float64 {
-	if len(a) == 0 || len(b) == 0 {
-		return 0
-	}
-
-	setA := make(map[string]struct{}, len(a))
-	for _, t := range a {
-		setA[t] = struct{}{}
-	}
-	setB := make(map[string]struct{}, len(b))
-	for _, t := range b {
-		setB[t] = struct{}{}
-	}
-
-	intersection := 0
-	for t := range setA {
-		if _, ok := setB[t]; ok {
-			intersection++
-		}
-	}
-	union := len(setA)
-	for t := range setB {
-		if _, ok := setA[t]; !ok {
-			union++
-		}
-	}
-	if union == 0 {
-		return 0
-	}
-	return float64(intersection) / float64(union)
+	return similarity.Jaccard(a, b)
 }
 
 // mmrRelevanceOrRankProxy returns a rel(d) score in [0,1] for each row in
