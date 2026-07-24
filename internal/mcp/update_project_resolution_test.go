@@ -203,3 +203,60 @@ func TestHandleCapturePassive_HonorsProcessOverride(t *testing.T) {
 		t.Fatalf("expected captured observation under the override project, err=%v len=%d", err, len(obs))
 	}
 }
+
+// TestHandleSessionStart_HonorsProcessOverrideWhenDirectoryEmpty covers issue
+// #147: resolveSessionStartProject's empty-directory branch called the bare
+// resolveWriteProject() and ignored cfg.DefaultProject, the same bug class
+// as #140/#146. When the caller omits "directory" (auto-detect path),
+// session_start must honor the process-level override, same as mem_save.
+func TestHandleSessionStart_HonorsProcessOverrideWhenDirectoryEmpty(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	cfg := MCPConfig{DefaultProject: "override-project-x"}
+
+	res, err := handleSessionStart(s, cfg, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id": "s-147-start",
+	}}})
+	if err != nil {
+		t.Fatalf("session start handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected session start error: %s", callResultText(t, res))
+	}
+
+	body := callResultJSON(t, res)
+	if body["project"] != "override-project-x" {
+		t.Fatalf("session_start must honor the process override when directory is empty, got %v", body["project"])
+	}
+}
+
+// TestHandleSessionEnd_HonorsProcessOverride covers issue #147:
+// handleSessionEnd always called the bare resolveWriteProject(), ignoring
+// cfg.DefaultProject entirely — the same bug class as #140/#146.
+func TestHandleSessionEnd_HonorsProcessOverride(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	cfg := MCPConfig{DefaultProject: "override-project-x"}
+
+	res, err := handleSessionEnd(s, cfg, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":      "s-147-end",
+		"summary": "done",
+	}}})
+	if err != nil {
+		t.Fatalf("session end handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected session end error: %s", callResultText(t, res))
+	}
+
+	body := callResultJSON(t, res)
+	if body["project"] != "override-project-x" {
+		t.Fatalf("session_end must honor the process override, got %v", body["project"])
+	}
+}

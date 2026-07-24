@@ -2568,7 +2568,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		resolvedDirectory := strings.TrimSpace(directory)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveSessionStartProject(resolvedDirectory)
+		detRes, err := resolveSessionStartProject(resolvedDirectory, cfg.DefaultProject)
 		if err != nil {
 			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
@@ -2591,9 +2591,14 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 	}
 }
 
-func resolveSessionStartProject(explicitDirectory string) (projectpkg.DetectionResult, error) {
+func resolveSessionStartProject(explicitDirectory, defaultProject string) (projectpkg.DetectionResult, error) {
 	if explicitDirectory == "" {
-		return resolveWriteProject()
+		// Honour the process-level project override (cfg.DefaultProject), same
+		// as mem_save/mem_update/mem_capture_passive (#403/#146/#140). A bare
+		// resolveWriteProject() here ignored the override and silently started
+		// the session under whatever project cwd auto-detected to — the same
+		// bug class as issue #140 (issue #147).
+		return resolveWriteProjectWithProcessOverride(defaultProject)
 	}
 	res := projectpkg.DetectProjectFull(explicitDirectory)
 	if res.Error != nil {
@@ -2608,7 +2613,12 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		summary, _ := req.GetArguments()["summary"].(string)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveWriteProject()
+		// Honour the process-level project override (cfg.DefaultProject), same
+		// as mem_save/mem_update/mem_capture_passive (#403/#146/#140). A bare
+		// resolveWriteProject() here ignored the override and reported whatever
+		// project cwd auto-detected to — the same bug class as issue #140
+		// (issue #147).
+		detRes, err := resolveWriteProjectWithProcessOverride(cfg.DefaultProject)
 		if err != nil {
 			if errors.Is(err, projectpkg.ErrInvalidConfig) {
 				return writeProjectErrorResult(nil, "", detRes, err), nil
