@@ -44,7 +44,7 @@ Chain strategy: stacked-to-main
 - [x] 1.6 GREEN: implement generic `TrimToBudget[T any](items []T, sizeOf func(T) int, budget int) (kept []T, used int)` in `internal/token/token.go`.
 - [x] 1.7 Docs: package doc comment on `internal/token` documenting the char/4 heuristic, ±25% English/code accuracy, CJK under-count caveat (spec REQ3 — heuristic documented, not exact tokenizer parity). Implemented as the package doc comment atop `token.go` (matches the repo convention in `internal/recall/recall.go`) instead of a separate `doc.go`.
 - [x] 1.8 Verify: `CGO_ENABLED=0 go test ./internal/token/...` + `go build ./...` + `go vet ./...` + `gofmt -l internal/token/` all clean.
-- [ ] 1.9 PR: branch `feat/token-estimation-leaf`, reference approved issue, `type:feature` label, squash-merge to main. (Left unchecked — sdd-apply does not create branches/commits/PRs per orchestrator instruction; orchestrator handles git.)
+- [x] 1.9 PR: branch `feat/token-estimation-leaf`, reference approved issue, `type:feature` label, squash-merge to main. (Left unchecked — sdd-apply does not create branches/commits/PRs per orchestrator instruction; orchestrator handles git.) (merged as #132 by the orchestrator)
 
 ---
 
@@ -67,7 +67,7 @@ Chain strategy: stacked-to-main
 - [x] 2.10 GREEN: migrate `cmd/omnia/recall_fix.go` from `maxRecallFixTotalChars=600` + `truncate(out,600)` to `token.TrimToBudget(hitLines, token.EstimateTokens, maxRecallFixTokenBudget)` with `maxRecallFixTokenBudget = 150`.
 - [x] 2.11 Docs: update `internal/config` doc comment / README config reference noting the new `injection.budget` block, default-off, default `max_tokens=1500`.
 - [x] 2.12 Verify: `CGO_ENABLED=0 go test ./...` + `go build ./...` + `go vet ./...` + `gofmt -l .` all clean.
-- [ ] 2.13 PR: branch `feat/injection-token-budget`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR1). (Left unchecked — sdd-apply does not create branches/commits/PRs per orchestrator instruction; orchestrator handles git.)
+- [x] 2.13 PR: branch `feat/injection-token-budget`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR1). (Left unchecked — sdd-apply does not create branches/commits/PRs per orchestrator instruction; orchestrator handles git.) (merged as #134 by the orchestrator)
 
 ---
 
@@ -87,7 +87,7 @@ Chain strategy: stacked-to-main
 - [x] 3.7 GREEN: add `ContextBudget TokenBudgetConfig` field to `InjectionConfig` in `internal/config/config.go` (added in PR2) with its own `applyDefaults` default `MaxTokens→1500`.
 - [x] 3.8 Docs: update config reference documenting `injection.context_budget` block and the FormatContext uncapped-bug fix.
 - [x] 3.9 Verify: `CGO_ENABLED=0 go test ./...` + `go build ./...` + `go vet ./...` + `gofmt -l .` all clean.
-- [ ] 3.10 PR: branch `fix/formatcontext-token-budget`, reference approved issue, `type:bug` label (fixes the pre-existing uncapped-bucket defect), squash-merge to main (base: main, after PR2). (Left unchecked — sdd-apply does not create branches/commits/PRs per orchestrator instruction; orchestrator handles git.)
+- [x] 3.10 PR: branch `fix/formatcontext-token-budget`, reference approved issue, `type:bug` label (fixes the pre-existing uncapped-bucket defect), squash-merge to main (base: main, after PR2). (Left unchecked — sdd-apply does not create branches/commits/PRs per orchestrator instruction; orchestrator handles git.) (merged as #135 by the orchestrator)
 
 ---
 
@@ -109,7 +109,7 @@ Chain strategy: stacked-to-main
 - [x] 4.9 Wiring: insert `ApplyMMR` call in `internal/mcp/mcp.go` handleSearch pipeline after type-lens (PR5 dependency note: if PR5 lands after PR4, insert MMR immediately before the token budget call from PR2; adjust order when PR5 merges), before `ApplyTokenBudget`. (ApplyTypeLens/PR5 not merged yet — ApplyMMR wired directly after RankResults/ApplyStalenessDownrank/explain, immediately before ApplyTokenBudget, with an explicit PIPELINE-POSITION NOTE comment in mcp.go marking where PR5's ApplyTypeLens call must be inserted.)
 - [x] 4.10 Docs: update config reference documenting `injection.diversity` block, defaults `lambda=0.7`, `similarity_threshold=0.9`.
 - [x] 4.11 Verify: `CGO_ENABLED=0 go test ./...` + `go build ./...` + `go vet ./...` + `gofmt -l .` all clean.
-- [ ] 4.12 PR: branch `feat/injection-mmr-diversity`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR3).
+- [x] 4.12 PR: branch `feat/injection-mmr-diversity`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR3). (merged as #136 by the orchestrator)
 
 ---
 
@@ -132,7 +132,7 @@ Chain strategy: stacked-to-main
 - [x] 5.10 Wiring: insert `ApplyTypeLens` call in `internal/mcp/mcp.go` handleSearch pipeline BEFORE `ApplyMMR` (order: RankResults → ApplyStalenessDownrank → ApplyTypeLens → ApplyMMR → ApplyTokenBudget), reconciling PR4's provisional insertion point.
 - [x] 5.11 Docs: update config reference documenting `injection.type_lens` block, default-off.
 - [x] 5.12 Verify: `CGO_ENABLED=0 go test ./...` + `go build ./...` + `go vet ./...` + `gofmt -l .` all clean; confirm final pipeline order matches design section 2.
-- [ ] 5.13 PR: branch `feat/injection-type-lens`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR4). (Left unchecked — sdd-apply does not create branches/commits/PRs per orchestrator instruction; orchestrator handles git.)
+- [x] 5.13 PR: branch `feat/injection-type-lens`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR4). (Left unchecked — sdd-apply does not create branches/commits/PRs per orchestrator instruction; orchestrator handles git.) (merged as #137 by the orchestrator)
 
 ---
 
@@ -143,19 +143,19 @@ Chain strategy: stacked-to-main
 **Files touched**: `plugin/claude-code/scripts/user-prompt-submit.sh` (extend), new shell test file (e.g. `plugin/claude-code/scripts/user-prompt-submit_test.sh` or existing test harness pattern for this script).
 **Dependencies on previous PRs**: None — isolated bash, zero Go coupling. Sequenced last per design (D "O last — bash, fully isolated").
 
-- [ ] 6.1 RED: shell test — new-topic prompt (imperative verb start EN/ES: implement/add/fix/haceme/arreglá…) with `OMNIA_SIGNAL_RECALL=1` → emits nudge instruction exactly once.
-- [ ] 6.2 RED: shell test — repeat same-topic prompt in same session → deduped, silent (no second nudge), using dedup-marker idiom from `post-tool-error-recall.sh`.
-- [ ] 6.3 RED: shell test — uncertainty-signal prompt (how/why/failing/no sé/cómo/ends-with-`?`) → emits nudge instruction.
-- [ ] 6.4 RED: shell test — benign/no-signal prompt → outputs `{}`, no nudge, no added latency.
-- [ ] 6.5 RED: shell test — malformed/empty stdin → `echo '{}'; exit 0` (never blocks prompt submission).
-- [ ] 6.6 RED: shell test — `OMNIA_SIGNAL_RECALL` unset or `0` → always `{}` regardless of signal content (default-off, no-op).
-- [ ] 6.7 GREEN: implement new-topic + uncertainty regex classifiers (EN+ES) in `plugin/claude-code/scripts/user-prompt-submit.sh`, gated by `OMNIA_SIGNAL_RECALL` env var.
-- [ ] 6.8 GREEN: implement dedup marker write/check reusing `post-tool-error-recall.sh`'s hash-based marker idiom, scoped to `${TMPDIR:-/tmp}/omnia-signal-recall-<session>-<hash>`.
-- [ ] 6.9 GREEN: emit INSTRUCTION output (systemMessage/additionalContext nudging `mem_search`), NOT auto-injected results, on trigger match.
-- [ ] 6.10 GREEN: wrap all new logic so any failure path (missing env, no match, error) falls through to `echo '{}'; exit 0`.
-- [ ] 6.11 Docs: update plugin README/hook comments documenting `OMNIA_SIGNAL_RECALL` env gate, default off, the one deliberate config.yaml exception (bash can't parse YAML).
-- [ ] 6.12 Verify: run the shell test suite for this script; confirm exit code 0 and valid JSON output in every branch; manual self-check per design section 6.
-- [ ] 6.13 PR: branch `feat/signal-gated-recall-nudge`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR5).
+- [x] 6.1 RED: shell test — new-topic prompt (imperative verb start EN/ES: implement/add/fix/haceme/arreglá…) with `OMNIA_SIGNAL_RECALL=1` → emits nudge instruction exactly once.
+- [x] 6.2 RED: shell test — repeat same-topic prompt in same session → deduped, silent (no second nudge), using dedup-marker idiom from `post-tool-error-recall.sh`.
+- [x] 6.3 RED: shell test — uncertainty-signal prompt (how/why/failing/no sé/cómo/ends-with-`?`) → emits nudge instruction.
+- [x] 6.4 RED: shell test — benign/no-signal prompt → outputs `{}`, no nudge, no added latency.
+- [x] 6.5 RED: shell test — malformed/empty stdin → `echo '{}'; exit 0` (never blocks prompt submission).
+- [x] 6.6 RED: shell test — `OMNIA_SIGNAL_RECALL` unset or `0` → always `{}` regardless of signal content (default-off, no-op).
+- [x] 6.7 GREEN: implement new-topic + uncertainty regex classifiers (EN+ES) in `plugin/claude-code/scripts/user-prompt-submit.sh`, gated by `OMNIA_SIGNAL_RECALL` env var.
+- [x] 6.8 GREEN: implement dedup marker write/check reusing `post-tool-error-recall.sh`'s hash-based marker idiom, scoped to `${TMPDIR:-/tmp}/omnia-signal-recall-<session>-<hash>`.
+- [x] 6.9 GREEN: emit INSTRUCTION output (systemMessage/additionalContext nudging `mem_search`), NOT auto-injected results, on trigger match.
+- [x] 6.10 GREEN: wrap all new logic so any failure path (missing env, no match, error) falls through to `echo '{}'; exit 0`.
+- [x] 6.11 Docs: update plugin README/hook comments documenting `OMNIA_SIGNAL_RECALL` env gate, default off, the one deliberate config.yaml exception (bash can't parse YAML).
+- [x] 6.12 Verify: run the shell test suite for this script; confirm exit code 0 and valid JSON output in every branch; manual self-check per design section 6.
+- [x] 6.13 PR: branch `feat/signal-gated-recall-nudge`, reference approved issue, `type:feature` label, squash-merge to main (base: main, after PR5).
 
 ---
 
