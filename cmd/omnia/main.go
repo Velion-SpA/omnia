@@ -841,6 +841,18 @@ func cmdServe(cfg store.Config) {
 		}
 	}
 
+	// Omnia v0.3 Context Economy (design obs #1643/D8, spec obs #1642 PR3):
+	// load config.yaml BEFORE storeNew so store.Config.ContextTokenBudget —
+	// read once at store construction (s.cfg is immutable after New) — can
+	// be set from injection.context_budget before FormatContext's first
+	// call (GET /context, the dashboard). appCfg/appCfgErr are reused below
+	// for auto-embed/recall wiring, so loadAppConfigWithRecallAutodetect
+	// still only runs once per startup here, matching cmdMCP's convention.
+	appCfg, appCfgErr := loadAppConfigWithRecallAutodetect()
+	if appCfgErr == nil && appCfg.Injection.ContextBudget.Enabled {
+		cfg.ContextTokenBudget = appCfg.Injection.ContextBudget.MaxTokens
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
@@ -867,12 +879,13 @@ func cmdServe(cfg store.Config) {
 	// can Stop() it (graceful drain) before the process exits.
 	//
 	// Also builds the recall.Service for GET /search (issue #86) from the
-	// same config load — loadAppConfigWithRecallAutodetect runs the Ollama
+	// same config load (appCfg/appCfgErr, hoisted above ContextTokenBudget's
+	// wiring) — loadAppConfigWithRecallAutodetect runs the Ollama
 	// auto-detect exactly once at startup here, never per-request, matching
 	// cmdMCP's wiring. A missing/unparseable config file degrades both to
 	// their pre-#86/pre-PR4 defaults (no auto-embed, FTS5-only /search).
 	var autoEmbedWorker *embed.Worker
-	if appCfg, cfgErr := loadAppConfigWithRecallAutodetect(); cfgErr == nil {
+	if appCfgErr == nil {
 		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s, cfg.DataDir); worker != nil {
 			worker.Start(ctx)
 			srv.SetAutoEmbed(worker)
@@ -1096,6 +1109,19 @@ func cmdMCP(cfg store.Config) {
 		}
 	}
 
+	// Omnia v0.3 Context Economy (design obs #1643/D8, spec obs #1642 PR3):
+	// load config.yaml BEFORE storeNew so store.Config.ContextTokenBudget —
+	// read once at store construction (s.cfg is immutable after New) — can
+	// be set from injection.context_budget before mem_context's first
+	// FormatContext call. appCfg/appCfgErr are reused below for the rest of
+	// this function's config-driven wiring (recall, structural forgetting,
+	// injection.budget, procedural), so loadAppConfigWithRecallAutodetect
+	// still only runs once per `omnia mcp` startup.
+	appCfg, appCfgErr := loadAppConfigWithRecallAutodetect()
+	if appCfgErr == nil && appCfg.Injection.ContextBudget.Enabled {
+		cfg.ContextTokenBudget = appCfg.Injection.ContextBudget.MaxTokens
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
@@ -1137,8 +1163,9 @@ func cmdMCP(cfg store.Config) {
 	// loadAppConfigWithRecallAutodetect (shared with cmdServe/cmdSearch) runs
 	// the Ollama auto-detect (issue #83) — see its doc for the full gating
 	// rationale — which may flip appCfg.Recall.Enabled to true before
-	// buildRecallService reads it below.
-	if appCfg, cfgErr := loadAppConfigWithRecallAutodetect(); cfgErr == nil {
+	// buildRecallService reads it below. appCfg/appCfgErr are the same
+	// values hoisted above (before storeNew) for ContextTokenBudget wiring.
+	if appCfgErr == nil {
 		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir)
 		// memory-recall-ranking (task 5.4): thread recall.ranking.* through to
 		// handleSearch regardless of whether hybrid recall itself is enabled —
@@ -1682,6 +1709,16 @@ func cmdContext(cfg store.Config) {
 				project = os.Args[i]
 			}
 		}
+	}
+
+	// Omnia v0.3 Context Economy (design obs #1643/D8, spec obs #1642 PR3):
+	// thread injection.context_budget through so `omnia context`'s
+	// FormatContext output honors the same aggregate token budget as
+	// mem_context (cmdMCP) and the dashboard (cmdServe). Missing/unparseable
+	// config.yaml degrades silently to the pre-v0.3 uncapped default,
+	// matching every other `omnia` subcommand's config.Load convention.
+	if appCfg, cfgErr := loadAppConfigWithRecallAutodetect(); cfgErr == nil && appCfg.Injection.ContextBudget.Enabled {
+		cfg.ContextTokenBudget = appCfg.Injection.ContextBudget.MaxTokens
 	}
 
 	s, err := storeNew(cfg)

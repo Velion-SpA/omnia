@@ -382,6 +382,317 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	}
 }
 
+// ─── Omnia v0.3 Context Economy — FormatContext token budget (PR3) ─────────
+//
+// design obs #1643/D8, spec injection-budget REQ3 (spec obs #1642): fixes
+// FormatContext's pre-existing unbounded-aggregate-bucket defect via
+// Config.ContextTokenBudget. All three tests below build fixtures via the
+// SAME insertion helper so PinnedObservations/RecentSessions/
+// recentUnpinnedObservations/RecentPrompts return identical, deterministic
+// ordering across "disabled" vs "enabled" runs — no reliance on guessed SQL
+// ordering behavior.
+
+// TestFormatContextTokenBudgetDisabledIsByteForByteNoOp locks spec REQ6's
+// "disabled by default, no-op when off" scenario: with ContextTokenBudget
+// left at its zero-value default, FormatContext's output must be exactly
+// (byte-for-byte) what independently fetching each of the four buckets and
+// rendering them with the very same line-formatting helpers would produce —
+// i.e. the new budget-trimming block must not run at all when off.
+func TestFormatContextTokenBudgetDisabledIsByteForByteNoOp(t *testing.T) {
+	s := newTestStore(t)
+	if s.cfg.ContextTokenBudget != 0 {
+		t.Fatalf("expected default ContextTokenBudget to stay 0 (disabled), got %d", s.cfg.ContextTokenBudget)
+	}
+
+	if err := s.CreateSession("s1", "ctxbudget", "/tmp/ctxbudget"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "s1",
+			Type:      "decision",
+			Title:     fmt.Sprintf("pinned-%d", i),
+			Content:   fmt.Sprintf("pinned content %d", i),
+			Project:   "ctxbudget",
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatalf("add pinned observation %d: %v", i, err)
+		}
+		if err := s.PinObservation(id); err != nil {
+			t.Fatalf("pin observation %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "s1",
+			Type:      "bugfix",
+			Title:     fmt.Sprintf("recent-%d", i),
+			Content:   fmt.Sprintf("recent content %d", i),
+			Project:   "ctxbudget",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add recent observation %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := s.AddPrompt(AddPromptParams{
+			SessionID: "s1",
+			Content:   fmt.Sprintf("prompt content %d", i),
+			Project:   "ctxbudget",
+		}); err != nil {
+			t.Fatalf("add prompt %d: %v", i, err)
+		}
+	}
+
+	sessions, err := s.RecentSessions("ctxbudget", 5)
+	if err != nil {
+		t.Fatalf("recent sessions: %v", err)
+	}
+	pinned, err := s.PinnedObservations("ctxbudget", "project")
+	if err != nil {
+		t.Fatalf("pinned observations: %v", err)
+	}
+	observations, err := s.recentUnpinnedObservations("ctxbudget", "project", s.cfg.MaxContextResults)
+	if err != nil {
+		t.Fatalf("recent unpinned observations: %v", err)
+	}
+	prompts, err := s.RecentPrompts("ctxbudget", 10)
+	if err != nil {
+		t.Fatalf("recent prompts: %v", err)
+	}
+
+	var want strings.Builder
+	want.WriteString("## Memory from Previous Sessions\n\n")
+	if len(sessions) > 0 {
+		want.WriteString("### Recent Sessions\n")
+		for _, sess := range sessions {
+			want.WriteString(formatSessionLine(sess))
+		}
+		want.WriteString("\n")
+	}
+	if len(prompts) > 0 {
+		want.WriteString("### Recent User Prompts\n")
+		for _, p := range prompts {
+			want.WriteString(formatPromptLine(p))
+		}
+		want.WriteString("\n")
+	}
+	if len(pinned) > 0 {
+		want.WriteString("### Pinned\n")
+		for _, obs := range pinned {
+			want.WriteString(formatObservationLine(obs))
+		}
+		want.WriteString("\n")
+	}
+	if len(observations) > 0 {
+		want.WriteString("### Recent Observations\n")
+		for _, obs := range observations {
+			want.WriteString(formatObservationLine(obs))
+		}
+		want.WriteString("\n")
+	}
+
+	got, err := s.FormatContext("ctxbudget", "project")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+	if got != want.String() {
+		t.Fatalf("expected disabled ContextTokenBudget to leave FormatContext byte-for-byte unchanged (no trimming applied)\ngot:\n%s\nwant:\n%s", got, want.String())
+	}
+}
+
+// TestFormatContextTokenBudgetUncappedBugRegressionAndBoundedWhenEnabled
+// pins BOTH halves of the fix in one test: (a) the pre-existing unbounded
+// behavior is preserved verbatim when the flag stays off (compat — the
+// "bug", left in place, off by default), and (b) enabling the budget with a
+// large multi-item pinned bucket keeps only the top-ranked items and drops
+// the rest entirely (the "fix").
+func TestFormatContextTokenBudgetUncappedBugRegressionAndBoundedWhenEnabled(t *testing.T) {
+	const totalPinned = 12
+	const keepPinned = 5
+
+	buildFixture := func(t *testing.T, contextTokenBudget int) *Store {
+		t.Helper()
+		cfg := mustDefaultConfig(t)
+		cfg.DataDir = t.TempDir()
+		cfg.DedupeWindow = time.Hour
+		cfg.ContextTokenBudget = contextTokenBudget
+		s, err := New(cfg)
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+
+		if err := s.CreateSession("s1", "ctxbudget", "/tmp/ctxbudget"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		for i := 0; i < totalPinned; i++ {
+			id, err := s.AddObservation(AddObservationParams{
+				SessionID: "s1",
+				Type:      "decision",
+				Title:     fmt.Sprintf("pinned-%02d", i),
+				Content:   fmt.Sprintf("body-%02d-%s", i, strings.Repeat("z", 320)),
+				Project:   "ctxbudget",
+				Scope:     "project",
+			})
+			if err != nil {
+				t.Fatalf("add pinned observation %d: %v", i, err)
+			}
+			if err := s.PinObservation(id); err != nil {
+				t.Fatalf("pin observation %d: %v", i, err)
+			}
+		}
+		return s
+	}
+
+	// Disabled (default) run: also used to learn the real, deterministic
+	// PinnedObservations ranking order (avoids hardcoding SQL ORDER BY
+	// assumptions) for the enabled run below.
+	control := buildFixture(t, 0)
+	pinnedAll, err := control.PinnedObservations("ctxbudget", "project")
+	if err != nil {
+		t.Fatalf("pinned observations (control): %v", err)
+	}
+	if len(pinnedAll) != totalPinned {
+		t.Fatalf("expected %d pinned observations in control fixture, got %d", totalPinned, len(pinnedAll))
+	}
+
+	ctxDisabled, err := control.FormatContext("ctxbudget", "project")
+	if err != nil {
+		t.Fatalf("format context (disabled): %v", err)
+	}
+	for _, obs := range pinnedAll {
+		if !strings.Contains(ctxDisabled, obs.Title) {
+			t.Fatalf("expected disabled budget to keep ALL %d pinned items (today's uncapped behavior); missing %q in:\n%s", totalPinned, obs.Title, ctxDisabled)
+		}
+	}
+
+	var budget int
+	for _, obs := range pinnedAll[:keepPinned] {
+		budget += formatObservationLineTokens(obs)
+	}
+
+	enabled := buildFixture(t, budget)
+	ctxEnabled, err := enabled.FormatContext("ctxbudget", "project")
+	if err != nil {
+		t.Fatalf("format context (enabled): %v", err)
+	}
+	for _, obs := range pinnedAll[:keepPinned] {
+		if !strings.Contains(ctxEnabled, obs.Title) {
+			t.Fatalf("expected top-ranked pinned item %q to survive the budget, got:\n%s", obs.Title, ctxEnabled)
+		}
+	}
+	for _, obs := range pinnedAll[keepPinned:] {
+		if strings.Contains(ctxEnabled, obs.Title) {
+			t.Fatalf("expected lower-ranked pinned item %q to be trimmed by the budget (pre-fix behavior kept it unbounded), got:\n%s", obs.Title, ctxEnabled)
+		}
+	}
+}
+
+// TestFormatContextTokenBudgetPinnedNeverStarved locks the priority
+// allocation design decision (D8 — pinned is the pre-emption analog, never
+// starved): budget is consumed pinned FIRST, then recent observations, then
+// recent sessions, then recent prompts LAST — regardless of the buckets'
+// DISPLAY order in the rendered text (Sessions, Prompts, Pinned, Recent
+// Observations). The budget here is sized to exactly fit the pinned bucket
+// and nothing else: a wrong (display-order) implementation would let the
+// Sessions bucket consume some of that budget before ever reaching Pinned,
+// starving it — this test fails under that wrong behavior and passes only
+// when pinned is allocated its budget first.
+func TestFormatContextTokenBudgetPinnedNeverStarved(t *testing.T) {
+	const numPinned = 3
+
+	buildFixture := func(t *testing.T, contextTokenBudget int) *Store {
+		t.Helper()
+		cfg := mustDefaultConfig(t)
+		cfg.DataDir = t.TempDir()
+		cfg.DedupeWindow = time.Hour
+		cfg.ContextTokenBudget = contextTokenBudget
+		s, err := New(cfg)
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+
+		if err := s.CreateSession("s1", "ctxbudget", "/tmp/ctxbudget"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		for i := 0; i < 3; i++ {
+			sessID := fmt.Sprintf("s-extra-%d", i)
+			if err := s.CreateSession(sessID, "ctxbudget", "/tmp/ctxbudget"); err != nil {
+				t.Fatalf("create extra session %d: %v", i, err)
+			}
+		}
+		for i := 0; i < numPinned; i++ {
+			id, err := s.AddObservation(AddObservationParams{
+				SessionID: "s1",
+				Type:      "decision",
+				Title:     fmt.Sprintf("pinned-%d", i),
+				Content:   fmt.Sprintf("pinned body %d %s", i, strings.Repeat("p", 150)),
+				Project:   "ctxbudget",
+				Scope:     "project",
+			})
+			if err != nil {
+				t.Fatalf("add pinned observation %d: %v", i, err)
+			}
+			if err := s.PinObservation(id); err != nil {
+				t.Fatalf("pin observation %d: %v", i, err)
+			}
+		}
+		for i := 0; i < 4; i++ {
+			if _, err := s.AddObservation(AddObservationParams{
+				SessionID: "s1",
+				Type:      "bugfix",
+				Title:     fmt.Sprintf("recent-%d", i),
+				Content:   fmt.Sprintf("recent body %d %s", i, strings.Repeat("r", 150)),
+				Project:   "ctxbudget",
+				Scope:     "project",
+			}); err != nil {
+				t.Fatalf("add recent observation %d: %v", i, err)
+			}
+		}
+		for i := 0; i < 5; i++ {
+			if _, err := s.AddPrompt(AddPromptParams{
+				SessionID: "s1",
+				Content:   fmt.Sprintf("prompt body %d %s", i, strings.Repeat("q", 400)),
+				Project:   "ctxbudget",
+			}); err != nil {
+				t.Fatalf("add prompt %d: %v", i, err)
+			}
+		}
+		return s
+	}
+
+	control := buildFixture(t, 0)
+	pinnedAll, err := control.PinnedObservations("ctxbudget", "project")
+	if err != nil {
+		t.Fatalf("pinned observations (control): %v", err)
+	}
+	if len(pinnedAll) != numPinned {
+		t.Fatalf("expected %d pinned observations, got %d", numPinned, len(pinnedAll))
+	}
+
+	var budget int
+	for _, obs := range pinnedAll {
+		budget += formatObservationLineTokens(obs)
+	}
+
+	enabled := buildFixture(t, budget)
+	ctx, err := enabled.FormatContext("ctxbudget", "project")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+	for _, obs := range pinnedAll {
+		if !strings.Contains(ctx, obs.Title) {
+			t.Fatalf("expected pinned item %q to never be starved by a tight budget, got:\n%s", obs.Title, ctx)
+		}
+	}
+	if strings.Contains(ctx, "### Recent Sessions") || strings.Contains(ctx, "### Recent User Prompts") || strings.Contains(ctx, "### Recent Observations") {
+		t.Fatalf("expected budget fully consumed by pinned bucket to leave nothing for sessions/prompts/observations, got:\n%s", ctx)
+	}
+}
+
 func TestTopicKeyUpsertUpdatesSameTopicWithoutCreatingNewRow(t *testing.T) {
 	s := newTestStore(t)
 

@@ -61,7 +61,19 @@ backfill_days: 30
 # char/4 heuristic, not a real tokenizer) — no result is ever partially
 # truncated. The topic_key exact-match sentinel and error-signature-match
 # rows are always emitted complete and never count against this budget.
+#
+# context_budget is FormatContext's own aggregate token budget (mem_context /
+# `omnia context` / the dashboard), fixing a pre-existing defect: each of its
+# four buckets (pinned / recent observations / recent sessions / recent
+# prompts) was individually per-item truncated but never capped IN TOTAL.
+# Disabled by default: off keeps today's uncapped-total output. When
+# enabled, the budget is consumed in PRIORITY order — pinned first (never
+# starved), then recent observations, then recent sessions, then recent
+# prompts last — regardless of their display order in the rendered text.
 # injection:
 #   budget:
+#     enabled: true
+#     max_tokens: 1500
+#   context_budget:
 #     enabled: true
 #     max_tokens: 1500

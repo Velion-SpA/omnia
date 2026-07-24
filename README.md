@@ -206,6 +206,8 @@ Config lives at `~/.config/omnia/config.yaml` (`cp config.example.yaml` to start
 | `recall.ranking.recency_half_life_days` | `14` | Days until the recency component decays to `0.5`; never reaches `0`, so recency alone can never exclude a result |
 | `injection.budget.enabled` | `false` | Enable `mem_search`'s token-based injection budget (top-ranked results kept complete, in order, until the next one would exceed the budget — no partial truncation; byte-for-byte identical output when off) |
 | `injection.budget.max_tokens` | `1500` | Estimated-token ceiling for `injection.budget`; the topic_key exact-match sentinel and error-signature-match rows are always emitted complete and never count against this budget |
+| `injection.context_budget.enabled` | `false` | Enable `FormatContext`'s (mem_context / `omnia context` / dashboard) aggregate token budget across its pinned/recent-observations/recent-sessions/recent-prompts buckets — fixes a pre-existing defect where each bucket was individually per-item truncated but never capped in total; byte-for-byte identical (today's uncapped) output when off |
+| `injection.context_budget.max_tokens` | `1500` | Estimated-token ceiling for `injection.context_budget`, consumed pinned-first (never starved), then recent observations, then recent sessions, then recent prompts last |
 
 Cloud env vars use the `OMNIA_CLOUD_*` prefix (legacy `ENGRAM_CLOUD_*` also accepted).
 
