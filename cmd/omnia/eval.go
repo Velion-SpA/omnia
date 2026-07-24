@@ -12,7 +12,10 @@ import (
 	"github.com/velion/omnia/internal/envx"
 	"github.com/velion/omnia/internal/eval"
 	"github.com/velion/omnia/internal/llm"
+	"github.com/velion/omnia/internal/mcp"
+	"github.com/velion/omnia/internal/recall"
 	"github.com/velion/omnia/internal/store"
+	"github.com/velion/omnia/internal/token"
 )
 
 // defaultEvalCorpusPath and defaultEvalABPairsPath resolve the eval
@@ -30,6 +33,14 @@ type evalRunOptions struct {
 	ABPairsPath string
 	ConfigPath  string
 	Runs        int
+	// Injection selects the retrieval seam (issue #143): false (default)
+	// keeps storeBackedFetcher — the raw top-1 FTS5 hit, byte-for-byte
+	// unchanged from pre-#143 behavior. true switches to
+	// pipelineBackedFetcher, which additionally runs the v0.3 "Context
+	// Economy" injection passes (type-lens/MMR/token-budget) driven by the
+	// loaded config's `injection` block, so the eval numbers reflect what an
+	// agent would actually receive with those flags on.
+	Injection bool
 }
 
 var (
@@ -59,6 +70,7 @@ var (
 //
 //	omnia eval [--mode advisory|blocking] [--runs N] [--threshold F]
 //	           [--baseline F] [--corpus PATH] [--ab-pairs PATH] [--config PATH]
+//	           [--injection]
 func cmdEval(args []string) {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
 	mode := fs.String("mode", string(eval.GateModeAdvisory), "release-gate mode: advisory|blocking (default advisory — spec EVAL-8)")
@@ -68,6 +80,7 @@ func cmdEval(args []string) {
 	corpusPath := fs.String("corpus", defaultEvalCorpusPath, "path to the eval corpus JSON (spec EVAL-2)")
 	abPairsPath := fs.String("ab-pairs", defaultEvalABPairsPath, "path to the bilingual AB pairs JSON for the retrieval-only section (spec EVAL-7)")
 	configPath := fs.String("config", config.DefaultPath(), "path to config file (embeddings + recall settings)")
+	injection := fs.Bool("injection", false, "opt-in: score against the v0.3 Context Economy injection pipeline (type-lens + MMR + token budget, driven by --config's `injection` block) instead of the raw top-1 FTS5 hit; default false keeps current behavior byte-for-byte unchanged (issue #143)")
 	if err := fs.Parse(args); err != nil {
 		fatal(err)
 		return
@@ -85,6 +98,7 @@ func cmdEval(args []string) {
 		ABPairsPath: *abPairsPath,
 		ConfigPath:  *configPath,
 		Runs:        *runs,
+		Injection:   *injection,
 	})
 	if err != nil {
 		fatal(fmt.Errorf("eval: %w", err))
@@ -197,7 +211,6 @@ func defaultRunEvalHarness(ctx context.Context, opts evalRunOptions) (eval.RunSu
 		judge = runner
 	}
 
-	fetch := storeBackedFetcher(s)
 	appCfg, appCfgErr := config.Load(opts.ConfigPath)
 	// EMBM-3/blocking-fix: reject an internally-inconsistent embeddings
 	// config (a truncation/expansion Dim mismatched against the model's MRL
@@ -212,6 +225,44 @@ func defaultRunEvalHarness(ctx context.Context, opts evalRunOptions) (eval.RunSu
 		if err := config.ValidateEmbeddings(appCfg.Embeddings); err != nil {
 			return eval.RunSummary{}, fmt.Errorf("eval: invalid embeddings config: %w", err)
 		}
+	}
+
+	// Retrieval seam (issue #143): --injection swaps in pipelineBackedFetcher
+	// so eval scores against the SAME v0.3 "Context Economy" injection
+	// passes handleSearch applies, driven by the loaded config's Injection
+	// block. A config load failure (appCfgErr != nil) degrades to a
+	// zero-value config.InjectionConfig — every sub-gate's Enabled defaults
+	// to false, so pipelineBackedFetcher's passes are all no-ops in that
+	// case, matching the same "missing config degrades gracefully"
+	// convention the retrieval-only section below already follows.
+	//
+	// Review fix (#143 adversarial review, HIGH): pipelineBackedFetcher must
+	// branch on hybrid recall exactly like handleSearch does
+	// (internal/mcp/mcp.go's handleSearch, cfg.Recall != nil branch,
+	// ~L1183-1224) — the SAME config file that drives the Injection block
+	// above can ALSO enable `recall.enabled: true` (cmd/omnia/main.go's
+	// cmdMCP, ~L1168-1169: mcpCfg.Recall = buildRecallService(s,
+	// appCfg.Recall, appCfg.Embeddings, cfg.DataDir); recall.enabled may even
+	// get auto-flipped on by the Ollama auto-detect, ~L1163-1165). Without
+	// this, --injection would silently keep measuring the FTS5-only
+	// candidate pool even when recall is actually on in production,
+	// understating what an agent would receive. buildRecallService is the
+	// SAME package-level helper cmdMCP itself calls — reused here, not
+	// reimplemented, so eval and mem_search can't drift apart on how recall
+	// gets built. recallCfg/embCfg both degrade to their zero value (recall
+	// disabled) on a config load failure, mirroring injectionCfg below.
+	fetch := storeBackedFetcher(s)
+	if opts.Injection {
+		var injectionCfg config.InjectionConfig
+		var recallCfg config.RecallConfig
+		var embCfg config.EmbeddingsConfig
+		if appCfgErr == nil {
+			injectionCfg = appCfg.Injection
+			recallCfg = appCfg.Recall
+			embCfg = appCfg.Embeddings
+		}
+		recallSvc := buildRecallService(s, recallCfg, embCfg, cfg.DataDir)
+		fetch = pipelineBackedFetcher(s, recallSvc, injectionCfg)
 	}
 
 	runFunc := func(ctx context.Context) (eval.Report, error) {
@@ -267,4 +318,207 @@ func estimateTokenCount(s string) int {
 		n = 1
 	}
 	return n
+}
+
+// pipelineFetchLimit mirrors handleSearch's own default candidate-pool size
+// (internal/mcp/mcp.go: `limit := intArg(req, "limit", 10)`) so
+// pipelineBackedFetcher exercises the SAME batch size a real mem_search call
+// would hand to the injection passes below — ApplyTypeLens/ApplyMMR need at
+// least 2 candidates to do anything, and ApplyTokenBudget needs a
+// realistically-sized batch to demonstrate a trim. storeBackedFetcher's own
+// Limit:1 is deliberately NOT reused here: with only 1 candidate, every pass
+// below is a trivial no-op and --injection would measure nothing.
+const pipelineFetchLimit = 10
+
+// injectionPreviewChars duplicates internal/mcp's own unexported
+// tokenBudgetPreviewChars (token_budget.go) — the same "duplicate the
+// primitive, document why" convention internal/mcp/recall_ranking.go's
+// exactSentinelRank and internal/config's recencyTimeLayouts already use for
+// crossing an unexported-boundary. It MUST stay 300, matching handleSearch's
+// own preview truncation (`truncate(r.Content, 300)` in mcp.go's display
+// loop) so pipelineBackedFetcher's token accounting counts the SAME preview
+// basis handleSearch actually renders, not the full (potentially much
+// larger) stored Content.
+//
+// The `truncate` call below (this file, cmd/omnia) is NOT literally
+// handleSearch's own truncate — it is cmd/omnia's own separately-maintained
+// unexported copy (cmd/omnia/main.go:3269), distinct from
+// internal/mcp/mcp.go:3591's unexported truncate that handleSearch itself
+// calls. The two currently have byte-identical bodies, but they are two
+// same-shaped, cross-package copies (like injectionPreviewChars above), not
+// one shared helper — either could drift from the other in a future change
+// without the compiler ever noticing.
+const injectionPreviewChars = 300
+
+// applyInjectionPipeline re-ranks/trims a raw candidate batch through the
+// SAME v0.3 "Context Economy" passes handleSearch applies, in the SAME
+// order (internal/mcp/mcp.go's handleSearch, design obs #1643 section 2):
+// ApplyTypeLens -> ApplyMMR -> ApplyTokenBudget. query is the case's own
+// search query, used only for InferLensType's situational classification;
+// explicitType is always "" because eval.EvalCase carries no per-case type
+// filter (mirrors handleSearch's typ == "" branch — the lens is free to
+// fire). relevance is the caller's own per-ID relevance signal, computed by
+// the caller's own retrieval branch (see pipelineBackedFetcher) exactly the
+// way handleSearch computes it for each of ITS two branches — RRF fusion
+// Score for the hybrid recall path, or negated FTS5 rank for the FTS5-only
+// path. It is passed in rather than derived here from each result's own
+// Rank field because mcp.HydrateFusedResults does NOT repopulate a
+// meaningful Rank for fused rows (only the topic_key sentinel gets Rank set,
+// to -1000); deriving relevance from -r.Rank on those rows would silently
+// flatten every ordinary fused row's relevance to 0 and break ApplyMMR's
+// ranking (review fix, #143 HIGH).
+//
+// Scope decision (issue #143): only cfg's own sub-gates (TypeLens,
+// Diversity, Budget) are wired here. cfg.RecallRanking
+// (memory-recall-ranking) and cfg.StructuralForgetting are SEPARATE,
+// independently-gated config blocks outside config.InjectionConfig and are
+// out of scope for this fetcher. Both default to disabled in production
+// exactly like every Injection sub-gate, so this omission has zero effect
+// on the shipped default (nothing enabled); it only means an operator who
+// has ALSO turned on ranking/structural-forgetting won't see that reflected
+// in `--injection` eval numbers. RankResults itself never runs here (out of
+// scope), so results stay in the caller's own retrieval order until a pass
+// below re-sorts them, same as handleSearch when RecallRanking is disabled
+// (the default).
+//
+// The ApplyTypeLens call — including the InferLensType classifier call
+// itself — is gated behind cfg.TypeLens.Enabled, mirroring handleSearch's
+// own "the gate guards the CLASSIFIER call too, not just the re-rank" idiom
+// (mcp.go comment on its own ApplyTypeLens call site): no regex scan of the
+// query runs when type_lens is off. ApplyMMR/ApplyTokenBudget are called
+// unconditionally because each is already a gated no-op internally when its
+// own cfg.Enabled is false — the same pattern handleSearch itself uses.
+//
+// Pure and side-effect-free over results (same contract as the three passes
+// it composes), so it is directly unit-testable with hand-built
+// store.SearchResult fixtures, independent of a real store.
+func applyInjectionPipeline(query string, results []store.SearchResult, relevance map[int64]float64, cfg config.InjectionConfig) []store.SearchResult {
+	if cfg.TypeLens.Enabled {
+		lensType := mcp.InferLensType(query, "")
+		results = mcp.ApplyTypeLens(results, lensType, cfg.TypeLens)
+	}
+
+	results = mcp.ApplyMMR(results, relevance, cfg.Diversity)
+	results = mcp.ApplyTokenBudget(results, cfg.Budget)
+	return results
+}
+
+// pipelineBackedFetcher returns an eval.RetrievedFetcher (issue #143) that
+// wraps the SAME retrieval branch handleSearch itself uses with the v0.3
+// Context Economy injection pipeline (applyInjectionPipeline), so
+// `omnia eval --injection` measures what an agent would ACTUALLY receive
+// with these flags on — not the raw top-1 FTS5 hit storeBackedFetcher always
+// scores against.
+//
+// Retrieval branch (review fix, #143 HIGH): recallSvc mirrors
+// handleSearch's own cfg.Recall != nil branch EXACTLY
+// (internal/mcp/mcp.go's handleSearch, ~L1183-1224). A non-nil recallSvc
+// (recall.enabled=true in the loaded config — see defaultRunEvalHarness,
+// which builds it via the SAME buildRecallService cmdMCP calls) routes
+// through recall.Service.Search + mcp.HydrateFusedResults, with relevance
+// taken from each fused result's own Score (RRF fusion), exactly like
+// handleSearch's if-branch. A nil recallSvc (recall disabled or
+// unconfigured — the default) falls back to storeSearch + negated FTS5
+// Rank as relevance, exactly like handleSearch's else-branch. Without this
+// branch, --injection would always measure the FTS5-only candidate pool
+// even when hybrid recall is actually configured in production, silently
+// scoring a retrieval path production never uses whenever recall is on.
+//
+// Pre-emption (topic_key sentinel / error-signature lane, spec: Sentinel
+// and Signature Pre-Emption Invariant) needs NO special handling in either
+// branch. On the FTS5-only side, store.Store.Search's sentinel/signature
+// lanes (store.go's topic_key-sentinel block and its "Signature lane"
+// block) run UNCONDITIONALLY inside s.Search itself, gated only by the
+// query TEXT'S OWN shape (a literal "/" for the topic_key lane; a
+// distinctive-enough error-shaped n-gram, >=12 chars/2 tokens, for the
+// signature lane) — NOT by any special caller-side "lane" argument
+// storeSearch would need to opt into. On the recall side, the topic_key
+// sentinel is carried through Fuse/HydrateFusedResults (recall.Result.Exact
+// -> store.SearchResult.Rank = -1000), the same sentinel value the FTS5
+// branch's rows carry. Either way, a sentinel/signature row CAN reach this
+// fetcher exactly as it can reach handleSearch (an eval case's query
+// happening to contain "/" or read as an error signature is unlikely for
+// the current corpus's natural-language queries, but not impossible for
+// future bugfix-flavored cases). It needs no extra code here because
+// ApplyTypeLens/ApplyMMR/ApplyTokenBudget each already partition
+// Rank==exactSentinelRank/SignatureMatch rows out first and always re-emit
+// them untouched (see each function's own doc comment and
+// internal/mcp/preemption_invariant_test.go) — this fetcher inherits that
+// guarantee for free by calling the same three functions. The FTS5-only
+// branch's relevance map deliberately does NOT skip the sentinel row before
+// populating relevance (unlike handleSearch's own else-branch, which does)
+// — a pre-existing, reviewed-as-harmless divergence: ApplyMMR/ApplyTokenBudget
+// both partition the sentinel out before relevance is ever consulted, so
+// the extra map entry is inert. This fetcher does not change that.
+//
+// Token accounting: Tokens.InjectedContext sums token.EstimateTokens over
+// EVERY post-pipeline result's preview (truncate(r.Content, 300), the SAME
+// basis handleSearch's own display loop and ApplyTokenBudget's own
+// previewTokens use) — the full set that would actually be injected, not
+// just the top hit. This is intentionally a DIFFERENT quantity than
+// storeBackedFetcher's Tokens.Retrieval (a single top-1 heuristic estimate
+// via the local, cruder estimateTokenCount): pipelineBackedFetcher answers
+// "what would injection actually cost," storeBackedFetcher answers "roughly
+// how big was the one snippet scored." See TestPipelineBackedFetcher_Parity*
+// for the exact boundary of what stays identical between the two fetchers
+// with every injection flag off (Retrieved/SurfacedObservationID — the
+// scoring-relevant fields) and what does NOT (Tokens — a deliberately more
+// accurate accounting, not a bug).
+func pipelineBackedFetcher(s *store.Store, recallSvc *recall.Service, cfg config.InjectionConfig) eval.RetrievedFetcher {
+	return func(ctx context.Context, c eval.EvalCase) (eval.RetrievedCase, error) {
+		var (
+			results   []store.SearchResult
+			relevance map[int64]float64
+		)
+
+		if recallSvc != nil {
+			fused, ferr := recallSvc.Search(ctx, c.Query, recall.LexicalSearchOptions{
+				Limit: mcp.RecallFetchLimit(pipelineFetchLimit),
+			})
+			if ferr != nil {
+				return eval.RetrievedCase{}, fmt.Errorf("search: %w", ferr)
+			}
+			relevance = make(map[int64]float64, len(fused))
+			for _, fr := range fused {
+				relevance[fr.ID] = fr.Score
+			}
+			results = mcp.HydrateFusedResults(s, fused, pipelineFetchLimit, mcp.RecallScopeFilter{})
+		} else {
+			r, err := storeSearch(s, c.Query, store.SearchOptions{Limit: pipelineFetchLimit})
+			if err != nil {
+				return eval.RetrievedCase{}, fmt.Errorf("search: %w", err)
+			}
+			results = r
+			relevance = make(map[int64]float64, len(r))
+			for _, rr := range r {
+				relevance[rr.ID] = -rr.Rank
+			}
+		}
+
+		if len(results) == 0 {
+			return eval.RetrievedCase{}, nil
+		}
+
+		results = applyInjectionPipeline(c.Query, results, relevance, cfg)
+		if len(results) == 0 {
+			// A genuine outcome, not an error: e.g. a budget too small to fit
+			// any eligible row (ApplyTokenBudget's own documented behavior)
+			// starves retrieval entirely — treated the same as "no results"
+			// above, so scoring correctly registers a miss instead of a
+			// panic on results[0] below.
+			return eval.RetrievedCase{}, nil
+		}
+
+		injectedTokens := 0
+		for _, r := range results {
+			injectedTokens += token.EstimateTokens(truncate(r.Content, injectionPreviewChars))
+		}
+
+		top := results[0]
+		return eval.RetrievedCase{
+			Retrieved:             top.Content,
+			SurfacedObservationID: top.SyncID,
+			Tokens:                eval.TokenBreakdown{InjectedContext: injectedTokens},
+		}, nil
+	}
 }

@@ -563,13 +563,16 @@ Set `structural_forgetting.enabled: true` in config to have `mem_search` downran
 
 ```
 omnia eval [--mode advisory|blocking] [--runs N] [--threshold F] [--baseline F]
-           [--corpus PATH] [--ab-pairs PATH] [--config PATH]
+           [--corpus PATH] [--ab-pairs PATH] [--config PATH] [--injection]
 ```
 
 - `--runs N` (default `3`, must be 3-5): the harness always repeats the full pass 3-5 times and reports **mean ± standard deviation** per capability, per language, and overall — a single run's number is never used for a gate decision (fewer than 3 runs is refused outright).
 - `--corpus PATH` (default `internal/eval/testdata/cases.json`): the eval corpus JSON. Loading enforces a hard 50-150 case-count floor; the starter corpus ships with 11 real cases and is below that floor by design — full corpus authoring is a tracked follow-up, so `omnia eval` will refuse to run against it until it grows.
 - `--ab-pairs PATH` (default `internal/embed/testdata/ab_pairs.json`): the bilingual AB-pair set backing the retrieval-only recall@k section. This section is attached best-effort — it is skipped (not fatal) when `embeddings.enabled` is false in config or the embedding host is unreachable.
 - `--config PATH` (default: standard config path): read for `embeddings.*` (base URL, model, dim) to build the retrieval-only section's embedder, and for `OMNIA_AGENT_CLI` (env, not config) to build the LLM judge Causal/State-Abstraction cases require. If the corpus contains any `causal` or `state_abstraction` cases, `OMNIA_AGENT_CLI` must be set — unlike the retrieval-only section's graceful degrade, an unconfigured judge on those cases is a hard per-case scoring error that fails the run, not a silent skip.
+- `--injection` (default `false`, issue #143): opt-in — scores every case against the v0.3 "Context Economy" injection pipeline (type-lens boost + MMR diversity + token budget, in the same order `mem_search`/`handleSearch` applies them) instead of the raw top-1 FTS5 hit, driven by `--config`'s `injection` block. Off by default, current behavior stays byte-for-byte unchanged. Use this to measure the real accuracy/token tradeoff of enabling `injection.type_lens`/`injection.diversity`/`injection.budget` in `config.yaml` before turning them on in production — `Tokens.InjectedContext` in the report reflects what would actually be injected (the full post-pipeline result set's 300-char preview basis), not just the single top hit.
+
+  **Token numbers are only comparable within the same flag setting**: a `--injection` run's `Tokens.InjectedContext` sums the 300-char preview estimate over the *entire* post-pipeline result set (up to 10 candidates), while a no-flag run's `Tokens.Retrieval` is a cruder `len/4` estimate over just the single top hit. Compare `--injection` runs against other `--injection` runs (e.g. a flag-off config vs. a flag-on config) to judge the accuracy/token tradeoff; comparing a `--injection` run against a no-flag run mixes two different accounting bases and is meaningless on the token axis — the accuracy axis stays comparable either way.
 
 **Release gate** (spec EVAL-8) — only evaluated when `--baseline` is supplied (baseline overall accuracy to compare against; values `<= 0` — including the `0` default — skip the gate entirely and only print the report):
 
