@@ -234,24 +234,66 @@ Est. lines: ~200.
 Design slice 4 · Branch `feat/write-gate-envelope` · Base: `main` (after PR4) ·
 `type:feature` · Depends on: PR3, PR4 · Capability: write-gate
 
-- [ ] 5.1 RED: add `internal/mcp/mcp_test.go` cases asserting `handleSave`'s
+- [x] 5.1 RED: add `internal/mcp/mcp_test.go` cases asserting `handleSave`'s
       response `extra` map gains `write_gate: {decision, target_id, similarity,
       reason}` for each of NOOP/UPDATE/RELATE/SAVE, with `target_id` set for
       NOOP/UPDATE and omitted for SAVE; NOOP/UPDATE also set `extra["id"]` to
       the target.
-- [ ] 5.2 RED: assert RELATE keeps the existing `judgment_required` +
+      DONE: written as new file `internal/mcp/write_gate_envelope_test.go`
+      (kept separate from the already-large `mcp_test.go`, mirroring PR11's
+      `review_due_nudge_test.go` precedent). Confirmed RED via `git stash` of
+      the mcp.go/main.go production edits + `CGO_ENABLED=0 go vet
+      ./internal/mcp/...` → `unknown field WriteHygieneEnabled in struct
+      literal of type MCPConfig` — before any production code landed.
+      `TestHandleSaveWriteGateEnvelope_NoopNamesExistingID` covers NOOP + the
+      top-level `id`=target assertion; `TestHandleSaveWriteGateEnvelope_
+      UpdateNamesTarget` covers similarity-triggered AUTO-UPDATE;
+      `TestHandleSaveWriteGateEnvelope_SaveOmitsTargetID` covers plain SAVE
+      (no candidate) with `target_id` absent from the map entirely.
+- [x] 5.2 RED: assert RELATE keeps the existing `judgment_required` +
       `candidates` array byte-identical to pre-PR5 behavior (write_gate is
       additive/informational only on this path).
-- [ ] 5.3 GREEN: modify `handleSave` in `internal/mcp/mcp.go` to call
+      DONE: `TestHandleSaveWriteGateEnvelope_RelateKeepsJudgmentRequired
+      ByteIdentical` runs the same RELATE-triggering fixture with the gate
+      off vs on (in separate projects, so the gate-on run's own FTS candidate
+      search never sees the gate-off run's row as a self-match) and asserts
+      `judgment_required`/`candidates` count are identical either way, with
+      `write_gate` present ONLY on the gate-on side.
+- [x] 5.3 GREEN: modify `handleSave` in `internal/mcp/mcp.go` to call
       `store.SaveObservation` instead of `store.AddObservation`, and build the
       `write_gate` envelope object from the returned `SaveResult`.
-- [ ] 5.4 Kill-switch check: with gate disabled (PR2/PR4 flag off), confirm
+      DONE. Also added `MCPConfig.WriteHygieneEnabled bool` (threaded from
+      `cmd/omnia/main.go`'s cmdMCP, alongside the existing
+      `mcpCfg.Review = appCfg.Review` line) so the envelope's own kill-switch
+      reads the SAME `write_hygiene.enabled` value already wired into
+      `store.Config` — this small addition to `cmd/omnia/main.go` was
+      necessary to satisfy 5.4's byte-for-byte requirement (see below); not
+      originally listed in this task's file list but required plumbing, not
+      scope creep.
+- [x] 5.4 Kill-switch check: with gate disabled (PR2/PR4 flag off), confirm
       `handleSave`'s envelope has NO `write_gate` key change vs current
       behavior (or an explicit `decision:"save"` no-op shape — pick one and
       lock it in a test).
+      DECISION (locked at apply time): option (a) — NO `write_gate` key at
+      all when `MCPConfig.WriteHygieneEnabled` is false, envelope
+      byte-for-byte identical to pre-write-hygiene output. DONE:
+      `TestHandleSaveWriteGateKillSwitchByteIdentical` proves this
+      specifically via a `topic_key`-upsert scenario (Decision=`update` fires
+      REGARDLESS of the gate, since that pre-existing step is unconditional)
+      — the envelope must still omit `write_gate` and keep the original
+      "Memory saved: ..." message, not just for the trivial plain-SAVE case.
+      A naive implementation gating only on `Decision==WriteGateDecisionSave`
+      would have leaked a `write_gate` key here; gating on the explicit
+      `MCPConfig.WriteHygieneEnabled` flag instead avoids that.
 
-Files: `internal/mcp/mcp.go` (modify), `internal/mcp/mcp_test.go` (modify).
-Est. lines: ~220.
+Files: `internal/mcp/mcp.go` (modify), `internal/mcp/write_gate_envelope_test.go`
+(new), `cmd/omnia/main.go` (modify, +1 wiring line for
+`mcpCfg.WriteHygieneEnabled`), `DOCS.md` (modify, `mem_save` envelope docs).
+Est. lines: ~220. Actual: `mcp.go` +62/-1, `write_gate_envelope_test.go` 362
+(new), `main.go` +8, `DOCS.md` +2 — total ~434L (over estimate, same
+over-estimate pattern PR3/PR4/PR11 all hit, driven by thorough per-decision
+RED/GREEN coverage — 5 tests covering all four decisions plus the
+kill-switch's non-obvious topic_key-upsert edge case — not scope creep).
 
 ---
 

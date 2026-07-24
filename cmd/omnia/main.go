@@ -1224,6 +1224,14 @@ func cmdMCP(cfg store.Config) {
 		// config.yaml (default false, backward-compatible — see
 		// MCPConfig.Review's own doc).
 		mcpCfg.Review = appCfg.Review
+		// Omnia v0.3.1 Write Hygiene (design obs #1668 D4, spec write-gate
+		// REQ "Envelope Transparency"/"Default-On With Kill-Switch"): thread
+		// the SAME write_hygiene.enabled value already wired into
+		// store.Config (see the WriteHygieneEnabled block above) so
+		// handleSave's `write_gate` envelope key is gated by the identical
+		// flag that gates SaveObservation's decision ladder — the envelope's
+		// own kill-switch can never drift from the store's kill-switch.
+		mcpCfg.WriteHygieneEnabled = appCfg.WriteHygiene.Enabled
 		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
 		// enabled, run the worker on the same ctx cancelled at shutdown so
 		// mem_save embeds new memories out-of-band. nil when disabled.

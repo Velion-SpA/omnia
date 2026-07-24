@@ -154,6 +154,21 @@ type MCPConfig struct {
 	// convention above. `omnia review-due` (cmd/omnia) is NOT gated by this
 	// flag; it is its own explicit, opt-in command.
 	Review config.ReviewConfig
+
+	// WriteHygieneEnabled gates handleSave's `write_gate` envelope
+	// transparency (design obs #1668 D4, spec write-gate REQ "Envelope
+	// Transparency"). It MUST be threaded from the SAME `write_hygiene.enabled`
+	// value already wired into store.Config (see cmd/omnia's cmdMCP), so the
+	// envelope's own kill-switch never drifts from the store's kill-switch.
+	// The zero value (false) is the default: handleSave's response stays
+	// byte-for-byte identical to pre-write-hygiene output — no `write_gate`
+	// key is ever added, and the result text keeps its original "Memory
+	// saved: ..." shape — regardless of which internal decision path
+	// (topic_key upsert, dedupe-hash-window, or the new similarity ladder)
+	// produced the store.SaveResult, since those first two paths run
+	// unconditionally inside SaveObservation whether or not write-hygiene is
+	// enabled (spec write-gate REQ "Default-On With Kill-Switch").
+	WriteHygieneEnabled bool
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -1744,7 +1759,15 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 
 		truncated := len(content) > s.MaxObservationLength()
 
-		savedID, err := s.AddObservation(store.AddObservationParams{
+		// Omnia v0.3.1 Write Hygiene (design obs #1668 D2/D4, spec write-gate
+		// domain): call the shared SaveObservation core directly (instead of
+		// the AddObservation thin wrapper) so the write-gate's decision is
+		// available here to build the `write_gate` envelope below.
+		// saveResult.ID is the SAME value AddObservation always returned
+		// (the existing/matched row's ID for "noop"/"update", the new row's
+		// ID for "save"/"relate") — every downstream use of `savedID` keeps
+		// its pre-existing meaning unchanged.
+		saveResult, err := s.SaveObservation(store.AddObservationParams{
 			SessionID:      sessionID,
 			Type:           typ,
 			Title:          title,
@@ -1759,6 +1782,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
 		}
+		savedID := saveResult.ID
 
 		// Auto-embed the just-saved memory out-of-band (non-blocking): it
 		// becomes semantically searchable within seconds without slowing the
@@ -1812,7 +1836,22 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			activity.RecordSave(sessionID)
 		}
 
+		// Write-gate envelope transparency (design obs #1668 D4, spec
+		// write-gate REQ "Envelope Transparency"): the base "Memory saved"
+		// notice is only overridden for NOOP/AUTO-UPDATE, and only when the
+		// envelope's own kill-switch (cfg.WriteHygieneEnabled) is on — with
+		// the gate off, this stays byte-for-byte the same "Memory saved"
+		// message regardless of which internal decision path fired, per the
+		// spec's kill-switch requirement.
 		msg := fmt.Sprintf("Memory saved: %q (%s)", title, typ)
+		if cfg.WriteHygieneEnabled {
+			switch saveResult.Decision {
+			case store.WriteGateDecisionNoop:
+				msg = fmt.Sprintf("Memory not saved: identical to existing #%d — nothing new stored", saveResult.ID)
+			case store.WriteGateDecisionUpdate:
+				msg = fmt.Sprintf("Memory updated: #%d instead of duplicating", saveResult.ID)
+			}
+		}
 		if topicKey == "" && suggestedTopicKey != "" {
 			msg += fmt.Sprintf("\nSuggested topic_key: %s", suggestedTopicKey)
 		}
@@ -1829,6 +1868,27 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Post-transaction conflict candidate detection (REQ-001).
 		// Errors are logged and swallowed — detection failure never fails the save.
 		extra := map[string]any{}
+
+		// Write-gate envelope (design obs #1668 D4, spec write-gate REQ
+		// "Envelope Transparency"): additive/informational metadata about the
+		// SaveObservation decision. Gated by cfg.WriteHygieneEnabled — see
+		// its doc comment for why this must stay off (no key at all) rather
+		// than reporting an explicit no-op "save" shape when write-hygiene is
+		// disabled, so the envelope stays byte-for-byte identical to
+		// pre-write-hygiene output. `target_id` is present for
+		// noop/update/relate and omitted only for a plain "save" (D4: "SAVE
+		// omits target_id").
+		if cfg.WriteHygieneEnabled {
+			writeGate := map[string]any{
+				"decision":   saveResult.Decision,
+				"similarity": saveResult.Similarity,
+				"reason":     saveResult.Reason,
+			}
+			if saveResult.TargetID != nil {
+				writeGate["target_id"] = *saveResult.TargetID
+			}
+			extra["write_gate"] = writeGate
+		}
 
 		// Soft searchability lint (non-blocking): nudge toward findable memories.
 		// The save has already succeeded above — this only annotates the envelope.
