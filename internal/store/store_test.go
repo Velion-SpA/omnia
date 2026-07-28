@@ -3932,6 +3932,110 @@ func TestExportImportEdgeBranches(t *testing.T) {
 	})
 }
 
+func TestPortableExportV2DeterministicFullGraph(t *testing.T) {
+	s := newTestStore(t)
+	seed := func(s *Store, base int) {
+		_, err := s.db.Exec(fmt.Sprintf(`
+		INSERT INTO sessions (id, project, directory, started_at) VALUES ('s1', 'omnia', '/repo', '2026-01-01T00:00:00Z');
+		INSERT INTO observations (id,sync_id,session_id,type,title,content,project,scope,pinned,source,trust_tag,created_at,updated_at)
+			VALUES (%d,'obs-b','s1','discovery','second','second content','omnia','project',0,'agent','standard','2026-01-03T00:00:00Z','2026-01-03T00:00:00Z'),
+			       (%d,'obs-a','s1','decision','portable','portable content','omnia','project',1,'user','high','2026-01-02T00:00:00Z','2026-01-02T00:00:00Z');
+		INSERT INTO user_prompts (id,sync_id,session_id,content,project,created_at)
+			VALUES (%d,'prompt-a','s1','keep everything','omnia','2026-01-04T00:00:00Z');
+		INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+			VALUES ('rel-a', 'obs-a', 'obs-b', 'related', 'judged', '2026-01-04T00:00:00Z', '2026-01-04T00:00:00Z');
+		INSERT INTO memory_anchors (sync_id, obs_sync_id, file_path, line_start, line_end, content_hash, created_at)
+			VALUES ('anc-a', 'obs-a', 'internal/store/store.go', 1, 2, 'hash', '2026-01-05T00:00:00Z');
+		INSERT INTO procedures (sync_id, project, polarity, "trigger", steps, steps_summary, expected_outcome, postcondition_kind, source_obs_sync_ids, created_at, updated_at)
+			VALUES ('proc-a', 'omnia', 'playbook', 'export memory', '[{"order":1,"template":"run export"}]', 'run export', 'portable file', 'tests_pass', '["obs-a"]', '2026-01-06T00:00:00Z', '2026-01-06T00:00:00Z');
+	`, base+1, base, base+2))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed(s, 40)
+
+	legacy, err := s.Export()
+	if err != nil || legacy.SchemaVersion != 0 || len(legacy.Relations) != 0 {
+		t.Fatalf("legacy Export boundary changed: data=%+v err=%v", legacy, err)
+	}
+	baseQuery, baseQueryIt, nonTxRead := s.hooks.query, s.hooks.queryIt, false
+	assertTx := func(db queryer) {
+		if _, ok := db.(*sql.Tx); !ok {
+			nonTxRead = true
+		}
+	}
+	s.hooks.query = func(db queryer, query string, args ...any) (*sql.Rows, error) {
+		assertTx(db)
+		return baseQuery(db, query, args...)
+	}
+	s.hooks.queryIt = func(db queryer, query string, args ...any) (rowScanner, error) {
+		assertTx(db)
+		return baseQueryIt(db, query, args...)
+	}
+	first, err := s.ExportPortable()
+	if err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	if nonTxRead {
+		t.Fatal("portable export did not use one read transaction")
+	}
+	other := newTestStore(t)
+	seed(other, 400)
+	second, err := other.ExportPortable()
+	if err != nil {
+		t.Fatalf("second export: %v", err)
+	}
+	firstJSON, _ := json.Marshal(first)
+	secondJSON, _ := json.Marshal(second)
+	if string(firstJSON) != string(secondJSON) {
+		t.Fatalf("portable exports depend on local IDs:\n%s\n%s", firstJSON, secondJSON)
+	}
+	wantCounts := ExportCounts{Sessions: 1, Observations: 2, Prompts: 1, Relations: 1, Anchors: 1, Procedures: 1}
+	if first.SchemaVersion != 2 || first.Checksum == "" || first.Counts != wantCounts ||
+		first.Observations[0].SyncID != "obs-a" || len(first.Relations)+len(first.Anchors)+len(first.Procedures) != 3 || first.Procedures[0]["steps_summary"] != "run export" {
+		t.Fatalf("portable metadata/full graph mismatch: %+v", first)
+	}
+	decoded, err := DecodeExportData(firstJSON)
+	if err != nil || !decoded.Observations[0].Pinned || derefString(decoded.Observations[0].Source) != "user" ||
+		derefString(decoded.Observations[0].TrustTag) != "high" {
+		t.Fatalf("pinned/provenance read mismatch: data=%+v err=%v", decoded, err)
+	}
+}
+
+func TestPortableExportV2EmptyAndRejectsInvalidInput(t *testing.T) {
+	s := newTestStore(t)
+	data, err := s.ExportPortable()
+	if err != nil {
+		t.Fatalf("empty export: %v", err)
+	}
+	raw, _ := json.Marshal(data)
+	for _, collection := range []string{"sessions", "observations", "prompts", "relations", "anchors", "procedures"} {
+		if !strings.Contains(string(raw), `"`+collection+`":[]`) {
+			t.Fatalf("empty %s must be an array: %s", collection, raw)
+		}
+	}
+
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "malformed", raw: `{"schema_version":`, want: "unexpected end"},
+		{name: "negative", raw: `{"schema_version":-1}`, want: "unsupported schema version"},
+		{name: "one", raw: `{"schema_version":1}`, want: "unsupported schema version"},
+		{name: "future", raw: `{"schema_version":3}`, want: "unsupported schema version"},
+		{name: "checksum mismatch", raw: strings.Replace(string(raw), data.Checksum, strings.Repeat("0", len(data.Checksum)), 1), want: "checksum mismatch"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := DecodeExportData([]byte(tt.raw)); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
 func TestNewErrorBranches(t *testing.T) {
 	t.Run("fails when data dir is a file", func(t *testing.T) {
 		base := t.TempDir()

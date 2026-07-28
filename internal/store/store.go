@@ -545,11 +545,17 @@ type syncEmbeddingPayload struct {
 
 // ExportData is the full serializable dump of the engram database.
 type ExportData struct {
-	Version      string        `json:"version"`
-	ExportedAt   string        `json:"exported_at"`
-	Sessions     []Session     `json:"sessions"`
-	Observations []Observation `json:"observations"`
-	Prompts      []Prompt      `json:"prompts"`
+	SchemaVersion int           `json:"schema_version,omitempty"`
+	Version       string        `json:"version"`
+	ExportedAt    string        `json:"exported_at"`
+	Counts        ExportCounts  `json:"counts,omitempty"`
+	Checksum      string        `json:"checksum,omitempty"`
+	Sessions      []Session     `json:"sessions"`
+	Observations  []Observation `json:"observations"`
+	Prompts       []Prompt      `json:"prompts"`
+	Relations     []PortableRow `json:"relations,omitempty"`
+	Anchors       []PortableRow `json:"anchors,omitempty"`
+	Procedures    []PortableRow `json:"procedures,omitempty"`
 }
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -4901,6 +4907,10 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 }
 
 func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
+	return s.exportWithProjectScopeFrom(s.db, project)
+}
+
+func (s *Store) exportWithProjectScopeFrom(db queryer, project string) (*ExportData, error) {
 	data := &ExportData{
 		Version:    "0.1.0",
 		ExportedAt: Now(),
@@ -4925,7 +4935,7 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 	sessionQuery += " ORDER BY started_at"
 
 	// Sessions
-	rows, err := s.queryItHook(s.db,
+	rows, err := s.queryItHook(db,
 		sessionQuery,
 		sessionArgs...,
 	)
@@ -4955,7 +4965,7 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 		obsArgs = append(obsArgs, project, project)
 	}
 	obsQuery += " ORDER BY id"
-	obsRows, err := s.queryItHook(s.db, obsQuery, obsArgs...)
+	obsRows, err := s.queryItHook(db, obsQuery, obsArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("export observations: %w", err)
 	}
@@ -4981,7 +4991,7 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 		promptArgs = append(promptArgs, project, project)
 	}
 	promptQuery += " ORDER BY id"
-	promptRows, err := s.queryItHook(s.db, promptQuery, promptArgs...)
+	promptRows, err := s.queryItHook(db, promptQuery, promptArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("export prompts: %w", err)
 	}
