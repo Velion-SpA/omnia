@@ -841,7 +841,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(project) != "" {
 		data, err = s.store.ExportProject(project)
 	} else {
-		data, err = s.store.Export()
+		data, err = s.store.ExportPortable()
 	}
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
@@ -863,14 +863,18 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var data store.ExportData
-	if err := json.Unmarshal(body, &data); err != nil {
+	data, err := store.DecodeExportData(body)
+	if err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
 
-	result, err := s.store.Import(&data)
+	result, err := s.store.Import(data)
 	if err != nil {
+		if errors.Is(err, store.ErrInvalidPortableExport) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

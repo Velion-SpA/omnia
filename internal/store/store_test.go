@@ -4261,6 +4261,92 @@ func TestPortableImportV2RelationsAndAnchorsAreValidatedAtomicAndIdempotent(t *t
 	}
 }
 
+func TestPortableImportV2ProceduresRoundTripScaleAndAtomic(t *testing.T) {
+	src := newTestStore(t)
+	if err := src.CreateSession("portable-session", "omnia", "/tmp/omnia"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := src.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO procedures
+		(sync_id,project,scope,polarity,"trigger",steps,steps_summary,expected_outcome,postcondition_kind,
+		 postcondition_expr,confidence,state,reuse_confirmed,contradicted_count,source_obs_sync_ids,
+		 induced_by_actor,induced_by_kind,induced_by_model,created_at,updated_at,last_reused_at,review_after,retired_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const total = 1000
+	for i := 0; i < total; i++ {
+		if _, err := stmt.Exec(fmt.Sprintf("proc-%04d", i), "omnia", "project", ProcedurePolarityPlaybook, "portable trigger",
+			`[{"order":1,"template":"run {{command}}","slots":["command"]}]`, "INDEXED SENTINEL",
+			"portable outcome", PostconditionCustom, "exit == 0", 0.75, ProcedureStateTrusted, 4, 1,
+			`["obs-deleted"]`, "alice", "human", "none", "2026-01-01T00:00:00Z",
+			"2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z", "2026-02-01T00:00:00Z", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = stmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.db.Exec(`UPDATE procedures SET project=NULL,expected_outcome=NULL,postcondition_expr=NULL,
+		induced_by_actor=NULL,induced_by_kind=NULL,induced_by_model=NULL WHERE sync_id='proc-0000'`); err != nil {
+		t.Fatal(err)
+	}
+	exported, err := src.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWire, _ := json.Marshal(exported)
+
+	dst := newTestStore(t)
+	for i := 0; i < 2; i++ {
+		result, err := dst.Import(exported)
+		if err != nil || result.ProceduresImported != total {
+			t.Fatalf("import %d: result=%+v err=%v", i+1, result, err)
+		}
+	}
+	var count, reuse, contradicted int
+	var summary, state, lastReused string
+	if err := dst.db.QueryRow(`SELECT count(*),max(steps_summary),max(state),max(reuse_confirmed),
+		max(contradicted_count),max(last_reused_at) FROM procedures`).Scan(
+		&count, &summary, &state, &reuse, &contradicted, &lastReused,
+	); err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := dst.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotWire, _ := json.Marshal(roundTrip)
+	if count != total || summary != "INDEXED SENTINEL" || state != ProcedureStateTrusted || reuse != 4 ||
+		contradicted != 1 || lastReused != "2026-01-03T00:00:00Z" || string(gotWire) != string(wantWire) {
+		t.Fatalf("procedure round-trip lost fields or determinism: count=%d summary=%q state=%q", count, summary, state)
+	}
+
+	bad := *exported
+	bad.Procedures = append([]PortableRow(nil), exported.Procedures...)
+	bad.Procedures[0] = PortableRow{}
+	for key, value := range exported.Procedures[0] {
+		bad.Procedures[0][key] = value
+	}
+	bad.Procedures[0]["state"] = "unknown"
+	bad.Checksum, _ = portableChecksum(&bad)
+	atomic := newTestStore(t)
+	if _, err := atomic.Import(&bad); err == nil || !strings.Contains(err.Error(), "procedure state") {
+		t.Fatalf("expected invalid procedure state, got %v", err)
+	}
+	var sessions, procedures int
+	_ = atomic.db.QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessions)
+	_ = atomic.db.QueryRow(`SELECT count(*) FROM procedures`).Scan(&procedures)
+	if sessions != 0 || procedures != 0 {
+		t.Fatalf("invalid procedure partially mutated file: sessions=%d procedures=%d", sessions, procedures)
+	}
+}
+
 func TestPortableImportPreflightAndLegacyMergeStayExplicit(t *testing.T) {
 	src := newTestStore(t)
 	if err := src.CreateSession("s1", "portable", "/source"); err != nil {

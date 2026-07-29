@@ -5133,6 +5133,7 @@ type ImportResult struct {
 	PromptsImported      int `json:"prompts_imported"`
 	RelationsImported    int `json:"relations_imported"`
 	AnchorsImported      int `json:"anchors_imported"`
+	ProceduresImported   int `json:"procedures_imported"`
 }
 
 // ─── Sync Chunk Tracking ─────────────────────────────────────────────────────

@@ -110,7 +110,7 @@ var (
 	}
 	storeFormatContext = func(s *store.Store, project, scope string) (string, error) { return s.FormatContext(project, scope) }
 	storeStats         = func(s *store.Store) (*store.Stats, error) { return s.Stats() }
-	storeExport        = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
+	storeExport        = func(s *store.Store) (*store.ExportData, error) { return s.ExportPortable() }
 	jsonMarshalIndent  = json.MarshalIndent
 	runDiagnostics     = func(ctx context.Context, s *store.Store, project, check string) (diagnostic.Report, error) {
 		runner := diagnostic.NewRunner()
@@ -1914,7 +1914,7 @@ func cmdExport(cfg store.Config) {
 		fatal(err)
 	}
 
-	if err := os.WriteFile(outFile, out, 0644); err != nil {
+	if err := replaceFile(outFile, out, 0o600); err != nil {
 		fatal(err)
 	}
 
@@ -1922,6 +1922,36 @@ func cmdExport(cfg store.Config) {
 	fmt.Printf("  Sessions:     %d\n", len(data.Sessions))
 	fmt.Printf("  Observations: %d\n", len(data.Observations))
 	fmt.Printf("  Prompts:      %d\n", len(data.Prompts))
+	fmt.Printf("  Relations:    %d\n", len(data.Relations))
+	fmt.Printf("  Anchors:      %d\n", len(data.Anchors))
+	fmt.Printf("  Procedures:   %d\n", len(data.Procedures))
+}
+
+func replaceFile(path string, data []byte, mode os.FileMode) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		if err != nil {
+			_ = os.Remove(name)
+		}
+	}()
+	if err = tmp.Chmod(mode); err == nil {
+		_, err = tmp.Write(data)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(name, path)
+	}
+	return err
 }
 
 func cmdImport(cfg store.Config) {
@@ -1950,8 +1980,8 @@ func cmdImport(cfg store.Config) {
 		fatal(fmt.Errorf("read %s: %w", inFile, err))
 	}
 
-	var data store.ExportData
-	if err := json.Unmarshal(raw, &data); err != nil {
+	data, err := store.DecodeExportData(raw)
+	if err != nil {
 		fatal(fmt.Errorf("parse %s: %w", inFile, err))
 	}
 
@@ -1961,7 +1991,7 @@ func cmdImport(cfg store.Config) {
 	}
 	defer s.Close()
 
-	result, err := s.Import(&data)
+	result, err := s.Import(data)
 	if err != nil {
 		fatal(err)
 	}
@@ -1970,6 +2000,9 @@ func cmdImport(cfg store.Config) {
 	fmt.Printf("  Sessions:     %d\n", result.SessionsImported)
 	fmt.Printf("  Observations: %d\n", result.ObservationsImported)
 	fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
+	fmt.Printf("  Relations:    %d\n", result.RelationsImported)
+	fmt.Printf("  Anchors:      %d\n", result.AnchorsImported)
+	fmt.Printf("  Procedures:   %d\n", result.ProceduresImported)
 }
 
 func cmdSync(cfg store.Config) {

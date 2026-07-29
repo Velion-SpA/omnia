@@ -184,7 +184,7 @@ func stubRuntimeHooks(t *testing.T) {
 		return s.FormatContext(project, scope)
 	}
 	storeStats = func(s *store.Store) (*store.Stats, error) { return s.Stats() }
-	storeExport = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
+	storeExport = func(s *store.Store) (*store.ExportData, error) { return s.ExportPortable() }
 	jsonMarshalIndent = json.MarshalIndent
 	syncStatus = func(sy *engramsync.Syncer) (localChunks int, remoteChunks int, pendingImport int, err error) {
 		return sy.Status()
@@ -3921,7 +3921,7 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 
 	t.Run("export marshal seam error", func(t *testing.T) {
 		withArgs(t, "engram", "export")
-		storeExport = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
+		storeExport = func(s *store.Store) (*store.ExportData, error) { return s.ExportPortable() }
 		jsonMarshalIndent = func(any, string, string) ([]byte, error) {
 			return nil, errors.New("forced marshal error")
 		}

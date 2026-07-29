@@ -3,9 +3,12 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+var ErrInvalidPortableExport = errors.New("invalid portable export")
 
 type portableRelation struct {
 	SyncID                     string   `json:"sync_id"`
@@ -44,6 +47,32 @@ type portableAnchor struct {
 	NewBlameSHA  *string `json:"new_blame_sha"`
 }
 
+type portableProcedure struct {
+	SyncID            string          `json:"sync_id"`
+	Project           *string         `json:"project"`
+	Scope             string          `json:"scope"`
+	Polarity          string          `json:"polarity"`
+	Trigger           string          `json:"trigger"`
+	Steps             []ProcedureStep `json:"steps"`
+	StepsSummary      string          `json:"steps_summary"`
+	ExpectedOutcome   *string         `json:"expected_outcome"`
+	PostconditionKind string          `json:"postcondition_kind"`
+	PostconditionExpr *string         `json:"postcondition_expr"`
+	Confidence        float64         `json:"confidence"`
+	State             string          `json:"state"`
+	ReuseConfirmed    int             `json:"reuse_confirmed"`
+	ContradictedCount int             `json:"contradicted_count"`
+	SourceObsSyncIDs  []string        `json:"source_obs_sync_ids"`
+	InducedByActor    *string         `json:"induced_by_actor"`
+	InducedByKind     *string         `json:"induced_by_kind"`
+	InducedByModel    *string         `json:"induced_by_model"`
+	CreatedAt         string          `json:"created_at"`
+	UpdatedAt         string          `json:"updated_at"`
+	LastReusedAt      *string         `json:"last_reused_at"`
+	ReviewAfter       *string         `json:"review_after"`
+	RetiredAt         *string         `json:"retired_at"`
+}
+
 func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	if data == nil {
 		return nil, fmt.Errorf("import: data is required")
@@ -53,7 +82,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		return s.importLegacy(data)
 	case portableSchemaVersion:
 		if err := validatePortableImport(data); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %v", ErrInvalidPortableExport, err)
 		}
 		return s.importPortableCore(data)
 	default:
@@ -76,7 +105,10 @@ func validatePortableImport(data *ExportData) error {
 	if err := validatePortableCoreKeys(data); err != nil {
 		return err
 	}
-	_, _, err = decodePortableGraph(data)
+	if _, _, err = decodePortableGraph(data); err != nil {
+		return err
+	}
+	_, err = decodePortableProcedures(data.Procedures)
 	return err
 }
 
@@ -154,6 +186,39 @@ func decodePortableGraph(data *ExportData) ([]portableRelation, []portableAnchor
 	return relations, anchors, nil
 }
 
+func decodePortableProcedures(rows []PortableRow) ([]portableProcedure, error) {
+	procedures := make([]portableProcedure, len(rows))
+	seen := map[string]bool{}
+	for i, row := range rows {
+		raw, _ := json.Marshal(row)
+		if err := json.Unmarshal(raw, &procedures[i]); err != nil {
+			return nil, fmt.Errorf("portable import decode procedure %d: %w", i, err)
+		}
+		p := &procedures[i]
+		p.SyncID = strings.Trim(p.SyncID, " ")
+		if p.SyncID == "" || seen[p.SyncID] {
+			return nil, fmt.Errorf("portable export invalid or duplicate procedure sync_id %q", p.SyncID)
+		}
+		if !isValidProcedurePolarity(p.Polarity) {
+			return nil, fmt.Errorf("portable export invalid procedure polarity %q", p.Polarity)
+		}
+		if !isValidPostconditionKind(p.PostconditionKind) {
+			return nil, fmt.Errorf("portable export invalid procedure postcondition kind %q", p.PostconditionKind)
+		}
+		switch p.State {
+		case ProcedureStateCandidate, ProcedureStateTrusted, ProcedureStateRetired:
+		default:
+			return nil, fmt.Errorf("portable export invalid procedure state %q", p.State)
+		}
+		if strings.TrimSpace(p.Trigger) == "" || p.Confidence < 0 || p.Confidence > 1 ||
+			p.ReuseConfirmed < 0 || p.ContradictedCount < 0 {
+			return nil, fmt.Errorf("portable export invalid procedure fields %q", p.SyncID)
+		}
+		seen[p.SyncID] = true
+	}
+	return procedures, nil
+}
+
 func (s *Store) importPortableCore(data *ExportData) (*ImportResult, error) {
 	tx, err := s.beginTxHook()
 	if err != nil {
@@ -164,6 +229,10 @@ func (s *Store) importPortableCore(data *ExportData) (*ImportResult, error) {
 		return nil, err
 	}
 	relations, anchors, err := decodePortableGraph(data)
+	if err != nil {
+		return nil, err
+	}
+	procedures, err := decodePortableProcedures(data.Procedures)
 	if err != nil {
 		return nil, err
 	}
@@ -210,6 +279,12 @@ func (s *Store) importPortableCore(data *ExportData) (*ImportResult, error) {
 		}
 		result.AnchorsImported++
 	}
+	for _, procedure := range procedures {
+		if err := s.upsertPortableProcedure(tx, procedure); err != nil {
+			return nil, fmt.Errorf("import procedure %s: %w", procedure.SyncID, err)
+		}
+		result.ProceduresImported++
+	}
 	if err := s.commitHook(tx); err != nil {
 		return nil, fmt.Errorf("import: commit: %w", err)
 	}
@@ -232,7 +307,7 @@ func validatePortableGraphReferences(tx *sql.Tx, data *ExportData, relations []p
 		err := tx.QueryRow(`SELECT sync_id FROM `+table+`
 			WHERE trim(sync_id)=? ORDER BY (sync_id=?) DESC,id LIMIT 1`, key, key).Scan(&stored)
 		if err == sql.ErrNoRows {
-			return "", fmt.Errorf("portable import dangling %s %q", label, key)
+			return "", fmt.Errorf("%w: portable import dangling %s %q", ErrInvalidPortableExport, label, key)
 		}
 		if err != nil {
 			return "", fmt.Errorf("portable import validate %s: %w", label, err)
@@ -281,7 +356,7 @@ func rejectPortableTombstone(tx *sql.Tx, table, entity, syncID string) error {
 	var found int
 	err := tx.QueryRow(`SELECT 1 FROM `+table+` WHERE trim(sync_id)=?`, strings.Trim(syncID, " ")).Scan(&found)
 	if err == nil {
-		return fmt.Errorf("portable import rejected: %s %q is tombstoned", entity, syncID)
+		return fmt.Errorf("%w: portable import rejected: %s %q is tombstoned", ErrInvalidPortableExport, entity, syncID)
 	}
 	if err == sql.ErrNoRows {
 		return nil
@@ -407,5 +482,44 @@ func (s *Store) upsertPortableAnchor(tx *sql.Tx, anchor portableAnchor) error {
 	_, err = s.execHook(tx, `UPDATE memory_anchors SET sync_id=?,obs_sync_id=?,repo_root=?,file_path=?,symbol=?,
 		line_start=?,line_end=?,blame_sha=?,blame_at=?,content_hash=?,anchor_status=?,created_at=?,checked_at=?,
 		staled_at=?,new_blame_sha=? WHERE id=?`, append(args, id)...)
+	return err
+}
+
+func (s *Store) upsertPortableProcedure(tx *sql.Tx, p portableProcedure) error {
+	steps, err := json.Marshal(p.Steps)
+	if err != nil {
+		return err
+	}
+	sources, err := json.Marshal(p.SourceObsSyncIDs)
+	if err != nil {
+		return err
+	}
+	args := []any{p.SyncID, p.Project, p.Scope, p.Polarity, p.Trigger, string(steps), p.StepsSummary,
+		p.ExpectedOutcome, p.PostconditionKind, p.PostconditionExpr, p.Confidence, p.State, p.ReuseConfirmed,
+		p.ContradictedCount, string(sources), p.InducedByActor, p.InducedByKind, p.InducedByModel,
+		p.CreatedAt, p.UpdatedAt, p.LastReusedAt, p.ReviewAfter, p.RetiredAt}
+	id, err := s.canonicalGraphRowID(tx, "procedures", p.SyncID)
+	if err != nil {
+		return err
+	}
+	if id != 0 {
+		if _, err := s.execHook(tx, `UPDATE procedures SET sync_id=? WHERE id=?`, p.SyncID, id); err != nil {
+			return err
+		}
+	}
+	_, err = s.execHook(tx, `INSERT INTO procedures
+		(sync_id,project,scope,polarity,"trigger",steps,steps_summary,expected_outcome,postcondition_kind,
+		 postcondition_expr,confidence,state,reuse_confirmed,contradicted_count,source_obs_sync_ids,
+		 induced_by_actor,induced_by_kind,induced_by_model,created_at,updated_at,last_reused_at,review_after,retired_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(sync_id) DO UPDATE SET project=excluded.project,scope=excluded.scope,polarity=excluded.polarity,
+		"trigger"=excluded."trigger",steps=excluded.steps,steps_summary=excluded.steps_summary,
+		expected_outcome=excluded.expected_outcome,postcondition_kind=excluded.postcondition_kind,
+		postcondition_expr=excluded.postcondition_expr,confidence=excluded.confidence,state=excluded.state,
+		reuse_confirmed=excluded.reuse_confirmed,contradicted_count=excluded.contradicted_count,
+		source_obs_sync_ids=excluded.source_obs_sync_ids,induced_by_actor=excluded.induced_by_actor,
+		induced_by_kind=excluded.induced_by_kind,induced_by_model=excluded.induced_by_model,
+		created_at=excluded.created_at,updated_at=excluded.updated_at,last_reused_at=excluded.last_reused_at,
+		review_after=excluded.review_after,retired_at=excluded.retired_at`, args...)
 	return err
 }

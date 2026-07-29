@@ -517,6 +517,9 @@ func TestCmdExportAndImport(t *testing.T) {
 	mustSeedObservation(t, sourceCfg, "s-exp", "proj-exp", "pattern", "exported", "export me", "project")
 
 	exportPath := filepath.Join(t.TempDir(), "memories.json")
+	if err := os.WriteFile(exportPath, []byte("old partial export"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	withArgs(t, "engram", "export", exportPath)
 	exportOut, exportErr := captureOutput(t, func() { cmdExport(sourceCfg) })
@@ -525,6 +528,21 @@ func TestCmdExportAndImport(t *testing.T) {
 	}
 	if !strings.Contains(exportOut, "Exported to "+exportPath) {
 		t.Fatalf("unexpected export output: %q", exportOut)
+	}
+	raw, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported, err := store.DecodeExportData(raw)
+	if err != nil || exported.SchemaVersion != 2 {
+		t.Fatalf("CLI export is not portable v2: data=%+v err=%v", exported, err)
+	}
+	info, err := os.Stat(exportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("CLI export mode = %v, want 0600", info.Mode().Perm())
 	}
 
 	withArgs(t, "engram", "import", exportPath)
