@@ -4036,6 +4036,194 @@ func TestPortableExportV2EmptyAndRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestPortableImportV2CoreIsAtomicIdempotentAndImportedWins(t *testing.T) {
+	src := newTestStore(t)
+	if _, err := src.db.Exec(`
+		INSERT INTO sessions (id,project,directory,started_at,summary)
+			VALUES ('s1','portable','/source','2026-01-01T00:00:00Z','source'),(' s1 ','portable','/padded','2026-01-01T00:00:00Z','padded');
+		INSERT INTO observations (sync_id,session_id,type,title,content,project,scope,pinned,error_signature,outcome,source,trust_tag,created_at,updated_at)
+			VALUES ('obs-a','s1','decision','source title','source content','portable','project',1,'sig','worked','user','high','2026-01-02T00:00:00Z','2026-01-02T00:00:00Z');
+		INSERT INTO user_prompts (sync_id,session_id,content,project,created_at)
+			VALUES ('prompt-a','s1','source prompt','portable','2026-01-03T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := newTestStore(t)
+	if _, err := dst.db.Exec(`
+		INSERT INTO sessions (id,project,directory,started_at,summary)
+			VALUES ('s1','local','/local','2030-01-01T00:00:00Z','local');
+		INSERT INTO observations (sync_id,session_id,type,title,content,project,scope,pinned,source,trust_tag,created_at,updated_at)
+			VALUES (' obs-a ','s1','note','local title','newer local content','local','personal',0,'agent','standard','2030-01-01T00:00:00Z','2030-01-01T00:00:00Z'),
+			       ('obs-a','s1','note','duplicate','duplicate','local','project',0,'agent','standard','2031-01-01T00:00:00Z','2031-01-01T00:00:00Z');
+		INSERT INTO user_prompts (sync_id,session_id,content,project,created_at)
+			VALUES (' prompt-a ','s1','newer local prompt','local','2030-01-01T00:00:00Z'),
+			       ('prompt-a','s1','duplicate','local','2031-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := dst.Import(data); err != nil {
+			t.Fatalf("import %d: %v", i+1, err)
+		}
+	}
+	var sessions, observations, prompts int
+	var directory, title, content, prompt, source, trust string
+	var pinned bool
+	if err := dst.db.QueryRow(`SELECT count(*),max(CASE WHEN id='s1' THEN directory ELSE '' END) FROM sessions WHERE trim(id)='s1'`).Scan(&sessions, &directory); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.db.QueryRow(`SELECT count(*),title,content,pinned,source,trust_tag FROM observations WHERE trim(sync_id)='obs-a'`).Scan(
+		&observations, &title, &content, &pinned, &source, &trust,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.db.QueryRow(`SELECT count(*),content FROM user_prompts WHERE trim(sync_id)='prompt-a'`).Scan(&prompts, &prompt); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 2 || observations != 1 || prompts != 1 {
+		t.Fatalf("v2 re-import duplicated core rows: sessions=%d observations=%d prompts=%d", sessions, observations, prompts)
+	}
+	if directory != "/source" || title != "source title" || content != "source content" || prompt != "source prompt" ||
+		!pinned || source != "user" || trust != "high" {
+		t.Fatalf("v2 collision must restore imported fields: directory=%q title=%q content=%q prompt=%q pinned=%v source=%q trust=%q",
+			directory, title, content, prompt, pinned, source, trust)
+	}
+	atomic := newTestStore(t)
+	bad := *data
+	bad.Observations = append([]Observation(nil), data.Observations...)
+	bad.Observations[0].SessionID = "missing"
+	bad.Checksum, _ = portableChecksum(&bad)
+	if _, err := atomic.Import(&bad); err == nil || !strings.Contains(err.Error(), "import observation") {
+		t.Fatalf("expected atomic core import failure, got %v", err)
+	}
+	if err := atomic.db.QueryRow(`SELECT count(*) FROM sessions WHERE id='s1'`).Scan(&sessions); err != nil || sessions != 0 {
+		t.Fatalf("failed v2 import left a partial session: count=%d err=%v", sessions, err)
+	}
+	for _, tt := range []struct{ name, table, incoming, tombstone string }{{"observation ASCII-space", "deletion_tombstones", "obs-a", " obs-a "}, {"prompt ASCII-space", "prompt_tombstones", "prompt-a", " prompt-a "}, {"observation tab", "deletion_tombstones", "\tobs-a\t", "\tobs-a\t"}, {"prompt tab", "prompt_tombstones", "\tprompt-a\t", "\tprompt-a\t"}} {
+		t.Run(tt.name+" tombstone wins", func(t *testing.T) {
+			dst := newTestStore(t)
+			incoming := *data
+			query := `INSERT INTO deletion_tombstones (sync_id) VALUES (?)`
+			if tt.table == "prompt_tombstones" {
+				incoming.Prompts = append([]Prompt(nil), data.Prompts...)
+				incoming.Prompts[0].SyncID, query = tt.incoming, `INSERT INTO prompt_tombstones (sync_id) VALUES (?)`
+			} else {
+				incoming.Observations = append([]Observation(nil), data.Observations...)
+				incoming.Observations[0].SyncID = tt.incoming
+			}
+			incoming.Checksum, _ = portableChecksum(&incoming)
+			if _, err := dst.db.Exec(query, tt.tombstone); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := dst.Import(&incoming); err == nil || !strings.Contains(err.Error(), "tombstoned") {
+				t.Fatalf("expected tombstone rejection, got %v", err)
+			}
+			var rows, proofs int
+			_ = dst.db.QueryRow(`SELECT count(*) FROM sessions`).Scan(&rows)
+			_ = dst.db.QueryRow(`SELECT count(*) FROM ` + tt.table).Scan(&proofs)
+			if rows != 0 || proofs != 1 {
+				t.Fatalf("tombstone preflight was not atomic: rows=%d proofs=%d", rows, proofs)
+			}
+		})
+	}
+}
+
+func TestPortableImportPreflightAndLegacyMergeStayExplicit(t *testing.T) {
+	src := newTestStore(t)
+	if err := src.CreateSession("s1", "portable", "/source"); err != nil {
+		t.Fatal(err)
+	}
+	valid, err := src.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name   string
+		mutate func(*ExportData)
+		want   string
+	}{
+		{"future version", func(data *ExportData) { data.SchemaVersion++ }, "unsupported schema version"},
+		{"count mismatch", func(data *ExportData) { data.Counts.Sessions++ }, "count mismatch"},
+		{"checksum mismatch", func(data *ExportData) { data.Checksum = "bad" }, "checksum mismatch"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data := *valid
+			tt.mutate(&data)
+			dst := newTestStore(t)
+			if _, err := dst.Import(&data); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q, got %v", tt.want, err)
+			}
+			var count int
+			if err := dst.db.QueryRow(`SELECT count(*) FROM sessions`).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("preflight failure mutated store: count=%d err=%v", count, err)
+			}
+		})
+	}
+	legacy := newTestStore(t)
+	if err := legacy.CreateSession("s1", "local", "/local"); err != nil {
+		t.Fatal(err)
+	}
+	data := &ExportData{
+		Sessions:     []Session{{ID: "s1", Project: "legacy", Directory: "/incoming", StartedAt: Now()}},
+		Observations: []Observation{{SyncID: "legacy-obs", SessionID: "s1", Type: "note", Title: "legacy", Content: "append", Scope: "project", CreatedAt: Now(), UpdatedAt: Now()}},
+		Prompts:      []Prompt{{SyncID: "legacy-prompt", SessionID: "s1", Content: "append", CreatedAt: Now()}},
+	}
+	if _, err := legacy.Import(data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Import(data); err != nil {
+		t.Fatal(err)
+	}
+	var directory string
+	var observations, prompts int
+	_ = legacy.db.QueryRow(`SELECT directory FROM sessions WHERE id='s1'`).Scan(&directory)
+	_ = legacy.db.QueryRow(`SELECT count(*) FROM observations WHERE sync_id='legacy-obs'`).Scan(&observations)
+	_ = legacy.db.QueryRow(`SELECT count(*) FROM user_prompts WHERE sync_id='legacy-prompt'`).Scan(&prompts)
+	if directory != "/local" || observations != 2 || prompts != 2 {
+		t.Fatalf("legacy merge semantics changed: directory=%q observations=%d prompts=%d", directory, observations, prompts)
+	}
+}
+
+func TestPortableImportConvergesLegacyDuplicateSelfExport(t *testing.T) {
+	src := newTestStore(t)
+	if err := src.CreateSession("s1", "legacy", "/legacy"); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"old", "alpha", "beta", "tab"} {
+		at := "2025-01-01T00:00:00Z"
+		if suffix != "old" {
+			at = "2026-01-01T00:00:00Z"
+		}
+		legacy := &ExportData{
+			Observations: []Observation{{SyncID: "dup-obs" + map[string]string{"beta": " ", "tab": "\t"}[suffix], SessionID: "s1", Type: "note", Title: suffix, Content: suffix, Scope: "project", CreatedAt: at, UpdatedAt: at}},
+			Prompts:      []Prompt{{SyncID: "dup-prompt" + map[string]string{"beta": " ", "tab": "\t"}[suffix], SessionID: "s1", Content: suffix, CreatedAt: at}},
+		}
+		if _, err := src.Import(legacy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := src.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Observations) != 2 || len(data.Prompts) != 2 || data.Observations[1].SyncID != "dup-obs\t" || data.Prompts[1].SyncID != "dup-prompt\t" ||
+		data.Observations[0].Content != "beta" || data.Observations[1].Content != "tab" || data.Prompts[0].Content != "beta" || data.Prompts[1].Content != "tab" {
+		t.Fatalf("portable export did not canonicalize legacy duplicates: %+v %+v", data.Observations, data.Prompts)
+	}
+	dst := newTestStore(t)
+	if _, err := dst.Import(data); err != nil {
+		t.Fatal(err)
+	}
+	var observations, prompts int
+	_ = dst.db.QueryRow(`SELECT count(*) FROM observations`).Scan(&observations)
+	_ = dst.db.QueryRow(`SELECT count(*) FROM user_prompts`).Scan(&prompts)
+	if observations != 2 || prompts != 2 {
+		t.Fatalf("self-export/import did not converge: observations=%d prompts=%d", observations, prompts)
+	}
+}
+
 func TestNewErrorBranches(t *testing.T) {
 	t.Run("fails when data dir is a file", func(t *testing.T) {
 		base := t.TempDir()

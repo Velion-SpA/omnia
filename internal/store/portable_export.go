@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 const portableSchemaVersion = 2
+
 type ExportCounts struct {
 	Sessions     int `json:"sessions"`
 	Observations int `json:"observations"`
@@ -39,6 +41,7 @@ type portablePayload struct {
 	Anchors      []PortableRow
 	Procedures   []PortableRow
 }
+
 func nonNil[T any](in []T) []T {
 	if in == nil {
 		return []T{}
@@ -57,6 +60,21 @@ func portablePrompts(in []Prompt) []PortableRow {
 	out := make([]PortableRow, len(in))
 	for i, prompt := range in {
 		out[i] = portableRecord(prompt)
+	}
+	return out
+}
+func canonicalPortable[T any](in []T, key, timestamp func(T) string, record func(T) PortableRow) []T {
+	chosen, rank := map[string]T{}, map[string]string{}
+	for _, value := range in {
+		raw, _ := json.Marshal(record(value))
+		k, candidate := key(value), normalizeComparableTimestamp(timestamp(value))+"\x00"+string(raw)
+		if previous, ok := rank[k]; !ok || candidate > previous {
+			chosen[k], rank[k] = value, candidate
+		}
+	}
+	out := make([]T, 0, len(chosen))
+	for _, value := range chosen {
+		out = append(out, value)
 	}
 	return out
 }
@@ -161,6 +179,20 @@ func (s *Store) exportPortable(db queryer) (*ExportData, error) {
 	if err != nil {
 		return nil, err
 	}
+	for i := range data.Observations {
+		data.Observations[i].SyncID = strings.Trim(data.Observations[i].SyncID, " ")
+	}
+	for i := range data.Prompts {
+		data.Prompts[i].SyncID = strings.Trim(data.Prompts[i].SyncID, " ")
+	}
+	data.Observations = canonicalPortable(data.Observations,
+		func(value Observation) string { return value.SyncID },
+		func(value Observation) string { return value.UpdatedAt },
+		func(value Observation) PortableRow { return portableObservations([]Observation{value})[0] })
+	data.Prompts = canonicalPortable(data.Prompts,
+		func(value Prompt) string { return value.SyncID },
+		func(value Prompt) string { return value.CreatedAt },
+		func(value Prompt) PortableRow { return portableRecord(value) })
 	sort.Slice(data.Sessions, func(i, j int) bool {
 		return data.Sessions[i].StartedAt < data.Sessions[j].StartedAt || data.Sessions[i].StartedAt == data.Sessions[j].StartedAt && data.Sessions[i].ID < data.Sessions[j].ID
 	})

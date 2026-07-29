@@ -5010,7 +5010,7 @@ func (s *Store) exportWithProjectScopeFrom(db queryer, project string) (*ExportD
 	return data, nil
 }
 
-func (s *Store) Import(data *ExportData) (*ImportResult, error) {
+func (s *Store) importLegacy(data *ExportData) (*ImportResult, error) {
 	tx, err := s.beginTxHook()
 	if err != nil {
 		return nil, fmt.Errorf("import: begin tx: %w", err)
