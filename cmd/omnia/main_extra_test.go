@@ -776,7 +776,12 @@ func TestReleaseLikeOfflineUpdateCheckPolicy(t *testing.T) {
 		"https_proxy="+slowProxy.URL,
 		"http_proxy="+slowProxy.URL,
 	)
-	nearFuture := time.Now().UTC().Add(350 * time.Millisecond).Format(time.RFC3339Nano)
+	// jd-fix-agent finding A: --as-of future-detection now tolerates up to
+	// asOfClockSkewTolerance (5s, internal/store/timetravel.go) of clock
+	// skew before something is classified as historical rather than live.
+	// This offset must clear that grace band to keep exercising the
+	// "clearly future stays live" path this test is about.
+	nearFuture := time.Now().UTC().Add(7 * time.Second).Format(time.RFC3339Nano)
 	futureOut, _ := runWithEnv("near-future as-of stays live across slow update", slowProxyEnv, true,
 		"search", "fixture", "--as-of", nearFuture)
 	if strings.Contains(futureOut, "Recorded-time view:") {

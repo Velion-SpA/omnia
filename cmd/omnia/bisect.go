@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,6 +25,18 @@ var replaceBisectFile = atomic.ReplaceFile
 var removeBisectFile = os.Remove
 var beforeBisectMutationLock = func() {}
 var newBisectGeneration = randomBisectGeneration
+
+// beforeBisectStateFileOpen is a test seam invoked right after
+// validateBisectStateFile's os.Lstat check succeeds and right before the
+// actual (symlink-refusing) file open, so tests can deterministically
+// exercise the TOCTOU race window between the two.
+var beforeBisectStateFileOpen = func() {}
+
+// beforeBisectDataDirChmod is a test seam invoked right after
+// os.MkdirAll bootstraps a missing data directory and right before the
+// symlink guard + os.Chmod that follow, so tests can deterministically
+// exercise the race window between directory creation and the chmod.
+var beforeBisectDataDirChmod = func() {}
 
 // Windows reports synthesized permissions; exact 0600 enforcement is POSIX-only.
 var bisectPrivateModeRequired = func() bool { return runtime.GOOS != "windows" }
@@ -75,7 +88,18 @@ func runBisect(cfg store.Config, args []string) (string, error) {
 		if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 			return "", err
 		}
+		beforeBisectDataDirChmod()
 		if bisectPrivateModeRequired() {
+			// C2: os.Chmod follows symlinks. If a symlink was planted at
+			// cfg.DataDir in the window between MkdirAll and here, an
+			// Lstat-based guard rejects it instead of chmod'ing through it.
+			dirInfo, lstatErr := os.Lstat(cfg.DataDir)
+			if lstatErr != nil {
+				return "", lstatErr
+			}
+			if dirInfo.Mode()&os.ModeSymlink != 0 {
+				return "", errors.New("bisect data directory must be a directory, not a symlink")
+			}
 			if err := os.Chmod(cfg.DataDir, 0o700); err != nil {
 				return "", err
 			}
@@ -299,7 +323,19 @@ func readBisectState(path string) (*bisectState, error) {
 		}
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	beforeBisectStateFileOpen()
+	// C1: validateBisectStateFile's os.Lstat above and this read used to be
+	// two separate syscalls with a TOCTOU race window between them. Opening
+	// with O_NOFOLLOW (non-Windows) makes the open() itself fail atomically
+	// with ELOOP if a symlink was swapped into place in that window,
+	// instead of silently following it — no race window at all. The Lstat
+	// check above is kept as defense in depth.
+	f, err := openBisectStateFileNoFollow(path)
+	if err != nil {
+		return nil, errors.New("corrupt bisect state; run `omnia bisect reset`")
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
 	var state bisectState
 	if err != nil || json.Unmarshal(data, &state) != nil {
 		return nil, errors.New("corrupt bisect state; run `omnia bisect reset`")

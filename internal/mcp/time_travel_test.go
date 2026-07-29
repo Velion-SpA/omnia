@@ -113,6 +113,87 @@ func TestRecordedTimeReadHandlers(t *testing.T) {
 	}
 }
 
+// TestRecordedTimeEnvelopeStructuredFields is the RED->GREEN test for the
+// as_of structured envelope flag: handleSearch, handleContext, and
+// handleGetObservation must surface a dedicated top-level JSON envelope
+// field whenever they resolve recorded-time (possibly historical) data —
+// not just embed the disclaimer inside the free-text result string — so an
+// agent inspecting the response structurally (not substring-scanning
+// "result") has a reliable signal. This follows the same
+// present-only-when-true convention already used for fts_relaxed/
+// fts_relax_step and budget_trimmed in this file. The fields must be
+// entirely ABSENT on the non-as_of path (byte-for-byte no-op preserved).
+func TestRecordedTimeEnvelopeStructuredFields(t *testing.T) {
+	cfg, _ := store.DefaultConfig()
+	cfg.DataDir, cfg.TimeTravelEnabled = t.TempDir(), true
+	s, _ := store.New(cfg)
+	defer s.Close()
+	_ = s.CreateSession("s1", "omnia", t.TempDir())
+	id, _ := s.AddObservation(store.AddObservationParams{SessionID: "s1", Type: "decision", Title: "old title", Content: "old body searchable", Project: "omnia", Scope: "project"})
+	_, _ = s.DB().Exec(`UPDATE observations SET created_at='2023-01-01', updated_at='2023-01-01', review_after='2025-01-01' WHERE id=?`, id)
+	asOf := "2024-01-01"
+	title, content := "current title", "current searchable body"
+	_, _ = s.UpdateObservation(id, store.UpdateObservationParams{Title: &title, Content: &content})
+
+	req := func(args map[string]any) mcppkg.CallToolRequest {
+		return mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}}
+	}
+	activity := NewSessionActivity(time.Minute)
+	cfgMCP := MCPConfig{TimeTravelEnabled: true}
+
+	withAsOf := []struct {
+		name string
+		call server.ToolHandlerFunc
+		args map[string]any
+	}{
+		{"get", handleGetObservation(s, cfgMCP), map[string]any{"id": float64(id), "as_of": asOf}},
+		{"search", handleSearch(s, cfgMCP, activity), map[string]any{"query": "searchable", "project": "omnia", "as_of": asOf}},
+		{"context", handleContext(s, cfgMCP, activity), map[string]any{"project": "omnia", "as_of": asOf}},
+		{"context_zero_result", handleContext(s, cfgMCP, activity), map[string]any{"project": "omnia", "scope": "personal", "as_of": asOf}},
+	}
+	for _, tt := range withAsOf {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := tt.call(context.Background(), req(tt.args))
+			if err != nil {
+				t.Fatalf("%s: %v", tt.name, err)
+			}
+			body := callResultJSON(t, res)
+			recordedTime, ok := body["recorded_time"].(bool)
+			if !ok || !recordedTime {
+				t.Fatalf("%s: expected envelope[\"recorded_time\"]=true, got %v (body=%+v)", tt.name, body["recorded_time"], body)
+			}
+			if got, _ := body["as_of"].(string); got != asOf {
+				t.Fatalf("%s: expected envelope[\"as_of\"]=%q, got %v (body=%+v)", tt.name, asOf, body["as_of"], body)
+			}
+		})
+	}
+
+	withoutAsOf := []struct {
+		name string
+		call server.ToolHandlerFunc
+		args map[string]any
+	}{
+		{"get", handleGetObservation(s, cfgMCP), map[string]any{"id": float64(id)}},
+		{"search", handleSearch(s, cfgMCP, activity), map[string]any{"query": "searchable", "project": "omnia"}},
+		{"context", handleContext(s, cfgMCP, activity), map[string]any{"project": "omnia"}},
+	}
+	for _, tt := range withoutAsOf {
+		t.Run(tt.name+"_no_as_of", func(t *testing.T) {
+			res, err := tt.call(context.Background(), req(tt.args))
+			if err != nil {
+				t.Fatalf("%s: %v", tt.name, err)
+			}
+			body := callResultJSON(t, res)
+			if _, ok := body["recorded_time"]; ok {
+				t.Fatalf("%s: expected NO recorded_time key without as_of, got %+v", tt.name, body["recorded_time"])
+			}
+			if _, ok := body["as_of"]; ok {
+				t.Fatalf("%s: expected NO as_of key without as_of, got %+v", tt.name, body["as_of"])
+			}
+		})
+	}
+}
+
 func TestAsOfSchemaFeatureGate(t *testing.T) {
 	s := newMCPTestStore(t)
 	allow := map[string]bool{"mem_search": true, "mem_context": true, "mem_get_observation": true}

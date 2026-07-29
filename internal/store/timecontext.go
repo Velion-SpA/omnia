@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/velion/omnia/internal/token"
 )
@@ -20,7 +19,7 @@ func (s *Store) FormatContextAsOf(project, scope, timestamp string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("invalid as_of timestamp: %w", err)
 	}
-	if at.After(time.Now().UTC()) {
+	if asOfIsFuture(at) {
 		return s.FormatContext(project, scope)
 	}
 

@@ -1597,6 +1597,16 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			envelope["budget_trimmed"] = budgetTrimmed
 		}
 
+		// jd-fix-agent finding B (as_of structured envelope flag): surface a
+		// dedicated, structurally-inspectable signal whenever this response
+		// resolves recorded-time (possibly historical) data, mirroring the
+		// fts_relaxed/budget_trimmed present-only-when-true convention.
+		// Byte-for-byte identical to before this fix on the non-as_of path.
+		if asOf != "" {
+			envelope["recorded_time"] = true
+			envelope["as_of"] = asOf
+		}
+
 		// omnia-0.3.1-write-hygiene PR7 (design obs #1668 D7, spec fts-recall
 		// REQ "Fallback Transparency"): surface which relaxation level
 		// produced results ONLY when the ladder actually fired. Every other
@@ -2454,13 +2464,20 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 
 		if contextResult == "" {
 			message := "No previous session memories found."
+			var extra map[string]any
 			if asOf != "" {
 				message += recordedTimeDisclaimer
+				// jd-fix-agent finding B: structural as_of/recorded_time
+				// envelope signal, matching handleSearch's convention.
+				extra = map[string]any{"recorded_time": true, "as_of": asOf}
 			}
-			return respondWithProject(detRes, message, nil), nil
+			return respondWithProject(detRes, message, extra), nil
 		}
 		if asOf != "" {
-			return respondWithProject(detRes, contextResult+recordedTimeDisclaimer, nil), nil
+			// jd-fix-agent finding B: structural as_of/recorded_time
+			// envelope signal, matching handleSearch's convention.
+			extra := map[string]any{"recorded_time": true, "as_of": asOf}
+			return respondWithProject(detRes, contextResult+recordedTimeDisclaimer, extra), nil
 		}
 
 		stats, _ := s.Stats()
@@ -2705,8 +2722,12 @@ func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 			obs.SessionID, obsProject+scope+topic, toolName+duplicateMeta+revisionMeta,
 			timeutil.FormatLocal(obs.CreatedAt),
 		)
+		var extra map[string]any
 		if asOf != "" {
 			result += recordedTimeDisclaimer
+			// jd-fix-agent finding B: structural as_of/recorded_time
+			// envelope signal, matching handleSearch's convention.
+			extra = map[string]any{"recorded_time": true, "as_of": asOf}
 		}
 
 		if detErr != nil {
@@ -2714,7 +2735,7 @@ func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 			// the observation content without envelope rather than erroring.
 			return mcp.NewToolResultText(result), nil
 		}
-		return respondWithProject(detRes, result, nil), nil
+		return respondWithProject(detRes, result, extra), nil
 	}
 }
 

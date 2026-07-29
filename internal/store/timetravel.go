@@ -13,6 +13,25 @@ import (
 
 const revisionOpUpdate, revisionOpSoftDelete = "update", "soft_delete"
 
+// asOfClockSkewTolerance absorbs minor clock skew between the machine that
+// produced an --as-of timestamp and this server's own wall clock. Without
+// it, a server whose clock runs even slightly behind true time would treat
+// a genuinely-past --as-of request as "the future" (because the request's
+// timestamp ends up numerically ahead of this server's lagging time.Now())
+// and silently resolve it to live/current data instead of the requested
+// recorded-time state. This is defensive slack, not a feature: it is
+// intentionally small and not configurable.
+const asOfClockSkewTolerance = 5 * time.Second
+
+// asOfIsFuture reports whether at is far enough beyond the current instant
+// (accounting for asOfClockSkewTolerance) to be treated as a future --as-of
+// request, which resolves to live/current state. Every "is this timestamp
+// in the future" comparison across the time-travel read paths must go
+// through this single function so the tolerance is applied consistently.
+func asOfIsFuture(at time.Time) bool {
+	return at.After(time.Now().UTC().Add(asOfClockSkewTolerance))
+}
+
 var ErrBisectEventTombstoned = errors.New("bisect event tombstoned")
 var ErrBisectStateStale = errors.New("bisect state stale")
 
@@ -203,7 +222,7 @@ func NormalizeAsOf(timestamp string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid as_of timestamp: %w", err)
 	}
-	if at.After(time.Now().UTC()) {
+	if asOfIsFuture(at) {
 		return "", nil
 	}
 	return timestamp, nil
@@ -298,7 +317,7 @@ func (s *Store) StateAsOf(id int64, timestamp string) (*Observation, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid as_of timestamp: %w", err)
 	}
-	if at.After(time.Now().UTC()) {
+	if asOfIsFuture(at) {
 		return s.GetObservation(id)
 	}
 	live, err := s.getObservationIncludingDeleted(id)
@@ -431,7 +450,7 @@ func (s *Store) SearchAsOf(query string, opts SearchOptions, timestamp string) (
 	if err != nil {
 		return nil, fmt.Errorf("invalid as_of timestamp: %w", err)
 	}
-	if at.After(time.Now().UTC()) {
+	if asOfIsFuture(at) {
 		return s.Search(query, opts)
 	}
 	historyStart, _, err := s.timeTravelBoundary()

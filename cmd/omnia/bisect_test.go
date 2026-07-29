@@ -319,6 +319,102 @@ func TestBisectAbsentDataDirectory(t *testing.T) {
 	private := statErr == nil && (!bisectPrivateModeRequired() || info.Mode().Perm() == 0o700)
 	requireBisect(t, err == nil && out == "no revisions in range" && statErr == nil && private, "start did not securely create absent data directory")
 }
+
+// TestReadBisectStateRejectsSymlinkSwappedInAfterValidation closes a TOCTOU
+// race in readBisectState: validateBisectStateFile's os.Lstat check and the
+// subsequent read used to be two separate syscalls with a window between
+// them where a symlink swapped into place would be silently followed by
+// os.ReadFile. This simulates that exact race deterministically via a test
+// hook (beforeBisectStateFileOpen) that swaps the validated regular file for
+// a symlink to an attacker-controlled file right before the read, and
+// confirms the read fails cleanly instead of returning the symlinked
+// target's content.
+func TestReadBisectStateRejectsSymlinkSwappedInAfterValidation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bisect-state.json")
+	target := filepath.Join(dir, "attacker-target.json")
+	secret := &bisectState{
+		Version: bisectStateVersion, Generation: "attacker-secret-generation",
+		Candidates: []store.BisectEvent{{ID: 999, SyncID: "attacker-sync", CreatedAt: "2099-01-01T00:00:00Z"}},
+	}
+	secretData, err := json.Marshal(secret)
+	requireBisect(t, err == nil, "marshal attacker target")
+	requireBisect(t, os.WriteFile(target, secretData, 0o600) == nil, "write attacker target")
+
+	legit := &bisectState{
+		Version: bisectStateVersion, Generation: "legit-generation",
+		Candidates: []store.BisectEvent{{ID: 1, SyncID: "legit-sync", CreatedAt: "2026-01-01T00:00:00Z"}},
+	}
+	requireBisect(t, writeBisectState(path, legit) == nil, "write legit state")
+
+	oldHook := beforeBisectStateFileOpen
+	defer func() { beforeBisectStateFileOpen = oldHook }()
+	swapped := false
+	beforeBisectStateFileOpen = func() {
+		_ = os.Remove(path)
+		if symErr := os.Symlink(target, path); symErr != nil {
+			if runtime.GOOS == "windows" {
+				return
+			}
+			t.Fatalf("swap in symlink: %v", symErr)
+		}
+		swapped = true
+	}
+
+	_, readErr := readBisectState(path)
+	if !swapped && runtime.GOOS == "windows" {
+		t.Skip("symlink privilege unavailable on this runner")
+	}
+	requireBisect(t, readErr != nil, "swapped-in symlink read unexpectedly succeeded")
+	requireBisect(t, !strings.Contains(fmt.Sprint(readErr), "attacker"), "attacker target content leaked through race window")
+}
+
+// TestBisectDataDirBootstrapRejectsSymlinkSwappedInBeforeChmod closes a
+// narrower race in the missing-data-dir bootstrap: os.MkdirAll and the
+// subsequent os.Chmod-by-path used to be separate syscalls with a window in
+// between where a symlink planted at cfg.DataDir would cause Chmod to
+// apply through the symlink to an attacker-chosen directory. This
+// simulates that race deterministically via a test hook
+// (beforeBisectDataDirChmod) that swaps the just-created directory for a
+// symlink to an attacker-controlled directory right before the chmod step,
+// and confirms bootstrap fails cleanly instead of chmod'ing through it.
+func TestBisectDataDirBootstrapRejectsSymlinkSwappedInBeforeChmod(t *testing.T) {
+	if !bisectPrivateModeRequired() {
+		t.Skip("exact 0700 enforcement is POSIX-only")
+	}
+	parent := t.TempDir()
+	cfg := testConfig(t)
+	cfg.DataDir = filepath.Join(parent, "data")
+	cfg.TimeTravelEnabled = true
+	attackerTarget := filepath.Join(parent, "attacker-target")
+	requireBisect(t, os.Mkdir(attackerTarget, 0o777) == nil, "create attacker target dir")
+	// os.Mkdir's requested mode is subject to umask; force the exact mode
+	// so the post-exploit assertion below isn't confounded by umask bits.
+	requireBisect(t, os.Chmod(attackerTarget, 0o777) == nil, "force attacker target mode")
+
+	oldHook := beforeBisectDataDirChmod
+	defer func() { beforeBisectDataDirChmod = oldHook }()
+	swapped := false
+	beforeBisectDataDirChmod = func() {
+		_ = os.Remove(cfg.DataDir)
+		if symErr := os.Symlink(attackerTarget, cfg.DataDir); symErr != nil {
+			if runtime.GOOS == "windows" {
+				return
+			}
+			t.Fatalf("swap in symlink: %v", symErr)
+		}
+		swapped = true
+	}
+
+	_, err := runBisect(cfg, []string{"start", "--good", "now", "--bad", "2099-01-01T00:00:00Z"})
+	if !swapped && runtime.GOOS == "windows" {
+		t.Skip("symlink privilege unavailable on this runner")
+	}
+	requireBisect(t, err != nil && strings.Contains(err.Error(), "symlink"), "swapped-in data-dir symlink accepted before chmod")
+	info, statErr := os.Lstat(attackerTarget)
+	requireBisect(t, statErr == nil && info.Mode().Perm() == 0o777, "attacker directory permissions were modified through the symlink")
+}
+
 func mustBisect(t *testing.T, cfg store.Config, args ...string) string {
 	t.Helper()
 	out, err := runBisect(cfg, args)

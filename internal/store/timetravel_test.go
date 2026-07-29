@@ -513,6 +513,7 @@ func TestStateAsOfRecordedTimeBoundariesAndVisibility(t *testing.T) {
 		{"before edit", original.UpdatedAt, "original"},
 		{"exact edit boundary", edited.UpdatedAt, "edited"},
 		{"future resolves live", time.Now().Add(time.Hour).Format(time.RFC3339Nano), "edited"},
+		{"within clock-skew tolerance resolves live", time.Now().Add(2 * time.Second).Format(time.RFC3339Nano), "edited"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := s.StateAsOf(id, tt.at)
@@ -539,6 +540,64 @@ func TestStateAsOfRecordedTimeBoundariesAndVisibility(t *testing.T) {
 	got, err := disabled.StateAsOf(disabledID, old.UpdatedAt)
 	if err != nil || got.Title != current {
 		t.Fatalf("disabled as-of must be ignored: %+v, %v", got, err)
+	}
+}
+
+// TestAsOfIsFutureHonorsClockSkewTolerance is the direct unit test for the
+// shared future-detection primitive behind every --as-of comparison
+// (NormalizeAsOf, StateAsOf, SearchAsOf, FormatContextAsOf). Without a small
+// tolerance band, a server whose wall clock runs even slightly behind true
+// time would classify a genuinely-past --as-of request as "future" (because
+// the request's timestamp, produced by a correctly-synced client, ends up
+// numerically ahead of this server's lagging time.Now()) and silently
+// resolve it to live/current data instead of the requested recorded-time
+// state. asOfClockSkewTolerance absorbs that class of skew: only timestamps
+// clearly beyond the tolerance band are treated as "the future".
+func TestAsOfIsFutureHonorsClockSkewTolerance(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tt := range []struct {
+		name string
+		at   time.Time
+		want bool
+	}{
+		{"a couple seconds in the past is never future", now.Add(-2 * time.Second), false},
+		{"exactly now is not future", now, false},
+		{"within tolerance ahead of now (simulated clock skew) is not future", now.Add(2 * time.Second), false},
+		{"at the tolerance boundary is not yet future", now.Add(asOfClockSkewTolerance), false},
+		{"clearly beyond tolerance is future", now.Add(asOfClockSkewTolerance + time.Second), true},
+		{"far future is still future", now.Add(time.Hour), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := asOfIsFuture(tt.at); got != tt.want {
+				t.Fatalf("asOfIsFuture(now%+v) = %v, want %v", tt.at.Sub(now), got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeAsOfClockSkewTolerance reproduces the --as-of CLI-facing
+// symptom directly: a timestamp that is only a couple of seconds ahead of
+// "now" (simulating minor clock skew between the machine that produced the
+// timestamp and this server) must NOT be misclassified as a future request
+// and normalized away to the live sentinel. A timestamp clearly and far in
+// the future must still normalize to the live sentinel exactly as before.
+func TestNormalizeAsOfClockSkewTolerance(t *testing.T) {
+	nearNow := time.Now().UTC().Add(2 * time.Second).Format(time.RFC3339Nano)
+	got, err := NormalizeAsOf(nearNow)
+	if err != nil {
+		t.Fatalf("NormalizeAsOf(%q) unexpected error: %v", nearNow, err)
+	}
+	if got != nearNow {
+		t.Fatalf("NormalizeAsOf(%q) = %q, want unchanged (within clock-skew tolerance)", nearNow, got)
+	}
+
+	farFuture := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	got, err = NormalizeAsOf(farFuture)
+	if err != nil {
+		t.Fatalf("NormalizeAsOf(%q) unexpected error: %v", farFuture, err)
+	}
+	if got != "" {
+		t.Fatalf("NormalizeAsOf(%q) = %q, want empty (live sentinel) for far-future timestamp", farFuture, got)
 	}
 }
 
