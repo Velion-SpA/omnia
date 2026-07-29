@@ -43,6 +43,19 @@ func compareBisectPoints(left, right bisectPoint) int {
 	return 0
 }
 
+func bisectBoundAvailable(point bisectPoint, observationID bool, boundary bisectPoint) bool {
+	if !observationID {
+		return !point.at.Before(boundary.at)
+	}
+	if point.id <= boundary.id {
+		return compareBisectPoints(point, boundary) == 0
+	}
+	if !point.at.Before(boundary.at) {
+		return true
+	}
+	return point.at.Equal(boundary.at.Truncate(time.Second))
+}
+
 func bisectEventPoint(event BisectEvent) (bisectPoint, error) {
 	if event.ID <= 0 || strings.TrimSpace(event.SyncID) == "" {
 		return bisectPoint{}, errors.New("invalid bisect event identity")
@@ -73,40 +86,45 @@ func (s *Store) BisectEvents(goodRef, badRef string) ([]BisectEvent, error) {
 	if !s.cfg.TimeTravelEnabled {
 		return nil, errors.New("time travel is disabled")
 	}
-	resolve := func(ref string) (bisectPoint, error) {
+	resolve := func(ref string) (bisectPoint, bool, error) {
 		if strings.EqualFold(strings.TrimSpace(ref), "now") {
-			return bisectPoint{at: time.Now().UTC(), id: int64(1<<63 - 1)}, nil
+			return bisectPoint{at: time.Now().UTC(), id: int64(1<<63 - 1)}, false, nil
 		}
 		if id, err := strconv.ParseInt(strings.TrimSpace(ref), 10, 64); err == nil && id > 0 {
 			var raw string
 			if err := s.db.QueryRow(`SELECT created_at FROM observations WHERE id=?`, id).Scan(&raw); err != nil {
-				return bisectPoint{}, fmt.Errorf("resolve observation bound %d: %w", id, err)
+				return bisectPoint{}, false, fmt.Errorf("resolve observation bound %d: %w", id, err)
 			}
 			at, err := parseObservationTime(raw)
-			return bisectPoint{at: at, id: id}, err
+			return bisectPoint{at: at, id: id}, true, err
 		}
 		at, err := parseObservationTime(ref)
-		return bisectPoint{at: at, id: int64(1<<63 - 1)}, err
+		return bisectPoint{at: at, id: int64(1<<63 - 1)}, false, err
 	}
-	good, err := resolve(goodRef)
+	good, goodIsObservation, err := resolve(goodRef)
 	if err != nil {
 		return nil, fmt.Errorf("invalid good bound: %w", err)
 	}
-	bad, err := resolve(badRef)
+	bad, badIsObservation, err := resolve(badRef)
 	if err != nil {
 		return nil, fmt.Errorf("invalid bad bound: %w", err)
-	}
-	if compareBisectPoints(good, bad) >= 0 {
-		return nil, errors.New("good bound must precede bad bound")
 	}
 	boundaryAt, boundaryID, err := s.timeTravelBoundary()
 	if err != nil {
 		return nil, err
 	}
-	if compareBisectPoints(good, bisectPoint{at: boundaryAt, id: boundaryID}) < 0 {
+	boundary := bisectPoint{at: boundaryAt, id: boundaryID}
+	if !bisectBoundAvailable(good, goodIsObservation, boundary) ||
+		!bisectBoundAvailable(bad, badIsObservation, boundary) {
 		return nil, historyUnavailableError(boundaryAt)
 	}
-	rows, err := s.db.Query(`SELECT id, ifnull(sync_id,''), created_at FROM observations`)
+	if compareBisectPoints(good, bad) >= 0 {
+		return nil, errors.New("good bound must precede bad bound")
+	}
+	rows, err := s.db.Query(
+		`SELECT id, ifnull(sync_id,''), created_at FROM observations WHERE id > ?`,
+		boundaryID,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +138,9 @@ func (s *Store) BisectEvents(goodRef, badRef string) ([]BisectEvent, error) {
 		point, parseErr := bisectEventPoint(event)
 		if parseErr != nil {
 			return nil, fmt.Errorf("invalid recorded event instant for observation %d: %w", event.ID, parseErr)
+		}
+		if !bisectBoundAvailable(point, true, boundary) {
+			continue
 		}
 		if compareBisectPoints(point, good) > 0 && compareBisectPoints(point, bad) <= 0 {
 			events = append(events, event)

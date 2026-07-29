@@ -100,6 +100,68 @@ func TestBisectEdgesValidationAndDeterminism(t *testing.T) {
 	_ = mustBisect(t, cfg2, "bad")
 	requireBisect(t, strings.Contains(mustBisect(t, cfg2, "bad"), "decision A"), "all-bad chose wrong event")
 }
+
+func TestBisectRejectsUnavailableBadBoundsWithoutLeakingPreEnableContent(t *testing.T) {
+	const secret = "PRE-ENABLE-SECRET-MUST-NOT-LEAK"
+	tests := []struct {
+		name    string
+		bad     func([]int64) string
+		wantErr bool
+	}{
+		{"timestamp before nanosecond boundary", func([]int64) string { return "2026-01-02T03:04:05Z" }, true},
+		{"pre-enable ID after boundary instant", func(ids []int64) string { return fmt.Sprint(ids[1]) }, true},
+		{"post-enable fractional ID before boundary", func(ids []int64) string { return fmt.Sprint(ids[4]) }, true},
+		{"valid post-enable bounds", func(ids []int64) string { return fmt.Sprint(ids[3]) }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.TimeTravelEnabled = true
+			s, err := store.New(cfg)
+			requireBisect(t, err == nil, "create store")
+			requireBisect(t, s.CreateSession("boundary", "omnia", t.TempDir()) == nil, "create session")
+			titles := []string{secret + "-1", secret + "-2", "post-enable good", "post-enable bad", secret + "-BACKDATED"}
+			ids := make([]int64, len(titles))
+			for i, title := range titles {
+				ids[i], err = s.AddObservation(store.AddObservationParams{
+					SessionID: "boundary", Type: "decision", Title: title, Content: title,
+					Project: "omnia", Scope: "project",
+				})
+				requireBisect(t, err == nil, "add observation")
+			}
+			timestamps := []string{
+				"2026-01-02T03:04:05.800000000Z",
+				"2026-01-02T03:04:05.900000000Z",
+				"2026-01-02 03:04:05",
+				"2026-01-02T03:04:05.950000000Z",
+				"2026-01-02T03:04:05.100000000Z",
+			}
+			for i, id := range ids {
+				_, err = s.DB().Exec(`UPDATE observations SET created_at=?, updated_at=? WHERE id=?`, timestamps[i], timestamps[i], id)
+				requireBisect(t, err == nil, "set observation timestamp")
+			}
+			_, err = s.DB().Exec(
+				`UPDATE time_travel_metadata SET started_at='2026-01-02T03:04:05.123456789Z', initial_max_observation_id=? WHERE id=1`,
+				ids[1],
+			)
+			requireBisect(t, err == nil, "set recording boundary")
+			requireBisect(t, s.Close() == nil, "close store")
+
+			out, err := runBisect(cfg, []string{"start", "--good", fmt.Sprint(ids[2]), "--bad", tt.bad(ids)})
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "history unavailable before") {
+					t.Fatalf("output=%q err=%v, want unavailable-bound error", out, err)
+				}
+			} else if err != nil || !strings.Contains(out, "post-enable bad") {
+				t.Fatalf("output=%q err=%v, want post-enable candidate", out, err)
+			}
+			if strings.Contains(out+fmt.Sprint(err), secret) {
+				t.Fatalf("pre-enable content leaked: output=%q err=%v", out, err)
+			}
+		})
+	}
+}
+
 func TestBisectRejectsDisabledCorruptAndStaleStateAndSkipsTombstone(t *testing.T) {
 	disabled, _ := bisectFixture(t, false, 1)
 	_, err := runBisect(disabled, []string{"start", "--good", "2026-01-01", "--bad", "now"})
