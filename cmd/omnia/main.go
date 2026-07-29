@@ -2163,6 +2163,9 @@ func cmdImport(cfg store.Config) {
 	fmt.Printf("  Relations:    %d\n", result.RelationsImported)
 	fmt.Printf("  Anchors:      %d\n", result.AnchorsImported)
 	fmt.Printf("  Procedures:   %d\n", result.ProceduresImported)
+	if result.ConflictsSkipped > 0 {
+		fmt.Printf("  Skipped (older than local, kept local): %d\n", result.ConflictsSkipped)
+	}
 }
 
 func cmdSync(cfg store.Config) {

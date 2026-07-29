@@ -4027,7 +4027,7 @@ func TestPortableExportV2EmptyAndRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestPortableImportV2CoreIsAtomicIdempotentAndImportedWins(t *testing.T) {
+func TestPortableImportV2CoreIsAtomicIdempotentAndRecencySafe(t *testing.T) {
 	src := newTestStore(t)
 	if _, err := src.db.Exec(`
 		INSERT INTO sessions (id,project,directory,started_at,summary)
@@ -4054,8 +4054,10 @@ func TestPortableImportV2CoreIsAtomicIdempotentAndImportedWins(t *testing.T) {
 			       ('prompt-a','s1','duplicate','local','2031-01-01T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
+	var result *ImportResult
 	for i := 0; i < 2; i++ {
-		if _, err := dst.Import(data); err != nil {
+		result, err = dst.Import(data)
+		if err != nil {
 			t.Fatalf("import %d: %v", i+1, err)
 		}
 	}
@@ -4076,10 +4078,24 @@ func TestPortableImportV2CoreIsAtomicIdempotentAndImportedWins(t *testing.T) {
 	if sessions != 2 || observations != 1 || prompts != 1 {
 		t.Fatalf("v2 re-import duplicated core rows: sessions=%d observations=%d prompts=%d", sessions, observations, prompts)
 	}
-	if directory != "/source" || title != "source title" || content != "source content" || prompt != "source prompt" ||
-		!pinned || source != "user" || trust != "high" {
-		t.Fatalf("v2 collision must restore imported fields: directory=%q title=%q content=%q prompt=%q pinned=%v source=%q trust=%q",
-			directory, title, content, prompt, pinned, source, trust)
+	// Sessions have no updated_at/recency concept, so the imported session
+	// still wins unconditionally (unchanged pre-existing behavior).
+	if directory != "/source" {
+		t.Fatalf("v2 session collision must still restore imported fields: directory=%q", directory)
+	}
+	// Observations and prompts DO have a recency concept. The destination's
+	// local rows here are newer than the import (2030/2031 vs 2026), so the
+	// import must be recency-safe and keep the newer local content instead
+	// of silently reverting it to the stale snapshot.
+	if title != "local title" || content != "newer local content" || pinned || source != "agent" || trust != "standard" {
+		t.Fatalf("v2 recency-safe import must keep newer local observation content: title=%q content=%q pinned=%v source=%q trust=%q",
+			title, content, pinned, source, trust)
+	}
+	if prompt != "newer local prompt" {
+		t.Fatalf("v2 recency-safe import must keep newer local prompt content: prompt=%q", prompt)
+	}
+	if result.ConflictsSkipped != 2 {
+		t.Fatalf("expected 2 skipped conflicts (stale observation + stale prompt), got %d", result.ConflictsSkipped)
 	}
 	atomic := newTestStore(t)
 	bad := *data
@@ -4118,6 +4134,65 @@ func TestPortableImportV2CoreIsAtomicIdempotentAndImportedWins(t *testing.T) {
 				t.Fatalf("tombstone preflight was not atomic: rows=%d proofs=%d", rows, proofs)
 			}
 		})
+	}
+}
+
+// TestPortableImportV2SkipsOlderImportedObservation guards against the
+// "accidentally restore an old backup" data-loss scenario: export the store
+// on Monday, keep editing the observation through the week (updated_at moves
+// forward, content changes), then re-import Monday's snapshot. The import
+// must NOT silently revert the observation to Monday's content — the
+// destination's newer local edit must survive, and the skip must be counted
+// so a human can see it happened.
+func TestPortableImportV2SkipsOlderImportedObservation(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`
+		INSERT INTO sessions (id,project,directory,started_at,summary) VALUES ('s1','portable','/live','2026-01-01T00:00:00Z','live');
+		INSERT INTO observations (sync_id,session_id,type,title,content,project,scope,pinned,source,trust_tag,created_at,updated_at)
+			VALUES ('obs-x','s1','decision','title A','content A','portable','project',0,'agent','standard','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	monday, err := s.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`
+		UPDATE observations SET title='title B',content='content B',updated_at='2026-01-08T00:00:00Z' WHERE sync_id='obs-x'`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Import(monday)
+	if err != nil {
+		t.Fatalf("re-import of stale snapshot failed: %v", err)
+	}
+	var title, content string
+	if err := s.db.QueryRow(`SELECT title,content FROM observations WHERE sync_id='obs-x'`).Scan(&title, &content); err != nil {
+		t.Fatal(err)
+	}
+	if title != "title B" || content != "content B" {
+		t.Fatalf("stale re-import must not revert newer local observation content: title=%q content=%q", title, content)
+	}
+	if result.ConflictsSkipped != 1 {
+		t.Fatalf("expected exactly 1 skipped conflict for the stale observation, got %d", result.ConflictsSkipped)
+	}
+	if result.ObservationsImported != 1 {
+		t.Fatalf("expected ObservationsImported to still count the processed row, got %d", result.ObservationsImported)
+	}
+
+	// Re-importing the SAME (now stale) snapshot again must stay idempotent:
+	// no duplicate rows, content still untouched, still reported as skipped.
+	result2, err := s.Import(monday)
+	if err != nil {
+		t.Fatalf("second re-import of stale snapshot failed: %v", err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM observations WHERE sync_id='obs-x'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("stale re-import must not duplicate rows: count=%d", count)
+	}
+	if result2.ConflictsSkipped != 1 {
+		t.Fatalf("expected second stale re-import to also report 1 skipped conflict, got %d", result2.ConflictsSkipped)
 	}
 }
 

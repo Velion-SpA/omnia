@@ -251,16 +251,24 @@ func (s *Store) importPortableCore(data *ExportData) (*ImportResult, error) {
 		result.SessionsImported++
 	}
 	for _, observation := range data.Observations {
-		if err := s.upsertPortableObservation(tx, observation); err != nil {
+		skipped, err := s.upsertPortableObservation(tx, observation)
+		if err != nil {
 			return nil, fmt.Errorf("import observation %s: %w", observation.SyncID, err)
 		}
 		result.ObservationsImported++
+		if skipped {
+			result.ConflictsSkipped++
+		}
 	}
 	for _, prompt := range data.Prompts {
-		if err := s.upsertPortablePrompt(tx, prompt); err != nil {
+		skipped, err := s.upsertPortablePrompt(tx, prompt)
+		if err != nil {
 			return nil, fmt.Errorf("import prompt %s: %w", prompt.SyncID, err)
 		}
 		result.PromptsImported++
+		if skipped {
+			result.ConflictsSkipped++
+		}
 	}
 	for _, relation := range relations {
 		if err := s.upsertPortableRelation(tx, relation); err != nil {
@@ -280,10 +288,14 @@ func (s *Store) importPortableCore(data *ExportData) (*ImportResult, error) {
 		result.AnchorsImported++
 	}
 	for _, procedure := range procedures {
-		if err := s.upsertPortableProcedure(tx, procedure); err != nil {
+		skipped, err := s.upsertPortableProcedure(tx, procedure)
+		if err != nil {
 			return nil, fmt.Errorf("import procedure %s: %w", procedure.SyncID, err)
 		}
 		result.ProceduresImported++
+		if skipped {
+			result.ConflictsSkipped++
+		}
 	}
 	if err := s.commitHook(tx); err != nil {
 		return nil, fmt.Errorf("import: commit: %w", err)
@@ -364,11 +376,31 @@ func rejectPortableTombstone(tx *sql.Tx, table, entity, syncID string) error {
 	return fmt.Errorf("portable import tombstone preflight: %w", err)
 }
 
-func (s *Store) upsertPortableObservation(tx *sql.Tx, observation Observation) error {
+// isPortableImportStale reports whether an incoming (imported) row's
+// timestamp is OLDER than the timestamp already stored at the destination
+// for the same sync_id. When true, the caller must skip overwriting the
+// destination row's content — the destination's newer local edits win — so
+// re-importing a stale backup (e.g. accidentally restoring Monday's export
+// after a week of further edits) can never silently revert real work done
+// since the export was taken. Equal timestamps (e.g. re-importing the exact
+// same unchanged file) are NOT stale: the row is still "overwritten" with
+// identical content, which is harmless and keeps re-import idempotent. See
+// ImportResult.ConflictsSkipped, which counts every time this returns true.
+func isPortableImportStale(existing, incoming string) bool {
+	return normalizeComparableTimestamp(incoming) < normalizeComparableTimestamp(existing)
+}
+
+// upsertPortableObservation upserts a single imported observation by
+// sync_id. It returns (skipped, err): skipped is true when an existing
+// destination row was found with a newer updated_at than the incoming row,
+// in which case the destination's content is left untouched (only duplicate
+// sync_id rows are still converged onto the canonical id).
+func (s *Store) upsertPortableObservation(tx *sql.Tx, observation Observation) (bool, error) {
 	key, id := strings.Trim(observation.SyncID, " "), int64(0)
-	err := tx.QueryRow(`SELECT id FROM observations WHERE trim(sync_id)=? ORDER BY id LIMIT 1`, key).Scan(&id)
+	var existingUpdatedAt string
+	err := tx.QueryRow(`SELECT id, updated_at FROM observations WHERE trim(sync_id)=? ORDER BY id LIMIT 1`, key).Scan(&id, &existingUpdatedAt)
 	if err != nil && err != sql.ErrNoRows {
-		return err
+		return false, err
 	}
 	args := []any{
 		observation.SessionID, observation.Type, observation.Title, observation.Content, observation.ToolName,
@@ -382,35 +414,48 @@ func (s *Store) upsertPortableObservation(tx *sql.Tx, observation Observation) e
 			(session_id,type,title,content,tool_name,project,scope,topic_key,normalized_hash,revision_count,duplicate_count,
 			 last_seen_at,review_after,pinned,created_at,updated_at,deleted_at,error_signature,outcome,source,trust_tag,sync_id)
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, append(args, key)...)
-		return err
+		return false, err
+	}
+	if isPortableImportStale(existingUpdatedAt, observation.UpdatedAt) {
+		_, err = s.execHook(tx, `DELETE FROM observations WHERE trim(sync_id)=? AND id<>?`, key, id)
+		return true, err
 	}
 	if _, err = s.execHook(tx, `UPDATE observations SET
 		session_id=?,type=?,title=?,content=?,tool_name=?,project=?,scope=?,topic_key=?,normalized_hash=?,revision_count=?,
 		duplicate_count=?,last_seen_at=?,review_after=?,pinned=?,created_at=?,updated_at=?,deleted_at=?,error_signature=?,
 		outcome=?,source=?,trust_tag=?,sync_id=? WHERE id=?`, append(args, key, id)...); err != nil {
-		return err
+		return false, err
 	}
 	_, err = s.execHook(tx, `DELETE FROM observations WHERE trim(sync_id)=? AND id<>?`, key, id)
-	return err
+	return false, err
 }
 
-func (s *Store) upsertPortablePrompt(tx *sql.Tx, prompt Prompt) error {
+// upsertPortablePrompt upserts a single imported user prompt by sync_id.
+// user_prompts has no updated_at column, so created_at (the only timestamp
+// available) doubles as the recency signal. See upsertPortableObservation
+// for the return-value contract.
+func (s *Store) upsertPortablePrompt(tx *sql.Tx, prompt Prompt) (bool, error) {
 	key, id := strings.Trim(prompt.SyncID, " "), int64(0)
-	err := tx.QueryRow(`SELECT id FROM user_prompts WHERE trim(sync_id)=? ORDER BY id LIMIT 1`, key).Scan(&id)
+	var existingCreatedAt string
+	err := tx.QueryRow(`SELECT id, created_at FROM user_prompts WHERE trim(sync_id)=? ORDER BY id LIMIT 1`, key).Scan(&id, &existingCreatedAt)
 	if err != nil && err != sql.ErrNoRows {
-		return err
+		return false, err
 	}
 	if err == sql.ErrNoRows {
 		_, err = s.execHook(tx, `INSERT INTO user_prompts (sync_id,session_id,content,project,created_at) VALUES (?,?,?,?,?)`,
 			key, prompt.SessionID, prompt.Content, prompt.Project, prompt.CreatedAt)
-		return err
+		return false, err
+	}
+	if isPortableImportStale(existingCreatedAt, prompt.CreatedAt) {
+		_, err = s.execHook(tx, `DELETE FROM user_prompts WHERE trim(sync_id)=? AND id<>?`, key, id)
+		return true, err
 	}
 	if _, err = s.execHook(tx, `UPDATE user_prompts SET session_id=?,content=?,project=?,created_at=?,sync_id=? WHERE id=?`,
 		prompt.SessionID, prompt.Content, prompt.Project, prompt.CreatedAt, key, id); err != nil {
-		return err
+		return false, err
 	}
 	_, err = s.execHook(tx, `DELETE FROM user_prompts WHERE trim(sync_id)=? AND id<>?`, key, id)
-	return err
+	return false, err
 }
 
 func (s *Store) canonicalGraphRowID(tx *sql.Tx, table, key string) (int64, error) {
@@ -431,6 +476,19 @@ func (s *Store) canonicalGraphRowID(tx *sql.Tx, table, key string) (int64, error
 	return id, nil
 }
 
+// upsertPortableRelation intentionally does NOT apply a recency guard.
+// Relations are graph edges: their structural identity (source_id/target_id,
+// superseded_by_relation_id) is already resolved once per import against the
+// CURRENT destination graph via validatePortableGraphReferences/
+// linkPortableRelation, which itself prefers the imported snapshot's own
+// rows over stored ones when both are present in the same import (see the
+// `imported` map bias in validatePortableGraphReferences' resolve closure).
+// Gating only the mutable judgment fields (judgment_status, confidence,
+// marked_by_*) behind a per-row recency check, while the structural links
+// keep resolving against the live graph, would produce inconsistent partial
+// states. Judgment curation (JudgeRelation) is expected to be redone from a
+// clean restore point rather than merged field-by-field with a concurrent
+// import.
 func (s *Store) upsertPortableRelation(tx *sql.Tx, relation portableRelation) error {
 	id, err := s.canonicalGraphRowID(tx, "memory_relations", relation.SyncID)
 	if err != nil {
@@ -465,6 +523,17 @@ func (s *Store) linkPortableRelation(tx *sql.Tx, relation portableRelation) erro
 	return err
 }
 
+// upsertPortableAnchor intentionally does NOT apply a recency guard.
+// memory_anchors has no single updated_at column — only checked_at/staled_at,
+// two nullable status-transition markers with no clear total ordering
+// between "checked" and "staled" events — so there is no clean timestamp to
+// compare against, unlike observations/prompts/procedures. Anchors also
+// resolve their obs_sync_id reference against the live destination graph at
+// import time (same reasoning as upsertPortableRelation above). Anchor
+// freshness is self-healing regardless of import order: ScanProject's
+// periodic recheck recomputes anchor_status from the actual repo state on
+// its own schedule, so a stale import being applied here does not lose
+// information the way a silently-reverted observation edit would.
 func (s *Store) upsertPortableAnchor(tx *sql.Tx, anchor portableAnchor) error {
 	id, err := s.canonicalGraphRowID(tx, "memory_anchors", anchor.SyncID)
 	if err != nil {
@@ -485,14 +554,22 @@ func (s *Store) upsertPortableAnchor(tx *sql.Tx, anchor portableAnchor) error {
 	return err
 }
 
-func (s *Store) upsertPortableProcedure(tx *sql.Tx, p portableProcedure) error {
+// upsertPortableProcedure upserts a single imported procedure by sync_id.
+// Procedures have a genuine mutable-content + updated_at concept — state,
+// reuse_confirmed, contradicted_count and last_reused_at all evolve in place
+// over a procedure's lifetime via ConfirmReuse/Contradict/DecayProcedures —
+// so the same recency-safe pattern as observations/prompts applies here: an
+// older imported snapshot must not silently revert trust that was built up
+// locally since the export. Returns (skipped, err); see
+// upsertPortableObservation for the contract.
+func (s *Store) upsertPortableProcedure(tx *sql.Tx, p portableProcedure) (bool, error) {
 	steps, err := json.Marshal(p.Steps)
 	if err != nil {
-		return err
+		return false, err
 	}
 	sources, err := json.Marshal(p.SourceObsSyncIDs)
 	if err != nil {
-		return err
+		return false, err
 	}
 	args := []any{p.SyncID, p.Project, p.Scope, p.Polarity, p.Trigger, string(steps), p.StepsSummary,
 		p.ExpectedOutcome, p.PostconditionKind, p.PostconditionExpr, p.Confidence, p.State, p.ReuseConfirmed,
@@ -500,11 +577,20 @@ func (s *Store) upsertPortableProcedure(tx *sql.Tx, p portableProcedure) error {
 		p.CreatedAt, p.UpdatedAt, p.LastReusedAt, p.ReviewAfter, p.RetiredAt}
 	id, err := s.canonicalGraphRowID(tx, "procedures", p.SyncID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if id != 0 {
 		if _, err := s.execHook(tx, `UPDATE procedures SET sync_id=? WHERE id=?`, p.SyncID, id); err != nil {
-			return err
+			return false, err
+		}
+		var existingUpdatedAt string
+		if err := tx.QueryRow(`SELECT updated_at FROM procedures WHERE id=?`, id).Scan(&existingUpdatedAt); err != nil {
+			return false, err
+		}
+		if isPortableImportStale(existingUpdatedAt, p.UpdatedAt) {
+			// Identity (sync_id) was already converged above, so re-import
+			// stays idempotent; only the content overwrite is skipped.
+			return true, nil
 		}
 	}
 	_, err = s.execHook(tx, `INSERT INTO procedures
@@ -521,5 +607,5 @@ func (s *Store) upsertPortableProcedure(tx *sql.Tx, p portableProcedure) error {
 		induced_by_kind=excluded.induced_by_kind,induced_by_model=excluded.induced_by_model,
 		created_at=excluded.created_at,updated_at=excluded.updated_at,last_reused_at=excluded.last_reused_at,
 		review_after=excluded.review_after,retired_at=excluded.retired_at`, args...)
-	return err
+	return false, err
 }

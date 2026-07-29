@@ -5201,6 +5201,15 @@ type ImportResult struct {
 	RelationsImported    int `json:"relations_imported"`
 	AnchorsImported      int `json:"anchors_imported"`
 	ProceduresImported   int `json:"procedures_imported"`
+	// ConflictsSkipped counts portable-import rows (observations, prompts,
+	// procedures) whose incoming (imported) timestamp was OLDER than the
+	// timestamp already stored at the destination for the same sync_id.
+	// Those rows are left untouched on purpose — the destination's newer
+	// local edits win instead of being silently reverted to a stale
+	// snapshot — so this is a normal, expected outcome of importing an old
+	// backup, not an error. It is surfaced here so a human notices it
+	// instead of the revert happening silently.
+	ConflictsSkipped int `json:"conflicts_skipped"`
 }
 
 // ─── Sync Chunk Tracking ─────────────────────────────────────────────────────
