@@ -728,6 +728,8 @@ func main() {
 		cmdDelete(cfg)
 	case "timeline":
 		cmdTimeline(cfg)
+	case "bisect":
+		cmdBisect(cfg)
 	case "conflicts":
 		cmdConflicts(cfg)
 	case "forget-scan":
@@ -792,7 +794,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve":
+	case "mcp", "serve", "bisect":
 		return false
 	case "recall-fix":
 		// #1399 slice 2: invoked synchronously and frequently by the
@@ -3293,6 +3295,7 @@ Commands:
                      Cascade-delete a project: soft-deletes observations (or hard if --hard),
                      removes prompts; with --hard also removes sessions
   timeline <obs_id>  Show chronological context around an observation [--before N] [--after N]
+  bisect <subcommand> Locate a regression: start --good T|ID --bad T|ID, good, bad, status, reset
   conflicts <sub>   Inspect and manage memory conflict relations
                        list     [--project P]  [--status S]  [--since RFC3339]  [--limit N]
                        show     <relation_id>
