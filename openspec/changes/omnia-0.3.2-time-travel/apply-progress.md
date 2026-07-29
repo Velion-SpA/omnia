@@ -40,6 +40,7 @@ above.
 | **MCP checkout-independent fixtures** (`d7ceed3`) | The baseline and verified checkpoint reproduced exactly ten failures: `TestHandleSaveSuggestsTopicKeyWhenMissing`, `TestHandleSaveFallsBackToManualSaveWhenNoActiveSession`, `TestHandleSaveWithNilActivityStillSucceeds`, `TestHandleSavePromptCaptureFailureIsNonFatal`, `TestHandleSavePromptFeedsAutoCaptureContext`, `TestHandleSaveCapturePromptFalseSkipsCurrentPrompt`, `TestHandleSaveNoCurrentPromptStillSucceeds`, `TestHandleSaveDoesNotSuggestWhenTopicKeyProvided`, `TestHandleCapturePassiveDefaultsSourceAndSession`, and `TestHandleSaveReturnsLifecycleState`. | Explicit fixture enrollment/default-project setup removed checkout-basename dependence. The focused ten, full MCP package, full normal suite, and MCP/CLI race review passed. | Commit `d7ceed3`; RED `/tmp/omnia-remediation-baseline-mcp.log`; GREEN `/tmp/omnia-remediation-mcp-ten-green.log`, `/tmp/omnia-remediation-mcp-full-green.log`, `/tmp/omnia-remediation-full-test.log`, `/tmp/omnia-remediation-race.log`. |
 | **Offline update policy for portable/recorded-time commands** (`fd64e63`) | **Executor-report evidence:** initial release-proxy tests proved `export`, `import`, and recorded-time reads contacted the update endpoint. Strict-TDD follow-up cycles caught parser-parity cases and a 350ms-future slow-proxy case before the policy/parser was complete. Raw per-cycle RED transcripts are not retained as standalone final artifacts. | Twenty unit cases and ten release-proxy scenarios passed, covering split/equal options, command-specific parsing, malformed/missing values, live-command policy, and the slow future response. Full `cmd/omnia` and race runs passed. | Commit `fd64e63`; `/tmp/omnia-v032-remediation-A-cmd-full-final2.log`; `/tmp/omnia-v032-remediation-A-cmd-race-final2.log`. |
 | **Coverage subprocess/output harness** (`bd3d586`) | Regression RED: `captureOutput did not restore os.Stdout after panic`; the base coverage-instrumented `cmd/omnia` package also exited non-zero. | Panic-safe restoration was added and directly tested. Reviewed GREEN evidence reports `cmd/omnia` coverage at **69.9%**, plus full normal and race passes. | Commit `bd3d586`; baseline coverage evidence `/tmp/omnia-remediation-cover-cmd-baseline.log`; full/race evidence `/tmp/omnia-remediation-full-test.log`, `/tmp/omnia-remediation-race.log`. |
+| **Bisect recording-boundary enforcement** (`24c0e73`) | Fresh first-post-enable ID bounds were rejected; a bad pre-boundary timestamp was accepted; pre-enable bad IDs/candidates leaked their secret content; and an over-broad fractional `.100Z` waiver was accepted and leaked. Review RED cycles reproduced the store and CLI failures. | Both good and bad bounds are now validated. Timestamp references use strict nanosecond boundaries; pre-enable and backdated candidates are filtered. Only the exact `.000Z` first-post-enable ID boundary receives the compatibility waiver, while `.950Z` passes naturally. Fresh CLI positive, negative, and valid-range cases pass, together with full store/CLI/full-normal, focused race, and coverage runs. | Commit `24c0e73`; `/tmp/omnia-v032-final-verify-cli-boundary-repro.log`; `/tmp/omnia-v032-boundary-red.log`; `/tmp/omnia-v032-boundary-review-red-{store,cmd}.log`; `/tmp/omnia-v032-boundary-v2-red-{store,cmd}.log`; `/tmp/omnia-v032-boundary-v2-cli-final.log`. |
 
 ## Reviewed Work Units
 
@@ -80,7 +81,7 @@ The reviewed history/recorded-time/bisect commits were cherry-picked onto the po
 
 Final integration worktree: `/tmp/omnia-v032-integration-20260728`
 Implementation checkpoint: `2ac186e1362b22efc40ad615c8b9d215a183b088`
-Current remediated/apply-evidence HEAD: `0964d17a24614c2ecbd967b56238a1d4955d8835`
+Current remediated/apply-evidence HEAD: `24c0e7325b604ae47f1abb72ea45425462060e38`
 
 ## Validation Evidence
 
@@ -90,11 +91,12 @@ Current remediated/apply-evidence HEAD: `0964d17a24614c2ecbd967b56238a1d4955d883
 - Real isolated recorded-time and bisect CLI smoke passed at the implementation checkpoint (`SMOKE_RESULT=PASS`); transcript: `/tmp/omnia-v032-final-smoke.log`. This smoke remains valid checkpoint evidence and will be re-executed by final `sdd-verify`.
 - Smoke workspace: `/tmp/omnia-v032-final-smoke.9EyUc1` (also recorded in `/tmp/omnia-v032-final-smoke-dir.txt`). The smoke proved live versus `--as-of` state, bisect start/status/convergence/reset, and database mode `0600`.
 - Initial verification found ten checkout-dependent MCP fixture failures and a coverage-harness subprocess/output failure. They were remediated by `d7ceed3` and `bd3d586`; they are not current validation failures.
-- Combined preverify at current HEAD passed `CGO_ENABLED=0 go test -count=1 ./...`.
-- Combined preverify at current HEAD passed `GOGC=1 CGO_ENABLED=0 go test -count=1 -cover ./...`.
-- Combined package coverage: `cmd/omnia` 70.0%, `internal/mcp` 88.4%, `internal/store` 79.2%, `internal/sync` 90.0%, and `internal/config` 92.6%.
-- Race runs for `cmd/omnia` and `internal/mcp` passed. `go vet`, `go build`, `go mod tidy -diff`, `git diff --check`, and remediation-file `gofmt` checks passed.
-- Combined evidence logs: `/tmp/omnia-v032-remediation-combined-focused.log`, `/tmp/omnia-v032-remediation-combined-test.log`, `/tmp/omnia-v032-remediation-combined-cover.log`, `/tmp/omnia-v032-remediation-combined-race.log`, `/tmp/omnia-v032-remediation-combined-quality.log`, and `/tmp/omnia-v032-remediation-combined-final-audit.log`.
+- Combined preverify at pre-boundary-remediation HEAD `0964d17` passed `CGO_ENABLED=0 go test -count=1 ./...`.
+- Combined preverify at `0964d17` passed `GOGC=1 CGO_ENABLED=0 go test -count=1 -cover ./...`.
+- Combined package coverage at `0964d17`: `cmd/omnia` 70.0%, `internal/mcp` 88.4%, `internal/store` 79.2%, `internal/sync` 90.0%, and `internal/config` 92.6%.
+- Race runs for `cmd/omnia` and `internal/mcp` passed at `0964d17`. `go vet`, `go build`, `go mod tidy -diff`, `git diff --check`, and remediation-file `gofmt` checks passed.
+- Combined `0964d17` evidence logs: `/tmp/omnia-v032-remediation-combined-focused.log`, `/tmp/omnia-v032-remediation-combined-test.log`, `/tmp/omnia-v032-remediation-combined-cover.log`, `/tmp/omnia-v032-remediation-combined-race.log`, `/tmp/omnia-v032-remediation-combined-quality.log`, and `/tmp/omnia-v032-remediation-combined-final-audit.log`.
+- Boundary remediation `24c0e73` independently passed `CGO_ENABLED=0 go test -count=1 ./...`, full `internal/store` and `cmd/omnia` suites, focused store/CLI race runs, `go vet`, changed-file formatting, `git diff --check`, and module checks. Coverage reached 82% for `BisectEvents` and 100% for its boundary helper. Fresh real CLI positive, negative, valid-range, and adversarial recording-boundary cases passed.
 - Full-tree `gofmt -l` still reports 21 unrelated pre-existing files; every changed/remediation Go file is format-clean.
 
 ## Remaining Tasks
