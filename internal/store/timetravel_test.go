@@ -478,3 +478,92 @@ func TestTimeTravelPulledCaptureRespectsDisabledRetentionAndRollback(t *testing.
 		}
 	})
 }
+
+func TestStateAsOfRecordedTimeBoundariesAndVisibility(t *testing.T) {
+	s := newTimeTravelStore(t, true, 0)
+	id := addTimeTravelObservation(t, s, "original", "")
+	original, _ := s.GetObservation(id)
+	editedTitle, editedContent, editedType, editedProject, editedScope := "edited", "current-only token", "pattern", "other", "personal"
+	edited, _ := s.UpdateObservation(id, UpdateObservationParams{Title: &editedTitle, Content: &editedContent, Type: &editedType, Project: &editedProject, Scope: &editedScope})
+	for _, tt := range []struct {
+		name, at, want string
+	}{
+		{"before edit", original.UpdatedAt, "original"},
+		{"exact edit boundary", edited.UpdatedAt, "edited"},
+		{"future resolves live", time.Now().Add(time.Hour).Format(time.RFC3339Nano), "edited"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := s.StateAsOf(id, tt.at)
+			if err != nil || got.Title != tt.want {
+				t.Fatalf("StateAsOf(%q) = %+v, %v; want %q", tt.at, got, err, tt.want)
+			}
+		})
+	}
+	if err := s.DeleteObservation(id, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StateAsOf(id, edited.UpdatedAt); err != nil {
+		t.Fatalf("pre-delete state unavailable: %v", err)
+	}
+	deleted, _ := s.getObservationIncludingDeleted(id)
+	if _, err := s.StateAsOf(id, *deleted.DeletedAt); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("at delete boundary error = %v, want not visible", err)
+	}
+	disabled := newTimeTravelStore(t, false, 0)
+	disabledID := addTimeTravelObservation(t, disabled, "disabled old", "")
+	old, _ := disabled.GetObservation(disabledID)
+	current := "disabled current"
+	_, _ = disabled.UpdateObservation(disabledID, UpdateObservationParams{Title: &current})
+	got, err := disabled.StateAsOf(disabledID, old.UpdatedAt)
+	if err != nil || got.Title != current {
+		t.Fatalf("disabled as-of must be ignored: %+v, %v", got, err)
+	}
+}
+
+func TestStateAsOfRetentionAndHardDelete(t *testing.T) {
+	s := newTimeTravelStore(t, true, 1)
+	id := addTimeTravelObservation(t, s, "first", "")
+	first, _ := s.GetObservation(id)
+	for _, content := range []string{"middle", "current searchable"} {
+		if _, err := s.UpdateObservation(id, UpdateObservationParams{Content: &content}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.StateAsOf(id, first.UpdatedAt); err == nil || !strings.Contains(err.Error(), "history unavailable before") {
+		t.Fatalf("retained-history error = %v", err)
+	}
+	if err := s.DeleteObservation(id, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StateAsOf(id, time.Now().Add(-time.Hour).Format(time.RFC3339Nano)); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("hard-deleted state resurrected: %v", err)
+	}
+}
+
+func TestStateAsOfRecordingBoundaryAndUnmodifiedLegacyRows(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	legacy, _ := New(cfg)
+	_ = legacy.CreateSession("s1", "omnia", "/tmp/omnia")
+	editedID := addTimeTravelObservation(t, legacy, "legacy edited", "")
+	stableID := addTimeTravelObservation(t, legacy, "legacy stable", "")
+	stable, _ := legacy.GetObservation(stableID)
+	_ = legacy.Close()
+
+	cfg.TimeTravelEnabled = true
+	s, _ := New(cfg)
+	defer s.Close()
+	startedAt := nextRevisionTimestamp("")
+	title := "edited after enable"
+	_, _ = s.UpdateObservation(editedID, UpdateObservationParams{Title: &title})
+	if _, err := s.StateAsOf(editedID, stable.UpdatedAt); err == nil || !strings.Contains(err.Error(), "history unavailable before") {
+		t.Fatalf("pre-enable edited history error = %v", err)
+	}
+	unrelatedID := addTimeTravelObservation(t, s, "unrelated", "")
+	changed := "unrelated changed"
+	_, _ = s.UpdateObservation(unrelatedID, UpdateObservationParams{Title: &changed})
+	got, err := s.StateAsOf(stableID, stable.UpdatedAt)
+	if err != nil || got.Title != "legacy stable" {
+		t.Fatalf("unmodified legacy state rejected by unrelated history: %+v, %v (enabled %s)", got, err, startedAt)
+	}
+}

@@ -44,9 +44,9 @@ func (s *Store) captureObservationRevisionTx(tx *sql.Tx, obs *Observation, op, m
 		validFrom = obs.CreatedAt
 	}
 	if _, err := s.execHook(tx, `
-		INSERT INTO observation_revisions (obs_sync_id, op, valid_from, valid_to, snapshot)
-		VALUES (?, ?, ?, ?, ?)`,
-		obs.SyncID, op, validFrom, mutationAt, string(snapshot),
+		INSERT INTO observation_revisions (obs_sync_id, op, valid_from, valid_to, snapshot, pinned)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		obs.SyncID, op, validFrom, mutationAt, string(snapshot), obs.Pinned,
 	); err != nil {
 		return fmt.Errorf("capture observation revision: %w", err)
 	}
@@ -73,4 +73,123 @@ func (s *Store) purgeObservationRevisionsTx(tx *sql.Tx, syncID string) error {
 		return fmt.Errorf("purge observation revisions: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) getObservationIncludingDeleted(id int64) (*Observation, error) {
+	var o Observation
+	return &o, scanObservationRow(s.db.QueryRow(`SELECT `+observationSelectColumns+` FROM observations WHERE id = ?`, id), &o)
+}
+func (s *Store) StateAsOf(id int64, timestamp string) (*Observation, error) {
+	if !s.cfg.TimeTravelEnabled || strings.TrimSpace(timestamp) == "" {
+		return s.GetObservation(id)
+	}
+	at, err := parseObservationTime(timestamp)
+	if err != nil {
+		return nil, fmt.Errorf("invalid as_of timestamp: %w", err)
+	}
+	if at.After(time.Now().UTC()) {
+		return s.GetObservation(id)
+	}
+	live, err := s.getObservationIncludingDeleted(id)
+	if err != nil {
+		return nil, err
+	}
+	var tombstoned int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM deletion_tombstones WHERE sync_id = ? AND hard = 1`, live.SyncID).Scan(&tombstoned); err != nil {
+		return nil, err
+	}
+	if tombstoned > 0 {
+		return nil, sql.ErrNoRows
+	}
+	historyStart, initialMaxObservationID, err := s.timeTravelBoundary()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`
+		SELECT valid_from, valid_to, snapshot, pinned FROM observation_revisions
+		WHERE obs_sync_id = ? ORDER BY valid_from, id`, live.SyncID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var earliest time.Time
+	hasRevisions := false
+	for rows.Next() {
+		hasRevisions = true
+		var fromRaw, toRaw, snapshot string
+		var pinned bool
+		if err := rows.Scan(&fromRaw, &toRaw, &snapshot, &pinned); err != nil {
+			return nil, err
+		}
+		from, fromErr := parseObservationTime(fromRaw)
+		to, toErr := parseObservationTime(toRaw)
+		if fromErr != nil || toErr != nil {
+			return nil, fmt.Errorf("invalid observation revision interval")
+		}
+		if earliest.IsZero() || from.Before(earliest) {
+			earliest = from
+		}
+		if !at.Before(from) && at.Before(to) {
+			if live.ID <= initialMaxObservationID && at.Before(historyStart) {
+				return nil, historyUnavailableError(historyStart)
+			}
+			var historical Observation
+			if err := json.Unmarshal([]byte(snapshot), &historical); err != nil {
+				return nil, fmt.Errorf("decode observation revision: %w", err)
+			}
+			historical.Pinned = pinned
+			normalizeTrustTag(&historical)
+			return &historical, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	created, err := parseObservationTime(live.CreatedAt)
+	if err != nil || at.Before(created) {
+		return nil, sql.ErrNoRows
+	}
+	updated, err := parseObservationTime(live.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if live.DeletedAt != nil {
+		deleted, parseErr := parseObservationTime(*live.DeletedAt)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if !at.Before(deleted) {
+			return nil, sql.ErrNoRows
+		}
+	}
+	if !at.Before(updated) {
+		return live, nil
+	}
+	if !hasRevisions {
+		return nil, historyUnavailableError(updated)
+	}
+	if earliest.IsZero() {
+		earliest = updated
+	}
+	return nil, historyUnavailableError(earliest)
+}
+
+func (s *Store) timeTravelBoundary() (time.Time, int64, error) {
+	var raw string
+	var initialMaxObservationID int64
+	if err := s.db.QueryRow(`
+		SELECT started_at, initial_max_observation_id
+		FROM time_travel_metadata WHERE id = 1`,
+	).Scan(&raw, &initialMaxObservationID); err != nil {
+		return time.Time{}, 0, err
+	}
+	startedAt, err := parseObservationTime(raw)
+	if err != nil {
+		return time.Time{}, 0, fmt.Errorf("invalid time-travel recording boundary: %w", err)
+	}
+	return startedAt, initialMaxObservationID, nil
+}
+
+func historyUnavailableError(start time.Time) error {
+	return fmt.Errorf("history unavailable before %s (history starts when time_travel is enabled and retained)", start.Format(time.RFC3339Nano))
 }

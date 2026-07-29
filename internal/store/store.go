@@ -1408,12 +1408,35 @@ func (s *Store) migrate() error {
 			valid_from TEXT NOT NULL,
 			valid_to TEXT NOT NULL,
 			snapshot TEXT NOT NULL,
+			pinned INTEGER NOT NULL DEFAULT 0,
 			recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
 		);
 		CREATE INDEX IF NOT EXISTS idx_obsrev_asof ON observation_revisions(obs_sync_id, valid_from, valid_to);
 		CREATE INDEX IF NOT EXISTS idx_obsrev_syncid ON observation_revisions(obs_sync_id);
 	`); err != nil {
 		return err
+	}
+	if err := s.addColumnIfNotExists("observation_revisions", "pinned", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS time_travel_metadata (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			started_at TEXT NOT NULL,
+			initial_max_observation_id INTEGER NOT NULL
+		);
+	`); err != nil {
+		return err
+	}
+	if s.cfg.TimeTravelEnabled {
+		if _, err := s.execHook(s.db, `
+			INSERT OR IGNORE INTO time_travel_metadata (id, started_at, initial_max_observation_id)
+			VALUES (1, COALESCE(
+				(SELECT MIN(valid_to) FROM observation_revisions),
+				?
+			), COALESCE((SELECT MAX(id) FROM observations), 0))`, nextRevisionTimestamp("")); err != nil {
+			return err
+		}
 	}
 
 	// ── omnia-structural-forgetting (living memory, cheap code anchor) ────
