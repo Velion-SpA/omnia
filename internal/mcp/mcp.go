@@ -169,6 +169,24 @@ type MCPConfig struct {
 	// unconditionally inside SaveObservation whether or not write-hygiene is
 	// enabled (spec write-gate REQ "Default-On With Kill-Switch").
 	WriteHygieneEnabled bool
+	TimeTravelEnabled   bool
+}
+
+const recordedTimeDisclaimer = "\n---\nRecorded-time view: history starts when time_travel is enabled; retained revisions may not cover earlier timestamps."
+
+func requestedAsOf(req mcp.CallToolRequest, enabled bool) (string, error) {
+	if !enabled {
+		return "", nil
+	}
+	value, _ := req.GetArguments()["as_of"].(string)
+	return store.NormalizeAsOf(value)
+}
+
+func withAsOfSchema(enabled bool, description string) mcp.ToolOption {
+	if !enabled {
+		return func(*mcp.Tool) {}
+	}
+	return mcp.WithString("as_of", mcp.Description(description))
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -443,6 +461,7 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 				mcp.WithBoolean("explain",
 					mcp.Description("Attach a per-hit score breakdown (lexical, semantic, fusion, recency, importance, final, staleness_penalty) to each result for transparency into why it ranked where it did. Omitted by default — response shape is unchanged unless explicitly requested."),
 				),
+				withAsOfSchema(cfg.TimeTravelEnabled, "Optional recorded-time timestamp. Search still matches current indexed text, so words found only in older revisions are not searchable."),
 			),
 			handleSearch(s, cfg, activity),
 		)
@@ -736,6 +755,7 @@ Examples:
 				mcp.WithString("scope",
 					mcp.Description("Filter observations by scope: project (default) or personal"),
 				),
+				withAsOfSchema(cfg.TimeTravelEnabled, "Optional recorded-time timestamp for observation context"),
 				// JW7: limit param removed — schema advertised it but handleContext never read it.
 			),
 			handleContext(s, cfg, activity),
@@ -804,6 +824,7 @@ Examples:
 					mcp.Required(),
 					mcp.Description("The observation ID to retrieve"),
 				),
+				withAsOfSchema(cfg.TimeTravelEnabled, "Optional recorded-time timestamp"),
 			),
 			handleGetObservation(s, cfg),
 		)
@@ -1150,6 +1171,10 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		allProjects := boolArg(req, "all_projects", false)
 		limit := intArg(req, "limit", 10)
 		explain := boolArg(req, "explain", false)
+		asOf, asOfErr := requestedAsOf(req, cfg.TimeTravelEnabled)
+		if asOfErr != nil {
+			return mcp.NewToolResultError(asOfErr.Error()), nil
+		}
 
 		// all_projects=true short-circuits project resolution: we search globally
 		// regardless of the project override or any auto-detected project. This
@@ -1218,7 +1243,21 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		var ftsDiag store.SearchDiag
 
 		var results []store.SearchResult
-		if cfg.Recall != nil {
+		if asOf != "" {
+			var searchErr error
+			results, searchErr = s.SearchAsOf(query, store.SearchOptions{
+				Type: typ, Project: searchProject, Scope: scope, Limit: limit, Diag: &ftsDiag,
+			}, asOf)
+			if searchErr != nil {
+				return mcp.NewToolResultError(searchErr.Error()), nil
+			}
+			for _, rr := range results {
+				if rr.Rank == exactSentinelRank {
+					continue
+				}
+				relevance[rr.ID] = -rr.Rank
+			}
+		} else if cfg.Recall != nil {
 			// RecallFetchLimit over-fetches candidates (beyond the caller's
 			// real limit) so HydrateFusedResults's project/scope/type
 			// re-check below has enough headroom to still fill up to limit
@@ -1263,7 +1302,11 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 
 		if len(results) == 0 {
 			// JW4: use respondWithProject even for empty results.
-			return respondWithProject(detRes, fmt.Sprintf("No memories found for: %q", query), nil), nil
+			message := fmt.Sprintf("No memories found for: %q", query)
+			if asOf != "" {
+				message += recordedTimeDisclaimer + "\nSearch limitation: matches current indexed text only; text found only in older revisions is not searchable."
+			}
+			return respondWithProject(detRes, message, nil), nil
 		}
 
 		// memory-recall-ranking (design D6 wiring boundary): re-sorts by
@@ -1271,7 +1314,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		// A pure no-op when it's not (the default), so this call never
 		// changes handleSearch's response when ranking is unconfigured
 		// (Requirement: Backward-Compatible Default Behavior).
-		now := time.Now()
+		now := store.ReadInstant(asOf)
 		results = RankResults(results, relevance, cfg.RecallRanking, now)
 
 		// Batch-load relations for all results (REQ-002). Avoids N+1.
@@ -1282,7 +1325,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			}
 		}
 		relationsMap := map[string]store.ObservationRelations{}
-		if len(syncIDs) > 0 {
+		if asOf == "" && len(syncIDs) > 0 {
 			if rm, relErr := s.GetRelationsForObservations(syncIDs); relErr == nil {
 				relationsMap = rm
 			}
@@ -1298,7 +1341,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		// identical to before this slice existed (Regression: memory with no
 		// anchor unaffected, extended to "flag off" too).
 		anchorsByObs := map[string][]store.MemoryAnchor{}
-		if cfg.StructuralForgetting.Enabled && len(syncIDs) > 0 {
+		if asOf == "" && cfg.StructuralForgetting.Enabled && len(syncIDs) > 0 {
 			if am, aerr := s.GetAnchorsForObservations(syncIDs); aerr == nil {
 				anchorsByObs = am
 			}
@@ -1416,7 +1459,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 				preview += " [preview]"
 			}
 			stateDisplay := ""
-			if r.State() == store.ObservationStateNeedsReview {
+			if r.StateAt(now) == store.ObservationStateNeedsReview {
 				stateDisplay = " | state: needs_review"
 			}
 			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s%s\n",
@@ -1428,7 +1471,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 				"sync_id": r.SyncID,
 				"title":   r.Title,
 				"type":    r.Type,
-				"state":   r.State(),
+				"state":   r.StateAt(now),
 				"scope":   r.Scope,
 				"pinned":  r.Pinned,
 			}
@@ -1456,7 +1499,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			// when the flag is off or this result has no anchors at all.
 			var stalenessPenalty float64
 			var anchorReceiptLine string
-			if cfg.StructuralForgetting.Enabled {
+			if asOf == "" && cfg.StructuralForgetting.Enabled {
 				if anchors, ok := anchorsByObs[r.SyncID]; ok {
 					stalenessPenalty = StalenessPenaltyFor(anchors)
 					if stale, found := firstStaleAnchor(anchors); found {
@@ -1474,7 +1517,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 				// path on a fusion error above — it returns an error result
 				// instead (see the cfg.Recall != nil branch), so there is no
 				// mid-query fallback case to distinguish here.
-				entry["score_breakdown"] = BuildResultReceipt(r, cfg.Recall != nil, cfg.RecallRanking, relevance, normalizedRelevance, now, stalenessPenalty)
+				entry["score_breakdown"] = BuildResultReceipt(r, cfg.Recall != nil && asOf == "", cfg.RecallRanking, relevance, normalizedRelevance, now, stalenessPenalty)
 			}
 			structuredResults = append(structuredResults, entry)
 
@@ -1540,8 +1583,13 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			fmt.Fprintf(&b, "---\n%d more result(s) matched but were trimmed by the injection token budget (injection.budget.max_tokens). Raise the budget or refine the query.\n", budgetTrimmed)
 		}
 
-		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
-			b.WriteString(nudge)
+		if asOf == "" {
+			if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
+				b.WriteString(nudge)
+			}
+		}
+		if asOf != "" {
+			b.WriteString(recordedTimeDisclaimer + "\nSearch limitation: matches current indexed text only; text found only in older revisions is not searchable.\n")
 		}
 
 		envelope := map[string]any{"results": structuredResults}
@@ -1565,7 +1613,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		// is enabled. Gated by cfg.Procedural != nil, mirroring
 		// cfg.StructuralForgetting.Enabled's own "byte-identical when off"
 		// contract — internal/recall stays untouched/pure either way.
-		if cfg.Procedural != nil {
+		if asOf == "" && cfg.Procedural != nil {
 			if card := BuildProcedureCard(s, query); card != nil {
 				envelope["procedure_card"] = card
 			}
@@ -2367,6 +2415,10 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
+		asOf, asOfErr := requestedAsOf(req, cfg.TimeTravelEnabled)
+		if asOfErr != nil {
+			return mcp.NewToolResultError(asOfErr.Error()), nil
+		}
 
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
 		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
@@ -2395,13 +2447,20 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
-		contextResult, err := s.FormatContext(contextProject, scope)
+		contextResult, err := s.FormatContextAsOf(contextProject, scope, asOf)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context: " + err.Error()), nil
 		}
 
 		if contextResult == "" {
-			return respondWithProject(detRes, "No previous session memories found.", nil), nil
+			message := "No previous session memories found."
+			if asOf != "" {
+				message += recordedTimeDisclaimer
+			}
+			return respondWithProject(detRes, message, nil), nil
+		}
+		if asOf != "" {
+			return respondWithProject(detRes, contextResult+recordedTimeDisclaimer, nil), nil
 		}
 
 		stats, _ := s.Stats()
@@ -2414,6 +2473,9 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 
 		result := fmt.Sprintf("%s\n---\nMemory stats: %d sessions, %d observations across projects: %s",
 			contextResult, stats.TotalSessions, stats.TotalObservations, projects)
+		if asOf != "" {
+			result += recordedTimeDisclaimer
+		}
 
 		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
 			result += nudge
@@ -2425,7 +2487,7 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		// project instead of a query match (BuildProcedureCardForProject's
 		// own doc). Gated by cfg.Procedural != nil, same as handleSearch.
 		var extra map[string]any
-		if cfg.Procedural != nil {
+		if asOf == "" && cfg.Procedural != nil {
 			if card := BuildProcedureCardForProject(s, contextProject, scope); card != nil {
 				extra = map[string]any{"procedure_card": card}
 			}
@@ -2436,7 +2498,7 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		// branch never runs — result/extra stay untouched, so mem_context's
 		// output is byte-for-byte identical to pre-spaced-review behavior
 		// regardless of how many observations are actually due.
-		if cfg.Review.DueNudge {
+		if asOf == "" && cfg.Review.DueNudge {
 			if due, dueErr := s.CountObservationsNeedingReview(contextProject); dueErr == nil && due > 0 {
 				label := "memories"
 				if due == 1 {
@@ -2604,8 +2666,15 @@ func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 			return mcp.NewToolResultError("id is required"), nil
 		}
 
-		obs, err := s.GetObservation(id)
+		asOf, asOfErr := requestedAsOf(req, cfg.TimeTravelEnabled)
+		if asOfErr != nil {
+			return mcp.NewToolResultError(asOfErr.Error()), nil
+		}
+		obs, err := s.StateAsOf(id, asOf)
 		if err != nil {
+			if asOf != "" && (strings.Contains(err.Error(), "history unavailable") || strings.Contains(err.Error(), "invalid as_of timestamp")) {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
 			return mcp.NewToolResultError(fmt.Sprintf("Observation #%d not found", id)), nil
 		}
 
@@ -2636,6 +2705,9 @@ func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 			obs.SessionID, obsProject+scope+topic, toolName+duplicateMeta+revisionMeta,
 			timeutil.FormatLocal(obs.CreatedAt),
 		)
+		if asOf != "" {
+			result += recordedTimeDisclaimer
+		}
 
 		if detErr != nil {
 			// Degraded path: resolution failed (e.g. ambiguous cwd). Return

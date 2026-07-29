@@ -1258,6 +1258,7 @@ func cmdMCP(cfg store.Config) {
 		// flag that gates SaveObservation's decision ladder — the envelope's
 		// own kill-switch can never drift from the store's kill-switch.
 		mcpCfg.WriteHygieneEnabled = appCfg.WriteHygiene.Enabled
+		mcpCfg.TimeTravelEnabled = appCfg.TimeTravel.Enabled
 		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
 		// enabled, run the worker on the same ctx cancelled at shutdown so
 		// mem_save embeds new memories out-of-band. nil when disabled.
@@ -1301,7 +1302,7 @@ func cmdTUI(cfg store.Config) {
 
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: omnia search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N] [--explain]")
+		fmt.Fprintln(os.Stderr, "usage: omnia search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N] [--as-of TIMESTAMP] [--explain]")
 		exitFunc(1)
 	}
 
@@ -1309,6 +1310,7 @@ func cmdSearch(cfg store.Config) {
 	var queryParts []string
 	opts := store.SearchOptions{Limit: 10}
 	explain := false
+	asOf := ""
 
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -1338,6 +1340,11 @@ func cmdSearch(cfg store.Config) {
 			// Per-hit score breakdown (Requirement: Per-Hit Score
 			// Breakdown) — a bare flag, no value to consume.
 			explain = true
+		case "--as-of":
+			if i+1 < len(os.Args) {
+				asOf = os.Args[i+1]
+				i++
+			}
 		default:
 			queryParts = append(queryParts, os.Args[i])
 		}
@@ -1347,6 +1354,16 @@ func cmdSearch(cfg store.Config) {
 	if query == "" {
 		fmt.Fprintln(os.Stderr, "error: search query is required")
 		exitFunc(1)
+	}
+	if cfg.TimeTravelEnabled {
+		normalizedAsOf, normalizeErr := store.NormalizeAsOf(asOf)
+		if normalizeErr != nil {
+			fatal(normalizeErr)
+			return
+		}
+		asOf = normalizedAsOf
+	} else {
+		asOf = ""
 	}
 
 	s, err := storeNew(cfg)
@@ -1367,8 +1384,23 @@ func cmdSearch(cfg store.Config) {
 	// back to plain FTS5 lexical results, and --explain below must label
 	// that fallback as lexical, not fusion (blocking fix: --explain
 	// mislabels fusion vs lexical on mid-query FTS5 fallback).
-	recallSvc := buildRecallServiceForCLI(s, cfg.DataDir)
-	results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, query, opts)
+	asOfEnabled := cfg.TimeTravelEnabled && strings.TrimSpace(asOf) != ""
+	var results []store.SearchResult
+	var relevance map[int64]float64
+	var fusionRan bool
+	if asOfEnabled {
+		results, err = s.SearchAsOf(query, opts, asOf)
+		relevance, fusionRan = map[int64]float64{}, false
+		for _, result := range results {
+			if result.Rank == cliExactSentinelRank {
+				continue
+			}
+			relevance[result.ID] = -result.Rank
+		}
+	} else {
+		recallSvc := buildRecallServiceForCLI(s, cfg.DataDir)
+		results, relevance, fusionRan, err = recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, query, opts)
+	}
 	if err != nil {
 		fatal(err)
 		return
@@ -1376,6 +1408,9 @@ func cmdSearch(cfg store.Config) {
 
 	if len(results) == 0 {
 		fmt.Printf("No memories found for: %q\n", query)
+		if asOfEnabled {
+			printRecordedTimeSearchDisclaimer()
+		}
 		return
 	}
 
@@ -1392,7 +1427,7 @@ func cmdSearch(cfg store.Config) {
 	// other row's normalized relevance toward 0.
 	var rankingCfg config.RankingConfig
 	var normalizedRelevance map[int64]float64
-	now := time.Now()
+	now := store.ReadInstant(asOf)
 	if explain {
 		rankingCfg = loadRankingConfigForCLI()
 		nonSentinel := make([]store.SearchResult, 0, len(results))
@@ -1427,6 +1462,14 @@ func cmdSearch(cfg store.Config) {
 		}
 		fmt.Println()
 	}
+	if asOfEnabled {
+		printRecordedTimeSearchDisclaimer()
+	}
+}
+
+func printRecordedTimeSearchDisclaimer() {
+	fmt.Println("Recorded-time view: history starts when time_travel is enabled; retained revisions may not cover earlier timestamps.")
+	fmt.Println("Search limitation: matches current indexed text only; text found only in older revisions is not searchable.")
 }
 
 // printScoreBreakdown renders BuildReceipt's map[string]any output as one
@@ -1799,6 +1842,7 @@ func cmdTimeline(cfg store.Config) {
 func cmdContext(cfg store.Config) {
 	project := ""
 	scope := ""
+	asOf := ""
 
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -1807,11 +1851,26 @@ func cmdContext(cfg store.Config) {
 				scope = os.Args[i+1]
 				i++
 			}
+		case "--as-of":
+			if i+1 < len(os.Args) {
+				asOf = os.Args[i+1]
+				i++
+			}
 		default:
 			if project == "" {
 				project = os.Args[i]
 			}
 		}
+	}
+	if cfg.TimeTravelEnabled {
+		var err error
+		asOf, err = store.NormalizeAsOf(asOf)
+		if err != nil {
+			fatal(err)
+			return
+		}
+	} else {
+		asOf = ""
 	}
 
 	// Omnia v0.3 Context Economy (design obs #1643/D8, spec obs #1642 PR3):
@@ -1854,17 +1913,28 @@ func cmdContext(cfg store.Config) {
 	}
 	defer s.Close()
 
-	ctx, err := storeFormatContext(s, project, scope)
+	var ctx string
+	if cfg.TimeTravelEnabled && strings.TrimSpace(asOf) != "" {
+		ctx, err = s.FormatContextAsOf(project, scope, asOf)
+	} else {
+		ctx, err = storeFormatContext(s, project, scope)
+	}
 	if err != nil {
 		fatal(err)
 	}
 
 	if ctx == "" {
 		fmt.Println("No previous session memories found.")
+		if cfg.TimeTravelEnabled && strings.TrimSpace(asOf) != "" {
+			fmt.Println("Recorded-time view: history starts when time_travel is enabled; retained revisions may not cover earlier timestamps.")
+		}
 		return
 	}
 
 	fmt.Print(ctx)
+	if cfg.TimeTravelEnabled && strings.TrimSpace(asOf) != "" {
+		fmt.Println("Recorded-time view: history starts when time_travel is enabled; retained revisions may not cover earlier timestamps.")
+	}
 }
 
 func cmdStats(cfg store.Config) {
@@ -3251,7 +3321,7 @@ Commands:
                        untouched) — there is no --apply all; --apply and
                        --dry-run cannot be combined.
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
-  context [project]  Show recent context from previous sessions
+  context [project] [--as-of TIMESTAMP]  Show recent or recorded-time context
   stats              Show memory system statistics
   export [file]      Export all memories to JSON (default: omnia-export.json)
   import <file>      Import memories from a JSON export file

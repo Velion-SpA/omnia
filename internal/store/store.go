@@ -133,6 +133,11 @@ const (
 
 // State returns the virtual lifecycle state derived from review_after.
 func (o Observation) State() string {
+	return o.StateAt(time.Now().UTC())
+}
+
+// StateAt returns the virtual lifecycle state at a specific read instant.
+func (o Observation) StateAt(at time.Time) string {
 	if o.ReviewAfter == nil || strings.TrimSpace(*o.ReviewAfter) == "" {
 		return ObservationStateActive
 	}
@@ -140,7 +145,7 @@ func (o Observation) State() string {
 	if err != nil {
 		return ObservationStateActive
 	}
-	if !reviewAfter.After(time.Now().UTC()) {
+	if !reviewAfter.After(at.UTC()) {
 		return ObservationStateNeedsReview
 	}
 	return ObservationStateActive

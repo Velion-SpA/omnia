@@ -10,6 +10,33 @@ import (
 
 const revisionOpUpdate, revisionOpSoftDelete = "update", "soft_delete"
 
+// ReadInstant returns wall time for live reads or the normalized as_of instant.
+func ReadInstant(asOf string) time.Time {
+	if asOf == "" {
+		return time.Now()
+	}
+	at, _ := parseObservationTime(asOf)
+	return at
+}
+
+// NormalizeAsOf validates a requested recorded-time timestamp. A timestamp
+// later than the current instant is normalized to the live-read sentinel so
+// every caller can take the exact same path as an omitted as_of argument.
+func NormalizeAsOf(timestamp string) (string, error) {
+	timestamp = strings.TrimSpace(timestamp)
+	if timestamp == "" {
+		return "", nil
+	}
+	at, err := parseObservationTime(timestamp)
+	if err != nil {
+		return "", fmt.Errorf("invalid as_of timestamp: %w", err)
+	}
+	if at.After(time.Now().UTC()) {
+		return "", nil
+	}
+	return timestamp, nil
+}
+
 func nextRevisionTimestamp(previous string) string {
 	now := time.Now().UTC()
 	if parsed, err := parseObservationTime(previous); err == nil && !now.After(parsed) {
