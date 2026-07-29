@@ -701,6 +701,9 @@ func main() {
 	if dir := envx.Get(datadir.DataDirEnv); dir != "" {
 		cfg.DataDir = dir
 	}
+	if appCfg, err := config.Load(config.DefaultPath()); err == nil {
+		applyTimeTravelConfig(&cfg, appCfg)
+	}
 
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
@@ -776,6 +779,11 @@ func main() {
 		printUsage()
 		exitFunc(1)
 	}
+}
+
+func applyTimeTravelConfig(cfg *store.Config, appCfg *config.Config) {
+	cfg.TimeTravelEnabled = appCfg.TimeTravel.Enabled
+	cfg.HistoryRevisionCap = appCfg.TimeTravel.MaxRevisionsPerMemory
 }
 
 func shouldCheckForUpdates(args []string) bool {

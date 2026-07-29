@@ -635,7 +635,9 @@ type Config struct {
 	// false` in a successfully-loaded config.yaml, threaded by the
 	// composition root (cmd/omnia's cmdServe/cmdMCP/cmdContext/cmdSave), sets
 	// this true and restores the pre-PR7 zero-hit behavior byte-for-byte.
-	DisableFTSRelax bool
+	DisableFTSRelax    bool
+	TimeTravelEnabled  bool
+	HistoryRevisionCap int
 }
 
 func DefaultConfig() (Config, error) {
@@ -1395,6 +1397,21 @@ func (s *Store) migrate() error {
 			deleted_at   TEXT NOT NULL DEFAULT (datetime('now'))
 		);
 		CREATE INDEX IF NOT EXISTS idx_deletion_tombstones_project ON deletion_tombstones(project, deleted_at DESC);
+	`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS observation_revisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			obs_sync_id TEXT NOT NULL,
+			op TEXT NOT NULL,
+			valid_from TEXT NOT NULL,
+			valid_to TEXT NOT NULL,
+			snapshot TEXT NOT NULL,
+			recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE INDEX IF NOT EXISTS idx_obsrev_asof ON observation_revisions(obs_sync_id, valid_from, valid_to);
+		CREATE INDEX IF NOT EXISTS idx_obsrev_syncid ON observation_revisions(obs_sync_id);
 	`); err != nil {
 		return err
 	}
@@ -3130,6 +3147,14 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 				topicKey, nullableString(p.Project), scope,
 			).Scan(&existingID)
 			if err == nil {
+				before, err := s.getObservationTx(tx, existingID)
+				if err != nil {
+					return err
+				}
+				mutationAt := nextRevisionTimestamp(before.UpdatedAt)
+				if err := s.captureObservationRevisionTx(tx, before, revisionOpUpdate, mutationAt); err != nil {
+					return err
+				}
 				// error_signature/outcome use COALESCE(NULLIF(?, ''), col) so a
 				// revision save that doesn't provide a new value PRESERVES the
 				// previously stored one instead of clearing it (e.g. an outcome
@@ -3148,7 +3173,7 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 					     trust_tag = COALESCE(NULLIF(?, ''), trust_tag),
 					     revision_count = revision_count + 1,
 					     last_seen_at = datetime('now'),
-					     updated_at = datetime('now')
+					     updated_at = ?
 					 WHERE id = ?`,
 					p.Type,
 					title,
@@ -3160,6 +3185,7 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 					outcome,
 					p.Source,
 					trustTagForRevision,
+					mutationAt,
 					existingID,
 				); err != nil {
 					return err
@@ -3254,6 +3280,14 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 					result = SaveResult{ID: targetID, Decision: WriteGateDecisionNoop, TargetID: &targetID, Similarity: verdict.similarity, Reason: verdict.reason}
 					return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 				case writeGateActionUpdate:
+					before, err := s.getObservationTx(tx, verdict.targetID)
+					if err != nil {
+						return err
+					}
+					mutationAt := nextRevisionTimestamp(before.UpdatedAt)
+					if err := s.captureObservationRevisionTx(tx, before, revisionOpUpdate, mutationAt); err != nil {
+						return err
+					}
 					if _, err := s.execHook(tx,
 						`UPDATE observations
 						 SET type = ?,
@@ -3268,7 +3302,7 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 						     trust_tag = COALESCE(NULLIF(?, ''), trust_tag),
 						     revision_count = revision_count + 1,
 						     last_seen_at = datetime('now'),
-						     updated_at = datetime('now')
+						     updated_at = ?
 						 WHERE id = ?`,
 						p.Type,
 						title,
@@ -3280,6 +3314,7 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 						outcome,
 						p.Source,
 						trustTagForRevision,
+						mutationAt,
 						verdict.targetID,
 					); err != nil {
 						return err
@@ -3917,6 +3952,10 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			outcome = normalized
 		}
 
+		mutationAt := nextRevisionTimestamp(obs.UpdatedAt)
+		if err := s.captureObservationRevisionTx(tx, obs, revisionOpUpdate, mutationAt); err != nil {
+			return err
+		}
 		if _, err := s.execHook(tx,
 			`UPDATE observations
 			 SET type = ?,
@@ -3928,7 +3967,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			     normalized_hash = ?,
 			     outcome = ?,
 			     revision_count = revision_count + 1,
-			     updated_at = datetime('now')
+			     updated_at = ?
 			 WHERE id = ? AND deleted_at IS NULL`,
 			typ,
 			title,
@@ -3938,6 +3977,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			nullableString(topicKey),
 			hashNormalized(content),
 			nullableString(outcome),
+			mutationAt,
 			id,
 		); err != nil {
 			return err
@@ -3989,6 +4029,9 @@ func (s *Store) deleteObservation(id int64, hardDelete bool, actor string) error
 			if _, err := s.execHook(tx, `DELETE FROM observations WHERE id = ?`, id); err != nil {
 				return err
 			}
+			if err := s.purgeObservationRevisionsTx(tx, obs.SyncID); err != nil {
+				return err
+			}
 			// ── Phase: memory-conflict-surfacing — C.11 ──────────────────────
 			// Orphan any memory_relations rows that reference this observation's
 			// sync_id (as source or target). Relations are never cascade-deleted;
@@ -4029,18 +4072,20 @@ func (s *Store) deleteObservation(id int64, hardDelete bool, actor string) error
 				}
 			}
 		} else {
+			mutationAt := nextRevisionTimestamp(obs.UpdatedAt)
+			if err := s.captureObservationRevisionTx(tx, obs, revisionOpSoftDelete, mutationAt); err != nil {
+				return err
+			}
 			if _, err := s.execHook(tx,
 				`UPDATE observations
-				 SET deleted_at = datetime('now'),
-				     updated_at = datetime('now')
+				 SET deleted_at = ?,
+				     updated_at = ?
 				 WHERE id = ? AND deleted_at IS NULL`,
-				id,
+				mutationAt, mutationAt, id,
 			); err != nil {
 				return err
 			}
-			if err := tx.QueryRow(`SELECT deleted_at FROM observations WHERE id = ?`, id).Scan(&deletedAt); err != nil {
-				return err
-			}
+			deletedAt = mutationAt
 		}
 
 		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpDelete, syncObservationPayload{
