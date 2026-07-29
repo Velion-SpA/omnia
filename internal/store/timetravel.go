@@ -43,6 +43,18 @@ func (s *Store) captureObservationRevisionTx(tx *sql.Tx, obs *Observation, op, m
 	if validFrom == "" {
 		validFrom = obs.CreatedAt
 	}
+	var previousBoundary string
+	if err := tx.QueryRow(`
+		SELECT ifnull(MAX(valid_to), '') FROM observation_revisions
+		WHERE obs_sync_id = ?`, obs.SyncID,
+	).Scan(&previousBoundary); err != nil {
+		return fmt.Errorf("load observation revision boundary: %w", err)
+	}
+	if previousAt, previousErr := parseObservationTime(previousBoundary); previousErr == nil {
+		if validFromAt, validFromErr := parseObservationTime(validFrom); validFromErr != nil || previousAt.After(validFromAt) {
+			validFrom = previousBoundary
+		}
+	}
 	if _, err := s.execHook(tx, `
 		INSERT INTO observation_revisions (obs_sync_id, op, valid_from, valid_to, snapshot, pinned)
 		VALUES (?, ?, ?, ?, ?, ?)`,

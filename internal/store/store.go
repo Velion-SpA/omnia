@@ -3501,18 +3501,28 @@ func (s *Store) setObservationPinned(id int64, pinned bool) error {
 	if pinned {
 		value = 1
 	}
-	res, err := s.execHook(s.db, `UPDATE observations SET pinned = ? WHERE id = ? AND deleted_at IS NULL`, value, id)
-	if err != nil {
+	return s.withTx(func(tx *sql.Tx) error {
+		obs, err := s.getObservationTx(tx, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrObservationNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if obs.Pinned == pinned {
+			return nil
+		}
+		mutationAt := nextRevisionTimestamp(obs.UpdatedAt)
+		if err := s.captureObservationRevisionTx(tx, obs, revisionOpUpdate, mutationAt); err != nil {
+			return err
+		}
+		_, err = s.execHook(tx, `
+			UPDATE observations
+			SET pinned = ?, updated_at = ?
+			WHERE id = ? AND deleted_at IS NULL`,
+			value, mutationAt, id)
 		return err
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return ErrObservationNotFound
-	}
-	return nil
+	})
 }
 
 func (s *Store) recentUnpinnedObservations(project, scope string, limit int) ([]Observation, error) {

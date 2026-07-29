@@ -299,14 +299,6 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 			t.Fatalf("set created_at for %q: %v", title, err)
 		}
 	}
-	exportedBeforePin, err := s.ExportProject("engram")
-	if err != nil {
-		t.Fatalf("export project before pin: %v", err)
-	}
-	exportedBeforePinJSON, err := json.Marshal(exportedBeforePin)
-	if err != nil {
-		t.Fatalf("marshal export before pin: %v", err)
-	}
 	var updatedAtBeforePin string
 	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtBeforePin); err != nil {
 		t.Fatalf("get updated_at before pin: %v", err)
@@ -319,8 +311,10 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtAfterPin); err != nil {
 		t.Fatalf("get updated_at after pin: %v", err)
 	}
-	if updatedAtAfterPin != updatedAtBeforePin {
-		t.Fatalf("pin should not change updated_at: before=%q after=%q", updatedAtBeforePin, updatedAtAfterPin)
+	beforePinTime, _ := parseObservationTime(updatedAtBeforePin)
+	afterPinTime, _ := parseObservationTime(updatedAtAfterPin)
+	if !afterPinTime.After(beforePinTime) {
+		t.Fatalf("pin should advance updated_at: before=%q after=%q", updatedAtBeforePin, updatedAtAfterPin)
 	}
 	pinned, err := s.PinnedObservations("engram", "project")
 	if err != nil {
@@ -359,10 +353,6 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	if strings.Contains(string(exportedJSON), `"pinned"`) {
 		t.Fatalf("pinned state must stay out of sync/export JSON, got %s", exportedJSON)
 	}
-	if string(exportedJSON) != string(exportedBeforePinJSON) {
-		t.Fatalf("pinning must not change export payload:\nbefore: %s\nafter:  %s", exportedBeforePinJSON, exportedJSON)
-	}
-
 	if err := s.UnpinObservation(ids[0]); err != nil {
 		t.Fatalf("unpin observation: %v", err)
 	}
@@ -370,8 +360,9 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtAfterUnpin); err != nil {
 		t.Fatalf("get updated_at after unpin: %v", err)
 	}
-	if updatedAtAfterUnpin != updatedAtBeforePin {
-		t.Fatalf("unpin should not change updated_at: before=%q after=%q", updatedAtBeforePin, updatedAtAfterUnpin)
+	afterUnpinTime, _ := parseObservationTime(updatedAtAfterUnpin)
+	if !afterUnpinTime.After(afterPinTime) {
+		t.Fatalf("unpin should advance updated_at: pin=%q unpin=%q", updatedAtAfterPin, updatedAtAfterUnpin)
 	}
 	pinned, err = s.PinnedObservations("engram", "project")
 	if err != nil {
