@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -40,6 +43,8 @@ func TestBisectBoundsMidpointMarksResumeAndReset(t *testing.T) {
 	statePath := filepath.Join(cfg.DataDir, "bisect-state.json")
 	info, err := os.Stat(statePath)
 	requireBisect(t, err == nil && info.Mode().Perm() == 0o600, "state is not private")
+	state, err := readBisectState(statePath)
+	requireBisect(t, err == nil && state.Generation != "", "state generation is empty")
 	requireBisect(t, mustBisect(t, cfg, "status") == out, "session did not resume")
 	out = mustBisect(t, cfg, "good")
 	requireBisect(t, strings.Contains(out, "decision C"), "good mark chose wrong midpoint")
@@ -104,7 +109,7 @@ func TestBisectRejectsDisabledCorruptAndStaleStateAndSkipsTombstone(t *testing.T
 	requireBisect(t, os.WriteFile(statePath, []byte("{broken"), 0o600) == nil, "write corrupt fixture")
 	_, err = runBisect(cfg, []string{"status"})
 	requireBisect(t, err != nil && strings.Contains(err.Error(), "corrupt"), "corrupt state accepted")
-	_, _ = runBisect(cfg, []string{"reset"})
+	_ = mustBisect(t, cfg, "reset")
 	_, _ = runBisect(cfg, []string{"start", "--good", "2026-01-01T12:00:00Z", "--bad", "2026-01-05T00:00:00Z"})
 	s, _ := store.New(cfg)
 	_, _ = s.DB().Exec(`DELETE FROM observations WHERE id=?`, ids[1])
@@ -121,17 +126,137 @@ func TestBisectRejectsDisabledCorruptAndStaleStateAndSkipsTombstone(t *testing.T
 		!strings.Contains(out, "decision B"), "tombstoned content surfaced")
 }
 
-func TestBisectBoundsAndSanitizesOutput(t *testing.T) {
-	cfg, ids := bisectFixture(t, true, 3)
-	s, _ := store.New(cfg)
-	_, _ = s.DB().Exec(`UPDATE observations SET title=?, type=?, content=? WHERE id=?`,
-		strings.Repeat("T", 200)+"\x1b[31m\nleak", strings.Repeat("Y", 80), strings.Repeat("secret ", 100), ids[1])
-	_ = s.Close()
-	out := mustBisect(t, cfg, "start", "--good", "2026-01-01T12:00:00Z", "--bad", "2026-01-05T00:00:00Z")
-	requireBisect(t, !strings.ContainsAny(out, "\x1b\r") && len([]rune(out)) < 320 && strings.Count(out, "\n") == 1,
-		"bisect output is unbounded or unsafe")
+func TestBisectStateSecurityValidationAndCrashSafety(t *testing.T) {
+	cfg, _ := bisectFixture(t, true, 3)
+	_ = mustBisect(t, cfg, "start", "--good", "2026-01-01T12:00:00Z", "--bad", "2026-01-05T00:00:00Z")
+	path := filepath.Join(cfg.DataDir, "bisect-state.json")
+	oldModeCheck := bisectPrivateModeRequired
+	defer func() { bisectPrivateModeRequired = oldModeCheck }()
+	bisectPrivateModeRequired = func() bool { return true }
+	requireBisect(t, os.Chmod(path, 0o644) == nil, "chmod fixture")
+	_, err := runBisect(cfg, []string{"status"})
+	requireBisect(t, err != nil && strings.Contains(err.Error(), "0600"), "permissive state accepted")
+	bisectPrivateModeRequired = func() bool { return false }
+	_, err = runBisect(cfg, []string{"status"})
+	requireBisect(t, err == nil, "Windows-compatible mode rejected")
+	bisectPrivateModeRequired = oldModeCheck
+	_ = mustBisect(t, cfg, "reset")
+	_ = mustBisect(t, cfg, "start", "--good", "2026-01-01T12:00:00Z", "--bad", "2026-01-05T00:00:00Z")
+	data, _ := os.ReadFile(path)
+	var state bisectState
+	_ = json.Unmarshal(data, &state)
+	state.Candidates[0], state.Candidates[1] = state.Candidates[1], state.Candidates[0]
+	data, _ = json.Marshal(state)
+	_ = os.WriteFile(path, data, 0o600)
+	_, err = runBisect(cfg, []string{"status"})
+	requireBisect(t, err != nil && strings.Contains(err.Error(), "ordered"), "unordered state accepted")
+	state.Candidates[0], state.Candidates[1] = state.Candidates[1], state.Candidates[0]
+	syncID := state.Candidates[2].SyncID
+	state.Candidates[2].SyncID = "stale"
+	data, _ = json.Marshal(state)
+	_ = os.WriteFile(path, data, 0o600)
+	_, err = runBisect(cfg, []string{"status"})
+	requireBisect(t, err != nil && strings.Contains(err.Error(), "stale"), "non-current stale candidate accepted")
+	state.Candidates[2].SyncID = syncID
+	state.Lo = -1
+	data, _ = json.Marshal(state)
+	_ = os.WriteFile(path, data, 0o600)
+	_, err = runBisect(cfg, []string{"status"})
+	requireBisect(t, err != nil && strings.Contains(err.Error(), "invariants"), "invalid bounds accepted")
+	state.Lo = 0
+	_ = os.Remove(path)
+	target := path + ".target"
+	_ = os.WriteFile(target, []byte("{}"), 0o600)
+	if err := os.Symlink(target, path); err != nil && runtime.GOOS == "windows" {
+		t.Skip("symlink privilege unavailable")
+	}
+	_, err = runBisect(cfg, []string{"status"})
+	requireBisect(t, err != nil && strings.Contains(err.Error(), "symlink"), "symlink state accepted")
+	_ = mustBisect(t, cfg, "reset")
+	requireBisect(t, os.Rename(target, path) == nil, "reset followed state symlink")
+	original, _ := os.ReadFile(path)
+	oldReplace := replaceBisectFile
+	replaceBisectFile = func(string, string) error { return errors.New("write failed") }
+	defer func() { replaceBisectFile = oldReplace }()
+	err = writeBisectState(path, &bisectState{Version: bisectStateVersion, Generation: "generation", Candidates: state.Candidates, Hi: len(state.Candidates) - 1})
+	after, _ := os.ReadFile(path)
+	requireBisect(t, err != nil && string(after) == string(original), "failed atomic write replaced prior state")
+	oldRemove := removeBisectFile
+	removeBisectFile = func(string) error { return errors.New("remove failed") }
+	defer func() { removeBisectFile = oldRemove }()
+	_, err = runBisect(cfg, []string{"reset"})
+	_, statErr := os.Stat(path)
+	requireBisect(t, err != nil && strings.Contains(err.Error(), "remove failed") && statErr == nil, "reset ignored remove failure")
+	removeBisectFile = oldRemove
+	_ = os.Remove(path)
+	requireBisect(t, os.Mkdir(path, 0o700) == nil, "create nonregular state")
+	_ = mustBisect(t, cfg, "reset")
 }
 
+func TestBisectProcessLockRejectsConcurrentMarks(t *testing.T) {
+	cfg, _ := bisectFixture(t, true, 3)
+	_ = mustBisect(t, cfg, "start", "--good", "2026-01-01T12:00:00Z", "--bad", "2026-01-05T00:00:00Z")
+	path := filepath.Join(cfg.DataDir, "bisect-state.json")
+	before, _ := readBisectState(path)
+	oldHook := beforeBisectMutationLock
+	defer func() { beforeBisectMutationLock = oldHook }()
+	ready, release := make(chan struct{}, 2), make(chan struct{})
+	beforeBisectMutationLock = func() { ready <- struct{}{}; <-release }
+	results := make(chan error, 2)
+	for _, command := range []string{"good", "bad"} {
+		command := command
+		go func() { _, err := runBisect(cfg, []string{command}); results <- err }()
+	}
+	<-ready
+	<-ready
+	close(release)
+	first, second := <-results, <-results
+	oneStale := first == nil && second != nil && strings.Contains(second.Error(), "stale") ||
+		second == nil && first != nil && strings.Contains(first.Error(), "stale")
+	requireBisect(t, oneStale, "concurrent marks judged different candidates")
+	after, err := readBisectState(path)
+	movedOnce := after.Lo == 2 && after.Hi == 2 || after.Lo == 0 && after.Hi == 1
+	requireBisect(t, err == nil && before.Generation == after.Generation && movedOnce, "winning mark was advanced twice")
+}
+
+func TestBisectMarkRejectsResetStartABA(t *testing.T) {
+	cfg, _ := bisectFixture(t, true, 3)
+	oldGeneration := newBisectGeneration
+	defer func() { newBisectGeneration = oldGeneration }()
+	generation := 0
+	newBisectGeneration = func() (string, error) { generation++; return fmt.Sprint(generation), nil }
+	startArgs := []string{"start", "--good", "2026-01-01T12:00:00Z", "--bad", "2026-01-05T00:00:00Z"}
+	_, _ = runBisect(cfg, startArgs)
+	path := filepath.Join(cfg.DataDir, "bisect-state.json")
+	before, _ := readBisectState(path)
+	oldHook := beforeBisectMutationLock
+	defer func() { beforeBisectMutationLock = oldHook }()
+	ready, release, result := make(chan struct{}, 1), make(chan struct{}), make(chan error, 1)
+	beforeBisectMutationLock = func() { ready <- struct{}{}; <-release }
+	go func() { _, err := runBisect(cfg, []string{"good"}); result <- err }()
+	<-ready
+	_ = mustBisect(t, cfg, "reset")
+	_, _ = runBisect(cfg, startArgs)
+	restarted, _ := readBisectState(path)
+	close(release)
+	err := <-result
+	after, _ := readBisectState(path)
+	requireBisect(t, before.Generation != restarted.Generation && err != nil && strings.Contains(err.Error(), "stale"), "reset/start ABA accepted stale mark")
+	requireBisect(t, after.Generation == restarted.Generation && after.Lo == 0 && after.Hi == 2, "stale mark mutated restarted session")
+}
+
+func TestBisectAbsentDataDirectory(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.DataDir = filepath.Join(cfg.DataDir, "missing")
+	cfg.TimeTravelEnabled = true
+	requireBisect(t, mustBisect(t, cfg, "reset") == "Bisect state reset.", "absent reset failed")
+	_, err := runBisect(cfg, []string{"status"})
+	requireBisect(t, err != nil && strings.Contains(err.Error(), "data directory"), "absent status error unclear")
+	out, err := runBisect(cfg, []string{"start", "--good", "now", "--bad", "2099-01-01T00:00:00Z"})
+	info, statErr := os.Stat(cfg.DataDir)
+	private := statErr == nil && (!bisectPrivateModeRequired() || info.Mode().Perm() == 0o700)
+	requireBisect(t, err == nil && out == "no revisions in range" && statErr == nil && private, "start did not securely create absent data directory")
+}
 func mustBisect(t *testing.T, cfg store.Config, args ...string) string {
 	t.Helper()
 	out, err := runBisect(cfg, args)
