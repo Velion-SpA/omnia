@@ -188,6 +188,7 @@ func TestHandlePinAndUnpinObservation(t *testing.T) {
 
 func TestHandleSaveSuggestsTopicKeyWhenMissing(t *testing.T) {
 	s := newMCPTestStore(t)
+	enrollProject(t, s, "engram")
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -428,6 +429,7 @@ func TestHandleSaveResolvesActiveSessionFromStore(t *testing.T) {
 // project, mem_save with no session_id must still use manual-save-{project}.
 func TestHandleSaveFallsBackToManualSaveWhenNoActiveSession(t *testing.T) {
 	s := newMCPTestStore(t)
+	enrollProject(t, s, "engram")
 
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -501,6 +503,7 @@ func TestHandleSaveResolvesMostRecentActiveSession(t *testing.T) {
 
 func TestHandleSaveWithNilActivityStillSucceeds(t *testing.T) {
 	s := newMCPTestStore(t)
+	enrollProject(t, s, "engram")
 	h := handleSave(s, MCPConfig{}, nil)
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -519,6 +522,7 @@ func TestHandleSaveWithNilActivityStillSucceeds(t *testing.T) {
 
 func TestHandleSavePromptCaptureFailureIsNonFatal(t *testing.T) {
 	s := newMCPTestStore(t)
+	enrollProject(t, s, "engram")
 	activity := NewSessionActivity(10 * time.Minute)
 	activity.RecordPrompt(defaultSessionID("engram"), "engram", "prompt capture should fail non-fatally")
 	h := handleSave(s, MCPConfig{}, activity)
@@ -553,13 +557,13 @@ func TestHandleSavePromptCaptureFailureIsNonFatal(t *testing.T) {
 
 func TestHandleSavePromptFeedsAutoCaptureContext(t *testing.T) {
 	s := newMCPTestStore(t)
+	enrollProject(t, s, "engram")
 	activity := NewSessionActivity(10 * time.Minute)
-	savePrompt := handleSavePrompt(s, MCPConfig{}, activity)
+	savePrompt := handleSavePrompt(s, MCPConfig{DefaultProject: "engram"}, activity)
 	save := handleSave(s, MCPConfig{}, activity)
 
 	promptRes, err := savePrompt(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "user asked for prompt-linked bugfix memory",
-		"project": "engram",
 	}}})
 	if err != nil {
 		t.Fatalf("save prompt handler error: %v", err)
@@ -595,6 +599,7 @@ func TestHandleSavePromptFeedsAutoCaptureContext(t *testing.T) {
 
 func TestHandleSaveCapturePromptFalseSkipsCurrentPrompt(t *testing.T) {
 	s := newMCPTestStore(t)
+	enrollProject(t, s, "engram")
 	activity := NewSessionActivity(10 * time.Minute)
 	activity.RecordPrompt(defaultSessionID("engram"), "engram", "do not capture this prompt")
 	h := handleSave(s, MCPConfig{}, activity)
@@ -624,6 +629,7 @@ func TestHandleSaveCapturePromptFalseSkipsCurrentPrompt(t *testing.T) {
 
 func TestHandleSaveNoCurrentPromptStillSucceeds(t *testing.T) {
 	s := newMCPTestStore(t)
+	enrollProject(t, s, "engram")
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -649,6 +655,7 @@ func TestHandleSaveNoCurrentPromptStillSucceeds(t *testing.T) {
 
 func TestHandleSaveDoesNotSuggestWhenTopicKeyProvided(t *testing.T) {
 	s := newMCPTestStore(t)
+	enrollProject(t, s, "engram")
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -892,11 +899,11 @@ func TestHandleCapturePassiveWithNoLearningSection(t *testing.T) {
 
 func TestHandleCapturePassiveDefaultsSourceAndSession(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	enrollProject(t, s, "engram")
+	h := handleCapturePassive(s, MCPConfig{DefaultProject: "engram"}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "## Key Learnings:\n\n1. This learning is long enough to be persisted with default source",
-		"project": "engram",
 	}}}
 
 	res, err := h(context.Background(), req)
@@ -1071,6 +1078,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 
 func TestHandleSaveReturnsLifecycleState(t *testing.T) {
 	s := newMCPTestStore(t)
+	enrollProject(t, s, "engram")
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
