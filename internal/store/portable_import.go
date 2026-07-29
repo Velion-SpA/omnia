@@ -91,7 +91,15 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 }
 
 func validatePortableImport(data *ExportData) error {
-	want := ExportCounts{len(data.Sessions), len(data.Observations), len(data.Prompts), len(data.Relations), len(data.Anchors), len(data.Procedures)}
+	// DuplicatesCollapsed is a diagnostic-only count from export time and
+	// cannot be reconstructed from the decoded data (duplicates are already
+	// gone by import time), so it is carried through from data.Counts
+	// unchecked rather than compared like the other counts.
+	want := ExportCounts{
+		Sessions: len(data.Sessions), Observations: len(data.Observations), Prompts: len(data.Prompts),
+		Relations: len(data.Relations), Anchors: len(data.Anchors), Procedures: len(data.Procedures),
+		DuplicatesCollapsed: data.Counts.DuplicatesCollapsed,
+	}
 	if data.Counts != want {
 		return fmt.Errorf("portable export count mismatch")
 	}

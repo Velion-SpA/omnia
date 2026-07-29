@@ -6555,6 +6555,64 @@ func (s *Store) DeleteProject(project string, hardDelete bool) (*DeleteProjectRe
 				return fmt.Errorf("delete project: hard-delete observations: %w", err)
 			}
 			result.ObservationsDeleted, _ = res.RowsAffected()
+		} else if s.cfg.TimeTravelEnabled {
+			// Time-travel is on: capture a soft-delete revision for each
+			// affected observation BEFORE mutating it, mirroring the
+			// hard-delete loop above (select affected rows, then act on
+			// each in the same tx) and deleteObservation's single-item
+			// soft-delete path (before, err := getObservationTx; mutationAt
+			// := nextRevisionTimestamp(before.UpdatedAt); captureObservationRevisionTx;
+			// then write deleted_at/updated_at = mutationAt). Without this,
+			// StateAsOf queries at the edit->delete window incorrectly
+			// return sql.ErrNoRows instead of the edited content.
+			rows, err := s.queryItHook(tx, `
+				SELECT id FROM observations WHERE project = ? AND deleted_at IS NULL
+			`, project)
+			if err != nil {
+				return fmt.Errorf("delete project: read observations for soft-delete: %w", err)
+			}
+			var ids []int64
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err != nil {
+					_ = rows.Close()
+					return fmt.Errorf("delete project: scan observation id for soft-delete: %w", err)
+				}
+				ids = append(ids, id)
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("delete project: read observations for soft-delete: %w", err)
+			}
+			if err := rows.Close(); err != nil {
+				return fmt.Errorf("delete project: close observations for soft-delete: %w", err)
+			}
+			var deletedCount int64
+			for _, id := range ids {
+				before, err := s.getObservationTx(tx, id)
+				if err == sql.ErrNoRows {
+					continue
+				}
+				if err != nil {
+					return fmt.Errorf("delete project: load observation %d for soft-delete: %w", id, err)
+				}
+				mutationAt := nextRevisionTimestamp(before.UpdatedAt)
+				if err := s.captureObservationRevisionTx(tx, before, revisionOpSoftDelete, mutationAt); err != nil {
+					return fmt.Errorf("delete project: capture soft-delete revision for observation %d: %w", id, err)
+				}
+				res, err := s.execHook(tx, `
+					UPDATE observations
+					SET deleted_at = ?,
+					    updated_at = ?
+					WHERE id = ? AND deleted_at IS NULL
+				`, mutationAt, mutationAt, id)
+				if err != nil {
+					return fmt.Errorf("delete project: soft-delete observation %d: %w", id, err)
+				}
+				n, _ := res.RowsAffected()
+				deletedCount += n
+			}
+			result.ObservationsDeleted = deletedCount
 		} else {
 			res, err := s.execHook(tx, `
 				UPDATE observations

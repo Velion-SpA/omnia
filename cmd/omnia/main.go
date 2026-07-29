@@ -2085,6 +2085,9 @@ func cmdExport(cfg store.Config) {
 	fmt.Printf("  Relations:    %d\n", len(data.Relations))
 	fmt.Printf("  Anchors:      %d\n", len(data.Anchors))
 	fmt.Printf("  Procedures:   %d\n", len(data.Procedures))
+	if data.Counts.DuplicatesCollapsed > 0 {
+		fmt.Printf("  Duplicate sync_id rows collapsed: %d\n", data.Counts.DuplicatesCollapsed)
+	}
 }
 
 func replaceFile(path string, data []byte, mode os.FileMode) (err error) {

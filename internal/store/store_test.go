@@ -4027,6 +4027,62 @@ func TestPortableExportV2EmptyAndRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestPortableExportV2ReportsDuplicateSyncIDCollapse(t *testing.T) {
+	s := newTestStore(t)
+	// Bypass the normal insert path (the schema allows duplicate sync_id
+	// for observations/user_prompts — no UNIQUE constraint) to reproduce
+	// two rows sharing the same sync_id, exactly what canonicalPortable
+	// silently collapses to one row during export.
+	if _, err := s.db.Exec(`
+		INSERT INTO sessions (id, project, directory, started_at) VALUES ('s1', 'omnia', '/repo', '2026-01-01T00:00:00Z');
+		INSERT INTO observations (id,sync_id,session_id,type,title,content,project,scope,created_at,updated_at)
+			VALUES (1,'dup-obs','s1','decision','first','first content','omnia','project','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+			       (2,'dup-obs','s1','decision','second','second content','omnia','project','2026-01-02T00:00:00Z','2026-01-02T00:00:00Z');
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := s.ExportPortable()
+	if err != nil {
+		t.Fatalf("ExportPortable: %v", err)
+	}
+	if len(data.Observations) != 1 {
+		t.Fatalf("expected canonicalization to collapse to 1 observation, got %d", len(data.Observations))
+	}
+	if data.Counts.DuplicatesCollapsed != 1 {
+		t.Fatalf("Counts.DuplicatesCollapsed = %d, want 1 (silent collapse must be surfaced)", data.Counts.DuplicatesCollapsed)
+	}
+}
+
+func TestPortableExportV2BackfillsEmptySyncIDSoExportIsAlwaysImportable(t *testing.T) {
+	s := newTestStore(t)
+	// Defensively shouldn't happen given migrate()'s startup backfill (it
+	// only runs once, at New()) — but reachable within the same process via
+	// a future insert-path bug or direct DB tampering after the store is
+	// already open, exactly like this raw SQL insert bypassing the normal
+	// insert path.
+	if _, err := s.db.Exec(`
+		INSERT INTO sessions (id, project, directory, started_at) VALUES ('s1', 'omnia', '/repo', '2026-01-01T00:00:00Z');
+		INSERT INTO observations (id,sync_id,session_id,type,title,content,project,scope,created_at,updated_at)
+			VALUES (1,'','s1','decision','no sync id','content','omnia','project','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := s.ExportPortable()
+	if err != nil {
+		t.Fatalf("ExportPortable: %v", err)
+	}
+	if len(data.Observations) != 1 || strings.TrimSpace(data.Observations[0].SyncID) == "" {
+		t.Fatalf("export must backfill the empty sync_id before serializing: %+v", data.Observations)
+	}
+
+	fresh := newTestStore(t)
+	if _, err := fresh.Import(data); err != nil {
+		t.Fatalf("import of export with previously-empty sync_id must succeed, got: %v", err)
+	}
+}
+
 func TestPortableImportV2CoreIsAtomicIdempotentAndRecencySafe(t *testing.T) {
 	src := newTestStore(t)
 	if _, err := src.db.Exec(`

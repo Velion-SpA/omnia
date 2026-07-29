@@ -287,6 +287,28 @@ func TestTimeTravelDeleteProjectPurgesHistoryAndWritesProofsAtomically(t *testin
 	})
 }
 
+func TestTimeTravelDeleteProjectSoftDeletePreservesEditHistory(t *testing.T) {
+	s := newTimeTravelStore(t, true, 0)
+	id := addTimeTravelObservation(t, s, "soft-project original", "")
+	newTitle := "soft-project edited"
+	edited, err := s.UpdateObservation(id, UpdateObservationParams{Title: &newTitle})
+	if err != nil {
+		t.Fatalf("UpdateObservation: %v", err)
+	}
+
+	if _, err := s.DeleteProject("omnia", false); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	got, err := s.StateAsOf(id, edited.UpdatedAt)
+	if err != nil {
+		t.Fatalf("StateAsOf(%s) after project soft-delete: %v", edited.UpdatedAt, err)
+	}
+	if got.Title != newTitle {
+		t.Fatalf("StateAsOf title = %q, want %q", got.Title, newTitle)
+	}
+}
+
 func TestTimeTravelPulledUpdateAndSoftDeleteCaptureBeforeImages(t *testing.T) {
 	s := newTimeTravelStore(t, true, 0)
 	id := addTimeTravelObservation(t, s, "pulled original", "")

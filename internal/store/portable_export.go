@@ -18,6 +18,14 @@ type ExportCounts struct {
 	Relations    int `json:"relations"`
 	Anchors      int `json:"anchors"`
 	Procedures   int `json:"procedures"`
+	// DuplicatesCollapsed counts observation/prompt rows discarded by
+	// canonicalPortable because they shared a sync_id with a higher-ranked
+	// row (the schema allows duplicate sync_id for observations/user_prompts
+	// — no UNIQUE constraint). It is a diagnostic only: it cannot be
+	// reconstructed from a decoded export (the duplicates are already gone),
+	// so decode/import count-mismatch checks carry it through unchecked
+	// rather than recomputing it.
+	DuplicatesCollapsed int `json:"duplicates_collapsed,omitempty"`
 }
 type PortableRow map[string]any
 type portableWire struct {
@@ -63,7 +71,12 @@ func portablePrompts(in []Prompt) []PortableRow {
 	}
 	return out
 }
-func canonicalPortable[T any](in []T, key, timestamp func(T) string, record func(T) PortableRow) []T {
+
+// canonicalPortable collapses rows sharing the same key (sync_id) down to
+// the single highest-ranked row, and reports how many rows were discarded
+// as duplicates so callers can surface that count as a diagnostic instead
+// of silently dropping data with no signal.
+func canonicalPortable[T any](in []T, key, timestamp func(T) string, record func(T) PortableRow) ([]T, int) {
 	chosen, rank := map[string]T{}, map[string]string{}
 	for _, value := range in {
 		raw, _ := json.Marshal(record(value))
@@ -76,7 +89,7 @@ func canonicalPortable[T any](in []T, key, timestamp func(T) string, record func
 	for _, value := range chosen {
 		out = append(out, value)
 	}
-	return out
+	return out, len(in) - len(out)
 }
 func portableRecord(value any) PortableRow {
 	raw, _ := json.Marshal(value)
@@ -151,7 +164,15 @@ func DecodeExportData(raw []byte) (*ExportData, error) {
 		wire.Relations == nil || wire.Anchors == nil || wire.Procedures == nil {
 		return nil, fmt.Errorf("malformed portable export: every collection must be an array")
 	}
-	wantCounts := ExportCounts{len(wire.Sessions), len(observations), len(wire.Prompts), len(wire.Relations), len(wire.Anchors), len(wire.Procedures)}
+	// DuplicatesCollapsed cannot be recomputed here: canonicalization
+	// already ran at export time and the duplicates are gone from the
+	// wire payload, so it is carried through from wire.Counts unchecked
+	// rather than compared like the other (reconstructible) counts.
+	wantCounts := ExportCounts{
+		Sessions: len(wire.Sessions), Observations: len(observations), Prompts: len(wire.Prompts),
+		Relations: len(wire.Relations), Anchors: len(wire.Anchors), Procedures: len(wire.Procedures),
+		DuplicatesCollapsed: wire.Counts.DuplicatesCollapsed,
+	}
 	if wire.Counts != wantCounts {
 		return nil, fmt.Errorf("portable export count mismatch")
 	}
@@ -167,6 +188,22 @@ func DecodeExportData(raw []byte) (*ExportData, error) {
 func (s *Store) ExportPortable() (*ExportData, error) {
 	var data *ExportData
 	err := s.withTx(func(tx *sql.Tx) error {
+		// Defensive backfill: an empty sync_id shouldn't happen given
+		// migrate()'s startup backfill, but migrate() only runs once, at
+		// New() — a future insert-path bug or direct DB tampering could
+		// still leave a row with an empty sync_id before the next store
+		// restart. Left alone, such a row exports fine with a valid
+		// checksum and then fails the ENTIRE import elsewhere, at
+		// disaster-recovery time. Reuse migrate()'s exact generator SQL
+		// (see s.migrate()) here as a lightweight pre-export pass so a
+		// well-formed export is always importable, and the bad row is
+		// caught early instead.
+		if _, err := s.execHook(tx, `UPDATE observations SET sync_id = 'obs-' || lower(hex(randomblob(16))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
+			return fmt.Errorf("export: backfill empty observation sync_id: %w", err)
+		}
+		if _, err := s.execHook(tx, `UPDATE user_prompts SET sync_id = 'prompt-' || lower(hex(randomblob(16))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
+			return fmt.Errorf("export: backfill empty prompt sync_id: %w", err)
+		}
 		var err error
 		data, err = s.exportPortable(tx)
 		return err
@@ -185,11 +222,12 @@ func (s *Store) exportPortable(db queryer) (*ExportData, error) {
 	for i := range data.Prompts {
 		data.Prompts[i].SyncID = strings.Trim(data.Prompts[i].SyncID, " ")
 	}
-	data.Observations = canonicalPortable(data.Observations,
+	var obsCollapsed, promptCollapsed int
+	data.Observations, obsCollapsed = canonicalPortable(data.Observations,
 		func(value Observation) string { return value.SyncID },
 		func(value Observation) string { return value.UpdatedAt },
 		func(value Observation) PortableRow { return portableObservations([]Observation{value})[0] })
-	data.Prompts = canonicalPortable(data.Prompts,
+	data.Prompts, promptCollapsed = canonicalPortable(data.Prompts,
 		func(value Prompt) string { return value.SyncID },
 		func(value Prompt) string { return value.CreatedAt },
 		func(value Prompt) PortableRow { return portableRecord(value) })
@@ -212,7 +250,11 @@ func (s *Store) exportPortable(db queryer) (*ExportData, error) {
 	if err != nil {
 		return nil, err
 	}
-	data.Counts = ExportCounts{len(data.Sessions), len(data.Observations), len(data.Prompts), len(data.Relations), len(data.Anchors), len(data.Procedures)}
+	data.Counts = ExportCounts{
+		Sessions: len(data.Sessions), Observations: len(data.Observations), Prompts: len(data.Prompts),
+		Relations: len(data.Relations), Anchors: len(data.Anchors), Procedures: len(data.Procedures),
+		DuplicatesCollapsed: obsCollapsed + promptCollapsed,
+	}
 	data.Checksum, err = portableChecksum(data)
 	return data, err
 }
