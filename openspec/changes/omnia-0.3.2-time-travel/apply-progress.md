@@ -79,17 +79,23 @@ The reviewed history/recorded-time/bisect commits were cherry-picked onto the po
 | PR4C | `e72b2f8` | `2ac186e` |
 
 Final integration worktree: `/tmp/omnia-v032-integration-20260728`
-Final validated HEAD: `2ac186e1362b22efc40ad615c8b9d215a183b088`
+Implementation checkpoint: `2ac186e1362b22efc40ad615c8b9d215a183b088`
+Current remediated/apply-evidence HEAD: `0964d17a24614c2ecbd967b56238a1d4955d8835`
 
 ## Validation Evidence
 
-- Focused recorded-time and bisect tests, store race tests, focused MCP/CLI race tests, `go vet`, formatting, module tidy diff, whitespace checks, and commit-hygiene checks passed at the final integration HEAD.
+- At implementation checkpoint `2ac186e`, focused recorded-time and bisect tests, store race tests, focused MCP/CLI race tests, `go vet`, formatting, module tidy diff, whitespace checks, and commit-hygiene checks passed.
 - Affected-package coverage passed with 81.8% total; profile: `/tmp/omnia-v032-final-coverage.out`.
 - Exact validated arm64 binary: `/tmp/omnia-v032-final-checkpoint-bin`.
-- Real isolated recorded-time and bisect CLI smoke passed (`SMOKE_RESULT=PASS`); transcript: `/tmp/omnia-v032-final-smoke.log`.
+- Real isolated recorded-time and bisect CLI smoke passed at the implementation checkpoint (`SMOKE_RESULT=PASS`); transcript: `/tmp/omnia-v032-final-smoke.log`. This smoke remains valid checkpoint evidence and will be re-executed by final `sdd-verify`.
 - Smoke workspace: `/tmp/omnia-v032-final-smoke.9EyUc1` (also recorded in `/tmp/omnia-v032-final-smoke-dir.txt`). The smoke proved live versus `--as-of` state, bisect start/status/convergence/reset, and database mode `0600`.
-- Full `go test ./...` remains affected only by 10 known unrelated `internal/mcp` fixture failures that hardcode project `engram` while the checkout is detected as project `omnia`; these predate and are outside this change. Exact failures: `TestHandleSaveSuggestsTopicKeyWhenMissing`, `TestHandleSaveFallsBackToManualSaveWhenNoActiveSession`, `TestHandleSaveWithNilActivityStillSucceeds`, `TestHandleSavePromptCaptureFailureIsNonFatal`, `TestHandleSavePromptFeedsAutoCaptureContext`, `TestHandleSaveCapturePromptFalseSkipsCurrentPrompt`, `TestHandleSaveNoCurrentPromptStillSucceeds`, `TestHandleSaveDoesNotSuggestWhenTopicKeyProvided`, `TestHandleCapturePassiveDefaultsSourceAndSession`, and `TestHandleSaveReturnsLifecycleState`. Reproduction log: `/tmp/omnia-v032-final-mcp-known-failures.log`.
-- Full `cmd/omnia` package coverage exits 1 even though all 571 tests report passing. The same package-level exit reproduces at baseline `b13d359`, so it is pre-existing. Evidence: `/tmp/omnia-v032-cmd-cover.log`, `/tmp/omnia-v032-baseline-cmd-cover.log`, and the enumerated passing tests in `/tmp/omnia-v032-cmd-cover-terminal.txt`.
+- Initial verification found ten checkout-dependent MCP fixture failures and a coverage-harness subprocess/output failure. They were remediated by `d7ceed3` and `bd3d586`; they are not current validation failures.
+- Combined preverify at current HEAD passed `CGO_ENABLED=0 go test -count=1 ./...`.
+- Combined preverify at current HEAD passed `GOGC=1 CGO_ENABLED=0 go test -count=1 -cover ./...`.
+- Combined package coverage: `cmd/omnia` 70.0%, `internal/mcp` 88.4%, `internal/store` 79.2%, `internal/sync` 90.0%, and `internal/config` 92.6%.
+- Race runs for `cmd/omnia` and `internal/mcp` passed. `go vet`, `go build`, `go mod tidy -diff`, `git diff --check`, and remediation-file `gofmt` checks passed.
+- Combined evidence logs: `/tmp/omnia-v032-remediation-combined-focused.log`, `/tmp/omnia-v032-remediation-combined-test.log`, `/tmp/omnia-v032-remediation-combined-cover.log`, `/tmp/omnia-v032-remediation-combined-race.log`, `/tmp/omnia-v032-remediation-combined-quality.log`, and `/tmp/omnia-v032-remediation-combined-final-audit.log`.
+- Full-tree `gofmt -l` still reports 21 unrelated pre-existing files; every changed/remediation Go file is format-clean.
 
 ## Remaining Tasks
 
