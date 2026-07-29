@@ -2,9 +2,47 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
+
+type portableRelation struct {
+	SyncID                     string   `json:"sync_id"`
+	SourceID                   string   `json:"source_id"`
+	TargetID                   string   `json:"target_id"`
+	Relation                   string   `json:"relation"`
+	Reason                     *string  `json:"reason"`
+	Evidence                   *string  `json:"evidence"`
+	Confidence                 *float64 `json:"confidence"`
+	JudgmentStatus             string   `json:"judgment_status"`
+	MarkedByActor              *string  `json:"marked_by_actor"`
+	MarkedByKind               *string  `json:"marked_by_kind"`
+	MarkedByModel              *string  `json:"marked_by_model"`
+	SessionID                  *string  `json:"session_id"`
+	SupersededAt               *string  `json:"superseded_at"`
+	SupersededByRelationSyncID *string  `json:"superseded_by_relation_sync_id"`
+	CreatedAt                  string   `json:"created_at"`
+	UpdatedAt                  string   `json:"updated_at"`
+}
+
+type portableAnchor struct {
+	SyncID       string  `json:"sync_id"`
+	ObsSyncID    string  `json:"obs_sync_id"`
+	RepoRoot     *string `json:"repo_root"`
+	FilePath     string  `json:"file_path"`
+	Symbol       *string `json:"symbol"`
+	LineStart    int64   `json:"line_start"`
+	LineEnd      int64   `json:"line_end"`
+	BlameSHA     *string `json:"blame_sha"`
+	BlameAt      *string `json:"blame_at"`
+	ContentHash  string  `json:"content_hash"`
+	AnchorStatus string  `json:"anchor_status"`
+	CreatedAt    string  `json:"created_at"`
+	CheckedAt    *string `json:"checked_at"`
+	StaledAt     *string `json:"staled_at"`
+	NewBlameSHA  *string `json:"new_blame_sha"`
+}
 
 func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	if data == nil {
@@ -35,7 +73,11 @@ func validatePortableImport(data *ExportData) error {
 	if data.Checksum != checksum {
 		return fmt.Errorf("portable export checksum mismatch")
 	}
-	return validatePortableCoreKeys(data)
+	if err := validatePortableCoreKeys(data); err != nil {
+		return err
+	}
+	_, _, err = decodePortableGraph(data)
+	return err
 }
 
 func validatePortableCoreKeys(data *ExportData) error {
@@ -64,6 +106,54 @@ func validatePortableCoreKeys(data *ExportData) error {
 	return nil
 }
 
+func decodePortableGraph(data *ExportData) ([]portableRelation, []portableAnchor, error) {
+	relations := make([]portableRelation, len(data.Relations))
+	anchors := make([]portableAnchor, len(data.Anchors))
+	seen := map[string]bool{}
+	for i, row := range data.Relations {
+		raw, _ := json.Marshal(row)
+		if err := json.Unmarshal(raw, &relations[i]); err != nil {
+			return nil, nil, fmt.Errorf("portable import decode relation %d: %w", i, err)
+		}
+		r := &relations[i]
+		r.SyncID, r.SourceID, r.TargetID = strings.Trim(r.SyncID, " "), strings.Trim(r.SourceID, " "), strings.Trim(r.TargetID, " ")
+		if r.SyncID == "" || r.SourceID == "" || r.TargetID == "" || seen["relation:"+r.SyncID] {
+			return nil, nil, fmt.Errorf("portable export invalid or duplicate relation sync_id/endpoints %q", r.SyncID)
+		}
+		if r.Relation != RelationPending && !isValidRelationVerb(r.Relation) {
+			return nil, nil, fmt.Errorf("portable export invalid relation type %q", r.Relation)
+		}
+		switch r.JudgmentStatus {
+		case JudgmentStatusPending, JudgmentStatusJudged, JudgmentStatusOrphaned, JudgmentStatusIgnored:
+		default:
+			return nil, nil, fmt.Errorf("portable export invalid judgment status %q", r.JudgmentStatus)
+		}
+		if r.SupersededByRelationSyncID != nil {
+			value := strings.Trim(*r.SupersededByRelationSyncID, " ")
+			r.SupersededByRelationSyncID = &value
+		}
+		seen["relation:"+r.SyncID] = true
+	}
+	for i, row := range data.Anchors {
+		raw, _ := json.Marshal(row)
+		if err := json.Unmarshal(raw, &anchors[i]); err != nil {
+			return nil, nil, fmt.Errorf("portable import decode anchor %d: %w", i, err)
+		}
+		a := &anchors[i]
+		a.SyncID, a.ObsSyncID = strings.Trim(a.SyncID, " "), strings.Trim(a.ObsSyncID, " ")
+		if a.SyncID == "" || a.ObsSyncID == "" || seen["anchor:"+a.SyncID] {
+			return nil, nil, fmt.Errorf("portable export invalid or duplicate anchor sync_id/obs_sync_id %q", a.SyncID)
+		}
+		switch a.AnchorStatus {
+		case AnchorStatusActive, AnchorStatusStale, AnchorStatusTraveled:
+		default:
+			return nil, nil, fmt.Errorf("portable export invalid anchor status %q", a.AnchorStatus)
+		}
+		seen["anchor:"+a.SyncID] = true
+	}
+	return relations, anchors, nil
+}
+
 func (s *Store) importPortableCore(data *ExportData) (*ImportResult, error) {
 	tx, err := s.beginTxHook()
 	if err != nil {
@@ -71,6 +161,13 @@ func (s *Store) importPortableCore(data *ExportData) (*ImportResult, error) {
 	}
 	defer tx.Rollback()
 	if err := rejectPortableTombstones(tx, data); err != nil {
+		return nil, err
+	}
+	relations, anchors, err := decodePortableGraph(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePortableGraphReferences(tx, data, relations, anchors); err != nil {
 		return nil, err
 	}
 
@@ -96,10 +193,74 @@ func (s *Store) importPortableCore(data *ExportData) (*ImportResult, error) {
 		}
 		result.PromptsImported++
 	}
+	for _, relation := range relations {
+		if err := s.upsertPortableRelation(tx, relation); err != nil {
+			return nil, fmt.Errorf("import relation %s: %w", relation.SyncID, err)
+		}
+		result.RelationsImported++
+	}
+	for _, relation := range relations {
+		if err := s.linkPortableRelation(tx, relation); err != nil {
+			return nil, fmt.Errorf("import relation %s superseded reference: %w", relation.SyncID, err)
+		}
+	}
+	for _, anchor := range anchors {
+		if err := s.upsertPortableAnchor(tx, anchor); err != nil {
+			return nil, fmt.Errorf("import anchor %s: %w", anchor.SyncID, err)
+		}
+		result.AnchorsImported++
+	}
 	if err := s.commitHook(tx); err != nil {
 		return nil, fmt.Errorf("import: commit: %w", err)
 	}
 	return result, nil
+}
+
+func validatePortableGraphReferences(tx *sql.Tx, data *ExportData, relations []portableRelation, anchors []portableAnchor) error {
+	observations, relationIDs := map[string]bool{}, map[string]bool{}
+	for _, observation := range data.Observations {
+		observations[strings.Trim(observation.SyncID, " ")] = true
+	}
+	for _, relation := range relations {
+		relationIDs[relation.SyncID] = true
+	}
+	resolve := func(table, key, label string, imported map[string]bool) (string, error) {
+		if imported[key] {
+			return key, nil
+		}
+		var stored string
+		err := tx.QueryRow(`SELECT sync_id FROM `+table+`
+			WHERE trim(sync_id)=? ORDER BY (sync_id=?) DESC,id LIMIT 1`, key, key).Scan(&stored)
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("portable import dangling %s %q", label, key)
+		}
+		if err != nil {
+			return "", fmt.Errorf("portable import validate %s: %w", label, err)
+		}
+		return stored, nil
+	}
+	for i := range relations {
+		relation := &relations[i]
+		var err error
+		if relation.SourceID, err = resolve("observations", relation.SourceID, "relation source_id", observations); err != nil {
+			return err
+		}
+		if relation.TargetID, err = resolve("observations", relation.TargetID, "relation target_id", observations); err != nil {
+			return err
+		}
+		if relation.SupersededByRelationSyncID != nil && *relation.SupersededByRelationSyncID != "" {
+			if _, err := resolve("memory_relations", *relation.SupersededByRelationSyncID, "superseded relation", relationIDs); err != nil {
+				return err
+			}
+		}
+	}
+	for i := range anchors {
+		var err error
+		if anchors[i].ObsSyncID, err = resolve("observations", anchors[i].ObsSyncID, "anchor obs_sync_id", observations); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func rejectPortableTombstones(tx *sql.Tx, data *ExportData) error {
@@ -174,5 +335,77 @@ func (s *Store) upsertPortablePrompt(tx *sql.Tx, prompt Prompt) error {
 		return err
 	}
 	_, err = s.execHook(tx, `DELETE FROM user_prompts WHERE trim(sync_id)=? AND id<>?`, key, id)
+	return err
+}
+
+func (s *Store) canonicalGraphRowID(tx *sql.Tx, table, key string) (int64, error) {
+	var id int64
+	err := tx.QueryRow(`SELECT id FROM `+table+` WHERE sync_id=? LIMIT 1`, key).Scan(&id)
+	if err == sql.ErrNoRows {
+		err = tx.QueryRow(`SELECT id FROM `+table+` WHERE trim(sync_id)=? ORDER BY id LIMIT 1`, key).Scan(&id)
+	}
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.execHook(tx, `DELETE FROM `+table+` WHERE trim(sync_id)=? AND id<>?`, key, id); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func (s *Store) upsertPortableRelation(tx *sql.Tx, relation portableRelation) error {
+	id, err := s.canonicalGraphRowID(tx, "memory_relations", relation.SyncID)
+	if err != nil {
+		return err
+	}
+	args := []any{relation.SyncID, relation.SourceID, relation.TargetID, relation.Relation, relation.Reason,
+		relation.Evidence, relation.Confidence, relation.JudgmentStatus, relation.MarkedByActor, relation.MarkedByKind,
+		relation.MarkedByModel, relation.SessionID, relation.SupersededAt, relation.CreatedAt, relation.UpdatedAt}
+	if id == 0 {
+		_, err = s.execHook(tx, `INSERT INTO memory_relations
+			(sync_id,source_id,target_id,relation,reason,evidence,confidence,judgment_status,marked_by_actor,
+			 marked_by_kind,marked_by_model,session_id,superseded_at,created_at,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args...)
+		return err
+	}
+	_, err = s.execHook(tx, `UPDATE memory_relations SET sync_id=?,source_id=?,target_id=?,relation=?,reason=?,
+		evidence=?,confidence=?,judgment_status=?,marked_by_actor=?,marked_by_kind=?,marked_by_model=?,session_id=?,
+		superseded_at=?,superseded_by_relation_id=NULL,created_at=?,updated_at=? WHERE id=?`, append(args, id)...)
+	return err
+}
+
+func (s *Store) linkPortableRelation(tx *sql.Tx, relation portableRelation) error {
+	if relation.SupersededByRelationSyncID == nil || *relation.SupersededByRelationSyncID == "" {
+		return nil
+	}
+	var targetID int64
+	if err := tx.QueryRow(`SELECT id FROM memory_relations WHERE trim(sync_id)=? ORDER BY sync_id=? DESC,id LIMIT 1`,
+		*relation.SupersededByRelationSyncID, *relation.SupersededByRelationSyncID).Scan(&targetID); err != nil {
+		return err
+	}
+	_, err := s.execHook(tx, `UPDATE memory_relations SET superseded_by_relation_id=? WHERE sync_id=?`, targetID, relation.SyncID)
+	return err
+}
+
+func (s *Store) upsertPortableAnchor(tx *sql.Tx, anchor portableAnchor) error {
+	id, err := s.canonicalGraphRowID(tx, "memory_anchors", anchor.SyncID)
+	if err != nil {
+		return err
+	}
+	args := []any{anchor.SyncID, anchor.ObsSyncID, anchor.RepoRoot, anchor.FilePath, anchor.Symbol, anchor.LineStart,
+		anchor.LineEnd, anchor.BlameSHA, anchor.BlameAt, anchor.ContentHash, anchor.AnchorStatus, anchor.CreatedAt,
+		anchor.CheckedAt, anchor.StaledAt, anchor.NewBlameSHA}
+	if id == 0 {
+		_, err = s.execHook(tx, `INSERT INTO memory_anchors
+			(sync_id,obs_sync_id,repo_root,file_path,symbol,line_start,line_end,blame_sha,blame_at,content_hash,
+			 anchor_status,created_at,checked_at,staled_at,new_blame_sha) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args...)
+		return err
+	}
+	_, err = s.execHook(tx, `UPDATE memory_anchors SET sync_id=?,obs_sync_id=?,repo_root=?,file_path=?,symbol=?,
+		line_start=?,line_end=?,blame_sha=?,blame_at=?,content_hash=?,anchor_status=?,created_at=?,checked_at=?,
+		staled_at=?,new_blame_sha=? WHERE id=?`, append(args, id)...)
 	return err
 }

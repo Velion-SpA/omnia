@@ -5086,6 +5086,8 @@ type ImportResult struct {
 	SessionsImported     int `json:"sessions_imported"`
 	ObservationsImported int `json:"observations_imported"`
 	PromptsImported      int `json:"prompts_imported"`
+	RelationsImported    int `json:"relations_imported"`
+	AnchorsImported      int `json:"anchors_imported"`
 }
 
 // ─── Sync Chunk Tracking ─────────────────────────────────────────────────────

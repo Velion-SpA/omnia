@@ -4130,6 +4130,137 @@ func TestPortableImportV2CoreIsAtomicIdempotentAndImportedWins(t *testing.T) {
 	}
 }
 
+func TestPortableImportV2RelationsAndAnchorsAreValidatedAtomicAndIdempotent(t *testing.T) {
+	src := newTestStore(t)
+	if _, err := src.db.Exec(`
+		INSERT INTO sessions (id,project,directory,started_at) VALUES ('s1','portable','/source','2026-01-01T00:00:00Z');
+		INSERT INTO observations (sync_id,session_id,type,title,content,project,scope,created_at,updated_at)
+			VALUES ('obs-a','s1','decision','A','A','portable','project','2026-01-02T00:00:00Z','2026-01-02T00:00:00Z'),
+			       ('obs-b','s1','discovery','B','B','portable','project','2026-01-03T00:00:00Z','2026-01-03T00:00:00Z');
+		INSERT INTO memory_relations (sync_id,source_id,target_id,relation,judgment_status,created_at,updated_at)
+			VALUES ('rel-new','obs-a','obs-b','supersedes','judged','2026-01-04T00:00:00Z','2026-01-04T00:00:00Z'),
+			       ('rel-old','obs-a','obs-b','related','judged','2026-01-03T00:00:00Z','2026-01-03T00:00:00Z');
+		UPDATE memory_relations SET superseded_at='2026-01-04T00:00:00Z',
+			superseded_by_relation_id=(SELECT id FROM memory_relations WHERE sync_id='rel-new') WHERE sync_id='rel-old';
+		INSERT INTO memory_anchors (sync_id,obs_sync_id,file_path,line_start,line_end,content_hash,anchor_status,created_at)
+			VALUES ('anc-active','obs-a','a.go',1,2,'hash-a','active','2026-01-04T00:00:00Z'),
+			       ('anc-stale','obs-b','b.go',3,4,'hash-b','stale','2026-01-05T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	valid, err := src.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clone := func(data *ExportData) *ExportData {
+		t.Helper()
+		raw, err := json.Marshal(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := DecodeExportData(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	dst := newTestStore(t)
+	if _, err := dst.db.Exec(`
+		INSERT INTO memory_relations (sync_id,source_id,target_id,relation,judgment_status)
+			VALUES (' rel-old ','missing','missing','pending','pending');
+		INSERT INTO memory_anchors (sync_id,obs_sync_id,file_path,line_start,line_end,content_hash,anchor_status)
+			VALUES (' anc-active ','missing','old.go',9,9,'old','traveled')`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := dst.Import(valid); err != nil {
+			t.Fatalf("import %d: %v", i+1, err)
+		}
+	}
+	var relations, anchors int
+	var relation, target, status, anchorOwner, filePath string
+	if err := dst.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relations); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.db.QueryRow(`SELECT r.relation,p.sync_id FROM memory_relations r
+		JOIN memory_relations p ON p.id=r.superseded_by_relation_id WHERE r.sync_id='rel-old'`).Scan(&relation, &target); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.db.QueryRow(`SELECT count(*),max(anchor_status),max(obs_sync_id),max(file_path)
+		FROM memory_anchors`).Scan(&anchors, &status, &anchorOwner, &filePath); err != nil {
+		t.Fatal(err)
+	}
+	if relations != 2 || anchors != 2 || relation != RelationRelated || target != "rel-new" ||
+		status != AnchorStatusStale || anchorOwner != "obs-b" || filePath != "b.go" {
+		t.Fatalf("graph did not converge: relations=%d anchors=%d relation=%q target=%q status=%q owner=%q file=%q",
+			relations, anchors, relation, target, status, anchorOwner, filePath)
+	}
+
+	current := clone(valid)
+	current.Observations = nil
+	current.Counts.Observations = 0
+	current.Checksum, _ = portableChecksum(current)
+	mixed := newTestStore(t)
+	if _, err := mixed.db.Exec(`
+		INSERT INTO sessions (id,project,directory,started_at) VALUES ('s1','local','/local','2025-01-01T00:00:00Z');
+		INSERT INTO observations (sync_id,session_id,type,title,content,scope,created_at,updated_at)
+			VALUES (' obs-a ','s1','note','current-a','current-a','project','2025-01-01T00:00:00Z','2025-01-01T00:00:00Z'),
+			       (' obs-b ','s1','note','current-b','current-b','project','2025-01-01T00:00:00Z','2025-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mixed.Import(current); err != nil {
+		t.Fatalf("current canonical graph reference rejected: %v", err)
+	}
+	currentIDs := []string{" obs-a ", " obs-b "}
+	gotRelations, err := mixed.GetRelationsForObservations(currentIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotRelations[" obs-a "].AsSource) != 2 ||
+		gotRelations[" obs-a "].AsSource[0].SourceTitle != "current-a" ||
+		gotRelations[" obs-a "].AsSource[0].TargetTitle != "current-b" {
+		t.Fatalf("runtime relation identity lost padded endpoints: %+v", gotRelations)
+	}
+	gotAnchors, err := mixed.GetAnchorsForObservations(currentIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotAnchors[" obs-a "]) != 1 || len(gotAnchors[" obs-b "]) != 1 {
+		t.Fatalf("runtime anchor identity lost padded owners: %+v", gotAnchors)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*ExportData)
+		want   string
+	}{
+		{"dangling relation endpoint", func(d *ExportData) { d.Relations[0]["target_id"] = "missing" }, "target_id"},
+		{"invalid relation type", func(d *ExportData) { d.Relations[0]["relation"] = "causes" }, "relation type"},
+		{"invalid judgment status", func(d *ExportData) { d.Relations[0]["judgment_status"] = "approved" }, "judgment status"},
+		{"dangling supersede reference", func(d *ExportData) { d.Relations[0]["superseded_by_relation_sync_id"] = "missing" }, "superseded"},
+		{"dangling anchor owner", func(d *ExportData) { d.Anchors[0]["obs_sync_id"] = "missing" }, "obs_sync_id"},
+		{"invalid anchor status", func(d *ExportData) { d.Anchors[0]["anchor_status"] = "unknown" }, "anchor status"},
+		{"invalid anchor field type", func(d *ExportData) { d.Anchors[0]["line_start"] = "one" }, "decode anchor"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			data := clone(valid)
+			tt.mutate(data)
+			data.Checksum, _ = portableChecksum(data)
+			target := newTestStore(t)
+			if _, err := target.Import(data); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+			for _, table := range []string{"sessions", "observations", "memory_relations", "memory_anchors"} {
+				var count int
+				if err := target.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+					t.Fatalf("failed graph import mutated %s: count=%d err=%v", table, count, err)
+				}
+			}
+		})
+	}
+}
+
 func TestPortableImportPreflightAndLegacyMergeStayExplicit(t *testing.T) {
 	src := newTestStore(t)
 	if err := src.CreateSession("s1", "portable", "/source"); err != nil {
