@@ -18,6 +18,19 @@ func nextRevisionTimestamp(previous string) string {
 	return now.Format(time.RFC3339Nano)
 }
 
+func observationMutationTimestamp(previous, proposed string) string {
+	proposed = strings.TrimSpace(proposed)
+	if proposed == "" {
+		return nextRevisionTimestamp(previous)
+	}
+	proposedAt, proposedErr := parseObservationTime(proposed)
+	previousAt, previousErr := parseObservationTime(previous)
+	if proposedErr == nil && (previousErr != nil || proposedAt.After(previousAt)) {
+		return proposed
+	}
+	return nextRevisionTimestamp(previous)
+}
+
 func (s *Store) captureObservationRevisionTx(tx *sql.Tx, obs *Observation, op, mutationAt string) error {
 	if !s.cfg.TimeTravelEnabled || obs == nil || strings.TrimSpace(obs.SyncID) == "" {
 		return nil

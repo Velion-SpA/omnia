@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTimeTravelStore(t *testing.T, enabled bool, cap int) *Store {
@@ -198,4 +199,282 @@ func TestTimeTravelRapidUpdatesShareStableBoundaries(t *testing.T) {
 		}
 		previousBoundary = validTo
 	}
+}
+
+func TestTimeTravelDeleteProjectPurgesHistoryAndWritesProofsAtomically(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		s := newTimeTravelStore(t, true, 0)
+		var proofs []struct {
+			syncID, contentHash string
+		}
+		for _, title := range []string{"bulk one", "bulk two"} {
+			id := addTimeTravelObservation(t, s, title, "")
+			edited := title + " edited"
+			if _, err := s.UpdateObservation(id, UpdateObservationParams{Title: &edited}); err != nil {
+				t.Fatal(err)
+			}
+			obs, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if title == "bulk one" {
+				if _, err := s.db.Exec(`UPDATE observations SET normalized_hash = NULL WHERE id = ?`, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			proofs = append(proofs, struct {
+				syncID, contentHash string
+			}{syncID: obs.SyncID, contentHash: hashNormalized(obs.Content)})
+		}
+
+		if _, err := s.DeleteProject("omnia", true); err != nil {
+			t.Fatalf("DeleteProject: %v", err)
+		}
+		for _, proof := range proofs {
+			var revisions int
+			var contentHash sql.NullString
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM observation_revisions WHERE obs_sync_id = ?`, proof.syncID).Scan(&revisions); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRow(`
+				SELECT content_hash FROM deletion_tombstones
+				WHERE sync_id = ? AND hard = 1 AND reason = 'hard_delete'`,
+				proof.syncID,
+			).Scan(&contentHash); err != nil {
+				t.Fatal(err)
+			}
+			if revisions != 0 || !contentHash.Valid || contentHash.String != proof.contentHash {
+				t.Fatalf("%s: revisions=%d content_hash=%+v, want 0/%q", proof.syncID, revisions, contentHash, proof.contentHash)
+			}
+		}
+	})
+
+	t.Run("rollback", func(t *testing.T) {
+		s := newTimeTravelStore(t, true, 0)
+		id := addTimeTravelObservation(t, s, "bulk rollback", "")
+		edited := "bulk rollback edited"
+		if _, err := s.UpdateObservation(id, UpdateObservationParams{Title: &edited}); err != nil {
+			t.Fatal(err)
+		}
+		obs, err := s.GetObservation(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		originalExec := s.hooks.exec
+		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+			if strings.Contains(query, "INSERT INTO deletion_tombstones") {
+				return nil, errors.New("proof failed")
+			}
+			return originalExec(db, query, args...)
+		}
+
+		if _, err := s.DeleteProject("omnia", true); err == nil {
+			t.Fatal("DeleteProject unexpectedly succeeded")
+		}
+		if _, err := s.GetObservation(id); err != nil {
+			t.Fatalf("observation was not rolled back: %v", err)
+		}
+		if got := revisionCount(t, s, id); got != 1 {
+			t.Fatalf("revision count after rollback = %d, want 1", got)
+		}
+		var tombstones int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM deletion_tombstones WHERE sync_id = ?`, obs.SyncID).Scan(&tombstones); err != nil {
+			t.Fatal(err)
+		}
+		if tombstones != 0 {
+			t.Fatalf("tombstones after rollback = %d, want 0", tombstones)
+		}
+	})
+}
+
+func TestTimeTravelPulledUpdateAndSoftDeleteCaptureBeforeImages(t *testing.T) {
+	s := newTimeTravelStore(t, true, 0)
+	id := addTimeTravelObservation(t, s, "pulled original", "")
+	original, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateAt := time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
+	update := SyncMutation{
+		Seq: 1, Entity: SyncEntityObservation, EntityKey: original.SyncID, Op: SyncOpUpsert,
+		Payload: `{"sync_id":"` + original.SyncID + `","session_id":"s1","type":"decision","title":"pulled update","content":"updated remotely","project":"omnia","scope":"project","updated_at":"` + updateAt + `"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, update); err != nil {
+		t.Fatalf("pulled update: %v", err)
+	}
+	updated, err := s.GetObservationBySyncID(original.SyncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updateOp, updateTo, updateSnapshot string
+	if err := s.db.QueryRow(`
+		SELECT op, valid_to, snapshot FROM observation_revisions
+		WHERE obs_sync_id = ? ORDER BY id DESC LIMIT 1`, original.SyncID,
+	).Scan(&updateOp, &updateTo, &updateSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if updateOp != revisionOpUpdate || updateTo != updated.UpdatedAt || !strings.Contains(updateSnapshot, `"title":"pulled original"`) {
+		t.Fatalf("update revision op=%q valid_to=%q live=%q snapshot=%s", updateOp, updateTo, updated.UpdatedAt, updateSnapshot)
+	}
+
+	deleteAt := time.Now().UTC().Add(2 * time.Minute).Format(time.RFC3339Nano)
+	softDelete := SyncMutation{
+		Seq: 2, Entity: SyncEntityObservation, EntityKey: original.SyncID, Op: SyncOpDelete,
+		Payload: `{"sync_id":"` + original.SyncID + `","deleted":true,"deleted_at":"` + deleteAt + `"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, softDelete); err != nil {
+		t.Fatalf("pulled soft delete: %v", err)
+	}
+	deleted, err := s.getObservationBySyncIDTxForTest(original.SyncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deleteOp, deleteTo, deleteSnapshot string
+	if err := s.db.QueryRow(`
+		SELECT op, valid_to, snapshot FROM observation_revisions
+		WHERE obs_sync_id = ? ORDER BY id DESC LIMIT 1`, original.SyncID,
+	).Scan(&deleteOp, &deleteTo, &deleteSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if deleteOp != revisionOpSoftDelete || deleteTo != deleted.UpdatedAt || deleted.DeletedAt == nil || deleteTo != *deleted.DeletedAt || !strings.Contains(deleteSnapshot, `"title":"pulled update"`) {
+		t.Fatalf("delete revision op=%q valid_to=%q live=%+v snapshot=%s", deleteOp, deleteTo, deleted, deleteSnapshot)
+	}
+}
+
+func TestTimeTravelPulledHardDeletePurgesHistory(t *testing.T) {
+	s := newTimeTravelStore(t, true, 0)
+	id := addTimeTravelObservation(t, s, "pulled hard delete", "")
+	edited := "pulled hard delete edited"
+	if _, err := s.UpdateObservation(id, UpdateObservationParams{Title: &edited}); err != nil {
+		t.Fatal(err)
+	}
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutation := SyncMutation{
+		Seq: 1, Entity: SyncEntityObservation, EntityKey: obs.SyncID, Op: SyncOpDelete,
+		Payload: `{"sync_id":"` + obs.SyncID + `","deleted":true,"hard_delete":true}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+		t.Fatal(err)
+	}
+	var revisions, tombstones int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observation_revisions WHERE obs_sync_id = ?`, obs.SyncID).Scan(&revisions); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM deletion_tombstones WHERE sync_id = ? AND hard = 1`, obs.SyncID).Scan(&tombstones); err != nil {
+		t.Fatal(err)
+	}
+	if revisions != 0 || tombstones != 1 {
+		t.Fatalf("pulled hard delete revisions=%d tombstones=%d, want 0/1", revisions, tombstones)
+	}
+}
+
+func (s *Store) getObservationBySyncIDTxForTest(syncID string) (*Observation, error) {
+	row := s.db.QueryRow(`SELECT `+observationSelectColumns+` FROM observations WHERE sync_id = ? ORDER BY id DESC LIMIT 1`, syncID)
+	var obs Observation
+	if err := scanObservationRow(row, &obs); err != nil {
+		return nil, err
+	}
+	return &obs, nil
+}
+
+func TestTimeTravelPulledCaptureRespectsDisabledRetentionAndRollback(t *testing.T) {
+	t.Run("disabled", func(t *testing.T) {
+		s := newTimeTravelStore(t, false, 0)
+		id := addTimeTravelObservation(t, s, "disabled pull", "")
+		obs, _ := s.GetObservation(id)
+		mutation := SyncMutation{Seq: 1, Entity: SyncEntityObservation, EntityKey: obs.SyncID, Op: SyncOpUpsert,
+			Payload: `{"sync_id":"` + obs.SyncID + `","session_id":"s1","type":"decision","title":"changed","content":"changed","project":"omnia","scope":"project"}`}
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+			t.Fatal(err)
+		}
+		live, err := s.GetObservation(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if live.UpdatedAt != obs.UpdatedAt {
+			t.Fatalf("disabled missing updated_at changed from %q to %q", obs.UpdatedAt, live.UpdatedAt)
+		}
+		equalTimestamp := SyncMutation{Seq: 2, Entity: SyncEntityObservation, EntityKey: obs.SyncID, Op: SyncOpUpsert,
+			Payload: `{"sync_id":"` + obs.SyncID + `","session_id":"s1","type":"decision","title":"changed again","content":"changed","project":"omnia","scope":"project","updated_at":"` + obs.UpdatedAt + `"}`}
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, equalTimestamp); err != nil {
+			t.Fatal(err)
+		}
+		live, err = s.GetObservation(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if live.UpdatedAt != obs.UpdatedAt {
+			t.Fatalf("disabled equal updated_at changed from %q to %q", obs.UpdatedAt, live.UpdatedAt)
+		}
+
+		deleteAt := "2024-01-02 03:04:05"
+		beforeDelete := Now()
+		softDelete := SyncMutation{Seq: 3, Entity: SyncEntityObservation, EntityKey: obs.SyncID, Op: SyncOpDelete,
+			Payload: `{"sync_id":"` + obs.SyncID + `","deleted":true,"deleted_at":"` + deleteAt + `"}`}
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, softDelete); err != nil {
+			t.Fatal(err)
+		}
+		afterDelete := Now()
+		deleted, err := s.getObservationBySyncIDTxForTest(obs.SyncID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if deleted.DeletedAt == nil || *deleted.DeletedAt != deleteAt || deleted.UpdatedAt < beforeDelete || deleted.UpdatedAt > afterDelete {
+			t.Fatalf("disabled soft-delete timestamps deleted_at=%v updated_at=%q, want %q and [%q,%q]", deleted.DeletedAt, deleted.UpdatedAt, deleteAt, beforeDelete, afterDelete)
+		}
+		if got := revisionCount(t, s, id); got != 0 {
+			t.Fatalf("disabled pulled revisions = %d, want 0", got)
+		}
+	})
+
+	t.Run("retention", func(t *testing.T) {
+		s := newTimeTravelStore(t, true, 1)
+		id := addTimeTravelObservation(t, s, "retained original", "")
+		obs, _ := s.GetObservation(id)
+		for seq, title := range []string{"retained one", "retained two"} {
+			mutation := SyncMutation{Seq: int64(seq + 1), Entity: SyncEntityObservation, EntityKey: obs.SyncID, Op: SyncOpUpsert,
+				Payload: `{"sync_id":"` + obs.SyncID + `","session_id":"s1","type":"decision","title":"` + title + `","content":"changed","project":"omnia","scope":"project"}`}
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := revisionCount(t, s, id); got != 1 {
+			t.Fatalf("retained pulled revisions = %d, want 1", got)
+		}
+	})
+
+	t.Run("rollback", func(t *testing.T) {
+		s := newTimeTravelStore(t, true, 0)
+		id := addTimeTravelObservation(t, s, "pull rollback", "")
+		obs, _ := s.GetObservation(id)
+		originalExec := s.hooks.exec
+		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+			if strings.Contains(query, "INSERT INTO observation_revisions") {
+				return nil, errors.New("capture failed")
+			}
+			return originalExec(db, query, args...)
+		}
+		mutation := SyncMutation{Seq: 1, Entity: SyncEntityObservation, EntityKey: obs.SyncID, Op: SyncOpUpsert,
+			Payload: `{"sync_id":"` + obs.SyncID + `","session_id":"s1","type":"decision","title":"must rollback","content":"changed","project":"omnia","scope":"project"}`}
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err == nil {
+			t.Fatal("pulled update unexpectedly succeeded")
+		}
+		got, err := s.GetObservation(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Title != "pull rollback" {
+			t.Fatalf("title after rollback = %q", got.Title)
+		}
+		state, err := s.GetSyncState(DefaultSyncTargetKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.LastPulledSeq != 0 {
+			t.Fatalf("pull cursor after rollback = %d, want 0", state.LastPulledSeq)
+		}
+	})
 }

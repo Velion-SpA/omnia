@@ -6421,6 +6421,58 @@ func (s *Store) DeleteProject(project string, hardDelete bool) (*DeleteProjectRe
 			`, project, project); err != nil {
 				return fmt.Errorf("delete project: orphan relations: %w", err)
 			}
+			deletedAt := Now()
+			rows, err := s.queryItHook(tx, `
+				SELECT sync_id, ifnull(content, '')
+				FROM observations
+				WHERE project = ? AND trim(ifnull(sync_id, '')) != ''
+			`, project)
+			if err != nil {
+				return fmt.Errorf("delete project: read observations for tombstones: %w", err)
+			}
+			type projectDeletionProof struct {
+				syncID, content string
+			}
+			var proofs []projectDeletionProof
+			for rows.Next() {
+				var proof projectDeletionProof
+				if err := rows.Scan(&proof.syncID, &proof.content); err != nil {
+					_ = rows.Close()
+					return fmt.Errorf("delete project: scan observation for tombstone: %w", err)
+				}
+				proofs = append(proofs, proof)
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("delete project: read observations for tombstones: %w", err)
+			}
+			if err := rows.Close(); err != nil {
+				return fmt.Errorf("delete project: close observations for tombstones: %w", err)
+			}
+			for _, proof := range proofs {
+				if _, err := s.execHook(tx, `
+					INSERT INTO deletion_tombstones
+						(sync_id, entity, project, actor, reason, content_hash, hard, deleted_at)
+					VALUES (?, 'observation', ?, NULL, 'hard_delete', ?, 1, ?)
+					ON CONFLICT(sync_id) DO UPDATE SET
+						project      = excluded.project,
+						content_hash = excluded.content_hash,
+						hard         = excluded.hard,
+						deleted_at   = excluded.deleted_at,
+						actor        = excluded.actor,
+						reason       = excluded.reason
+				`, proof.syncID, project, hashNormalized(proof.content), deletedAt); err != nil {
+					return fmt.Errorf("delete project: write deletion tombstone: %w", err)
+				}
+			}
+			if _, err := s.execHook(tx, `
+				DELETE FROM observation_revisions
+				WHERE obs_sync_id IN (
+					SELECT sync_id FROM observations WHERE project = ?
+				)
+			`, project); err != nil {
+				return fmt.Errorf("delete project: purge observation revisions: %w", err)
+			}
 			res, err := s.execHook(tx, `DELETE FROM observations WHERE project = ?`, project)
 			if err != nil {
 				return fmt.Errorf("delete project: hard-delete observations: %w", err)
@@ -7689,6 +7741,12 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	if strings.TrimSpace(payload.UpdatedAt) == "" {
 		updatedAt = existing.UpdatedAt
 	}
+	if s.cfg.TimeTravelEnabled {
+		updatedAt = observationMutationTimestamp(existing.UpdatedAt, updatedAt)
+		if err := s.captureObservationRevisionTx(tx, existing, revisionOpUpdate, updatedAt); err != nil {
+			return err
+		}
+	}
 
 	_, err = s.execHook(tx,
 		`UPDATE observations
@@ -7725,6 +7783,9 @@ func (s *Store) applyObservationDeleteTx(tx *sql.Tx, payload syncObservationPayl
 		if _, err := s.execHook(tx, `DELETE FROM observations WHERE id = ?`, existing.ID); err != nil {
 			return err
 		}
+		if err := s.purgeObservationRevisionsTx(tx, existing.SyncID); err != nil {
+			return err
+		}
 		// ── Memory provenance foundation (omnia-provenance-foundation) ───────
 		// The pull path writes its OWN deletion_tombstones row — the proof
 		// must replicate independent of whatever happened on the pushing
@@ -7746,14 +7807,29 @@ func (s *Store) applyObservationDeleteTx(tx *sql.Tx, payload syncObservationPayl
 		}
 		return nil
 	}
-	deletedAt := payload.DeletedAt
-	if deletedAt == nil {
-		now := Now()
-		deletedAt = &now
+	if !s.cfg.TimeTravelEnabled {
+		deletedAt := payload.DeletedAt
+		if deletedAt == nil {
+			now := Now()
+			deletedAt = &now
+		}
+		_, err = s.execHook(tx,
+			`UPDATE observations SET deleted_at = ?, updated_at = datetime('now') WHERE id = ?`,
+			deletedAt, existing.ID,
+		)
+		return err
+	}
+	proposedDeletedAt := ""
+	if payload.DeletedAt != nil {
+		proposedDeletedAt = *payload.DeletedAt
+	}
+	mutationAt := observationMutationTimestamp(existing.UpdatedAt, proposedDeletedAt)
+	if err := s.captureObservationRevisionTx(tx, existing, revisionOpSoftDelete, mutationAt); err != nil {
+		return err
 	}
 	_, err = s.execHook(tx,
-		`UPDATE observations SET deleted_at = ?, updated_at = datetime('now') WHERE id = ?`,
-		deletedAt, existing.ID,
+		`UPDATE observations SET deleted_at = ?, updated_at = ? WHERE id = ?`,
+		mutationAt, mutationAt, existing.ID,
 	)
 	return err
 }
