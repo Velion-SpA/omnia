@@ -70,20 +70,33 @@ func captureOutput(t *testing.T, fn func()) (stdout string, stderr string) {
 	if err != nil {
 		t.Fatalf("stdout pipe: %v", err)
 	}
+	defer outR.Close()
 	errR, errW, err := os.Pipe()
 	if err != nil {
+		_ = outW.Close()
 		t.Fatalf("stderr pipe: %v", err)
 	}
+	defer errR.Close()
 
 	os.Stdout = outW
 	os.Stderr = errW
 
-	fn()
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		restored = true
 
-	_ = outW.Close()
-	_ = errW.Close()
-	os.Stdout = oldOut
-	os.Stderr = oldErr
+		os.Stdout = oldOut
+		os.Stderr = oldErr
+		_ = outW.Close()
+		_ = errW.Close()
+	}
+	defer restore()
+
+	fn()
+	restore()
 
 	outBytes, err := io.ReadAll(outR)
 	if err != nil {
@@ -95,6 +108,32 @@ func captureOutput(t *testing.T, fn func()) (stdout string, stderr string) {
 	}
 
 	return string(outBytes), string(errBytes)
+}
+
+func TestCaptureOutputRestoresStreamsAfterPanic(t *testing.T) {
+	oldOut := os.Stdout
+	oldErr := os.Stderr
+	const panicValue = "capture panic"
+
+	var recovered any
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		_, _ = captureOutput(t, func() {
+			panic(panicValue)
+		})
+	}()
+
+	if recovered != panicValue {
+		t.Fatalf("expected panic %q to propagate, got %v", panicValue, recovered)
+	}
+	if os.Stdout != oldOut {
+		t.Fatal("captureOutput did not restore os.Stdout after panic")
+	}
+	if os.Stderr != oldErr {
+		t.Fatal("captureOutput did not restore os.Stderr after panic")
+	}
 }
 
 func mustSeedObservation(t *testing.T, cfg store.Config, sessionID, project, typ, title, content, scope string) int64 {
