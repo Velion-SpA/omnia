@@ -3,12 +3,163 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const revisionOpUpdate, revisionOpSoftDelete = "update", "soft_delete"
+
+var ErrBisectEventTombstoned = errors.New("bisect event tombstoned")
+var ErrBisectStateStale = errors.New("bisect state stale")
+
+type BisectEvent struct {
+	ID        int64  `json:"id"`
+	SyncID    string `json:"sync_id"`
+	CreatedAt string `json:"created_at"`
+}
+
+type bisectPoint struct {
+	at time.Time
+	id int64
+}
+
+func compareBisectPoints(left, right bisectPoint) int {
+	if left.at.Before(right.at) {
+		return -1
+	}
+	if left.at.After(right.at) {
+		return 1
+	}
+	if left.id < right.id {
+		return -1
+	}
+	if left.id > right.id {
+		return 1
+	}
+	return 0
+}
+
+func bisectEventPoint(event BisectEvent) (bisectPoint, error) {
+	if event.ID <= 0 || strings.TrimSpace(event.SyncID) == "" {
+		return bisectPoint{}, errors.New("invalid bisect event identity")
+	}
+	at, err := parseObservationTime(event.CreatedAt)
+	if err != nil {
+		return bisectPoint{}, err
+	}
+	return bisectPoint{at: at, id: event.ID}, nil
+}
+
+func ValidateBisectEvents(events []BisectEvent) error {
+	var previous bisectPoint
+	for i, event := range events {
+		point, err := bisectEventPoint(event)
+		if err != nil {
+			return fmt.Errorf("invalid bisect event %d: %w", i, err)
+		}
+		if i > 0 && compareBisectPoints(previous, point) >= 0 {
+			return errors.New("bisect candidates are not strictly ordered")
+		}
+		previous = point
+	}
+	return nil
+}
+
+func (s *Store) BisectEvents(goodRef, badRef string) ([]BisectEvent, error) {
+	if !s.cfg.TimeTravelEnabled {
+		return nil, errors.New("time travel is disabled")
+	}
+	resolve := func(ref string) (bisectPoint, error) {
+		if strings.EqualFold(strings.TrimSpace(ref), "now") {
+			return bisectPoint{at: time.Now().UTC(), id: int64(1<<63 - 1)}, nil
+		}
+		if id, err := strconv.ParseInt(strings.TrimSpace(ref), 10, 64); err == nil && id > 0 {
+			var raw string
+			if err := s.db.QueryRow(`SELECT created_at FROM observations WHERE id=?`, id).Scan(&raw); err != nil {
+				return bisectPoint{}, fmt.Errorf("resolve observation bound %d: %w", id, err)
+			}
+			at, err := parseObservationTime(raw)
+			return bisectPoint{at: at, id: id}, err
+		}
+		at, err := parseObservationTime(ref)
+		return bisectPoint{at: at, id: int64(1<<63 - 1)}, err
+	}
+	good, err := resolve(goodRef)
+	if err != nil {
+		return nil, fmt.Errorf("invalid good bound: %w", err)
+	}
+	bad, err := resolve(badRef)
+	if err != nil {
+		return nil, fmt.Errorf("invalid bad bound: %w", err)
+	}
+	if compareBisectPoints(good, bad) >= 0 {
+		return nil, errors.New("good bound must precede bad bound")
+	}
+	boundaryAt, boundaryID, err := s.timeTravelBoundary()
+	if err != nil {
+		return nil, err
+	}
+	if compareBisectPoints(good, bisectPoint{at: boundaryAt, id: boundaryID}) < 0 {
+		return nil, historyUnavailableError(boundaryAt)
+	}
+	rows, err := s.db.Query(`SELECT id, ifnull(sync_id,''), created_at FROM observations`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []BisectEvent
+	for rows.Next() {
+		var event BisectEvent
+		if err := rows.Scan(&event.ID, &event.SyncID, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		point, parseErr := bisectEventPoint(event)
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid recorded event instant for observation %d: %w", event.ID, parseErr)
+		}
+		if compareBisectPoints(point, good) > 0 && compareBisectPoints(point, bad) <= 0 {
+			events = append(events, event)
+		}
+	}
+	sort.Slice(events, func(i, j int) bool {
+		left, _ := bisectEventPoint(events[i])
+		right, _ := bisectEventPoint(events[j])
+		return compareBisectPoints(left, right) < 0
+	})
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return events, ValidateBisectEvents(events)
+}
+
+func (s *Store) BisectEventState(event BisectEvent) (*Observation, error) {
+	var tombstoned int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM deletion_tombstones WHERE sync_id=? AND hard=1`, event.SyncID).Scan(&tombstoned); err != nil {
+		return nil, err
+	}
+	if tombstoned > 0 {
+		return nil, ErrBisectEventTombstoned
+	}
+	var createdAt string
+	if err := s.db.QueryRow(`SELECT created_at FROM observations WHERE id=? AND sync_id=?`, event.ID, event.SyncID).Scan(&createdAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrBisectStateStale
+		}
+		return nil, err
+	}
+	if createdAt != event.CreatedAt {
+		return nil, ErrBisectStateStale
+	}
+	obs, err := s.StateAsOf(event.ID, createdAt)
+	if err == sql.ErrNoRows {
+		err = ErrBisectStateStale
+	}
+	return obs, err
+}
 
 // ReadInstant returns wall time for live reads or the normalized as_of instant.
 func ReadInstant(asOf string) time.Time {
