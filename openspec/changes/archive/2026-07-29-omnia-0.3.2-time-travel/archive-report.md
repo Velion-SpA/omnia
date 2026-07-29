@@ -5,6 +5,7 @@
 **Artifact mode**: Hybrid
 **Archive path**: `openspec/changes/archive/2026-07-29-omnia-0.3.2-time-travel/`
 **Final pre-archive artifact commit**: `6b57800e1acd60ecaaebbb71352c2b6d788354dc`
+**Archive filesystem commit**: `9ae7fe43e82a89c809790cf0719928b1bce131e6`
 **Verified implementation HEAD**: `eb259ce12f3b6cbea1aee8a7bd74a30b9f306457`
 **Source remediation**: `24c0e7325b604ae47f1abb72ea45425462060e38`
 **Verification verdict**: **PASS WITH WARNINGS**
@@ -66,8 +67,8 @@ follow-up.
 
 ## Hybrid Memory Traceability
 
-The parent orchestrator owns final Omnia-direct and mandatory Engram persistence
-for this report.
+Final Omnia-direct and mandatory Engram persistence is complete for this
+report.
 
 | Artifact | Topic key | Omnia direct ID | Engram ID |
 |---|---|---:|---:|
@@ -77,11 +78,10 @@ for this report.
 | Tasks | `sdd/omnia-0.3.2-time-travel/tasks` | #1709 | #1536 |
 | Apply progress | `sdd/omnia-0.3.2-time-travel/apply-progress` | #1713 | #1537 |
 | Verify report | `sdd/omnia-0.3.2-time-travel/verify-report` | #1759 | #1602 |
-| Archive report | `sdd/omnia-0.3.2-time-travel/archive-report` | pending parent persistence | pending parent persistence |
+| Archive report | `sdd/omnia-0.3.2-time-travel/archive-report` | #1763 | #1607 |
 
 ## Result
 
 The OpenSpec portion of the SDD cycle is archived. Portable full-graph export,
 recorded-time queries, and deterministic local memory bisect are now represented
-in the main specification source of truth. Final hybrid memory mirroring remains
-with the parent orchestrator as explicitly assigned.
+in the main specification source of truth. Final hybrid memory mirroring is complete.
