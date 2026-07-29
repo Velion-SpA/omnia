@@ -193,3 +193,78 @@ func (s *Store) timeTravelBoundary() (time.Time, int64, error) {
 func historyUnavailableError(start time.Time) error {
 	return fmt.Errorf("history unavailable before %s (history starts when time_travel is enabled and retained)", start.Format(time.RFC3339Nano))
 }
+
+func (s *Store) SearchResultsAsOf(results []SearchResult, timestamp string) ([]SearchResult, error) {
+	if !s.cfg.TimeTravelEnabled || strings.TrimSpace(timestamp) == "" {
+		return results, nil
+	}
+	resolved := make([]SearchResult, 0, len(results))
+	for _, hit := range results {
+		obs, err := s.StateAsOf(hit.ID, timestamp)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		hit.Observation = *obs
+		resolved = append(resolved, hit)
+	}
+	return resolved, nil
+}
+func (s *Store) SearchAsOf(query string, opts SearchOptions, timestamp string) ([]SearchResult, error) {
+	if !s.cfg.TimeTravelEnabled || strings.TrimSpace(timestamp) == "" {
+		return s.Search(query, opts)
+	}
+	at, err := parseObservationTime(timestamp)
+	if err != nil {
+		return nil, fmt.Errorf("invalid as_of timestamp: %w", err)
+	}
+	if at.After(time.Now().UTC()) {
+		return s.Search(query, opts)
+	}
+	historyStart, _, err := s.timeTravelBoundary()
+	if err != nil {
+		return nil, err
+	}
+	project, _ := NormalizeProject(opts.Project)
+	var candidateLimit int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations`).Scan(&candidateLimit); err != nil {
+		return nil, err
+	}
+	candidateOpts := SearchOptions{Limit: candidateLimit, Diag: opts.Diag, IncludeDeleted: true}
+	candidateOpts.postFilter = func(candidates []SearchResult) ([]SearchResult, error) {
+		resolved, err := s.SearchResultsAsOf(candidates, timestamp)
+		if err != nil {
+			return nil, err
+		}
+		filtered := resolved[:0]
+		for _, hit := range resolved {
+			hitProject, _ := NormalizeProject(derefString(hit.Project))
+			if (opts.Type == "" || hit.Type == opts.Type) &&
+				(project == "" || hitProject == project) &&
+				(opts.Scope == "" || hit.Scope == normalizeScope(opts.Scope)) {
+				filtered = append(filtered, hit)
+			}
+		}
+		return filtered, nil
+	}
+	filtered, err := s.Search(query, candidateOpts)
+	if err != nil {
+		return nil, err
+	}
+	if len(filtered) == 0 && at.Before(historyStart) {
+		return nil, historyUnavailableError(historyStart)
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > s.cfg.MaxSearchResults {
+		limit = s.cfg.MaxSearchResults
+	}
+	if len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+	return filtered, nil
+}

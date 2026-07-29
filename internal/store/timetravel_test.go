@@ -567,3 +567,84 @@ func TestStateAsOfRecordingBoundaryAndUnmodifiedLegacyRows(t *testing.T) {
 		t.Fatalf("unmodified legacy state rejected by unrelated history: %+v, %v (enabled %s)", got, err, startedAt)
 	}
 }
+
+func TestSearchAsOfRecordedFiltersRetentionAndMixedCaseProject(t *testing.T) {
+	s := newTimeTravelStore(t, true, 0)
+	id := addTimeTravelObservation(t, s, "original", "")
+	if _, err := s.db.Exec(`UPDATE observations SET project = 'OmNiA' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	same := "original content"
+	original, _ := s.UpdateObservation(id, UpdateObservationParams{Content: &same})
+	typ, project, scope, content := "pattern", "other", "personal", "current searchable"
+	if _, err := s.UpdateObservation(id, UpdateObservationParams{
+		Type: &typ, Project: &project, Scope: &scope, Content: &content,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := s.SearchAsOf("searchable", SearchOptions{
+		Type: "decision", Project: "OMNIA", Scope: "project",
+	}, original.UpdatedAt)
+	if err != nil || len(hits) != 1 || hits[0].Title != "original" {
+		t.Fatalf("historical mixed-case filter = %#v, %v", hits, err)
+	}
+	rejected, err := s.SearchAsOf("searchable", SearchOptions{
+		Type: typ, Project: project, Scope: scope,
+	}, original.UpdatedAt)
+	if err != nil || len(rejected) != 0 {
+		t.Fatalf("historically invalid filters returned %#v, %v", rejected, err)
+	}
+}
+
+func TestSearchResultsAsOfRetentionGap(t *testing.T) {
+	s := newTimeTravelStore(t, true, 1)
+	id := addTimeTravelObservation(t, s, "retained search", "")
+	first, _ := s.GetObservation(id)
+	for _, content := range []string{"middle", "current searchable"} {
+		if _, err := s.UpdateObservation(id, UpdateObservationParams{Content: &content}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, _ := s.Search("searchable", SearchOptions{})
+	if historical, err := s.SearchResultsAsOf(current, first.UpdatedAt); err == nil || historical != nil {
+		t.Fatalf("pruned search = %#v, %v; want retention error", historical, err)
+	}
+	oldOnly, err := s.Search("middle", SearchOptions{})
+	if err != nil || len(oldOnly) != 0 {
+		t.Fatalf("historical-only text must not be indexed: %#v, %v", oldOnly, err)
+	}
+}
+
+func TestSearchAsOfRelaxesAfterHistoricalFiltering(t *testing.T) {
+	s := newTimeTravelStore(t, true, 0)
+	eligible := addTimeTravelObservation(t, s, "eligible memory", "")
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "decision", Title: "eligible and memory",
+		Content: "strict out of scope", Project: "other", Scope: "project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var diag SearchDiag
+	hits, err := s.SearchAsOf("eligible and memory", SearchOptions{
+		Project: "omnia", Scope: "project", Diag: &diag,
+	}, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil || len(hits) != 1 || hits[0].ID != eligible {
+		t.Fatalf("historically filtered relaxation = %#v, %v", hits, err)
+	}
+	if !diag.Relaxed || diag.Step != 1 || diag.Exhausted {
+		t.Fatalf("historical relaxation diag = %+v", diag)
+	}
+}
+
+func TestSearchAsOfZeroHitBeforeRecordingBoundary(t *testing.T) {
+	s := newTimeTravelStore(t, true, 0)
+	var startedAt string
+	if err := s.db.QueryRow(`SELECT started_at FROM time_travel_metadata WHERE id = 1`).Scan(&startedAt); err != nil {
+		t.Fatal(err)
+	}
+	start, _ := parseObservationTime(startedAt)
+	_, err := s.SearchAsOf("no-candidate", SearchOptions{}, start.Add(-time.Second).Format(time.RFC3339Nano))
+	if err == nil || !strings.Contains(err.Error(), startedAt) {
+		t.Fatalf("zero-hit boundary error = %v, want exact persisted %s", err, startedAt)
+	}
+}

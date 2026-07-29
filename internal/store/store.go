@@ -200,10 +200,12 @@ type TimelineResult struct {
 }
 
 type SearchOptions struct {
-	Type    string `json:"type,omitempty"`
-	Project string `json:"project,omitempty"`
-	Scope   string `json:"scope,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
+	Type           string `json:"type,omitempty"`
+	Project        string `json:"project,omitempty"`
+	Scope          string `json:"scope,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
+	IncludeDeleted bool   `json:"-"`
+	postFilter     func([]SearchResult) ([]SearchResult, error)
 	// Diag, when non-nil, receives the outcome of the zero-hit FTS
 	// relaxation ladder (design obs #1668 D7, spec fts-recall) for this
 	// call — an output parameter, not a request field, so it is never
@@ -4287,7 +4289,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	if limit <= 0 {
 		limit = 10
 	}
-	if limit > s.cfg.MaxSearchResults {
+	if limit > s.cfg.MaxSearchResults && !opts.IncludeDeleted {
 		limit = s.cfg.MaxSearchResults
 	}
 
@@ -4296,9 +4298,9 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		tkSQL := `
 			SELECT ` + observationSelectColumns + `
 			FROM observations
-			WHERE topic_key = ? AND deleted_at IS NULL
+			WHERE topic_key = ? AND (? OR deleted_at IS NULL)
 		`
-		tkArgs := []any{query}
+		tkArgs := []any{query, opts.IncludeDeleted}
 
 		if opts.Type != "" {
 			tkSQL += " AND type = ?"
@@ -4396,7 +4398,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		// still runs (reverse-only) even when no probe survives the
 		// distinctiveness guards.
 		orClauses := make([]string, 0, len(probes)+1)
-		sigArgs := []any{minSignatureLength}
+		sigArgs := []any{minSignatureLength, opts.IncludeDeleted}
 		for _, probe := range probes {
 			orClauses = append(orClauses, "error_signature LIKE '%' || ? || '%'")
 			sigArgs = append(sigArgs, probe)
@@ -4410,10 +4412,9 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			WHERE error_signature IS NOT NULL
 			  AND error_signature != ''
 			  AND LENGTH(error_signature) >= ?
-			  AND deleted_at IS NULL
+			  AND (? OR deleted_at IS NULL)
 			  AND ( ` + strings.Join(orClauses, "\n			        OR ") + ` )
 		`
-
 		if opts.Type != "" {
 			sigSQL += " AND type = ?"
 			sigArgs = append(sigArgs, opts.Type)
@@ -4457,6 +4458,12 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	if err != nil {
 		return nil, err
 	}
+	if opts.postFilter != nil {
+		ftsResults, err = opts.postFilter(ftsResults)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// ── Zero-hit relaxation ladder (design obs #1668 D7, spec fts-recall,
 	// repro obs #1659/#1662) ────────────────────────────────────────────
@@ -4484,9 +4491,19 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		*opts.Diag = diag
 	}
 
+	preemptive := append(directResults, signatureResults...)
+	if opts.postFilter != nil {
+		preemptive, err = opts.postFilter(preemptive)
+		if err != nil {
+			return nil, err
+		}
+		seen = make(map[int64]bool, len(preemptive))
+		for _, result := range preemptive {
+			seen[result.ID] = true
+		}
+	}
 	var results []SearchResult
-	results = append(results, directResults...)
-	results = append(results, signatureResults...)
+	results = append(results, preemptive...)
 	for _, sr := range ftsResults {
 		if !seen[sr.ID] {
 			results = append(results, sr)
@@ -4536,9 +4553,9 @@ func (s *Store) runFTSQuery(ftsQuery string, opts SearchOptions, limit int) ([]S
 		       fts.rank
 		FROM observations_fts fts
 		JOIN observations o ON o.id = fts.rowid
-		WHERE observations_fts MATCH ? AND o.deleted_at IS NULL
+		WHERE observations_fts MATCH ? AND (? OR o.deleted_at IS NULL)
 	`
-	args := []any{ftsQuery}
+	args := []any{ftsQuery, opts.IncludeDeleted}
 
 	if opts.Type != "" {
 		sqlQ += " AND o.type = ?"
@@ -4683,6 +4700,12 @@ func (s *Store) zeroHitRelax(words []string, opts SearchOptions, limit int) ([]S
 		if err != nil {
 			return nil, SearchDiag{}, err
 		}
+		if opts.postFilter != nil {
+			step1Results, err = opts.postFilter(step1Results)
+			if err != nil {
+				return nil, SearchDiag{}, err
+			}
+		}
 		if len(step1Results) > 0 {
 			return step1Results, SearchDiag{Relaxed: true, Step: 1}, nil
 		}
@@ -4705,6 +4728,12 @@ func (s *Store) zeroHitRelax(words []string, opts SearchOptions, limit int) ([]S
 	step2Results, err := s.runFTSQuery(step2Query, opts, limit)
 	if err != nil {
 		return nil, SearchDiag{}, err
+	}
+	if opts.postFilter != nil {
+		step2Results, err = opts.postFilter(step2Results)
+		if err != nil {
+			return nil, SearchDiag{}, err
+		}
 	}
 	if len(step2Results) > 0 {
 		return step2Results, SearchDiag{Relaxed: true, Step: 2}, nil
