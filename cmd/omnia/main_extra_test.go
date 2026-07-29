@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -648,19 +650,150 @@ func TestCloudEnrollAndSyncHelpDoNotMutateLocalState(t *testing.T) {
 	}
 }
 
-func TestUpdateChecksSkipCriticalStartupCommands(t *testing.T) {
-	if shouldCheckForUpdates([]string{"mcp"}) {
-		t.Fatal("mcp startup must not run update check")
+func TestUpdateCheckPolicy(t *testing.T) {
+	tests := []struct {
+		name              string
+		args              []string
+		timeTravelEnabled bool
+		want              bool
+	}{
+		{name: "mcp", args: []string{"mcp"}, want: false},
+		{name: "serve", args: []string{"serve"}, want: false},
+		{name: "cloud serve", args: []string{"cloud", "serve"}, want: false},
+		{name: "portable export", args: []string{"export", "backup.json"}, want: false},
+		{name: "portable import", args: []string{"import", "backup.json"}, want: false},
+		{name: "enabled recorded-time search", args: []string{"search", "query", "--as-of", "2025-01-01T00:00:00Z"}, timeTravelEnabled: true, want: false},
+		{name: "enabled recorded-time context equals form", args: []string{"context", "--as-of=2025-01-01", "project"}, timeTravelEnabled: true, want: false},
+		{name: "disabled search stays live", args: []string{"search", "query", "--as-of", "2025-01-01T00:00:00Z"}, want: true},
+		{name: "disabled context stays live", args: []string{"context", "--as-of=2025-01-01", "project"}, want: true},
+		{name: "last repeated value wins", args: []string{"search", "query", "--as-of=", "--as-of", "2025-01-01"}, timeTravelEnabled: true, want: false},
+		{name: "last repeated empty value disables recorded time", args: []string{"search", "query", "--as-of", "2025-01-01", "--as-of="}, timeTravelEnabled: true, want: true},
+		{name: "missing value is not active", args: []string{"search", "query", "--as-of"}, timeTravelEnabled: true, want: true},
+		{name: "following flag is not a value", args: []string{"search", "query", "--as-of", "--limit", "1"}, timeTravelEnabled: true, want: true},
+		{name: "search preceding option consumes as-of flag", args: []string{"search", "query", "--limit", "--as-of", "2025-01-01"}, timeTravelEnabled: true, want: true},
+		{name: "context preceding option consumes as-of flag", args: []string{"context", "--scope", "--as-of", "2025-01-01"}, timeTravelEnabled: true, want: true},
+		{name: "future value resolves live", args: []string{"context", "--as-of=2999-01-01", "project"}, timeTravelEnabled: true, want: true},
+		{name: "invalid value is not active", args: []string{"search", "query", "--as-of=invalid"}, timeTravelEnabled: true, want: true},
+		{name: "live search", args: []string{"search", "query"}, want: true},
+		{name: "live context", args: []string{"context", "project"}, want: true},
+		{name: "normal command", args: []string{"version"}, want: true},
 	}
-	if shouldCheckForUpdates([]string{"serve"}) {
-		t.Fatal("serve startup must not run update check")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldCheckForUpdatesWithTimeTravel(tt.args, tt.timeTravelEnabled); got != tt.want {
+				t.Fatalf("shouldCheckForUpdatesWithTimeTravel(%q, %v) = %v, want %v", tt.args, tt.timeTravelEnabled, got, tt.want)
+			}
+		})
 	}
-	if shouldCheckForUpdates([]string{"cloud", "serve"}) {
-		t.Fatal("cloud serve startup must not run update check")
+}
+
+func TestReleaseLikeOfflineUpdateCheckPolicy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and executes a release-like CLI binary")
 	}
-	if !shouldCheckForUpdates([]string{"version"}) {
-		t.Fatal("normal commands should keep update output")
+
+	root := t.TempDir()
+	bin := filepath.Join(root, "omnia")
+	build := exec.Command("go", "build", "-ldflags", "-X main.version=0.3.2", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build release-like CLI: %v\n%s", err, out)
 	}
+
+	home := filepath.Join(root, "home")
+	configPath := filepath.Join(home, ".config", "omnia", "config.yaml")
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTimeTravelConfig := func(enabled bool) {
+		t.Helper()
+		raw := fmt.Sprintf("time_travel:\n  enabled: %t\n  max_revisions_per_memory: 0\n", enabled)
+		if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTimeTravelConfig(true)
+
+	baseEnv := append(os.Environ(),
+		"HOME="+home,
+		"OMNIA_DATA_DIR="+dataDir,
+		"HTTPS_PROXY=http://127.0.0.1:1",
+		"HTTP_PROXY=http://127.0.0.1:1",
+		"https_proxy=http://127.0.0.1:1",
+		"http_proxy=http://127.0.0.1:1",
+		"NO_PROXY=",
+		"no_proxy=",
+		"OMNIA_NO_UPDATE_CHECK=",
+	)
+	runWithEnv := func(name string, env []string, wantUpdateAttempt bool, args ...string) (string, string) {
+		t.Helper()
+		cmd := exec.Command(bin, args...)
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		attempted := strings.Contains(stderr.String(), "Could not check for updates")
+		if attempted != wantUpdateAttempt {
+			t.Fatalf("%s update attempt = %v, want %v\nstdout=%s\nstderr=%s", name, attempted, wantUpdateAttempt, stdout.String(), stderr.String())
+		}
+		return stdout.String(), stderr.String()
+	}
+	run := func(name string, wantUpdateAttempt bool, args ...string) (string, string) {
+		t.Helper()
+		return runWithEnv(name, baseEnv, wantUpdateAttempt, args...)
+	}
+
+	exportPath := filepath.Join(root, "export.json")
+	run("export", false, "export", exportPath)
+	run("import", false, "import", exportPath)
+	asOf := time.Now().UTC().Format(time.RFC3339Nano)
+	searchOut, _ := run("enabled recorded-time search", false, "search", "fixture", "--as-of", asOf)
+	if !strings.Contains(searchOut, "Recorded-time view:") {
+		t.Fatalf("recorded-time search did not activate: %s", searchOut)
+	}
+	contextOut, _ := run("enabled recorded-time context equals form", false, "context", "--as-of="+asOf)
+	if !strings.Contains(contextOut, "Recorded-time view:") {
+		t.Fatalf("recorded-time context did not activate: %s", contextOut)
+	}
+	run("last repeated empty value", true, "search", "fixture", "--as-of", asOf, "--as-of=")
+	run("missing value before another flag", true, "search", "fixture", "--as-of", "--limit", "1")
+
+	slowProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer slowProxy.Close()
+	slowProxyEnv := append(baseEnv,
+		"HTTPS_PROXY="+slowProxy.URL,
+		"HTTP_PROXY="+slowProxy.URL,
+		"https_proxy="+slowProxy.URL,
+		"http_proxy="+slowProxy.URL,
+	)
+	nearFuture := time.Now().UTC().Add(350 * time.Millisecond).Format(time.RFC3339Nano)
+	futureOut, _ := runWithEnv("near-future as-of stays live across slow update", slowProxyEnv, true,
+		"search", "fixture", "--as-of", nearFuture)
+	if strings.Contains(futureOut, "Recorded-time view:") {
+		t.Fatalf("near-future as-of changed from live to recorded during update check: %s", futureOut)
+	}
+
+	searchMalformedOut, _ := run("search option consumes as-of", true, "search", "fixture", "--limit", "--as-of", asOf)
+	if strings.Contains(searchMalformedOut, "Recorded-time view:") {
+		t.Fatalf("malformed search unexpectedly activated recorded time: %s", searchMalformedOut)
+	}
+	contextMalformedOut, _ := run("context option consumes as-of", true, "context", "--scope", "--as-of", asOf)
+	if strings.Contains(contextMalformedOut, "Recorded-time view:") {
+		t.Fatalf("malformed context unexpectedly activated recorded time: %s", contextMalformedOut)
+	}
+
+	writeTimeTravelConfig(false)
+	run("disabled recorded-time flag", true, "search", "fixture", "--as-of", asOf)
 }
 
 func TestMainCloudHelpDoesNotCreateLocalDatabase(t *testing.T) {

@@ -673,10 +673,12 @@ func main() {
 		exitFunc(1)
 	}
 
-	if shouldCheckForUpdates(os.Args[1:]) {
+	args := os.Args[1:]
+	updateCheckNeedsConfig := recordedTimeCommand(args)
+	if !updateCheckNeedsConfig && shouldCheckForUpdates(args) {
 		printUpdateCheckResult(checkForUpdates(version))
 	}
-	if handleConfigFreeCommand(os.Args[1:]) {
+	if handleConfigFreeCommand(args) {
 		return
 	}
 
@@ -704,6 +706,22 @@ func main() {
 	if appCfg, err := config.Load(config.DefaultPath()); err == nil {
 		applyTimeTravelConfig(&cfg, appCfg)
 	}
+	var preparedSearch searchCommandPlan
+	var preparedContext contextCommandPlan
+	if updateCheckNeedsConfig {
+		resolvedAsOf := ""
+		switch strings.ToLower(strings.TrimSpace(args[0])) {
+		case "search":
+			preparedSearch = prepareSearchCommand(args[1:], cfg.TimeTravelEnabled)
+			resolvedAsOf = preparedSearch.asOf
+		case "context":
+			preparedContext = prepareContextCommand(args[1:], cfg.TimeTravelEnabled)
+			resolvedAsOf = preparedContext.asOf
+		}
+		if shouldCheckForUpdatesWithResolvedAsOf(args, resolvedAsOf) {
+			printUpdateCheckResult(checkForUpdates(version))
+		}
+	}
 
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
@@ -717,7 +735,7 @@ func main() {
 	case "tui":
 		cmdTUI(cfg)
 	case "search":
-		cmdSearch(cfg)
+		cmdSearchPrepared(cfg, preparedSearch)
 	case "recall-fix":
 		cmdRecallFix(cfg)
 	case "recall-backfill":
@@ -745,7 +763,7 @@ func main() {
 	case "doctor":
 		cmdDoctor(cfg)
 	case "context":
-		cmdContext(cfg)
+		cmdContextPrepared(cfg, preparedContext)
 	case "stats":
 		cmdStats(cfg)
 	case "export":
@@ -789,13 +807,33 @@ func applyTimeTravelConfig(cfg *store.Config, appCfg *config.Config) {
 }
 
 func shouldCheckForUpdates(args []string) bool {
+	return shouldCheckForUpdatesWithResolvedAsOf(args, "")
+}
+
+func shouldCheckForUpdatesWithTimeTravel(args []string, timeTravelEnabled bool) bool {
+	if len(args) == 0 {
+		return false
+	}
+	resolvedAsOf := ""
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "search":
+		resolvedAsOf = prepareSearchCommand(args[1:], timeTravelEnabled).asOf
+	case "context":
+		resolvedAsOf = prepareContextCommand(args[1:], timeTravelEnabled).asOf
+	}
+	return shouldCheckForUpdatesWithResolvedAsOf(args, resolvedAsOf)
+}
+
+func shouldCheckForUpdatesWithResolvedAsOf(args []string, resolvedAsOf string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "bisect":
+	case "mcp", "serve", "bisect", "export", "import":
 		return false
+	case "search", "context":
+		return strings.TrimSpace(resolvedAsOf) == ""
 	case "recall-fix":
 		// #1399 slice 2: invoked synchronously and frequently by the
 		// PostToolUse forced-activation hook on every tool call (after its
@@ -807,6 +845,31 @@ func shouldCheckForUpdates(args []string) bool {
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
 	}
 	return true
+}
+
+func recordedTimeCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "search", "context":
+		return true
+	}
+	return false
+}
+
+func parseAsOfArgument(args []string, i int) (value string, consumeNext, matched bool) {
+	arg := args[i]
+	if strings.HasPrefix(arg, "--as-of=") {
+		return strings.TrimPrefix(arg, "--as-of="), false, true
+	}
+	if arg != "--as-of" {
+		return "", false, false
+	}
+	if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+		return "", false, true
+	}
+	return args[i+1], true, true
 }
 
 func handleConfigFreeCommand(args []string) bool {
@@ -1302,70 +1365,85 @@ func cmdTUI(cfg store.Config) {
 	}
 }
 
+type searchCommandPlan struct {
+	query   string
+	opts    store.SearchOptions
+	explain bool
+	asOf    string
+	asOfErr error
+}
+
+func prepareSearchCommand(args []string, timeTravelEnabled bool) searchCommandPlan {
+	plan := searchCommandPlan{opts: store.SearchOptions{Limit: 10}}
+	var queryParts []string
+
+	for i := 0; i < len(args); i++ {
+		if value, consumeNext, matched := parseAsOfArgument(args, i); matched {
+			plan.asOf = value
+			if consumeNext {
+				i++
+			}
+			continue
+		}
+		switch args[i] {
+		case "--type":
+			if i+1 < len(args) {
+				plan.opts.Type = args[i+1]
+				i++
+			}
+		case "--project":
+			if i+1 < len(args) {
+				plan.opts.Project = args[i+1]
+				i++
+			}
+		case "--limit":
+			if i+1 < len(args) {
+				if n, err := strconv.Atoi(args[i+1]); err == nil {
+					plan.opts.Limit = n
+				}
+				i++
+			}
+		case "--scope":
+			if i+1 < len(args) {
+				plan.opts.Scope = args[i+1]
+				i++
+			}
+		case "--explain":
+			plan.explain = true
+		default:
+			queryParts = append(queryParts, args[i])
+		}
+	}
+	plan.query = strings.Join(queryParts, " ")
+	plan.asOf, plan.asOfErr = resolveCommandAsOf(plan.asOf, timeTravelEnabled)
+	return plan
+}
+
+func resolveCommandAsOf(asOf string, timeTravelEnabled bool) (string, error) {
+	if !timeTravelEnabled {
+		return "", nil
+	}
+	return store.NormalizeAsOf(asOf)
+}
+
 func cmdSearch(cfg store.Config) {
+	cmdSearchPrepared(cfg, prepareSearchCommand(os.Args[2:], cfg.TimeTravelEnabled))
+}
+
+func cmdSearchPrepared(cfg store.Config, plan searchCommandPlan) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: omnia search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N] [--as-of TIMESTAMP] [--explain]")
 		exitFunc(1)
 	}
 
-	// Collect the query (everything that's not a flag)
-	var queryParts []string
-	opts := store.SearchOptions{Limit: 10}
-	explain := false
-	asOf := ""
-
-	for i := 2; i < len(os.Args); i++ {
-		switch os.Args[i] {
-		case "--type":
-			if i+1 < len(os.Args) {
-				opts.Type = os.Args[i+1]
-				i++
-			}
-		case "--project":
-			if i+1 < len(os.Args) {
-				opts.Project = os.Args[i+1]
-				i++
-			}
-		case "--limit":
-			if i+1 < len(os.Args) {
-				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
-					opts.Limit = n
-				}
-				i++
-			}
-		case "--scope":
-			if i+1 < len(os.Args) {
-				opts.Scope = os.Args[i+1]
-				i++
-			}
-		case "--explain":
-			// Per-hit score breakdown (Requirement: Per-Hit Score
-			// Breakdown) — a bare flag, no value to consume.
-			explain = true
-		case "--as-of":
-			if i+1 < len(os.Args) {
-				asOf = os.Args[i+1]
-				i++
-			}
-		default:
-			queryParts = append(queryParts, os.Args[i])
-		}
-	}
-
-	query := strings.Join(queryParts, " ")
+	query, opts, explain, asOf := plan.query, plan.opts, plan.explain, plan.asOf
 	if query == "" {
 		fmt.Fprintln(os.Stderr, "error: search query is required")
 		exitFunc(1)
 	}
-	if cfg.TimeTravelEnabled {
-		normalizedAsOf, normalizeErr := store.NormalizeAsOf(asOf)
-		if normalizeErr != nil {
-			fatal(normalizeErr)
-			return
-		}
-		asOf = normalizedAsOf
-	} else {
-		asOf = ""
+	if plan.asOfErr != nil {
+		fatal(plan.asOfErr)
+		return
 	}
 
 	s, err := storeNew(cfg)
@@ -1841,38 +1919,48 @@ func cmdTimeline(cfg store.Config) {
 	}
 }
 
-func cmdContext(cfg store.Config) {
-	project := ""
-	scope := ""
-	asOf := ""
+type contextCommandPlan struct {
+	project string
+	scope   string
+	asOf    string
+	asOfErr error
+}
 
-	for i := 2; i < len(os.Args); i++ {
-		switch os.Args[i] {
-		case "--scope":
-			if i+1 < len(os.Args) {
-				scope = os.Args[i+1]
+func prepareContextCommand(args []string, timeTravelEnabled bool) contextCommandPlan {
+	var plan contextCommandPlan
+	for i := 0; i < len(args); i++ {
+		if value, consumeNext, matched := parseAsOfArgument(args, i); matched {
+			plan.asOf = value
+			if consumeNext {
 				i++
 			}
-		case "--as-of":
-			if i+1 < len(os.Args) {
-				asOf = os.Args[i+1]
+			continue
+		}
+		switch args[i] {
+		case "--scope":
+			if i+1 < len(args) {
+				plan.scope = args[i+1]
 				i++
 			}
 		default:
-			if project == "" {
-				project = os.Args[i]
+			if plan.project == "" {
+				plan.project = args[i]
 			}
 		}
 	}
-	if cfg.TimeTravelEnabled {
-		var err error
-		asOf, err = store.NormalizeAsOf(asOf)
-		if err != nil {
-			fatal(err)
-			return
-		}
-	} else {
-		asOf = ""
+	plan.asOf, plan.asOfErr = resolveCommandAsOf(plan.asOf, timeTravelEnabled)
+	return plan
+}
+
+func cmdContext(cfg store.Config) {
+	cmdContextPrepared(cfg, prepareContextCommand(os.Args[2:], cfg.TimeTravelEnabled))
+}
+
+func cmdContextPrepared(cfg store.Config, plan contextCommandPlan) {
+	project, scope, asOf := plan.project, plan.scope, plan.asOf
+	if plan.asOfErr != nil {
+		fatal(plan.asOfErr)
+		return
 	}
 
 	// Omnia v0.3 Context Economy (design obs #1643/D8, spec obs #1642 PR3):
