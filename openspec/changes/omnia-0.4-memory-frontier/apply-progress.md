@@ -804,3 +804,73 @@ composition rather than a literal same-file re-key (re-keying an EXISTING plaint
 post-hoc `PRAGMA` would not actually re-encrypt already-written pages), which achieves the same "never embed
 the key in SQL/URI text" goal while remaining correct for both migration directions (`MigrateToEncrypted`'s
 plaintext-only source and `RotateKey`'s encrypted-old-key source).
+
+## 2026-07-30 — CI fix: doctor threat-model tests depended on a real OS keychain (test-isolation bug, not a security bug)
+
+GitHub Actions CI (Linux runner) failed on this branch (`codex/v04-security-impl`) with:
+```
+--- FAIL: TestCmdDoctor_EncryptionEnabled_StatesThreatModel (0.00s)
+    doctor_test.go:326: store.New: engram: open database: keychain unavailable and allow_plaintext_fallback is not enabled: keychain: no supported CLI found on PATH: keychain: no supported CLI found on PATH: exec: "secret-tool": executable file not found in $PATH
+--- FAIL: TestCmdDoctor_EncryptionEnabled_JSONIncludesThreatModel (0.00s)
+    doctor_test.go:363: store.New: engram: open database: keychain unavailable and allow_plaintext_fallback is not enabled: keychain: no supported CLI found on PATH: keychain: no supported CLI found on PATH: exec: "secret-tool": executable file not found in $PATH
+```
+
+### Root cause
+Both tests (`cmd/omnia/doctor_test.go`, REQ-433 doctor threat-model coverage) set
+`cfg.EncryptionEnabled = true` and then called `seedDoctorSession`, which opened the store via
+`store.New(cfg)` **directly** — bypassing every injection seam this capability's own test suite already
+established. With encryption enabled and no fake keychain in play, `store.New` routed through the REAL
+`internal/store.openEngramDB` → `keychain.Resolve` → `internal/keychain.Client` path, which shells out to
+macOS `/usr/bin/security` (present and working locally, which is why these tests passed on the author's
+machine) or Linux `secret-tool` (absent on GitHub Actions' Linux runners, and on any minimal CI image) — CI
+therefore hit `ErrUnavailable` and, correctly, refused to open (fail-closed, `allow_plaintext_fallback=false`
+is the safe default). **The fail-closed behavior itself was correct and is not the bug** — this was a pure
+test-hygiene bug: these two tests should never have depended on (or been capable of silently passing only
+because of) a real OS keychain in the first place, on ANY host, not just CI.
+
+### Why the fix doesn't need the `internal/store`/`internal/embed` fake-keychain pattern verbatim
+`internal/store/encryption_test.go` and `internal/embed/encryption_test.go` already avoid touching the real
+keychain via an unexported package-level var (`newKeychainClient`) overridden by a `fakeKeychain` test double
+(`withFakeKeychain`). That exact var is unexported and unreachable from `cmd/omnia` (package `main`), which
+is where `doctor_test.go` lives. `cmd/omnia` already has its OWN equivalent DI seam for exactly this class of
+problem: the package-level `storeNew` var (`cmd/omnia/main.go:72`, `storeNew = store.New`), already used by
+this package's own tests (`context_budget_wiring_test.go`, `main_extra_test.go`) to intercept every
+`*store.Store` construction without touching real dependencies.
+
+### Fix (`cmd/omnia/doctor_test.go`)
+1. `seedDoctorSession` now calls `storeNew(cfg)` instead of `store.New(cfg)` directly, so it participates in
+   the package's existing override seam (no-op change for every other caller, since `storeNew` defaults to
+   `store.New`).
+2. New `withStoreNewIgnoringEncryption(t)` helper overrides `storeNew` so every call strips
+   `EncryptionEnabled`/`EncryptionKeychainService`/`EncryptionAllowPlaintextFallback` to their zero values
+   before delegating to the real `storeNew` — `internal/store/encryption.go`'s own
+   `if !cfg.EncryptionEnabled { return openDB(...) }` guard then guarantees the keychain is never consulted
+   at all. The `cfg` passed to `cmdDoctor(cfg)` itself is untouched (`EncryptionEnabled` stays `true`), so
+   `writeDoctorJSON`/`renderDoctorText` still exercise the REQ-433 threat-model-text branch being tested —
+   that branch only reads the boolean directly off `cfg`, independent of how the store was actually opened.
+3. Both tests now also call `t.Setenv("PATH", "")` before seeding, turning "verify the fix works with no
+   keychain CLI reachable" into a permanent, always-on regression assertion instead of a one-off manual
+   check — these two tests can now never again silently regress to depending on a real keychain and only
+   fail on Linux CI months later.
+
+Explicitly NOT done, per the task's own instruction: no `if runtime.GOOS == "darwin"` (or similar) skip/gate
+— that would silently stop testing this security-relevant behavior on Linux CI going forward.
+
+### Verification
+- RED confirmed: temporarily disabling `withStoreNewIgnoringEncryption(t)` while keeping `t.Setenv("PATH",
+  "")` reproduced the exact original CI failure locally (`keychain: no supported CLI found on PATH: exec:
+  "security": executable file not found in $PATH`), proving the new PATH-empty assertion actually
+  discriminates and that the fix (not incidental environment state) is what makes the tests pass.
+- GREEN confirmed: both tests pass with `PATH=""` (no keychain CLI reachable at all, i.e. real CI
+  conditions), and `TestCmdDoctor_EncryptionDisabled_NoThreatModelText` (the flag-off regression pin) is
+  unaffected.
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo, all packages)
+- `gofmt -l cmd/omnia/doctor_test.go` — clean
+- `git diff --check` — clean
+
+### Design Deviations
+None — this is a CI-environment test-isolation fix, not a design or security change. No production code
+(`internal/keychain`, `internal/store/encryption.go`, `internal/embed/encryption.go`, `cmd/omnia/doctor.go`)
+was touched; only `cmd/omnia/doctor_test.go` changed.

@@ -19,7 +19,7 @@ import (
 
 func seedDoctorSession(t *testing.T, cfg store.Config, id, project, directory string) {
 	t.Helper()
-	s, err := store.New(cfg)
+	s, err := storeNew(cfg)
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
@@ -314,13 +314,58 @@ func TestCmdDoctorSyncMutationRequiredFieldsBlockedEnvelope(t *testing.T) {
 	}
 }
 
+// withStoreNewIgnoringEncryption overrides the package's storeNew injection
+// seam (established by context_budget_wiring_test.go/main_extra_test.go) so
+// every call opens a real, ordinary UNENCRYPTED store regardless of
+// cfg.EncryptionEnabled.
+//
+// The two REQ-433 threat-model tests below need cfg.EncryptionEnabled=true
+// so cmdDoctor's text/JSON output includes the threat-model statement (a
+// value doctor.go reads directly off cfg, independent of how the store was
+// actually opened — see writeDoctorJSON/renderDoctorText), but they must
+// NEVER exercise the real encrypted-store code path to get there: that path
+// resolves a key via the OS keychain (macOS `security` / Linux
+// `secret-tool`), which is unavailable on CI runners (this is exactly the
+// CI failure this seam fixes) and — even where a real keychain CLI exists,
+// e.g. locally on macOS — a test must never depend on or mutate a real
+// user's OS keychain in the first place.
+//
+// internal/store already has its own equivalent seam for this
+// (newKeychainClient, overridden via encryption_test.go's fakeKeychain/
+// withFakeKeychain) but it is unexported and unreachable from this package.
+// Stripping the encryption fields before delegating to the real storeNew
+// achieves the identical isolation goal — store.New/openEngramDB's own
+// `if !cfg.EncryptionEnabled` guard (internal/store/encryption.go) means the
+// keychain is never consulted at all once these fields are cleared.
+func withStoreNewIgnoringEncryption(t *testing.T) {
+	t.Helper()
+	oldStoreNew := storeNew
+	storeNew = func(cfg store.Config) (*store.Store, error) {
+		cfg.EncryptionEnabled = false
+		cfg.EncryptionKeychainService = ""
+		cfg.EncryptionAllowPlaintextFallback = false
+		return oldStoreNew(cfg)
+	}
+	t.Cleanup(func() { storeNew = oldStoreNew })
+}
+
 // TestCmdDoctor_EncryptionEnabled_StatesThreatModel (v0.4
 // memory-at-rest-security, spec REQ-433): when encryption is active, the
 // stated threat model — protects at-rest/lost-device while the process is
 // stopped; does NOT protect a live-process memory dump or an attacker
 // holding the unlocked keychain — MUST be discoverable in `omnia doctor`'s
 // output (text and JSON).
+//
+// This test forces PATH empty so it is a real, permanent regression test
+// for the CI failure that motivated withStoreNewIgnoringEncryption above
+// (GitHub Actions Linux runners have neither `secret-tool` nor a usable
+// keychain): if this test ever again touched the real encrypted-store code
+// path, it would fail deterministically here — on any host, not just CI —
+// instead of silently passing locally via a real macOS `security` CLI and
+// only failing on Linux CI.
 func TestCmdDoctor_EncryptionEnabled_StatesThreatModel(t *testing.T) {
+	t.Setenv("PATH", "")
+	withStoreNewIgnoringEncryption(t)
 	cfg := testConfig(t)
 	cfg.EncryptionEnabled = true
 	seedDoctorSession(t, cfg, "manual-save-engram", "engram", "/work/engram")
@@ -357,7 +402,13 @@ func TestCmdDoctor_EncryptionDisabled_NoThreatModelText(t *testing.T) {
 // same statement is present in --json mode too (REQ-433: "or its linked
 // documentation" — but the JSON envelope is the natural machine-readable
 // surface, so this pins it directly there as well).
+//
+// Also forces PATH empty (see TestCmdDoctor_EncryptionEnabled_StatesThreatModel
+// above) — a real, permanent regression test proving this never depends on a
+// real OS keychain CLI, matching real CI conditions on every run.
 func TestCmdDoctor_EncryptionEnabled_JSONIncludesThreatModel(t *testing.T) {
+	t.Setenv("PATH", "")
+	withStoreNewIgnoringEncryption(t)
 	cfg := testConfig(t)
 	cfg.EncryptionEnabled = true
 	seedDoctorSession(t, cfg, "manual-save-engram", "engram", "/work/engram")
