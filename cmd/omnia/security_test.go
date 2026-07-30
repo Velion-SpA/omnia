@@ -327,6 +327,98 @@ func TestCmdSecurityRotateKey_RotatesAndUpdatesKeychainOnlyAfterSuccess(t *testi
 	}
 }
 
+// TestCmdSecurityRotateKey_KeychainSetFails_WritesRecoveryFileNotStderr is a
+// RED test for a real security bug: when the keychain Set call fails AFTER
+// both files have already been re-encrypted with the new key, the CLI used
+// to print the raw 64-char hex key directly to stderr (capturable via shell
+// redirection, terminal scrollback, CI log capture, or a pasted support
+// ticket). The fix: write the recovery key to a 0600 file in the data dir
+// and print only that file's PATH (plus recovery instructions) to stderr —
+// never the raw key value.
+func TestCmdSecurityRotateKey_KeychainSetFails_WritesRecoveryFileNotStderr(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeSecurityConfig(t, dir, "encryption: {enabled: true}\n")
+	cfg := testConfig(t)
+	cfg.DataDir = dir
+
+	seedCfg := cfg
+	seedCfg.DedupeWindow = 0
+	s, err := store.New(seedCfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	if err := s.CreateSession("sess", "engram", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "sess", Type: "manual", Title: "t", Content: "c", Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	s.Close()
+
+	oldExit := exitFunc
+	var exitCode int
+	exitFunc = func(code int) { exitCode = code }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	fk := &fakeSecurityKeychain{hexKey: securityTestHexKey}
+	withFakeSecurityKeychain(t, fk)
+	withArgs(t, "omnia", "security", "encrypt", "--config", cfgPath)
+	captureOutput(t, func() { cmdSecurity(cfg) })
+
+	// Force the keychain Set call to fail AFTER both files have already
+	// been rotated to a new key — the exact failure mode this test covers.
+	fk.setErr = errors.New("keychain locked")
+	withArgs(t, "omnia", "security", "rotate-key", "--config", cfgPath)
+	_, stderr := captureOutput(t, func() { cmdSecurity(cfg) })
+
+	if exitCode != 1 {
+		t.Errorf("exitCode = %d, want 1", exitCode)
+	}
+	if len(fk.sets) == 0 {
+		t.Fatalf("expected at least one attempted keychain Set call, got none")
+	}
+	newKey := fk.sets[len(fk.sets)-1]
+
+	if strings.Contains(stderr, newKey) {
+		t.Fatal("stderr must NEVER contain the raw rotated key")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var recoveryPath string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "security-rotate-recovery-") {
+			recoveryPath = filepath.Join(dir, e.Name())
+		}
+	}
+	if recoveryPath == "" {
+		t.Fatalf("expected a security-rotate-recovery-*.txt file in %s, stderr=%q", dir, stderr)
+	}
+	if !strings.Contains(stderr, recoveryPath) {
+		t.Fatalf("expected stderr to mention the recovery file path %q, got: %q", recoveryPath, stderr)
+	}
+
+	info, err := os.Stat(recoveryPath)
+	if err != nil {
+		t.Fatalf("stat recovery file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("recovery file perm = %o, want 0600", perm)
+	}
+
+	body, err := os.ReadFile(recoveryPath)
+	if err != nil {
+		t.Fatalf("read recovery file: %v", err)
+	}
+	if !strings.Contains(string(body), newKey) {
+		t.Fatal("recovery file must contain the new key")
+	}
+}
+
 // countObservationsWithKey opens dbPath via ncruces+adiantum+hexKey and
 // counts rows in observations — a package-boundary-safe way for this CLI
 // test to verify rotation without depending on internal/store's own
