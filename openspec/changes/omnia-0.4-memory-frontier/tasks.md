@@ -48,7 +48,7 @@ composition while reads stay brute-force, and PR 3 alone routes Vec1 reads.
 | 10 | Enforcement MCP/CLI, override, and audit taxonomy | PR 8 | Depends on PR 7; reforecast before apply. |
 | 11 | Consolidation cluster + Ollama client foundation | PR 9A | Complete (~197 lines). Landed independently of PR 2-8 — no hard dependency, only the suggested review order. |
 | 12 | Consolidation digest, CLI, and idle integration | PR 9B | Depends on PR 9A; ~263 lines. |
-| 13 | Learned-ranker feature/model and cold-start foundation | PR 10A | Depends on PR 9B; ~350 lines. |
+| 13 | Learned-ranker feature/model foundation (cold-start integration lands in PR 10B, not here) | PR 10A | Complete (350 lines). Landed independently of PR 2-9 — no hard dependency, only the suggested review order. |
 | 14 | Ranker train/eval/live integration | PR 10B | Depends on PR 10A; ~252 lines. |
 | 15 | Repo cartridge | PR 11 | Depends on PR 10B; previous ~430–540 estimate requires split or `size:exception`. |
 
@@ -339,15 +339,15 @@ Satisfies: REQ-420–426.
 
 Satisfies: REQ-440–446.
 
-- [ ] 10.1 [RED] `internal/ranker/features_test.go`: every feature (lexical RRF contribution, semantic cosine,
+- [x] 10.1 [RED] `internal/ranker/features_test.go`: every feature (lexical RRF contribution, semantic cosine,
   recency, `DefaultImportanceWeight`, outcome/judgment history) traces to an existing recall/config/store field
   — no invented signal (REQ-443) — fails, package doesn't exist.
-- [ ] 10.2 [GREEN] Create `internal/ranker/features.go`: build the normalized [0,1] feature vector from existing
+- [x] 10.2 [GREEN] Create `internal/ranker/features.go`: build the normalized [0,1] feature vector from existing
   `recall`/`config`/`store` fields.
-- [ ] 10.3 [RED] `internal/ranker/model_test.go`: batch gradient descent on a small labeled fixture separates
+- [x] 10.3 [RED] `internal/ranker/model_test.go`: batch gradient descent on a small labeled fixture separates
   positive (`compatible`/`worked`) from negative (`supersedes`/`conflicts_with`/`did_not_work`) examples — fails,
   package doesn't exist.
-- [ ] 10.4 [GREEN] Create `internal/ranker/model.go`: L2-regularized logistic regression, batch gradient
+- [x] 10.4 [GREEN] Create `internal/ranker/model.go`: L2-regularized logistic regression, batch gradient
   descent, serialize to `<dataDir>/ranker/model-<version>.json` + `current` pointer, versioned by a hash of
   `{feature-schema, train-set size, trained-at}` (REQ-445).
 - [ ] 10.5 [RED] Cold-start test: `enabled=true`, zero judgments/outcomes, ranking byte-for-byte identical to
