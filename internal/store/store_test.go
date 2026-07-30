@@ -2769,6 +2769,30 @@ func TestUpgradeRepairDryRunAndApply(t *testing.T) {
 			t.Fatalf("expected message to include entity_key=%q, got %q", blockerEntityKey, report.Message)
 		}
 	})
+
+	t.Run("well-formed embedding mutation is recognized as supported, not blocked", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.EnqueueEmbeddingMutation(EmbeddingSyncInput{
+			SyncID:      "obs-legacy-embedding",
+			Project:     "legacy-embed-proj",
+			Type:        "decision",
+			Model:       "nomic-embed-text",
+			Dim:         3,
+			Vector:      []float32{0.1, 0.2, 0.3},
+			ContentHash: "hash123",
+			UpdatedAt:   "2026-07-30 00:00:00",
+		}); err != nil {
+			t.Fatalf("enqueue embedding mutation: %v", err)
+		}
+
+		diagnosis, err := s.DiagnoseCloudUpgradeLegacyMutations("legacy-embed-proj")
+		if err != nil {
+			t.Fatalf("diagnose embedding legacy mutation: %v", err)
+		}
+		if diagnosis.BlockedCount != 0 || diagnosis.RepairableCount != 0 {
+			t.Fatalf("expected a well-formed embedding mutation to be neither blocked nor repairable, got %+v", diagnosis)
+		}
+	})
 }
 
 func TestRollbackCloudUpgradeSafetyBoundary(t *testing.T) {
