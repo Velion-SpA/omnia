@@ -118,3 +118,45 @@ None.
 - `go test ./...` — passed
 ### Design Deviations
 None.
+
+## PR 11 — Repo Cartridge
+- Completed tasks: 11.1–11.12 (all of Phase 11).
+- Boundary: `internal/cartridge` (Build/Save/Load/ResolveRepo) plus `omnia cartridge build`/`omnia cartridge
+  load` CLI, gated behind default-OFF `cartridge.enabled`. No MCP tool (`mem_cartridge`) was added — design.md
+  explicitly marks it "Optional" and tasks.md's Phase 11 checklist only requires the CLI surface; a future
+  increment can add the MCP tool without changing this contract.
+### TDD Cycle Evidence
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|---|---|---|---|---|---|---|---|
+| 11.1–11.2 | `internal/cartridge/build_test.go` | Unit | none (new package) | `cartridge.Build`/`BuildParams`/`Cartridge`/`SchemaVersion` undefined — compile failure | `Build` assembles `{schema_version, repo_root, head_sha, built_at, top_memories[], anchors[], trusted_procedures[], ranker_model_version?}`; `Save` writes the versioned JSON artifact | happy path, trusted-only procedure filter, top-N truncation | shared `rankedTopMemories` helper keeps `Build` itself linear |
+| 11.3–11.4 | `internal/cartridge/load_test.go` | Unit | build_test.go suite | `cartridge.Load`/`ReasonStaleCommit` undefined — compile failure | `Load` globs the repo-id prefix, picks the most-recently-built file, compares `HeadSHA` | stale-commit vs. fresh-commit vs. picks-latest-of-two-builds | `LoadResult{Fresh, Reason}` keeps every degradation path a plain value, never an error |
+| 11.5–11.6 | `internal/cartridge/load_test.go` | Unit | build_test.go suite | missing-file and corrupt-file cases both undefined pre-`Load` | missing directory/file and corrupt JSON both degrade to `LoadResult{Reason: ReasonMissing/ReasonCorrupt}` | missing vs. corrupt distinguished by `Reason`, never by a caller-visible error | single `Load` function, no separate corrupt-handling path to drift |
+| 11.7–11.8 | `internal/cartridge/load_test.go` | Unit | build_test.go suite | old-schema-version case undefined pre-`Load` | `SchemaVersion` mismatch degrades to `ReasonOldSchemaVersion` before the `HeadSHA` comparison even runs | fixture written with `SchemaVersion - 1` | version check precedes commit check so a stale AND old-format file reports the more fundamental reason |
+| 11.9–11.10 | `cmd/omnia/cartridge_test.go` | Unit | cmd/omnia suite | `cmdCartridge` undefined — compile failure | disabled (build/load), missing-config-file, outside-git-repo, full build→load round trip, stale-commit-after-new-commit, and missing-cartridge-inside-a-real-repo all pass | build+load round trip against a real temp git repo with a seeded observation | shared `cartridgeFlags`/`loadCartridgeConfig`/`cartridgeDataDir`/`loadCartridgeRankerModel` helpers keep both subcommands' wiring in lockstep |
+| 11.11 | `internal/cartridge/build_test.go` | Unit | build_test.go suite | N/A (assertion-only, added after GREEN) | `TestBuildContentShapeAssertion` marshals a built `Cartridge` and rejects any JSON key outside the documented allowlist (REQ-455); `TestBuildNeverWritesSyncMutations` confirms `ListPendingSyncMutations` count is unchanged by `Build`+`Save` (REQ-454) | N/A | N/A |
+| 11.12 | full repo | Verification | targeted `internal/cartridge`/`cmd/omnia` suites first, then repo-wide | N/A | full verification passed; `gofmt`/`git diff --check` clean | disabled path (build+load) tested at both the CLI-flag level and the config-file level (explicit `false` and missing file) | N/A |
+### Design Deviations
+- Repo-root resolution shells directly to `git -C <dir> rev-parse --show-toplevel` inside `internal/cartridge`
+  (mirroring `internal/anchor.Probe`'s own unexported `repoRoot` method and `internal/codegraph.Normalize`'s
+  identical probe) rather than exporting `internal/anchor.Probe.repoRoot` or reusing `codegraph.Normalize`
+  (whose file-relative-path contract doesn't fit a bare directory lookup cleanly). `HeadSHA` itself reuses the
+  already-exported `internal/anchor.Probe.HeadSHA` directly, per design's explicit pointer to that method.
+- `top_memories` ranking reuses `internal/mcp.RankResults`/`ApplyLearnedRanker` directly from
+  `internal/cartridge` (not duplicated) — the same reuse pattern `cmd/omnia/recall.go`/`eval.go` already use to
+  pull ranking helpers from `internal/mcp` at the CLI layer. With no live query, relevance is uniform across
+  candidates (nil map), so ranking degrades to recency × importance when enabled, or `AllObservations`' own
+  natural recency-DESC order when ranking is disabled too — never an error, never an empty digest.
+- `internal/cartridge` normalizes the `--project` filter once via `store.NormalizeProject` before calling
+  `AllObservations` (which does not normalize its own project filter internally, unlike
+  `ListActiveAnchors`/`ListProcedures`), so `top_memories` and `anchors`/`trusted_procedures` never
+  silently disagree on project casing. This is a local normalization inside the new package only — no existing
+  store method's behavior was changed.
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo, all packages, all v0.4 flags default-OFF)
+- `gofmt -l` on all new/changed files — clean
+- `git diff --check` — passed
+- Disabled path: `omnia cartridge build`/`omnia cartridge load` both print `capability disabled` and touch
+  neither the store nor the filesystem cartridges directory; a missing `config.yaml` degrades identically
+  (matches the PR6B/PR9B/PR10B anti-pattern fix — never a fatal exit for a missing config file).
