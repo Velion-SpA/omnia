@@ -93,23 +93,28 @@ JOIN embeddings AS e ON e.rowid = v.rowid`
 	return hits, true
 }
 
-// neighbor is a candidate edge endpoint discovered either by the brute-force
-// O(N^2) pairwise scan (store.go) or by a per-node Vec1 KNN query below —
-// the shared selection logic in finishGraph treats both sources identically
-// (design capability 7 testing strategy: "one set of KNN query/score/
-// fallback helpers"), guaranteeing structural parity between the two paths.
-type neighbor struct {
+// vec1Neighbor is a candidate edge endpoint discovered by tryVecGraph's
+// per-node Vec1 KNN query below. This is deliberately a PRIVATE, Vec1-only
+// type — it must never be shared with store.go's brute-force GraphScoped,
+// which keeps its own self-contained neighbor/edge-selection logic on
+// purpose (review remediation: "never edit the brute-force path, only wrap
+// it in a new branch" is a harder constraint than avoiding duplication
+// between the two paths; a future Vec1-only tuning change to this type or
+// vec1FinishGraph must never be able to silently regress the brute-force
+// fallback).
+type vec1Neighbor struct {
 	idx   int
 	score float32
 }
 
-// finishGraph applies the shared top-k-per-node selection and undirected
-// edge-dedup/degree/sort logic to a per-node neighbor candidate list,
-// regardless of whether that list came from the brute-force pairwise scan or
-// the Vec1 KNN path — this guarantees both produce the identical graph for
-// the same candidate universe (spec REQ-462). nodes is mutated in place
-// (Degree accumulation) and returned for convenience.
-func finishGraph(nodes []GraphNode, nbrs [][]neighbor, k int) ([]GraphNode, []GraphEdge) {
+// vec1FinishGraph applies the top-k-per-node selection and undirected
+// edge-dedup/degree/sort logic to tryVecGraph's per-node neighbor candidate
+// list. This is a PRIVATE COPY of the same selection logic store.go's
+// GraphScoped keeps inline for the brute-force path — the duplication is
+// intentional (see vec1Neighbor's doc comment) so this helper can evolve
+// independently without ever touching the brute-force fallback. nodes is
+// mutated in place (Degree accumulation) and returned for convenience.
+func vec1FinishGraph(nodes []GraphNode, nbrs [][]vec1Neighbor, k int) ([]GraphNode, []GraphEdge) {
 	type pair struct{ a, b int }
 	edgeScore := make(map[pair]float32)
 	for i := range nbrs {
@@ -225,7 +230,7 @@ func (s *Store) tryVecGraph(projects []string, k int, minScore float32) ([]Graph
 	}
 	knnQuery := `SELECT v.rowid, v.distance FROM vec_embeddings(?, ?) AS v` + projWhere
 
-	nbrs := make([][]neighbor, n)
+	nbrs := make([][]vec1Neighbor, n)
 	for i, r := range recs {
 		qArgs := append([]any{encodeNativeVector(r.vec), n}, args...)
 		nrows, err := s.db.QueryContext(context.Background(), knnQuery, qArgs...)
@@ -233,7 +238,7 @@ func (s *Store) tryVecGraph(projects []string, k int, minScore float32) ([]Graph
 			s.vec.markUnhealthy(err)
 			return nil, nil, false
 		}
-		var list []neighbor
+		var list []vec1Neighbor
 		for nrows.Next() {
 			var rowid int64
 			var dist float64
@@ -248,7 +253,7 @@ func (s *Store) tryVecGraph(projects []string, k int, minScore float32) ([]Graph
 			}
 			score := vecScore(dist)
 			if score >= minScore {
-				list = append(list, neighbor{idx: j, score: score})
+				list = append(list, vec1Neighbor{idx: j, score: score})
 			}
 		}
 		if err := nrows.Err(); err != nil {
@@ -264,6 +269,6 @@ func (s *Store) tryVecGraph(projects []string, k int, minScore float32) ([]Graph
 	for i := range recs {
 		nodes[i] = recs[i].node
 	}
-	outNodes, edges := finishGraph(nodes, nbrs, k)
+	outNodes, edges := vec1FinishGraph(nodes, nbrs, k)
 	return outNodes, edges, true
 }
