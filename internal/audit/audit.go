@@ -23,8 +23,9 @@ const (
 	// mem_save (internal/mcp handleSave); ActionRead is a taxonomy constant
 	// only — no read call-site appends it yet (open question, tracked in the
 	// spec's risk note: wiring read-path auditing is deferred).
-	ActionRead  Action = "read"
-	ActionWrite Action = "write"
+	ActionRead        Action = "read"
+	ActionWrite       Action = "write"
+	ActionConsolidate Action = "consolidate"
 )
 
 // Entry is a single audit log record.
