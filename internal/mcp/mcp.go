@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1146,8 +1147,8 @@ func handleBlame(s *store.Store) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		file, _ := req.GetArguments()["file"].(string)
 		lineValue, ok := req.GetArguments()["line"].(float64)
-		if !ok {
-			return mcp.NewToolResultError("line is required"), nil
+		if !ok || lineValue < 1 || math.Trunc(lineValue) != lineValue {
+			return mcp.NewToolResultError("line must be a positive integer"), nil
 		}
 		repoRoot, _ := req.GetArguments()["repo_root"].(string)
 		repoRoot, file, err := codegraph.Normalize(repoRoot, file)
@@ -1159,9 +1160,60 @@ func handleBlame(s *store.Store) server.ToolHandlerFunc {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		out, _ := jsonMarshal(map[string]any{"line": int(lineValue), "hits": hits})
+		out, _ := jsonMarshal(publicBlameResponse(int(lineValue), hits))
 		return mcp.NewToolResultText(string(out)), nil
 	}
+}
+
+type blameMemoryPreview struct {
+	SyncID  string `json:"sync_id"`
+	Type    string `json:"type"`
+	Title   string `json:"title"`
+	Preview string `json:"preview"`
+}
+
+type blameRange struct {
+	File  string `json:"file"`
+	Start int    `json:"start"`
+	End   int    `json:"end"`
+}
+
+type publicBlameHit struct {
+	AnchorStatus string               `json:"anchor_status"`
+	Range        blameRange           `json:"range"`
+	BlameSHA     string               `json:"blame_sha"`
+	Memories     []blameMemoryPreview `json:"memories"`
+}
+
+type publicBlameResult struct {
+	Line int              `json:"line"`
+	Hits []publicBlameHit `json:"hits"`
+}
+
+// publicBlameResponse deliberately projects store hits into the small MCP
+// contract. Store observations include full content and must never be emitted
+// by this read-only lookup.
+func publicBlameResponse(line int, hits []store.BlameHit) publicBlameResult {
+	out := publicBlameResult{Line: line, Hits: make([]publicBlameHit, 0, len(hits))}
+	byAnchor := make(map[string]int, len(hits))
+	for _, hit := range hits {
+		index, ok := byAnchor[hit.Anchor.SyncID]
+		if !ok {
+			index = len(out.Hits)
+			byAnchor[hit.Anchor.SyncID] = index
+			out.Hits = append(out.Hits, publicBlameHit{
+				AnchorStatus: hit.AnchorStatus,
+				Range:        blameRange{File: hit.Anchor.FilePath, Start: hit.Anchor.LineStart, End: hit.Anchor.LineEnd},
+				BlameSHA:     hit.Anchor.BlameSHA,
+				Memories:     make([]blameMemoryPreview, 0, 1),
+			})
+		}
+		out.Hits[index].Memories = append(out.Hits[index].Memories, blameMemoryPreview{
+			SyncID: hit.Memory.SyncID, Type: hit.Memory.Type, Title: hit.Memory.Title,
+			Preview: truncate(hit.Memory.Content, tokenBudgetPreviewChars),
+		})
+	}
+	return out
 }
 
 // ─── Tool Handlers ───────────────────────────────────────────────────────────

@@ -180,6 +180,9 @@ Satisfies: REQ-400–406.
 - [x] 6.10 Verification: `internal/store`/`internal/mcp`/CLI tests green; disabled-path
   (`code_graph.enabled=false`) confirms "capability disabled", no anchor table touched (REQ-400); no LLM call
   anywhere in this path (REQ-405).
+  - Remediation evidence: MCP returns grouped preview-only hits with an explicit empty array on no match;
+    fractional lines and non-git explicit repo roots are rejected; runtime tests cover enabled MCP/CLI,
+    disabled MCP registration, and the 5-anchor → 3-memory graph projection.
 
 ## Phase 7: `memory-enforcement-gate` A — Matcher + Command Runner (PR 7, base: `main` after PR 6)
 

@@ -21,14 +21,22 @@ func ParseFileLine(value string) (string, int, error) {
 }
 
 func Normalize(repoRoot, file string) (string, string, error) {
-	if strings.TrimSpace(repoRoot) == "" {
-		dir := filepath.Dir(file)
-		cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
-		out, err := cmd.Output()
+	dir := strings.TrimSpace(repoRoot)
+	if dir == "" {
+		absFile, err := filepath.Abs(file)
 		if err != nil {
-			return "", "", fmt.Errorf("no repo context")
+			return "", "", err
 		}
-		repoRoot = strings.TrimSpace(string(out))
+		dir = filepath.Dir(absFile)
+	}
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("no repo context")
+	}
+	repoRoot = strings.TrimSpace(string(out))
+	if repoRoot == "" {
+		return "", "", fmt.Errorf("no repo context")
 	}
 	if !filepath.IsAbs(file) {
 		file = filepath.Join(repoRoot, file)
@@ -36,6 +44,11 @@ func Normalize(repoRoot, file string) (string, string, error) {
 	absFile, err := filepath.Abs(file)
 	if err != nil {
 		return "", "", err
+	}
+	// Canonicalize existing paths so /var → /private-style aliases cannot make
+	// a real repository look unrelated to the repo root returned by git.
+	if resolved, err := filepath.EvalSymlinks(absFile); err == nil {
+		absFile = resolved
 	}
 	rel, err := filepath.Rel(repoRoot, absFile)
 	if err != nil || strings.HasPrefix(rel, "..") {

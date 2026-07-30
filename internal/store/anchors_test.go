@@ -51,7 +51,8 @@ func TestCodeDecisionGraphProjectsEachActiveAnchorAsOneEdge(t *testing.T) {
 	s := setupRelationsStore(t)
 	_, first := addTestObs(t, s, "First", "decision", "graph-project", "project")
 	_, second := addTestObs(t, s, "Second", "bugfix", "graph-project", "project")
-	for i, syncID := range []string{first, first, second, second, second} {
+	_, third := addTestObs(t, s, "Third", "pattern", "graph-project", "project")
+	for i, syncID := range []string{first, first, second, second, third} {
 		if _, err := s.UpsertAnchor(UpsertAnchorParams{ObsSyncID: syncID, RepoRoot: "/repo", FilePath: "graph.go", Symbol: string(rune('A' + i)), LineStart: i + 1, LineEnd: i + 1, ContentHash: string(rune('a' + i))}); err != nil {
 			t.Fatalf("UpsertAnchor: %v", err)
 		}
@@ -60,8 +61,8 @@ func TestCodeDecisionGraphProjectsEachActiveAnchorAsOneEdge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CodeDecisionGraph: %v", err)
 	}
-	if len(nodes) != 2 || len(edges) != 5 {
-		t.Fatalf("expected 2 nodes and 5 edges, got nodes=%+v edges=%+v", nodes, edges)
+	if len(nodes) != 3 || len(edges) != 5 {
+		t.Fatalf("expected 3 nodes and 5 edges, got nodes=%+v edges=%+v", nodes, edges)
 	}
 }
 
