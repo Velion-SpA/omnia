@@ -119,7 +119,7 @@ func buildRecallServiceForCLI(s *store.Store, dataDir string) *recall.Service {
 	if err != nil {
 		return nil
 	}
-	return buildRecallService(s, appCfg.Recall, appCfg.Embeddings, dataDir, appCfg.VecIndex.Enabled)
+	return buildRecallService(s, appCfg.Recall, appCfg.Embeddings, dataDir, appCfg.VecIndex.Enabled, appCfg.Encryption)
 }
 
 // recallOrFTSSearch is the shared search-routing seam between `omnia search`
@@ -285,7 +285,13 @@ func loadRankingConfigForCLI() config.RankingConfig {
 // embed.OpenStore (design capability 7) — this is the SAME builder cmdMCP,
 // cmdServe, `omnia search`, and `omnia eval --injection` all share, so
 // enabling vector_index affects every one of those read surfaces uniformly.
-func buildRecallService(s *store.Store, recallCfg config.RecallConfig, embCfg config.EmbeddingsConfig, dataDir string, vecIndexEnabled bool) *recall.Service {
+//
+// encCfg threads v0.4's memory-at-rest-security capability config through the
+// same way (a zero-value/disabled EncryptionConfig reproduces pre-v0.4
+// behavior exactly) — required once embeddings.db has been migrated to an
+// encrypted file, otherwise this builder would try to reopen it via plain
+// modernc and fail, silently degrading mem_search to FTS5-only.
+func buildRecallService(s *store.Store, recallCfg config.RecallConfig, embCfg config.EmbeddingsConfig, dataDir string, vecIndexEnabled bool, encCfg config.EncryptionConfig) *recall.Service {
 	if !recallCfg.Enabled {
 		return nil
 	}
@@ -308,7 +314,7 @@ func buildRecallService(s *store.Store, recallCfg config.RecallConfig, embCfg co
 	}
 
 	dbPath := config.ResolveEmbeddingsDBPath(embCfg.DBPath, dataDir)
-	embStore, err := embed.OpenStore(dbPath, vecIndexStoreOptions(vecIndexEnabled)...)
+	embStore, err := embed.OpenStore(dbPath, embedStoreOptions(vecIndexEnabled, encCfg)...)
 	if err != nil {
 		// The embeddings store is Omnia's own file, not the read-only
 		// engram.db. If it can't even be opened, fail closed to the

@@ -96,15 +96,46 @@ func OpenStore(path string, opts ...Option) (*Store, error) {
 	}
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 
+	// v0.4 memory-at-rest-security (design ADR-1/ADR-2/ADR-3): resolve the
+	// encryption decision FIRST — a fail-closed refusal (keychain
+	// unavailable, allow_plaintext_fallback=false) must stop OpenStore
+	// before any file is touched, and an allowed-fallback degradation must
+	// be decided before the vec1-only branch below runs (a degraded
+	// encryption request still wants Vec1 if vector_index.enabled).
+	hexKey, encryptionActive, err := resolveEmbedEncryption(cfg, path)
+	if err != nil {
+		return nil, fmt.Errorf("embed: %w", err)
+	}
+	vecWanted := cfg.vecIndexEnabled && hostIsLittleEndian()
+
 	var db *sql.DB
 	usingVec1Connector := false
-	if cfg.vecIndexEnabled && hostIsLittleEndian() {
+	switch {
+	case encryptionActive && vecWanted:
+		// Both capabilities compose in ONE connector (design: "encryption
+		// may compose its VFS initialization and vec1.Register in the same
+		// internal/embed connection initializer").
+		edb, everr := openEncryptedEmbedDB(path, hexKey, true)
+		if everr != nil {
+			return nil, fmt.Errorf("embed: %w", everr)
+		}
+		db, usingVec1Connector = edb, true
+	case encryptionActive:
+		edb, everr := openEncryptedEmbedDB(path, hexKey, false)
+		if everr != nil {
+			return nil, fmt.Errorf("embed: %w", everr)
+		}
+		db = edb
+	case vecWanted:
+		// UNCHANGED pre-v0.4-encryption vec1-only path (sqlite-vec-index,
+		// already shipped): byte-for-byte identical to before this
+		// capability existed whenever encryption is not active.
 		if vdb, verr := openVec1DB(dsn); verr == nil {
 			db, usingVec1Connector = vdb, true
 		} else {
 			log.Printf("[embed/vec1] connector unavailable (%v); vector_index falls back to brute force", verr)
 		}
-	} else if cfg.vecIndexEnabled {
+	case cfg.vecIndexEnabled:
 		log.Printf("[embed/vec1] vector_index.enabled but this host is not little-endian; unsupported, using brute force")
 	}
 	if db == nil {

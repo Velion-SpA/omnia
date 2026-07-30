@@ -41,6 +41,15 @@ type Option func(*storeOptions)
 
 type storeOptions struct {
 	vecIndexEnabled bool
+	// encryptionEnabled/encryptionKeychainService/encryptionAllowPlaintextFallback
+	// are set by WithEncryption (encryption.go, v0.4 memory-at-rest-security
+	// capability). Kept on the same storeOptions struct as vecIndexEnabled
+	// since both flags jointly decide OpenStore's driver selection (design
+	// ADR-1: ncruces is selected when EITHER is enabled; encryption.go's
+	// openEncryptedEmbedDB composes both in one connector when both apply).
+	encryptionEnabled                bool
+	encryptionKeychainService        string
+	encryptionAllowPlaintextFallback bool
 }
 
 // WithVecIndex opts a Store into the additive Vec1 flat/cos KNN index. Vec1

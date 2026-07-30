@@ -706,6 +706,7 @@ func main() {
 	}
 	if appCfg, err := config.Load(config.DefaultPath()); err == nil {
 		applyTimeTravelConfig(&cfg, appCfg)
+		applyEncryptionConfig(&cfg, appCfg)
 	}
 	var preparedSearch searchCommandPlan
 	var preparedContext contextCommandPlan
@@ -815,6 +816,19 @@ func main() {
 func applyTimeTravelConfig(cfg *store.Config, appCfg *config.Config) {
 	cfg.TimeTravelEnabled = appCfg.TimeTravel.Enabled
 	cfg.HistoryRevisionCap = appCfg.TimeTravel.MaxRevisionsPerMemory
+}
+
+// applyEncryptionConfig (v0.4 memory-at-rest-security, spec REQ-430) threads
+// config.yaml's encryption.* into store.Config BEFORE storeNew constructs
+// the *store.Store (s.cfg is immutable after New), mirroring
+// applyTimeTravelConfig above — the single composition-root call site (see
+// its call in run()) covers every CLI subcommand dispatched from the
+// switch below, since store.Config is passed by value into each cmd*
+// function and never reconstructed from a bare Config{} downstream.
+func applyEncryptionConfig(cfg *store.Config, appCfg *config.Config) {
+	cfg.EncryptionEnabled = appCfg.Encryption.Enabled
+	cfg.EncryptionKeychainService = appCfg.Encryption.KeychainService
+	cfg.EncryptionAllowPlaintextFallback = appCfg.Encryption.AllowPlaintextFallback
 }
 
 func shouldCheckForUpdates(args []string) bool {
@@ -1007,13 +1021,13 @@ func cmdServe(cfg store.Config) {
 	// their pre-#86/pre-PR4 defaults (no auto-embed, FTS5-only /search).
 	var autoEmbedWorker *embed.Worker
 	if appCfgErr == nil {
-		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s, cfg.DataDir, appCfg.VecIndex.Enabled); worker != nil {
+		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s, cfg.DataDir, appCfg.VecIndex.Enabled, appCfg.Encryption); worker != nil {
 			worker.Start(ctx)
 			srv.SetAutoEmbed(worker)
 			autoEmbedWorker = worker
 		}
 
-		recallSvc := buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir, appCfg.VecIndex.Enabled)
+		recallSvc := buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir, appCfg.VecIndex.Enabled, appCfg.Encryption)
 		srv.SetSearch(func(ctx context.Context, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 			return recallOrFTSSearch(ctx, s, recallSvc, query, opts)
 		})
@@ -1309,7 +1323,7 @@ func cmdMCP(cfg store.Config) {
 	// values hoisted above (before storeNew) for ContextTokenBudget wiring.
 	if appCfgErr == nil {
 		mcpCfg.CodeGraph = appCfg.CodeGraph
-		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir, appCfg.VecIndex.Enabled)
+		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir, appCfg.VecIndex.Enabled, appCfg.Encryption)
 		// memory-recall-ranking (task 5.4): thread recall.ranking.* through to
 		// handleSearch regardless of whether hybrid recall itself is enabled —
 		// RankResults/explain work over the FTS5-only path too.
@@ -1350,7 +1364,7 @@ func cmdMCP(cfg store.Config) {
 		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
 		// enabled, run the worker on the same ctx cancelled at shutdown so
 		// mem_save embeds new memories out-of-band. nil when disabled.
-		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s, cfg.DataDir, appCfg.VecIndex.Enabled); worker != nil {
+		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s, cfg.DataDir, appCfg.VecIndex.Enabled, appCfg.Encryption); worker != nil {
 			worker.Start(ctx)
 			mcpCfg.AutoEmbed = worker
 			autoEmbedWorker = worker

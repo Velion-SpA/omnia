@@ -170,26 +170,26 @@ Satisfies: REQ-460, REQ-462, REQ-463, REQ-465, REQ-466, REQ-468, REQ-469.
 
 Satisfies: REQ-430 (gate), REQ-431 (keychain key), REQ-432 (transparent encryption), REQ-434 (degradation).
 
-- [ ] 4.1 [RED] `internal/keychain/keychain_test.go` with an injectable runner fake (mirrors `Probe.runGit`'s
+- [x] 4.1 [RED] `internal/keychain/keychain_test.go` with an injectable runner fake (mirrors `Probe.runGit`'s
   pattern used by `repoRoot`/`HeadSHA`/`Blame`, `internal/anchor/anchor.go`): assert `Get`/`Set` shell out with
   the right args, and a missing-CLI runner returns a typed "unavailable" error — fails, package doesn't exist.
-- [ ] 4.2 [GREEN] Create `internal/keychain/keychain.go`: `Get`/`Set(service, account, value)` via `os/exec` to
+- [x] 4.2 [GREEN] Create `internal/keychain/keychain.go`: `Get`/`Set(service, account, value)` via `os/exec` to
   macOS `/usr/bin/security` or Linux `secret-tool`, injectable runner; `GenerateKey()` via `crypto/rand` (32
   bytes), service=`omnia`, account=`db-key-v1`.
-- [ ] 4.3 [RED] Driver-selection test: `encryption.enabled=true` + fake keychain with a key present opens via
+- [x] 4.3 [RED] Driver-selection test: `encryption.enabled=true` + fake keychain with a key present opens via
   ncruces+adiantum; a written observation reads back identical to the plaintext path (REQ-432) — fails, no
   adiantum wiring yet.
-- [ ] 4.4 [GREEN] Wire `openDB` (`store.go:35`/`:847`/`:897`; `embed/store.go:79`) to resolve the ncruces+
+- [x] 4.4 [GREEN] Wire `openDB` (`store.go:35`/`:847`/`:897`; `embed/store.go:79`) to resolve the ncruces+
   adiantum VFS when `encryption.enabled`, sourcing the key via `internal/keychain` (generate-once-on-first-enable,
   REQ-431).
-- [ ] 4.5 [RED] Keychain-unavailable test: `encryption.enabled=true` + fake runner returns "CLI not found"; with
+- [x] 4.5 [RED] Keychain-unavailable test: `encryption.enabled=true` + fake runner returns "CLI not found"; with
   `allow_plaintext_fallback` at its default `false`, assert the store REFUSES to open with a clear error; with
   it `true`, assert the store opens unencrypted with a stderr warning + audit entry (REQ-434).
-- [ ] 4.6 [GREEN] Implement the degradation branch: unreachable keychain + `allow_plaintext_fallback=false`
+- [x] 4.6 [GREEN] Implement the degradation branch: unreachable keychain + `allow_plaintext_fallback=false`
   (default) → refuse to open; `=true` → open unencrypted, stderr warning, audit entry.
-- [ ] 4.7 [REFACTOR] Extract the keychain-or-fail decision into one helper shared by `store.go` and
+- [x] 4.7 [REFACTOR] Extract the keychain-or-fail decision into one helper shared by `store.go` and
   `embed/store.go` driver selection.
-- [ ] 4.8 Verification: `internal/keychain` + affected `internal/store`/`internal/embed` tests green;
+- [x] 4.8 Verification: `internal/keychain` + affected `internal/store`/`internal/embed` tests green;
   `CGO_ENABLED=0 go build ./...` clean; disabled-path (`encryption.enabled=false`) byte-for-byte (REQ-430).
 
 ## Phase 5: `memory-at-rest-security` B — Migration + CLI + Audit (PR 5, base: `main` after PR 4)

@@ -31,6 +31,13 @@ const (
 	// (pass/flag/block/override) appends exactly one entry with this
 	// action, regardless of verdict.
 	ActionEnforce Action = "enforce"
+	// ActionEncryptionFallback extends the taxonomy for the
+	// memory-at-rest-security capability (spec REQ-434, design ADR-3):
+	// appended exactly once whenever encryption.enabled=true but the OS
+	// keychain is unavailable and encryption.allow_plaintext_fallback=true
+	// causes the store to degrade to an unencrypted open — a conscious,
+	// audited operator opt-in, never a silent downgrade.
+	ActionEncryptionFallback Action = "encryption_fallback"
 )
 
 // Entry is a single audit log record.
