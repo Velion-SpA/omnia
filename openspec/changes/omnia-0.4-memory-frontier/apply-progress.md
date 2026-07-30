@@ -432,3 +432,85 @@ new/updated test coverage, on top of the original 5 commits (not amended).
 - `git diff --check` — clean
 ### Design Deviations
 None beyond what's described above.
+
+## 2026-07-30 — PR 7/8 Remediation: Adversarial Review Findings (SHOULD-FIX #1, #2 + nit)
+
+- Fixes two independent-review SHOULD-FIX findings against PR 7/8 (`internal/enforce`), plus a same-file nit
+  the reviewer also flagged. No task numbers change — this is a remediation pass on already-`[x]` Phase 7/8
+  work, not new scope. All fail-safe verdict rules are unchanged: a runner timeout still can only ever
+  produce `flag` (never `block`), and a matcher lookup error still can only ever produce `pass` (never
+  `block`/`flag`).
+
+### Finding #1 — timeout only killed the direct `sh -c` child, not the whole process tree
+- **Root cause**: `RunCommand` (`internal/enforce/runner.go`) had no `SysProcAttr{Setpgid: true}`, so
+  `exec.CommandContext`'s default cancellation (`cmd.Process.Kill()`) only ever reached the direct shell
+  process. A command that forks/backgrounds a child (`sleep 30 & wait`, standing in for how real test
+  runners/linters/build tools fan out per-package/per-worker subprocesses) left that child running past the
+  "timeout" verdict. The existing `TestRunCommand_TimeoutIsNotAFailure` test used a bare `sleep 5` (no fork),
+  which is why this gap wasn't caught.
+- **Deeper discovery during RED**: the bug is worse than "an orphan leaks in the background." Because the
+  backgrounded child inherits the SAME stdout/stderr pipe Go creates to capture `RunCommand`'s output,
+  `cmd.Wait()` itself cannot reach EOF on that pipe until every process holding the write end closes it — so
+  the FIRST version of the RED test (polling `processExists` after `RunCommand` returned) accidentally
+  PASSED: `RunCommand` silently blocked for the full ~30s until the backgrounded `sleep` exited on its own,
+  at which point the child was, of course, already dead. The real, observable symptom is that a 1-second
+  configured timeout does not actually bound `RunCommand`'s wall-clock time at all when a postcondition
+  command forks. The RED test was strengthened with an elapsed-time assertion (`elapsed > 10s` fails) to
+  actually discriminate broken vs. fixed behavior, in addition to the `processExists` liveness check.
+- **Fix**: `internal/enforce/runner.go` now calls `setProcessGroup(cmd)` before `cmd.Run()` and overrides
+  `cmd.Cancel` to call `killProcessGroup(cmd)` instead of relying on `exec.CommandContext`'s default
+  single-process kill. Both functions are OS-specific (`syscall.SysProcAttr`'s fields and `syscall.Kill`
+  differ per platform), split via build tags following this repo's existing precedent
+  (`cmd/omnia/bisect_nofollow_unix.go` / `_windows.go`):
+  - `internal/enforce/runner_unix.go` (`//go:build !windows`): `Setpgid: true` makes the shell its own
+    process-group leader; `killProcessGroup` sends `SIGKILL` to `-cmd.Process.Pid` (negative PID = whole
+    group), falling back to a direct `cmd.Process.Kill()` if the group signal fails for any reason.
+  - `internal/enforce/runner_windows.go` (`//go:build windows`): documented gap — `setProcessGroup` is a
+    no-op and `killProcessGroup` falls back to killing only the direct process. A full Windows process-tree
+    kill needs Job Objects (`CreateJobObject`/`AssignProcessToJobObject`), a materially larger feature than
+    this fix's scope; this capability's dev/CI targets are macOS/Linux. Documented here rather than silently
+    left unaddressed.
+- **Test**: `TestRunCommand_TimeoutKillsBackgroundedGrandchild` (`internal/enforce/runner_test.go`) —
+  RED confirmed (30.01s elapsed, failed the 10s bound) against the unfixed runner; GREEN confirmed (1.00s
+  elapsed, backgrounded child pid gone) after the fix. Skips on `windows` (POSIX shell syntax used in the
+  repro — `$!`, `wait` — does not translate to `cmd /C` either, independent of the process-group gap above).
+
+### Finding #2 — matcher lookup errors were silently swallowed as a bare `pass`
+- **Root cause**: `Evaluate` (`internal/enforce/evaluate.go`) discarded `MatchTrustedProcedures`'s error
+  entirely, returning a `pass` indistinguishable from a genuine "nothing matched." design.md's own contract
+  ("cannot scope → pass with note") was not honored — if the procedure store started failing (DB corruption,
+  disk I/O error), the gate would silently report clean passes forever with zero signal that enforcement
+  itself was broken.
+- **Fix**: fail-safe bias is unchanged — a matcher error still only ever yields `VerdictPass`, never
+  `block`/`flag`, even under `mode: block` (asserted directly in the new test). Added:
+  - `Result.Note` (`internal/enforce/gate.go`) — an additive `omitempty` JSON field, empty for every ordinary
+    pass/flag/block/override outcome; populated only by `Evaluate`'s matcher-error path with
+    `fmt.Sprintf("procedure lookup failed, returning unscoped pass: %v", err)`.
+  - `audit.Entry.Note` (`internal/audit/audit.go`) — a sixth additive `omitempty` ADR-7 field (alongside the
+    five PR8 added: `Verdict`, `ProcedureSyncIDs`, `PostconditionKind`, `ExitCode`, `OverrideReason`), wired
+    through in `appendAuditEntry` so the note reaches the audit trail, not just the in-memory `Result`.
+  - `Result` is marshaled directly to JSON by `cmd/omnia/enforce.go`'s CLI output, so `note` surfaces there
+    automatically — no CLI/MCP handler changes were needed.
+- **Test**: `TestEvaluate_MatcherErrorPassesWithNoteAndAudits` (`internal/enforce/evaluate_test.go`), using a
+  new `fakeErroringProcedureSource` test double implementing `ProcedureSource` (`ListProcedures`/
+  `SearchProcedures` both return a forced error) — the seam the reviewer confirmed existed specifically for
+  this kind of error injection but had zero tests exercising it before this one. RED confirmed (`Note` empty)
+  against the unfixed `Evaluate`; GREEN confirmed (non-empty `Note` on both the `Result` and the audit entry,
+  verdict still `pass` under `mode: block`) after the fix.
+
+### Nit — `gate.go`'s `Decide` produced `"violations":null`, `evaluate.go`'s error path produced `"violations":[]`
+- One-line fix in `internal/enforce/gate.go`'s `Decide`: `var violations []Violation` → `violations :=
+  []Violation{}`, so both code paths in this package now serialize the same JSON shape for "no violations"
+  (`omnia enforce`'s JSON output is consumed by hooks/CI per REQ-418, where `null` vs. `[]` is a real
+  difference for a naive consumer).
+
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `CGO_ENABLED=0 go test ./...` — passed (58 packages, full repo)
+- `internal/enforce` full package suite — all pre-existing tests plus the 2 new ones pass; no regressions.
+### Design Deviations
+- None beyond the documented Windows process-tree-kill gap above (Finding #1): fail-safe verdict bias is
+  unchanged for both findings, and the `Note`/`processExists` additions are purely additive (new
+  `omitempty` fields, new unexported helper functions) — no existing field, JSON shape, or exported signature
+  was removed or changed incompatibly.
