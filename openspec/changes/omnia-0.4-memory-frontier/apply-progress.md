@@ -160,3 +160,39 @@ None.
 - Disabled path: `omnia cartridge build`/`omnia cartridge load` both print `capability disabled` and touch
   neither the store nor the filesystem cartridges directory; a missing `config.yaml` degrades identically
   (matches the PR6B/PR9B/PR10B anti-pattern fix — never a fatal exit for a missing config file).
+
+## PR 11 — Repo Cartridge: Review Remediation
+An independent adversarial review of PR 11 found one blocker and two should-fix issues before this could
+merge. All three are fixed with new RED→GREEN test coverage, on top of the original 4 commits (not amended).
+### Findings fixed
+1. **BLOCKER — default invocation leaked memories across all projects.** `omnia cartridge build`/`load` with
+   no `--project` flag passed an empty string straight through to `Build`/`Load`, and
+   `store.NormalizeProject("")` is treated by `AllObservations`/`CodeDecisionGraph`/`ListProcedures` as "no
+   filter — every project." The bare, most-likely-to-be-run invocation therefore silently digested every
+   project's memories into one file instead of just the current repo's. Fixed with a new
+   `resolveCartridgeProject` helper (`cmd/omnia/cartridge.go`) that falls back to `detectProject(repoRoot)`
+   when `--project` is empty, and errors loudly with a `--project` hint if detection itself fails — mirroring
+   `resolveConflictsProject`'s existing detect-or-error-loudly convention rather than silently defaulting to
+   "everything." Test: `TestCmdCartridgeBuildDefaultsToDetectedProjectNotEveryProject`.
+2. **SHOULD-FIX — on-disk cartridge key ignored project, and `load`'s `--project` flag was parsed and
+   discarded.** Two different projects sharing one repo+commit (a supported, tested scenario per
+   `internal/project/detect_test.go`'s monorepo-subproject tests) would silently overwrite each other's
+   cartridge file. Fixed: `Cartridge` gained a `Project` field, `FileName` (renamed from unexported `fileName`)
+   now keys the on-disk artifact as `<repo-id>-<project>-<head-sha>.json`, and `Load` takes a `project`
+   parameter, scopes its glob by project, and re-verifies the loaded file's embedded `Project` against the
+   request as a defense-in-depth check (new `ReasonProjectMismatch` degradation reason — never a caller-
+   visible error). Tests: `TestSaveKeysCartridgeByProjectAvoidingCrossProjectCollision`,
+   `TestCmdCartridgeLoadFiltersByProjectAvoidingCrossProjectLeak`,
+   `TestLoadReportsProjectMismatchForTamperedCartridge`.
+3. **SHOULD-FIX — plaintext cartridge bypassed at-rest encryption.** `Save` wrote an unencrypted JSON file
+   regardless of `EncryptionConfig.Enabled`. Since the memory-at-rest-security capability itself (PR4/PR5)
+   hasn't landed yet, there is no encrypt-on-write helper to call — so rather than implement encryption out of
+   scope, `Save` now fails closed: it refuses the write and returns a clear error when
+   `encCfg.Enabled` is true, explaining cartridge export doesn't yet support encrypted output. This is a known
+   limitation to revisit once PR4/PR5 lands. Test: `TestCmdCartridgeBuildRefusesPlaintextWhenEncryptionEnabled`.
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo, all packages)
+### Design Deviations
+None beyond what's described above.

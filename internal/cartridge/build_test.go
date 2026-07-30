@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/velion/omnia/internal/cartridge"
+	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/store"
 )
 
@@ -77,6 +78,9 @@ func TestBuildProducesVersionedArtifactTaggedWithCommit(t *testing.T) {
 	if c.RepoRoot != "/repo" || c.HeadSHA != "abc123" {
 		t.Errorf("RepoRoot/HeadSHA = %q/%q, want /repo/abc123", c.RepoRoot, c.HeadSHA)
 	}
+	if c.Project != "cartridge-project" {
+		t.Errorf("Project = %q, want %q", c.Project, "cartridge-project")
+	}
 	if len(c.TopMemories) != 1 || c.TopMemories[0].SyncID != obs.SyncID {
 		t.Fatalf("TopMemories = %+v, want exactly the seeded observation", c.TopMemories)
 	}
@@ -91,7 +95,7 @@ func TestBuildProducesVersionedArtifactTaggedWithCommit(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	path, err := cartridge.Save(dir, c)
+	path, err := cartridge.Save(dir, c, config.EncryptionConfig{})
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -178,7 +182,7 @@ func TestBuildContentShapeAssertion(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 	allowed := map[string]bool{
-		"schema_version": true, "repo_root": true, "head_sha": true, "built_at": true,
+		"schema_version": true, "repo_root": true, "project": true, "head_sha": true, "built_at": true,
 		"top_memories": true, "anchors": true, "trusted_procedures": true, "ranker_model_version": true,
 	}
 	for key := range raw {
@@ -203,7 +207,7 @@ func TestBuildNeverWritesSyncMutations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if _, err := cartridge.Save(t.TempDir(), c); err != nil {
+	if _, err := cartridge.Save(t.TempDir(), c, config.EncryptionConfig{}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	after, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 1000)
@@ -223,5 +227,65 @@ func TestBuildRequiresStoreAndHeadSHA(t *testing.T) {
 	s := newCartridgeTestStore(t)
 	if _, err := cartridge.Build(cartridge.BuildParams{Store: s}); err == nil {
 		t.Fatal("expected error for missing HeadSHA")
+	}
+}
+
+// TestSaveKeysCartridgeByProjectAvoidingCrossProjectCollision is the RED
+// test for the review's collision finding: two different projects sharing
+// one repo+commit (a supported, tested scenario — see
+// internal/project/detect_test.go's monorepo-subproject tests) MUST produce
+// two distinct on-disk cartridge files, never overwrite each other.
+// Previously the filename was keyed only by RepoID+HeadSHA, so the second
+// Save silently clobbered the first project's file.
+func TestSaveKeysCartridgeByProjectAvoidingCrossProjectCollision(t *testing.T) {
+	dir := t.TempDir()
+	built := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	cA := &cartridge.Cartridge{SchemaVersion: cartridge.SchemaVersion, RepoRoot: "/repo", Project: "project-a", HeadSHA: "abc123", BuiltAt: built}
+	cB := &cartridge.Cartridge{SchemaVersion: cartridge.SchemaVersion, RepoRoot: "/repo", Project: "project-b", HeadSHA: "abc123", BuiltAt: built}
+
+	pathA, err := cartridge.Save(dir, cA, config.EncryptionConfig{})
+	if err != nil {
+		t.Fatalf("Save (project-a): %v", err)
+	}
+	pathB, err := cartridge.Save(dir, cB, config.EncryptionConfig{})
+	if err != nil {
+		t.Fatalf("Save (project-b): %v", err)
+	}
+	if pathA == pathB {
+		t.Fatalf("project-a and project-b both saved to %q at the same repo+commit — expected distinct files", pathA)
+	}
+
+	dataA, err := os.ReadFile(pathA)
+	if err != nil {
+		t.Fatalf("read project-a cartridge: %v", err)
+	}
+	var roundTripA cartridge.Cartridge
+	if err := json.Unmarshal(dataA, &roundTripA); err != nil {
+		t.Fatalf("unmarshal project-a cartridge: %v", err)
+	}
+	if roundTripA.Project != "project-a" {
+		t.Fatalf("project-a's own file was clobbered: got Project = %q, want %q", roundTripA.Project, "project-a")
+	}
+}
+
+// TestSaveRefusesPlaintextWhenEncryptionEnabled is the RED test for the
+// review's at-rest-encryption-bypass finding: Save must fail closed (return
+// an error, write nothing) when the operator has EncryptionConfig.Enabled
+// on, since cartridge export has no encrypted-output path yet.
+func TestSaveRefusesPlaintextWhenEncryptionEnabled(t *testing.T) {
+	dir := t.TempDir()
+	c := &cartridge.Cartridge{
+		SchemaVersion: cartridge.SchemaVersion, RepoRoot: "/repo", Project: "cartridge-project",
+		HeadSHA: "abc123", BuiltAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+	}
+	if _, err := cartridge.Save(dir, c, config.EncryptionConfig{Enabled: true}); err == nil {
+		t.Fatal("expected Save to refuse writing a plaintext cartridge when at-rest encryption is enabled")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no cartridge file written when encryption is enabled and unsupported, found %d entries", len(entries))
 	}
 }

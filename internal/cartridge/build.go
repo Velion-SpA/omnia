@@ -39,8 +39,18 @@ const defaultTopMemories = 50
 type Cartridge struct {
 	SchemaVersion int    `json:"schema_version"`
 	RepoRoot      string `json:"repo_root"`
-	HeadSHA       string `json:"head_sha"`
-	BuiltAt       string `json:"built_at"`
+	// Project is the normalized project this cartridge was built for. It is
+	// load-bearing, not diagnostic: it is embedded in the on-disk filename
+	// (see FileName) so two different projects sharing one repo+commit (a
+	// supported, tested scenario — see internal/project/detect_test.go's
+	// monorepo-subproject tests) never collide on the same cartridge file,
+	// and Load re-verifies it against the requested project as a defense-in
+	// -depth check (ReasonProjectMismatch) so a caller can never be served
+	// the wrong project's digest even if an on-disk file was somehow
+	// mislabeled.
+	Project string `json:"project"`
+	HeadSHA string `json:"head_sha"`
+	BuiltAt string `json:"built_at"`
 	// TopMemories is the top-N (default 50, CartridgeConfig.TopMemories)
 	// most-relevant observations for the project, ranked by the active
 	// learned ranker (capability 5) when enabled, or by RankResults'
@@ -138,6 +148,7 @@ func Build(p BuildParams) (*Cartridge, error) {
 	return &Cartridge{
 		SchemaVersion:      SchemaVersion,
 		RepoRoot:           p.RepoRoot,
+		Project:            project,
 		HeadSHA:            p.HeadSHA,
 		BuiltAt:            now.Format(time.RFC3339),
 		TopMemories:        topMemories,
@@ -186,24 +197,59 @@ func RepoID(repoRoot string) string {
 	return hex.EncodeToString(sum[:])[:12]
 }
 
-// fileName is the on-disk cartridge artifact name: <repo-id>-<head-sha>.json.
-func fileName(repoRoot, headSHA string) string {
-	return RepoID(repoRoot) + "-" + headSHA + ".json"
+// projectSegment returns the filesystem-safe project segment used in the
+// on-disk cartridge filename (FileName) and in Load's glob pattern,
+// normalizing an empty project to a stable placeholder so an unscoped
+// caller's file never accidentally collides with — or gets shadowed by — a
+// real project's own cartridge.
+func projectSegment(project string) string {
+	if strings.TrimSpace(project) == "" {
+		return "unscoped"
+	}
+	return project
 }
 
-// Save writes c to dir/<repo-id>-<head-sha>.json, creating dir if needed,
-// and returns the written path. Save never mutates any other file in dir —
-// a cartridge built at a different commit keeps its own file (non-
-// destructive: rebuilding at a new HEAD never deletes the prior artifact,
-// it only becomes stale per Load's HeadSHA comparison).
-func Save(dir string, c *Cartridge) (string, error) {
+// FileName is the on-disk cartridge artifact name:
+// <repo-id>-<project>-<head-sha>.json. Project is included so two different
+// projects sharing one repo+commit (a supported, tested scenario — see
+// internal/project/detect_test.go's monorepo-subproject tests) never
+// overwrite each other's cartridge file. Exported so callers (and tests)
+// that need to locate/construct a specific cartridge's path never have to
+// duplicate this naming rule.
+func FileName(repoRoot, project, headSHA string) string {
+	return RepoID(repoRoot) + "-" + projectSegment(project) + "-" + headSHA + ".json"
+}
+
+// Save writes c to dir/<repo-id>-<project>-<head-sha>.json, creating dir if
+// needed, and returns the written path. Save never mutates any other file in
+// dir — a cartridge built at a different commit, or for a different
+// project, keeps its own file (non-destructive: rebuilding at a new HEAD
+// never deletes the prior artifact, it only becomes stale per Load's
+// HeadSHA comparison).
+//
+// encCfg is the operator's at-rest encryption setting (config.yaml's
+// `encryption` section). The memory-at-rest-security capability itself
+// (encrypting omnia.db/embeddings.db) has not landed yet in this codebase,
+// so there is no encrypt-on-write helper Save can call. Rather than write an
+// unencrypted copy of a user's top-ranked memories to disk while they
+// believe at-rest encryption protects that content, Save fails closed:
+// encCfg.Enabled=true refuses the write outright. This intentionally does
+// NOT consult encCfg.AllowPlaintextFallback — that flag is meant to let an
+// already-encrypted store degrade to plaintext on a read/write failure, not
+// to bless a capability (cartridge export) that has never had an encrypted
+// output path to begin with. Revisit this refusal once at-rest encryption
+// ships and a real Encrypt/Decrypt helper exists for Save/Load to call.
+func Save(dir string, c *Cartridge, encCfg config.EncryptionConfig) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("cartridge: Save: Cartridge is required")
+	}
+	if encCfg.Enabled {
+		return "", fmt.Errorf("cartridge: Save: at-rest encryption is enabled (encryption.enabled=true) but cartridge export does not yet support encrypted output — refusing to write a plaintext cartridge; disable cartridge.enabled until encryption support lands for this capability")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("cartridge: Save: %w", err)
 	}
-	path := filepath.Join(dir, fileName(c.RepoRoot, c.HeadSHA))
+	path := filepath.Join(dir, FileName(c.RepoRoot, c.Project, c.HeadSHA))
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("cartridge: Save: %w", err)

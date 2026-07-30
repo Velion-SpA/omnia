@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/velion/omnia/internal/cartridge"
 	"github.com/velion/omnia/internal/config"
@@ -70,6 +71,31 @@ func cartridgeDataDir(appCfg config.Config, dataDir string) string {
 	return filepath.Join(dataDir, "cartridges")
 }
 
+// resolveCartridgeProject returns the explicit project if non-empty,
+// otherwise falls back to detecting the project from repoRoot — mirroring
+// resolveConflictsProject's (conflicts.go) "detect-or-error-loudly-with-a-
+// hint" convention, since a cartridge build/load always has a concrete,
+// already-resolved repo root to detect from (unlike a bare cwd). Without
+// this fallback, an empty project string is passed straight through to
+// cartridge.Build/cartridge.Load, and store.NormalizeProject("") returns ""
+// — which AllObservations/CodeDecisionGraph/ListProcedures all treat as "no
+// filter, every project" rather than "this repo's project." The bare
+// `omnia cartridge build` invocation (no flags, the most natural usage)
+// would otherwise silently digest every project's memories into one file.
+func resolveCartridgeProject(explicit, repoRoot string) string {
+	if strings.TrimSpace(explicit) != "" {
+		return strings.TrimSpace(explicit)
+	}
+	detected := detectProject(repoRoot)
+	if strings.TrimSpace(detected) == "" {
+		fmt.Fprintln(os.Stderr, "error: could not detect project from repo root")
+		fmt.Fprintln(os.Stderr, "hint: use --project to specify the project explicitly")
+		exitFunc(1)
+		return ""
+	}
+	return detected
+}
+
 // loadCartridgeRankerModel mirrors cmdMCP's exact "load if enabled, nil
 // otherwise" convention (main.go's mcpCfg.LearnedRankerModel wiring): any
 // load failure (disabled, no model trained yet, corrupt/mismatched model)
@@ -104,6 +130,7 @@ func cmdCartridgeBuild(cfg store.Config, args []string) {
 		fmt.Printf("cartridge: cold start (no git repo context): %v\n", err)
 		return
 	}
+	project = resolveCartridgeProject(project, repoRoot)
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -126,7 +153,7 @@ func cmdCartridgeBuild(cfg store.Config, args []string) {
 		fatal(err)
 		return
 	}
-	path, err := cartridge.Save(cartridgeDataDir(appCfg, cfg.DataDir), c)
+	path, err := cartridge.Save(cartridgeDataDir(appCfg, cfg.DataDir), c, appCfg.Encryption)
 	if err != nil {
 		fatal(err)
 		return
@@ -136,7 +163,7 @@ func cmdCartridgeBuild(cfg store.Config, args []string) {
 }
 
 func cmdCartridgeLoad(cfg store.Config, args []string) {
-	repoArg, _, configPath := cartridgeFlags("cartridge load", args)
+	repoArg, project, configPath := cartridgeFlags("cartridge load", args)
 	appCfg, enabled := loadCartridgeConfig(configPath)
 	if !enabled {
 		fmt.Println("capability disabled")
@@ -150,16 +177,19 @@ func cmdCartridgeLoad(cfg store.Config, args []string) {
 		fmt.Printf("cartridge: cold start (no git repo context): %v\n", err)
 		return
 	}
+	project = resolveCartridgeProject(project, repoRoot)
 
-	result := cartridge.Load(cartridgeDataDir(appCfg, cfg.DataDir), repoRoot, headSHA)
+	result := cartridge.Load(cartridgeDataDir(appCfg, cfg.DataDir), repoRoot, headSHA, project)
 	switch {
 	case result.Fresh:
-		fmt.Printf("cartridge: warm start — %d memories, %d anchors, %d procedures (head %s)\n",
-			len(result.Cartridge.TopMemories), len(result.Cartridge.Anchors), len(result.Cartridge.TrustedProcedures), headSHA)
+		fmt.Printf("cartridge: warm start — %d memories, %d anchors, %d procedures (project %s, head %s)\n",
+			len(result.Cartridge.TopMemories), len(result.Cartridge.Anchors), len(result.Cartridge.TrustedProcedures), project, headSHA)
 	case result.Reason == cartridge.ReasonStaleCommit:
 		fmt.Printf("cartridge: stale (built at %s, HEAD is now %s) — cold start\n", result.Cartridge.HeadSHA, headSHA)
 	case result.Reason == cartridge.ReasonOldSchemaVersion:
 		fmt.Println("cartridge: format version mismatch — cold start")
+	case result.Reason == cartridge.ReasonProjectMismatch:
+		fmt.Printf("cartridge: project mismatch (requested %s) — cold start\n", project)
 	default:
 		fmt.Println("cartridge: no cartridge found — cold start")
 	}
