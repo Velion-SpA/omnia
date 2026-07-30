@@ -106,6 +106,21 @@ func OpenStore(path string, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("embed: %w", err)
 	}
+	if encryptionActive {
+		// A brand-new/nonexistent path is fine (created encrypted from
+		// scratch below). An EXISTING, detectably plaintext file means the
+		// operator flipped encryption.enabled=true on an already-populated
+		// plaintext store without migrating it first — without this check
+		// ncruces' adiantum VFS fails with a generic "file is not a
+		// database"-style error, not an actionable hint (reuses
+		// migrate_encryption.go's own isPlaintextSQLiteFile helper,
+		// previously unused here).
+		if existed, plaintext, perr := isPlaintextSQLiteFile(path); perr != nil {
+			return nil, fmt.Errorf("embed: inspect %s: %w", path, perr)
+		} else if existed && plaintext {
+			return nil, fmt.Errorf("embed: %s is a plaintext SQLite database but encryption.enabled=true — run `omnia security encrypt` first to migrate it", path)
+		}
+	}
 	vecWanted := cfg.vecIndexEnabled && hostIsLittleEndian()
 
 	var db *sql.DB

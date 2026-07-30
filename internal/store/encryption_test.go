@@ -183,6 +183,58 @@ func TestNew_EncryptionEnabled_KeychainUnavailable_FallbackOpensUnencryptedWithA
 	}
 }
 
+// ─── should-fix: enabling encryption on an existing plaintext store must
+// fail with an actionable hint, not a cryptic SQLite error ───
+
+func TestNew_EncryptionEnabled_ExistingPlaintextStore_FailsWithMigrationHint(t *testing.T) {
+	hexKey := "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+	withFakeKeychain(t, &fakeKeychain{hexKey: hexKey})
+
+	dir := t.TempDir()
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = dir
+	cfg.DedupeWindow = time.Hour
+
+	// Seed a plaintext store first — the natural "flip encryption.enabled
+	// after the fact" operator sequence, instead of running `omnia
+	// security encrypt` first.
+	seed, err := New(cfg)
+	if err != nil {
+		t.Fatalf("seed New: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("seed Close: %v", err)
+	}
+
+	cfg.EncryptionEnabled = true
+	_, err = New(cfg)
+	if err == nil {
+		t.Fatal("expected New to refuse opening an existing plaintext store with encryption.enabled=true")
+	}
+	if !strings.Contains(err.Error(), "omnia security encrypt") {
+		t.Errorf("error = %v, want a hint to run `omnia security encrypt`", err)
+	}
+}
+
+// TestNew_EncryptionEnabled_NewStore_StillCreatesFreshEncryptedFile confirms
+// the plaintext-detection guard above does NOT regress the normal
+// brand-new-store path (no file on disk yet).
+func TestNew_EncryptionEnabled_NewStore_StillCreatesFreshEncryptedFile(t *testing.T) {
+	hexKey := "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+	withFakeKeychain(t, &fakeKeychain{hexKey: hexKey})
+
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir() // brand-new, nothing on disk yet
+	cfg.DedupeWindow = time.Hour
+	cfg.EncryptionEnabled = true
+
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New (fresh encrypted): %v", err)
+	}
+	defer s.Close()
+}
+
 // ─── 4.8 Verification: disabled path is byte-for-byte (REQ-430) ───
 
 func TestNew_EncryptionDisabled_IsByteForByteUnaffected(t *testing.T) {

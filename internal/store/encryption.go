@@ -71,6 +71,21 @@ func openEngramDB(cfg Config, dbPath string) (*sql.DB, error) {
 		return openDB("sqlite", dbPath)
 	}
 
+	// A brand-new/nonexistent dbPath is fine (a fresh store is created
+	// encrypted from scratch, below). But an EXISTING, detectably plaintext
+	// file means the operator flipped encryption.enabled=true on an
+	// already-populated plaintext store without migrating it first — the
+	// natural first move, instead of running `omnia security encrypt`.
+	// Without this check, ncruces' adiantum VFS fails with a generic
+	// "file is not a database"-style error that gives no hint the fix is
+	// to run the migration CLI (reuses migrate_encryption.go's own
+	// isPlaintextSQLiteFile detection helper, previously unused here).
+	if existed, plaintext, perr := isPlaintextSQLiteFile(dbPath); perr != nil {
+		return nil, fmt.Errorf("engram: inspect %s: %w", dbPath, perr)
+	} else if existed && plaintext {
+		return nil, fmt.Errorf("engram: %s is a plaintext SQLite database but encryption.enabled=true — run `omnia security encrypt` first to migrate it", dbPath)
+	}
+
 	service := cfg.EncryptionKeychainService
 	if service == "" {
 		service = "omnia"

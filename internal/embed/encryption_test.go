@@ -161,6 +161,43 @@ func TestOpenStore_EncryptionEnabled_KeychainUnavailable_FallbackOpensUnencrypte
 	}
 }
 
+// ─── should-fix: enabling encryption on an existing plaintext store must
+// fail with an actionable hint, not a cryptic SQLite error ───
+
+func TestOpenStore_EncryptionEnabled_ExistingPlaintextStore_FailsWithMigrationHint(t *testing.T) {
+	withFakeEmbedKeychain(t, &fakeEmbedKeychain{hexKey: testHexKey})
+
+	path := t.TempDir() + "/emb.db"
+	seed, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("seed OpenStore: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("seed Close: %v", err)
+	}
+
+	_, err = OpenStore(path, WithEncryption(true, "omnia", false))
+	if err == nil {
+		t.Fatal("expected OpenStore to refuse opening an existing plaintext embeddings.db with encryption enabled")
+	}
+	if !strings.Contains(err.Error(), "omnia security encrypt") {
+		t.Errorf("error = %v, want a hint to run `omnia security encrypt`", err)
+	}
+}
+
+// TestOpenStore_EncryptionEnabled_NewStore_StillCreatesFreshEncryptedFile
+// confirms the plaintext-detection guard above does NOT regress the normal
+// brand-new-store path (no file on disk yet).
+func TestOpenStore_EncryptionEnabled_NewStore_StillCreatesFreshEncryptedFile(t *testing.T) {
+	withFakeEmbedKeychain(t, &fakeEmbedKeychain{hexKey: testHexKey})
+
+	s, err := OpenStore(t.TempDir()+"/emb.db", WithEncryption(true, "omnia", false))
+	if err != nil {
+		t.Fatalf("OpenStore (fresh encrypted): %v", err)
+	}
+	defer s.Close()
+}
+
 // ─── 4.8 Verification: disabled path is byte-for-byte (REQ-430) ───
 
 func TestOpenStore_EncryptionDisabled_NeverConsultsKeychain(t *testing.T) {
