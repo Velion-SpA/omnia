@@ -119,6 +119,80 @@ None.
 ### Design Deviations
 None.
 
+## PR 7 — Memory Enforcement Gate A: Matcher + Command Runner
+- Completed tasks: 7.1–7.8.
+- Boundary: `internal/enforce` package only (`matcher.go`, `runner.go`, `gate.go`) — trusted-procedure
+  matching, a sandboxed command runner covering all four `postcondition_kind` values, and the pure
+  pass/flag/block verdict decision. No audit logging, no override handling, and nothing reachable from
+  MCP/CLI yet (both deferred to PR 8 by design, per tasks.md's own phase split).
+### TDD Cycle Evidence
+| Task | Test File | RED | GREEN | REFACTOR |
+|---|---|---|---|---|
+| 7.1–7.2 | `matcher_test.go` | `MatchTrustedProcedures` undefined, package did not compile | `ListProcedures{State:trusted,Project}` candidate set narrowed by a per-file `SearchProcedures` query, intersected by sync_id; only the trusted procedure among matching trusted/candidate/retired fixtures is selected | Per-touched-file FTS query (not one long AND-of-fragments query) so a real match is never spuriously suppressed by FTS5 phrase-adjacency semantics |
+| 7.3–7.4 | `runner_test.go` | `RunCommand` undefined | `exec.CommandContext` via `sh -c`/`cmd /C`, hard timeout, exit code captured; non-zero exit is a FAILURE not an Err, TimedOut and Err are distinct outcomes | `CommandResult.Passed()` helper; output capped via `truncateOutput` |
+| 7.5–7.6 | `gate_test.go` | `Decide`/`DecideOptions`/`Verdict*` undefined | All-pass → `pass`; one failure + `Mode` unset → `flag`; `Mode: "block"` + failure → `block`; verified against all four postcondition kinds independently | `decideVerdict` isolated from `evaluatePostcondition` so the verdict rule is unit-testable without spawning a process |
+| 7.7 | `gate_test.go` (unconfigured-command + custom-gating cases) | A missing command config or `AllowCustomCommands=false` had no dedicated skip path | `resolveCommand` extracted as its own helper returning `(command, note, ok)`; unconfigured/gated kinds produce a `skipped` outcome that never escalates `decideVerdict`, even under `mode: "block"` | N/A — extracted directly during GREEN since the skip-path was designed as its own function from the start |
+| 7.8 | full `internal/enforce` suite | N/A (verification-only) | `CGO_ENABLED=0 go build ./...`, `go vet ./...`, `go test ./...` (full repo, not just this package) all passed | N/A |
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo)
+### Design Deviations
+- Task 7.8 says "unit suite green with injected fake command runner." The runner tests instead exercise the
+  real `exec.CommandContext` path directly (`exit 0`/`exit 1`/`sleep 5` via the real shell, plus a genuine
+  unstartable-process case) rather than injecting a fake/mock runner. This is a deliberate strengthening, not
+  a shortcut: `RunCommand` has no external dependency to fake (no network, no LLM, no filesystem write) — it
+  only shells out — so exercising the real implementation gives equal-or-better coverage with no added
+  flakiness risk, and keeps `Decide`/`evaluatePostcondition` (the parts that DO need isolation from process
+  spawning for fast, deterministic unit tests) fully covered via `gate_test.go`'s configured-command fixtures.
+- The matcher narrows via one `SearchProcedures` call **per touched file** (unioned by sync_id) rather than a
+  single combined query built from all touched paths. `SearchProcedures`'s `sanitizeFTS` quotes every
+  whitespace-separated word and ANDs them; a single query built by concatenating multiple file-path fragments
+  would require ALL fragments to literally co-occur in one procedure's trigger text, which is far more
+  fragile than the design's intent ("narrow via SearchProcedures ... using the touched file paths"). Read
+  literally per-path, this still uses `SearchProcedures` exactly as documented, just once per path instead of
+  once total.
+
+## PR 8 — Memory Enforcement Gate B: MCP/CLI + Override + Audit
+- Completed tasks: 8.1–8.10. Combined with PR 7 (7.1–7.8), all of Phase 7/8 (`memory-enforcement-gate`,
+  the v0.4 flagship) is now complete.
+- Boundary: `mem_enforce` MCP tool (`internal/mcp/mcp.go`, `handleEnforce`) + `omnia enforce` CLI
+  (`cmd/omnia/enforce.go`), both calling the SAME new `enforce.Evaluate` orchestration function
+  (`internal/enforce/evaluate.go`) so the pass/flag/block/override contract and the audit-entry mapping can
+  never drift between surfaces (REQ-418, task 8.9 satisfied by construction rather than a later extraction
+  pass — see Design Deviations). `internal/audit` gains `ActionEnforce` plus five additive `omitempty` Entry
+  fields (`Verdict`, `ProcedureSyncIDs`, `PostconditionKind`, `ExitCode`, `OverrideReason`) per ADR-7.
+### TDD Cycle Evidence
+| Task | Test File | RED | GREEN | REFACTOR |
+|---|---|---|---|---|
+| 8.1–8.2 | `internal/enforce/evaluate_test.go` | `Evaluate`/`EvalOptions` undefined | `DecideOptions.Override` added; `decideVerdict` returns the distinct `VerdictOverride` (never silently `pass`) only when there is an actual violation to override | N/A |
+| 8.3–8.4 | `internal/audit/audit_test.go`, `internal/enforce/evaluate_test.go` | `audit.ActionEnforce` and the five new `Entry` fields did not exist; `Evaluate` did not audit at all | `ActionEnforce` + `Verdict`/`ProcedureSyncIDs`/`PostconditionKind`/`ExitCode`/`OverrideReason` added to `Entry`; `appendAuditEntry` called for every verdict (pass/flag/block/override), including the zero-match `pass` path (REQ-411 fail-safe) | N/A |
+| 8.5–8.6 | `internal/enforce/evaluate_test.go` (`TestEvaluate_NeverWritesToTouchedFiles`) | N/A — this is an invariant check, not a driving requirement; the gate never had a file-write API to begin with | A seeded touched file's content is byte-identical before/after a failing `Evaluate` call | N/A — nothing to extract; `Decide`/`RunCommand` only read/execute by construction |
+| 8.7–8.8 | `internal/mcp/mcp_enforce_test.go`, `cmd/omnia/enforce_test.go` | `mem_enforce` unregistered/`handleEnforce` undefined; `loadEnforcementConfig`/`cmdEnforce` undefined | `mem_enforce` gated behind `cfg.Enforcement.Enabled` in `registerTools` (mirrors `mem_blame`/`CodeGraph`); `omnia enforce` dispatch case added, `loadEnforcementConfig` degrades to disabled on ANY `config.Load` error (fresh-install-safe from the start — see Design Deviations) | N/A |
+| 8.9 | — | — | `enforce.Evaluate` designed as the single shared function from the start: `handleEnforce` and `cmdEnforce` both build an `enforce.EvalOptions` and call it directly, so there was no duplicated per-surface audit-mapping code to consolidate | N/A — see Design Deviations |
+| 8.10 | full repo | N/A (verification-only) | `CGO_ENABLED=0 go build ./...`, `go vet ./...`, `go test ./...` (58 packages) all passed; disabled-path verified byte-for-byte (`mem_enforce` absent from `ListTools()`, `omnia enforce` prints `capability disabled` and never opens the store) | N/A |
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo, 58 packages)
+- `gofmt -l` on every touched/created file — clean
+- Manual check: `omnia enforce --files foo.go` with no `config.yaml` on `$PATH`/`$HOME` prints `capability
+  disabled` and exits 0 (never opens a store, never a fatal exit) — the exact anti-pattern already fixed 3x
+  elsewhere in this codebase (blame/consolidate/rank-train) was avoided from the start here.
+### Design Deviations
+- Task 8.9 ("Consolidate the pass/flag/block/override → audit-entry mapping into one function shared by MCP
+  and CLI entry points") describes a REFACTOR step that implies the mapping existed in duplicated form first.
+  Since PR7 and PR8 were implemented in one continuous session (not as literally separate incremental
+  sub-PRs with intermediate duplication), `enforce.Evaluate` was written as the single shared function from
+  its first GREEN commit — `handleEnforce` (MCP) and `cmdEnforce` (CLI) were never given their own
+  independent audit-mapping code to later merge. The end state matches 8.9's intent exactly (one function,
+  identical contract, REQ-418 satisfied); there was simply no separate extraction commit needed.
+- `omnia enforce --block` is an added CLI convenience (`design.md`'s own CLI shape: "`omnia enforce [--files
+  ...] [--block] [--override --reason ...]`") that forces `Mode: "block"` for that invocation and exits
+  non-zero on a `block` verdict, so a pre-commit hook/CI step can act on the exit code directly — this isn't
+  in the REQ text verbatim but is required for the CLI to actually be usable "for hooks/CI use" per REQ-418's
+  own scenario.
+
 ## PR 11 — Repo Cartridge
 - Completed tasks: 11.1–11.12 (all of Phase 11).
 - Boundary: `internal/cartridge` (Build/Save/Load/ResolveRepo) plus `omnia cartridge build`/`omnia cartridge

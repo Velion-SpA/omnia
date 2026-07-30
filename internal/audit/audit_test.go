@@ -158,3 +158,64 @@ func TestActionTaxonomy_ReadWriteConstantsExist(t *testing.T) {
 		t.Errorf("ActionWrite = %q, want %q", audit.ActionWrite, "write")
 	}
 }
+
+// TestActionEnforceConstantExists (ADR-7, memory-enforcement-gate PR8,
+// task 8.4) verifies the taxonomy gains ActionEnforce for gate decisions,
+// mirroring TestActionTaxonomy_ReadWriteConstantsExist's own value-check shape.
+func TestActionEnforceConstantExists(t *testing.T) {
+	if audit.ActionEnforce != "enforce" {
+		t.Errorf("ActionEnforce = %q, want %q", audit.ActionEnforce, "enforce")
+	}
+}
+
+// TestEntry_EnforcementFields_JSONRoundTrip (ADR-7: "Add ... additive
+// omitempty fields to Entry for gate decisions (decision, procedure
+// sync_id, postcondition kind, exit code, override reason)", task 8.3/8.4)
+// verifies Entry gains Verdict, ProcedureSyncIDs, PostconditionKind,
+// ExitCode, and OverrideReason and round-trips them through JSON — mirroring
+// TestEntry_ProvenanceFields_JSONRoundTrip's own shape above.
+func TestEntry_EnforcementFields_JSONRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", dir)
+	defer os.Setenv("HOME", origHome)
+
+	e := audit.Entry{
+		Ts:                audit.Now(),
+		Actor:             "mcp",
+		Action:            audit.ActionEnforce,
+		Project:           "myproject",
+		Summary:           "memory enforcement gate decision",
+		Result:            "ok",
+		Verdict:           "flag",
+		ProcedureSyncIDs:  []string{"proc-abc123", "proc-def456"},
+		PostconditionKind: "tests_pass",
+		ExitCode:          1,
+		OverrideReason:    "known flaky test, verified locally",
+	}
+	audit.Append(e)
+
+	entries, err := audit.Read(10)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	got := entries[0]
+	if got.Verdict != "flag" {
+		t.Errorf("Verdict = %q, want %q", got.Verdict, "flag")
+	}
+	if len(got.ProcedureSyncIDs) != 2 || got.ProcedureSyncIDs[0] != "proc-abc123" {
+		t.Errorf("ProcedureSyncIDs = %+v, want [proc-abc123 proc-def456]", got.ProcedureSyncIDs)
+	}
+	if got.PostconditionKind != "tests_pass" {
+		t.Errorf("PostconditionKind = %q, want %q", got.PostconditionKind, "tests_pass")
+	}
+	if got.ExitCode != 1 {
+		t.Errorf("ExitCode = %d, want 1", got.ExitCode)
+	}
+	if got.OverrideReason != "known flaky test, verified locally" {
+		t.Errorf("OverrideReason = %q, want %q", got.OverrideReason, "known flaky test, verified locally")
+	}
+}

@@ -26,6 +26,11 @@ const (
 	ActionRead        Action = "read"
 	ActionWrite       Action = "write"
 	ActionConsolidate Action = "consolidate"
+	// ActionEnforce extends the taxonomy for the memory-enforcement-gate
+	// capability (ADR-7): every mem_enforce/omnia enforce gate decision
+	// (pass/flag/block/override) appends exactly one entry with this
+	// action, regardless of verdict.
+	ActionEnforce Action = "enforce"
 )
 
 // Entry is a single audit log record.
@@ -47,6 +52,19 @@ type Entry struct {
 	TrustTag  string `json:"trust_tag,omitempty"`
 	SyncID    string `json:"sync_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
+
+	// Verdict, ProcedureSyncIDs, PostconditionKind, ExitCode, and
+	// OverrideReason carry memory-enforcement-gate decisions (ADR-7): the
+	// gate's pass/flag/block/override verdict, which trusted procedure(s)
+	// were evaluated, a representative postcondition kind/exit code, and
+	// (when Verdict is "override") the caller-supplied override reason.
+	// All five are additive and omitempty so existing JSONL lines (written
+	// before this field set existed) still unmarshal cleanly.
+	Verdict           string   `json:"verdict,omitempty"`
+	ProcedureSyncIDs  []string `json:"procedure_sync_ids,omitempty"`
+	PostconditionKind string   `json:"postcondition_kind,omitempty"`
+	ExitCode          int      `json:"exit_code,omitempty"`
+	OverrideReason    string   `json:"override_reason,omitempty"`
 }
 
 // defaultLogPath returns ~/.local/state/omnia/audit.jsonl.
