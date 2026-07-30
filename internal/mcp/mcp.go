@@ -33,6 +33,7 @@ import (
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/diagnostic"
 	"github.com/velion/omnia/internal/embed"
+	"github.com/velion/omnia/internal/enforce"
 	projectpkg "github.com/velion/omnia/internal/project"
 	"github.com/velion/omnia/internal/purge"
 	"github.com/velion/omnia/internal/ranker"
@@ -180,6 +181,14 @@ type MCPConfig struct {
 	WriteHygieneEnabled bool
 	TimeTravelEnabled   bool
 	CodeGraph           config.CodeGraphConfig
+
+	// Enforcement gates the mem_enforce tool (memory-enforcement-gate, REQ-410).
+	// The zero value (Enabled=false) is the default: mem_enforce is not
+	// registered at all — total inertness, mirroring CodeGraph's own
+	// registration-gate convention above — so a fresh install with no
+	// config.yaml sees zero behavior change. Built by cmd/omnia/main.go from
+	// config.EnforcementConfig only.
+	Enforcement config.EnforcementConfig
 }
 
 const recordedTimeDisclaimer = "\n---\nRecorded-time view: history starts when time_travel is enabled; retained revisions may not cover earlier timestamps."
@@ -447,6 +456,24 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 			mcp.WithNumber("line", mcp.Required(), mcp.Description("1-based source line.")),
 			mcp.WithString("repo_root", mcp.Description("Optional repository root.")),
 		), handleBlame(s))
+	}
+
+	// mem_enforce (memory-enforcement-gate, REQ-410/418): a pre-completion
+	// gate that mechanically runs trusted procedures' postconditions and
+	// returns a pass/flag/block/override verdict. Gated off entirely
+	// (never registered) while enforcement.enabled is false.
+	if cfg.Enforcement.Enabled && shouldRegister("mem_enforce", allowlist) {
+		srv.AddTool(mcp.NewTool("mem_enforce",
+			mcp.WithDescription("Mechanically verify the current change against trusted procedure postconditions (pass/flag/block; overridable). No LLM is used anywhere in this evaluation."),
+			mcp.WithString("project", mcp.Description("Project to scope trusted procedures to.")),
+			mcp.WithString("repo_root", mcp.Description("Optional repository root the postcondition commands run in.")),
+			mcp.WithArray("files_touched",
+				mcp.Description("Files touched by the current edit, used to match trusted procedures whose trigger overlaps them."),
+				mcp.Items(map[string]any{"type": "string"}),
+			),
+			mcp.WithBoolean("override", mcp.Description("Explicit escape hatch: proceed despite a failing postcondition. Recorded as its own distinct 'override' verdict, never silently 'pass'.")),
+			mcp.WithString("override_reason", mcp.Description("Why this failing postcondition is being overridden (recorded in the audit log).")),
+		), handleEnforce(s, cfg))
 	}
 
 	// ─── mem_search (profile: agent, core — always in context) ─────────
@@ -1221,6 +1248,50 @@ func publicBlameResponse(line int, hits []store.BlameHit) publicBlameResult {
 		})
 	}
 	return out
+}
+
+// handleEnforce implements mem_enforce (memory-enforcement-gate). It is a
+// thin adapter over enforce.Evaluate — the SAME function `omnia enforce`
+// (cmd/omnia) calls (REQ-418) — so both surfaces share one pass/flag/block/
+// override contract and one audit-entry mapping (task 8.9).
+func handleEnforce(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		project, _ := req.GetArguments()["project"].(string)
+		repoRoot, _ := req.GetArguments()["repo_root"].(string)
+		override, _ := req.GetArguments()["override"].(bool)
+		overrideReason, _ := req.GetArguments()["override_reason"].(string)
+		files := parseFilesTouchedArg(req)
+
+		result := enforce.Evaluate(ctx, s, enforce.EvalOptions{
+			Config:         cfg.Enforcement,
+			Project:        project,
+			RepoRoot:       repoRoot,
+			FilesTouched:   files,
+			Override:       override,
+			OverrideReason: overrideReason,
+			Actor:          "mcp",
+		})
+		out, _ := jsonMarshal(result)
+		return mcp.NewToolResultText(string(out)), nil
+	}
+}
+
+// parseFilesTouchedArg extracts the optional `files_touched` argument as a
+// []string, best-effort: non-string entries are silently skipped rather
+// than failing the whole call (mirrors parseCodeAnchorsArg's own
+// best-effort convention, anchor_adapter.go).
+func parseFilesTouchedArg(req mcp.CallToolRequest) []string {
+	raw, ok := req.GetArguments()["files_touched"].([]any)
+	if !ok {
+		return nil
+	}
+	files := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok && s != "" {
+			files = append(files, s)
+		}
+	}
+	return files
 }
 
 // ─── Tool Handlers ───────────────────────────────────────────────────────────

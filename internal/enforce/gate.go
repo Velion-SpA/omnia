@@ -9,11 +9,13 @@ import (
 )
 
 // Verdict values (REQ-413): the gate MUST return exactly one of these per
-// invocation. VerdictOverride is a Phase 8 (PR8) addition — see evaluate.go.
+// invocation. VerdictOverride (REQ-415, PR8) is its own distinct outcome —
+// never silently reported as VerdictPass.
 const (
-	VerdictPass  = "pass"
-	VerdictFlag  = "flag"
-	VerdictBlock = "block"
+	VerdictPass     = "pass"
+	VerdictFlag     = "flag"
+	VerdictBlock    = "block"
+	VerdictOverride = "override"
 )
 
 // Outcome values for one evaluated procedure's postcondition — informational
@@ -53,14 +55,20 @@ type Result struct {
 type DecideOptions struct {
 	Config   config.EnforcementConfig
 	RepoRoot string
+	// Override is the explicit escape hatch (REQ-415): when true and at
+	// least one postcondition did not cleanly pass, the verdict is
+	// VerdictOverride — its own distinct outcome, never silently VerdictPass.
+	// It has no effect when every postcondition already passed (nothing to
+	// override).
+	Override bool
 }
 
 // Decide runs the postcondition for every already-matched trusted procedure
-// (see MatchTrustedProcedures) and derives the pass/flag/block verdict
-// (REQ-412/413/414). It is a PURE decision function: no LLM call anywhere
-// (REQ-412), and — deliberately, for this Phase 7 slice — no audit logging
-// and no override handling. Both are layered on top by Evaluate (PR8,
-// evaluate.go), the single function mem_enforce/omnia enforce both call.
+// (see MatchTrustedProcedures) and derives the pass/flag/block/override
+// verdict (REQ-412/413/414/415). It is a PURE decision function: no LLM
+// call anywhere (REQ-412), and no audit logging — that is layered on top by
+// Evaluate (evaluate.go), the single function mem_enforce/omnia enforce
+// both call.
 func Decide(ctx context.Context, procedures []store.Procedure, opts DecideOptions) Result {
 	var violations []Violation
 	for _, p := range procedures {
@@ -69,17 +77,19 @@ func Decide(ctx context.Context, procedures []store.Procedure, opts DecideOption
 			violations = append(violations, v)
 		}
 	}
-	return decideVerdict(opts.Config, violations)
+	return decideVerdict(opts.Config, opts.Override, violations)
 }
 
-// decideVerdict derives pass/flag/block from a set of non-passing
-// evaluation outcomes (REQ-413/414). A `skipped` outcome (command not
+// decideVerdict derives pass/flag/block/override from a set of non-passing
+// evaluation outcomes (REQ-413/414/415). A `skipped` outcome (command not
 // configured, or custom postconditions not allowed) NEVER escalates the
 // verdict — fail-safe by design (design.md: "a wrong block is worse than a
 // missed catch"). A `runner_error`/`timeout` outcome forces `flag` even
 // under block mode, since a broken/slow verification environment is never
-// grounds to hard-block a caller's workflow.
-func decideVerdict(cfg config.EnforcementConfig, violations []Violation) Result {
+// grounds to hard-block a caller's workflow. An explicit override only ever
+// applies when there is something to override (blocking == true); it never
+// turns a clean pass into a spurious "override" record.
+func decideVerdict(cfg config.EnforcementConfig, override bool, violations []Violation) Result {
 	blocking := false
 	forceFlag := false
 	for _, v := range violations {
@@ -93,6 +103,9 @@ func decideVerdict(cfg config.EnforcementConfig, violations []Violation) Result 
 	}
 	if !blocking {
 		return Result{Verdict: VerdictPass, Violations: violations, Overridable: false}
+	}
+	if override {
+		return Result{Verdict: VerdictOverride, Violations: violations, Overridable: false}
 	}
 	if cfg.Mode == "block" && !forceFlag {
 		return Result{Verdict: VerdictBlock, Violations: violations, Overridable: true}
