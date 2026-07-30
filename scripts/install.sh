@@ -41,7 +41,7 @@ detect_os() {
     case "$os" in
         Linux) echo "linux" ;;
         Darwin) echo "darwin" ;;
-        *) err "unsupported OS: $os (omnia ships prebuilt binaries for linux and darwin only; try 'go install github.com/${REPO}/cmd/omnia@latest')" ;;
+        *) err "unsupported OS: $os (omnia ships prebuilt binaries for linux and darwin only; build from the canonical source with 'git clone https://github.com/Velion-SpA/omnia.git && cd omnia && go install ./cmd/omnia')" ;;
     esac
 }
 
@@ -78,6 +78,62 @@ fetch_stdout() {
     fi
 }
 
+checksum_error() {
+    reason="$1"
+    err "checksum verification failed for ${archive}: ${reason}"
+}
+
+verify_checksum() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        verifier=sha256sum
+    elif command -v shasum >/dev/null 2>&1; then
+        verifier=shasum
+    else
+        checksum_error "no SHA-256 verifier available (need sha256sum or shasum)"
+    fi
+
+    log "Verifying checksum..."
+    if ! fetch "${base_url}/checksums.txt" "${workdir}/checksums.txt" 2>/dev/null; then
+        checksum_error "checksums.txt is unavailable"
+    fi
+
+    if ! expected=$(awk -v archive="$archive" '
+        ($2 == archive || $2 == "*" archive) {
+            matches++
+            value=$1
+        }
+        END {
+            if (matches != 1) exit 1
+            print value
+        }
+    ' "${workdir}/checksums.txt"); then
+        checksum_error "archive is not listed in checksums.txt"
+    fi
+
+    expected=$(printf '%s\n' "$expected" | awk '{print tolower($0)}')
+    case "$expected" in
+        ''|*[!0-9a-f]*) checksum_error "invalid SHA-256 digest in checksums.txt" ;;
+    esac
+    [ "${#expected}" -eq 64 ] || checksum_error "invalid SHA-256 digest in checksums.txt"
+
+    digest_file="${workdir}/archive.sha256"
+    if [ "$verifier" = sha256sum ]; then
+        if ! sha256sum "${workdir}/${archive}" >"$digest_file" 2>/dev/null; then
+            checksum_error "SHA-256 verifier failed (sha256sum)"
+        fi
+    else
+        if ! shasum -a 256 "${workdir}/${archive}" >"$digest_file" 2>/dev/null; then
+            checksum_error "SHA-256 verifier failed (shasum -a 256)"
+        fi
+    fi
+    if ! actual=$(awk 'NF { if (++lines != 1) exit 1; print tolower($1) } END { if (lines != 1) exit 1 }' "$digest_file"); then
+        checksum_error "could not parse archive digest"
+    fi
+    if [ "$expected" != "$actual" ]; then
+        err "checksum mismatch for ${archive}: expected ${expected}, got ${actual}"
+    fi
+}
+
 latest_tag() {
     fetch_stdout "https://api.github.com/repos/${REPO}/releases/latest" \
         | grep '"tag_name"' \
@@ -109,26 +165,7 @@ main() {
     log "Downloading ${archive} (${tag})..."
     fetch "${base_url}/${archive}" "${workdir}/${archive}"
 
-    if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
-        log "Verifying checksum..."
-        if fetch "${base_url}/checksums.txt" "${workdir}/checksums.txt" 2>/dev/null; then
-            expected=$(grep " ${archive}\$" "${workdir}/checksums.txt" | awk '{print $1}')
-            if [ -n "$expected" ]; then
-                if command -v sha256sum >/dev/null 2>&1; then
-                    actual=$(sha256sum "${workdir}/${archive}" | awk '{print $1}')
-                else
-                    actual=$(shasum -a 256 "${workdir}/${archive}" | awk '{print $1}')
-                fi
-                if [ "$expected" != "$actual" ]; then
-                    err "checksum mismatch for ${archive}: expected ${expected}, got ${actual}"
-                fi
-            else
-                log "warning: ${archive} not listed in checksums.txt, skipping verification"
-            fi
-        else
-            log "warning: could not fetch checksums.txt, skipping verification"
-        fi
-    fi
+    verify_checksum
 
     log "Extracting..."
     tar -xzf "${workdir}/${archive}" -C "$workdir" "$BIN_NAME"

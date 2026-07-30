@@ -160,9 +160,9 @@ func updateInstructions() string {
 	case "darwin":
 		return "  brew update && brew upgrade omnia"
 	case "linux":
-		return "  brew update && brew upgrade omnia\n  or: go install github.com/velion/omnia/cmd/omnia@latest"
+		return "  brew update && brew upgrade omnia\n  or: git clone https://github.com/Velion-SpA/omnia.git && cd omnia && go install ./cmd/omnia"
 	default:
-		return "  go install github.com/velion/omnia/cmd/omnia@latest\n  or: https://github.com/velion/omnia/releases/latest"
+		return "  git clone https://github.com/Velion-SpA/omnia.git && cd omnia && go install ./cmd/omnia\n  or: https://github.com/Velion-SpA/omnia/releases/latest"
 	}
 }
 
