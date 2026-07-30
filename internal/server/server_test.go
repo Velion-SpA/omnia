@@ -405,6 +405,77 @@ func TestExportRejectsExplicitBlankProjectQuery(t *testing.T) {
 	}
 }
 
+func TestPortableHTTPDeliveryAndErrors(t *testing.T) {
+	st := newServerTestStore(t)
+	if _, err := st.UpsertProcedure(store.Procedure{
+		SyncID: "proc-http", Polarity: store.ProcedurePolarityPlaybook, Trigger: "deliver",
+		Steps: []store.ProcedureStep{{Order: 1, Template: "export"}}, PostconditionKind: store.PostconditionTestsPass,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, 0)
+	exportRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(exportRec, httptest.NewRequest(http.MethodGet, "/export", nil))
+	if exportRec.Code != http.StatusOK {
+		t.Fatalf("portable export status=%d body=%s", exportRec.Code, exportRec.Body.String())
+	}
+	data, err := store.DecodeExportData(exportRec.Body.Bytes())
+	if err != nil || data.SchemaVersion != 2 || data.Counts.Procedures != 1 {
+		t.Fatalf("portable export mismatch: data=%+v err=%v", data, err)
+	}
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/import", bytes.NewReader(exportRec.Body.Bytes()))
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("portable import %d status=%d body=%s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	procedures, err := st.ListProcedures(store.ListProceduresOptions{Limit: 10})
+	if err != nil || len(procedures) != 1 {
+		t.Fatalf("HTTP re-import duplicated procedures: count=%d err=%v", len(procedures), err)
+	}
+	badRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(badRec, httptest.NewRequest(http.MethodPost, "/import",
+		strings.NewReader(`{"schema_version":3}`)))
+	if badRec.Code != http.StatusBadRequest || !strings.Contains(badRec.Body.String(), "unsupported schema version") {
+		t.Fatalf("future import status=%d body=%s", badRec.Code, badRec.Body.String())
+	}
+	for _, tt := range []struct {
+		name   string
+		mutate func(*store.ExportData)
+		want   string
+	}{
+		{"invalid procedure", func(d *store.ExportData) { d.Procedures[0]["state"] = "unknown" }, "procedure state"},
+		{"dangling relation", func(d *store.ExportData) {
+			d.Relations = []store.PortableRow{{"sync_id": "rel-http", "source_id": "missing-a", "target_id": "missing-b",
+				"relation": "related", "judgment_status": "judged", "created_at": "2026-01-01", "updated_at": "2026-01-01"}}
+			d.Counts.Relations = 1
+		}, "source_id"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := store.DecodeExportData(exportRec.Body.Bytes())
+			if err != nil {
+				t.Fatal(err)
+			}
+			tt.mutate(payload)
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/import", bytes.NewReader(raw)))
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), tt.want) {
+				t.Fatalf("semantic import status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			procedures, _ := st.ListProcedures(store.ListProceduresOptions{Limit: 10})
+			if len(procedures) != 1 {
+				t.Fatalf("invalid import partially mutated procedures: %d", len(procedures))
+			}
+		})
+	}
+}
+
 // ─── Sync Status Tests ───────────────────────────────────────────────────────
 
 // stubSyncStatusProvider is a fake SyncStatusProvider for tests.

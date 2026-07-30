@@ -96,6 +96,10 @@ type Config struct {
 	// disabling it restores byte-for-byte pre-v0.3.1 save behavior.
 	WriteHygiene WriteHygieneConfig `yaml:"write_hygiene"`
 
+	// TimeTravel enables local observation history capture. It is default-off;
+	// zero retained revisions means unlimited history.
+	TimeTravel TimeTravelConfig `yaml:"time_travel"`
+
 	// Review gates the spaced-review / Play G due-count nudge appended to
 	// mem_context's output (design D11, spec spaced-review REQ "Existing-
 	// Tool Output Changes Gated Default-OFF"). Disabled by default: a fresh
@@ -105,6 +109,11 @@ type Config struct {
 	// convention. The standalone `omnia review-due` CLI is NOT gated by
 	// this flag — it is its own explicit, opt-in command.
 	Review ReviewConfig `yaml:"review"`
+}
+
+type TimeTravelConfig struct {
+	Enabled               bool `yaml:"enabled"`
+	MaxRevisionsPerMemory int  `yaml:"max_revisions_per_memory"`
 }
 
 // WriteHygieneConfig is the v0.3.1 write-gate block (design obs #1668

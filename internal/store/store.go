@@ -133,6 +133,11 @@ const (
 
 // State returns the virtual lifecycle state derived from review_after.
 func (o Observation) State() string {
+	return o.StateAt(time.Now().UTC())
+}
+
+// StateAt returns the virtual lifecycle state at a specific read instant.
+func (o Observation) StateAt(at time.Time) string {
 	if o.ReviewAfter == nil || strings.TrimSpace(*o.ReviewAfter) == "" {
 		return ObservationStateActive
 	}
@@ -140,7 +145,7 @@ func (o Observation) State() string {
 	if err != nil {
 		return ObservationStateActive
 	}
-	if !reviewAfter.After(time.Now().UTC()) {
+	if !reviewAfter.After(at.UTC()) {
 		return ObservationStateNeedsReview
 	}
 	return ObservationStateActive
@@ -200,10 +205,12 @@ type TimelineResult struct {
 }
 
 type SearchOptions struct {
-	Type    string `json:"type,omitempty"`
-	Project string `json:"project,omitempty"`
-	Scope   string `json:"scope,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
+	Type           string `json:"type,omitempty"`
+	Project        string `json:"project,omitempty"`
+	Scope          string `json:"scope,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
+	IncludeDeleted bool   `json:"-"`
+	postFilter     func([]SearchResult) ([]SearchResult, error)
 	// Diag, when non-nil, receives the outcome of the zero-hit FTS
 	// relaxation ladder (design obs #1668 D7, spec fts-recall) for this
 	// call — an output parameter, not a request field, so it is never
@@ -545,11 +552,17 @@ type syncEmbeddingPayload struct {
 
 // ExportData is the full serializable dump of the engram database.
 type ExportData struct {
-	Version      string        `json:"version"`
-	ExportedAt   string        `json:"exported_at"`
-	Sessions     []Session     `json:"sessions"`
-	Observations []Observation `json:"observations"`
-	Prompts      []Prompt      `json:"prompts"`
+	SchemaVersion int           `json:"schema_version,omitempty"`
+	Version       string        `json:"version"`
+	ExportedAt    string        `json:"exported_at"`
+	Counts        ExportCounts  `json:"counts,omitempty"`
+	Checksum      string        `json:"checksum,omitempty"`
+	Sessions      []Session     `json:"sessions"`
+	Observations  []Observation `json:"observations"`
+	Prompts       []Prompt      `json:"prompts"`
+	Relations     []PortableRow `json:"relations,omitempty"`
+	Anchors       []PortableRow `json:"anchors,omitempty"`
+	Procedures    []PortableRow `json:"procedures,omitempty"`
 }
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -629,7 +642,9 @@ type Config struct {
 	// false` in a successfully-loaded config.yaml, threaded by the
 	// composition root (cmd/omnia's cmdServe/cmdMCP/cmdContext/cmdSave), sets
 	// this true and restores the pre-PR7 zero-hit behavior byte-for-byte.
-	DisableFTSRelax bool
+	DisableFTSRelax    bool
+	TimeTravelEnabled  bool
+	HistoryRevisionCap int
 }
 
 func DefaultConfig() (Config, error) {
@@ -1391,6 +1406,44 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_deletion_tombstones_project ON deletion_tombstones(project, deleted_at DESC);
 	`); err != nil {
 		return err
+	}
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS observation_revisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			obs_sync_id TEXT NOT NULL,
+			op TEXT NOT NULL,
+			valid_from TEXT NOT NULL,
+			valid_to TEXT NOT NULL,
+			snapshot TEXT NOT NULL,
+			pinned INTEGER NOT NULL DEFAULT 0,
+			recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE INDEX IF NOT EXISTS idx_obsrev_asof ON observation_revisions(obs_sync_id, valid_from, valid_to);
+		CREATE INDEX IF NOT EXISTS idx_obsrev_syncid ON observation_revisions(obs_sync_id);
+	`); err != nil {
+		return err
+	}
+	if err := s.addColumnIfNotExists("observation_revisions", "pinned", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS time_travel_metadata (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			started_at TEXT NOT NULL,
+			initial_max_observation_id INTEGER NOT NULL
+		);
+	`); err != nil {
+		return err
+	}
+	if s.cfg.TimeTravelEnabled {
+		if _, err := s.execHook(s.db, `
+			INSERT OR IGNORE INTO time_travel_metadata (id, started_at, initial_max_observation_id)
+			VALUES (1, COALESCE(
+				(SELECT MIN(valid_to) FROM observation_revisions),
+				?
+			), COALESCE((SELECT MAX(id) FROM observations), 0))`, nextRevisionTimestamp("")); err != nil {
+			return err
+		}
 	}
 
 	// ── omnia-structural-forgetting (living memory, cheap code anchor) ────
@@ -3124,6 +3177,14 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 				topicKey, nullableString(p.Project), scope,
 			).Scan(&existingID)
 			if err == nil {
+				before, err := s.getObservationTx(tx, existingID)
+				if err != nil {
+					return err
+				}
+				mutationAt := nextRevisionTimestamp(before.UpdatedAt)
+				if err := s.captureObservationRevisionTx(tx, before, revisionOpUpdate, mutationAt); err != nil {
+					return err
+				}
 				// error_signature/outcome use COALESCE(NULLIF(?, ''), col) so a
 				// revision save that doesn't provide a new value PRESERVES the
 				// previously stored one instead of clearing it (e.g. an outcome
@@ -3142,7 +3203,7 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 					     trust_tag = COALESCE(NULLIF(?, ''), trust_tag),
 					     revision_count = revision_count + 1,
 					     last_seen_at = datetime('now'),
-					     updated_at = datetime('now')
+					     updated_at = ?
 					 WHERE id = ?`,
 					p.Type,
 					title,
@@ -3154,6 +3215,7 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 					outcome,
 					p.Source,
 					trustTagForRevision,
+					mutationAt,
 					existingID,
 				); err != nil {
 					return err
@@ -3248,6 +3310,14 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 					result = SaveResult{ID: targetID, Decision: WriteGateDecisionNoop, TargetID: &targetID, Similarity: verdict.similarity, Reason: verdict.reason}
 					return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 				case writeGateActionUpdate:
+					before, err := s.getObservationTx(tx, verdict.targetID)
+					if err != nil {
+						return err
+					}
+					mutationAt := nextRevisionTimestamp(before.UpdatedAt)
+					if err := s.captureObservationRevisionTx(tx, before, revisionOpUpdate, mutationAt); err != nil {
+						return err
+					}
 					if _, err := s.execHook(tx,
 						`UPDATE observations
 						 SET type = ?,
@@ -3262,7 +3332,7 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 						     trust_tag = COALESCE(NULLIF(?, ''), trust_tag),
 						     revision_count = revision_count + 1,
 						     last_seen_at = datetime('now'),
-						     updated_at = datetime('now')
+						     updated_at = ?
 						 WHERE id = ?`,
 						p.Type,
 						title,
@@ -3274,6 +3344,7 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 						outcome,
 						p.Source,
 						trustTagForRevision,
+						mutationAt,
 						verdict.targetID,
 					); err != nil {
 						return err
@@ -3435,18 +3506,28 @@ func (s *Store) setObservationPinned(id int64, pinned bool) error {
 	if pinned {
 		value = 1
 	}
-	res, err := s.execHook(s.db, `UPDATE observations SET pinned = ? WHERE id = ? AND deleted_at IS NULL`, value, id)
-	if err != nil {
+	return s.withTx(func(tx *sql.Tx) error {
+		obs, err := s.getObservationTx(tx, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrObservationNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if obs.Pinned == pinned {
+			return nil
+		}
+		mutationAt := nextRevisionTimestamp(obs.UpdatedAt)
+		if err := s.captureObservationRevisionTx(tx, obs, revisionOpUpdate, mutationAt); err != nil {
+			return err
+		}
+		_, err = s.execHook(tx, `
+			UPDATE observations
+			SET pinned = ?, updated_at = ?
+			WHERE id = ? AND deleted_at IS NULL`,
+			value, mutationAt, id)
 		return err
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return ErrObservationNotFound
-	}
-	return nil
+	})
 }
 
 func (s *Store) recentUnpinnedObservations(project, scope string, limit int) ([]Observation, error) {
@@ -3911,6 +3992,10 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			outcome = normalized
 		}
 
+		mutationAt := nextRevisionTimestamp(obs.UpdatedAt)
+		if err := s.captureObservationRevisionTx(tx, obs, revisionOpUpdate, mutationAt); err != nil {
+			return err
+		}
 		if _, err := s.execHook(tx,
 			`UPDATE observations
 			 SET type = ?,
@@ -3922,7 +4007,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			     normalized_hash = ?,
 			     outcome = ?,
 			     revision_count = revision_count + 1,
-			     updated_at = datetime('now')
+			     updated_at = ?
 			 WHERE id = ? AND deleted_at IS NULL`,
 			typ,
 			title,
@@ -3932,6 +4017,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			nullableString(topicKey),
 			hashNormalized(content),
 			nullableString(outcome),
+			mutationAt,
 			id,
 		); err != nil {
 			return err
@@ -3983,6 +4069,9 @@ func (s *Store) deleteObservation(id int64, hardDelete bool, actor string) error
 			if _, err := s.execHook(tx, `DELETE FROM observations WHERE id = ?`, id); err != nil {
 				return err
 			}
+			if err := s.purgeObservationRevisionsTx(tx, obs.SyncID); err != nil {
+				return err
+			}
 			// ── Phase: memory-conflict-surfacing — C.11 ──────────────────────
 			// Orphan any memory_relations rows that reference this observation's
 			// sync_id (as source or target). Relations are never cascade-deleted;
@@ -4023,18 +4112,20 @@ func (s *Store) deleteObservation(id int64, hardDelete bool, actor string) error
 				}
 			}
 		} else {
+			mutationAt := nextRevisionTimestamp(obs.UpdatedAt)
+			if err := s.captureObservationRevisionTx(tx, obs, revisionOpSoftDelete, mutationAt); err != nil {
+				return err
+			}
 			if _, err := s.execHook(tx,
 				`UPDATE observations
-				 SET deleted_at = datetime('now'),
-				     updated_at = datetime('now')
+				 SET deleted_at = ?,
+				     updated_at = ?
 				 WHERE id = ? AND deleted_at IS NULL`,
-				id,
+				mutationAt, mutationAt, id,
 			); err != nil {
 				return err
 			}
-			if err := tx.QueryRow(`SELECT deleted_at FROM observations WHERE id = ?`, id).Scan(&deletedAt); err != nil {
-				return err
-			}
+			deletedAt = mutationAt
 		}
 
 		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpDelete, syncObservationPayload{
@@ -4213,7 +4304,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	if limit <= 0 {
 		limit = 10
 	}
-	if limit > s.cfg.MaxSearchResults {
+	if limit > s.cfg.MaxSearchResults && !opts.IncludeDeleted {
 		limit = s.cfg.MaxSearchResults
 	}
 
@@ -4222,9 +4313,9 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		tkSQL := `
 			SELECT ` + observationSelectColumns + `
 			FROM observations
-			WHERE topic_key = ? AND deleted_at IS NULL
+			WHERE topic_key = ? AND (? OR deleted_at IS NULL)
 		`
-		tkArgs := []any{query}
+		tkArgs := []any{query, opts.IncludeDeleted}
 
 		if opts.Type != "" {
 			tkSQL += " AND type = ?"
@@ -4322,7 +4413,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		// still runs (reverse-only) even when no probe survives the
 		// distinctiveness guards.
 		orClauses := make([]string, 0, len(probes)+1)
-		sigArgs := []any{minSignatureLength}
+		sigArgs := []any{minSignatureLength, opts.IncludeDeleted}
 		for _, probe := range probes {
 			orClauses = append(orClauses, "error_signature LIKE '%' || ? || '%'")
 			sigArgs = append(sigArgs, probe)
@@ -4336,10 +4427,9 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			WHERE error_signature IS NOT NULL
 			  AND error_signature != ''
 			  AND LENGTH(error_signature) >= ?
-			  AND deleted_at IS NULL
+			  AND (? OR deleted_at IS NULL)
 			  AND ( ` + strings.Join(orClauses, "\n			        OR ") + ` )
 		`
-
 		if opts.Type != "" {
 			sigSQL += " AND type = ?"
 			sigArgs = append(sigArgs, opts.Type)
@@ -4383,6 +4473,12 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	if err != nil {
 		return nil, err
 	}
+	if opts.postFilter != nil {
+		ftsResults, err = opts.postFilter(ftsResults)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// ── Zero-hit relaxation ladder (design obs #1668 D7, spec fts-recall,
 	// repro obs #1659/#1662) ────────────────────────────────────────────
@@ -4410,9 +4506,19 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		*opts.Diag = diag
 	}
 
+	preemptive := append(directResults, signatureResults...)
+	if opts.postFilter != nil {
+		preemptive, err = opts.postFilter(preemptive)
+		if err != nil {
+			return nil, err
+		}
+		seen = make(map[int64]bool, len(preemptive))
+		for _, result := range preemptive {
+			seen[result.ID] = true
+		}
+	}
 	var results []SearchResult
-	results = append(results, directResults...)
-	results = append(results, signatureResults...)
+	results = append(results, preemptive...)
 	for _, sr := range ftsResults {
 		if !seen[sr.ID] {
 			results = append(results, sr)
@@ -4462,9 +4568,9 @@ func (s *Store) runFTSQuery(ftsQuery string, opts SearchOptions, limit int) ([]S
 		       fts.rank
 		FROM observations_fts fts
 		JOIN observations o ON o.id = fts.rowid
-		WHERE observations_fts MATCH ? AND o.deleted_at IS NULL
+		WHERE observations_fts MATCH ? AND (? OR o.deleted_at IS NULL)
 	`
-	args := []any{ftsQuery}
+	args := []any{ftsQuery, opts.IncludeDeleted}
 
 	if opts.Type != "" {
 		sqlQ += " AND o.type = ?"
@@ -4609,6 +4715,12 @@ func (s *Store) zeroHitRelax(words []string, opts SearchOptions, limit int) ([]S
 		if err != nil {
 			return nil, SearchDiag{}, err
 		}
+		if opts.postFilter != nil {
+			step1Results, err = opts.postFilter(step1Results)
+			if err != nil {
+				return nil, SearchDiag{}, err
+			}
+		}
 		if len(step1Results) > 0 {
 			return step1Results, SearchDiag{Relaxed: true, Step: 1}, nil
 		}
@@ -4631,6 +4743,12 @@ func (s *Store) zeroHitRelax(words []string, opts SearchOptions, limit int) ([]S
 	step2Results, err := s.runFTSQuery(step2Query, opts, limit)
 	if err != nil {
 		return nil, SearchDiag{}, err
+	}
+	if opts.postFilter != nil {
+		step2Results, err = opts.postFilter(step2Results)
+		if err != nil {
+			return nil, SearchDiag{}, err
+		}
 	}
 	if len(step2Results) > 0 {
 		return step2Results, SearchDiag{Relaxed: true, Step: 2}, nil
@@ -4901,6 +5019,10 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 }
 
 func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
+	return s.exportWithProjectScopeFrom(s.db, project)
+}
+
+func (s *Store) exportWithProjectScopeFrom(db queryer, project string) (*ExportData, error) {
 	data := &ExportData{
 		Version:    "0.1.0",
 		ExportedAt: Now(),
@@ -4925,7 +5047,7 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 	sessionQuery += " ORDER BY started_at"
 
 	// Sessions
-	rows, err := s.queryItHook(s.db,
+	rows, err := s.queryItHook(db,
 		sessionQuery,
 		sessionArgs...,
 	)
@@ -4955,7 +5077,7 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 		obsArgs = append(obsArgs, project, project)
 	}
 	obsQuery += " ORDER BY id"
-	obsRows, err := s.queryItHook(s.db, obsQuery, obsArgs...)
+	obsRows, err := s.queryItHook(db, obsQuery, obsArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("export observations: %w", err)
 	}
@@ -4981,7 +5103,7 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 		promptArgs = append(promptArgs, project, project)
 	}
 	promptQuery += " ORDER BY id"
-	promptRows, err := s.queryItHook(s.db, promptQuery, promptArgs...)
+	promptRows, err := s.queryItHook(db, promptQuery, promptArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("export prompts: %w", err)
 	}
@@ -5000,7 +5122,7 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 	return data, nil
 }
 
-func (s *Store) Import(data *ExportData) (*ImportResult, error) {
+func (s *Store) importLegacy(data *ExportData) (*ImportResult, error) {
 	tx, err := s.beginTxHook()
 	if err != nil {
 		return nil, fmt.Errorf("import: begin tx: %w", err)
@@ -5076,6 +5198,18 @@ type ImportResult struct {
 	SessionsImported     int `json:"sessions_imported"`
 	ObservationsImported int `json:"observations_imported"`
 	PromptsImported      int `json:"prompts_imported"`
+	RelationsImported    int `json:"relations_imported"`
+	AnchorsImported      int `json:"anchors_imported"`
+	ProceduresImported   int `json:"procedures_imported"`
+	// ConflictsSkipped counts portable-import rows (observations, prompts,
+	// procedures) whose incoming (imported) timestamp was OLDER than the
+	// timestamp already stored at the destination for the same sync_id.
+	// Those rows are left untouched on purpose — the destination's newer
+	// local edits win instead of being silently reverted to a stale
+	// snapshot — so this is a normal, expected outcome of importing an old
+	// backup, not an error. It is surfaced here so a human notices it
+	// instead of the revert happening silently.
+	ConflictsSkipped int `json:"conflicts_skipped"`
 }
 
 // ─── Sync Chunk Tracking ─────────────────────────────────────────────────────
@@ -6364,11 +6498,121 @@ func (s *Store) DeleteProject(project string, hardDelete bool) (*DeleteProjectRe
 			`, project, project); err != nil {
 				return fmt.Errorf("delete project: orphan relations: %w", err)
 			}
+			deletedAt := Now()
+			rows, err := s.queryItHook(tx, `
+				SELECT sync_id, ifnull(content, '')
+				FROM observations
+				WHERE project = ? AND trim(ifnull(sync_id, '')) != ''
+			`, project)
+			if err != nil {
+				return fmt.Errorf("delete project: read observations for tombstones: %w", err)
+			}
+			type projectDeletionProof struct {
+				syncID, content string
+			}
+			var proofs []projectDeletionProof
+			for rows.Next() {
+				var proof projectDeletionProof
+				if err := rows.Scan(&proof.syncID, &proof.content); err != nil {
+					_ = rows.Close()
+					return fmt.Errorf("delete project: scan observation for tombstone: %w", err)
+				}
+				proofs = append(proofs, proof)
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("delete project: read observations for tombstones: %w", err)
+			}
+			if err := rows.Close(); err != nil {
+				return fmt.Errorf("delete project: close observations for tombstones: %w", err)
+			}
+			for _, proof := range proofs {
+				if _, err := s.execHook(tx, `
+					INSERT INTO deletion_tombstones
+						(sync_id, entity, project, actor, reason, content_hash, hard, deleted_at)
+					VALUES (?, 'observation', ?, NULL, 'hard_delete', ?, 1, ?)
+					ON CONFLICT(sync_id) DO UPDATE SET
+						project      = excluded.project,
+						content_hash = excluded.content_hash,
+						hard         = excluded.hard,
+						deleted_at   = excluded.deleted_at,
+						actor        = excluded.actor,
+						reason       = excluded.reason
+				`, proof.syncID, project, hashNormalized(proof.content), deletedAt); err != nil {
+					return fmt.Errorf("delete project: write deletion tombstone: %w", err)
+				}
+			}
+			if _, err := s.execHook(tx, `
+				DELETE FROM observation_revisions
+				WHERE obs_sync_id IN (
+					SELECT sync_id FROM observations WHERE project = ?
+				)
+			`, project); err != nil {
+				return fmt.Errorf("delete project: purge observation revisions: %w", err)
+			}
 			res, err := s.execHook(tx, `DELETE FROM observations WHERE project = ?`, project)
 			if err != nil {
 				return fmt.Errorf("delete project: hard-delete observations: %w", err)
 			}
 			result.ObservationsDeleted, _ = res.RowsAffected()
+		} else if s.cfg.TimeTravelEnabled {
+			// Time-travel is on: capture a soft-delete revision for each
+			// affected observation BEFORE mutating it, mirroring the
+			// hard-delete loop above (select affected rows, then act on
+			// each in the same tx) and deleteObservation's single-item
+			// soft-delete path (before, err := getObservationTx; mutationAt
+			// := nextRevisionTimestamp(before.UpdatedAt); captureObservationRevisionTx;
+			// then write deleted_at/updated_at = mutationAt). Without this,
+			// StateAsOf queries at the edit->delete window incorrectly
+			// return sql.ErrNoRows instead of the edited content.
+			rows, err := s.queryItHook(tx, `
+				SELECT id FROM observations WHERE project = ? AND deleted_at IS NULL
+			`, project)
+			if err != nil {
+				return fmt.Errorf("delete project: read observations for soft-delete: %w", err)
+			}
+			var ids []int64
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err != nil {
+					_ = rows.Close()
+					return fmt.Errorf("delete project: scan observation id for soft-delete: %w", err)
+				}
+				ids = append(ids, id)
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("delete project: read observations for soft-delete: %w", err)
+			}
+			if err := rows.Close(); err != nil {
+				return fmt.Errorf("delete project: close observations for soft-delete: %w", err)
+			}
+			var deletedCount int64
+			for _, id := range ids {
+				before, err := s.getObservationTx(tx, id)
+				if err == sql.ErrNoRows {
+					continue
+				}
+				if err != nil {
+					return fmt.Errorf("delete project: load observation %d for soft-delete: %w", id, err)
+				}
+				mutationAt := nextRevisionTimestamp(before.UpdatedAt)
+				if err := s.captureObservationRevisionTx(tx, before, revisionOpSoftDelete, mutationAt); err != nil {
+					return fmt.Errorf("delete project: capture soft-delete revision for observation %d: %w", id, err)
+				}
+				res, err := s.execHook(tx, `
+					UPDATE observations
+					SET deleted_at = ?,
+					    updated_at = ?
+					WHERE id = ? AND deleted_at IS NULL
+				`, mutationAt, mutationAt, id)
+				if err != nil {
+					return fmt.Errorf("delete project: soft-delete observation %d: %w", id, err)
+				}
+				n, _ := res.RowsAffected()
+				deletedCount += n
+			}
+			result.ObservationsDeleted = deletedCount
 		} else {
 			res, err := s.execHook(tx, `
 				UPDATE observations
@@ -7632,6 +7876,12 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	if strings.TrimSpace(payload.UpdatedAt) == "" {
 		updatedAt = existing.UpdatedAt
 	}
+	if s.cfg.TimeTravelEnabled {
+		updatedAt = observationMutationTimestamp(existing.UpdatedAt, updatedAt)
+		if err := s.captureObservationRevisionTx(tx, existing, revisionOpUpdate, updatedAt); err != nil {
+			return err
+		}
+	}
 
 	_, err = s.execHook(tx,
 		`UPDATE observations
@@ -7668,6 +7918,9 @@ func (s *Store) applyObservationDeleteTx(tx *sql.Tx, payload syncObservationPayl
 		if _, err := s.execHook(tx, `DELETE FROM observations WHERE id = ?`, existing.ID); err != nil {
 			return err
 		}
+		if err := s.purgeObservationRevisionsTx(tx, existing.SyncID); err != nil {
+			return err
+		}
 		// ── Memory provenance foundation (omnia-provenance-foundation) ───────
 		// The pull path writes its OWN deletion_tombstones row — the proof
 		// must replicate independent of whatever happened on the pushing
@@ -7689,14 +7942,29 @@ func (s *Store) applyObservationDeleteTx(tx *sql.Tx, payload syncObservationPayl
 		}
 		return nil
 	}
-	deletedAt := payload.DeletedAt
-	if deletedAt == nil {
-		now := Now()
-		deletedAt = &now
+	if !s.cfg.TimeTravelEnabled {
+		deletedAt := payload.DeletedAt
+		if deletedAt == nil {
+			now := Now()
+			deletedAt = &now
+		}
+		_, err = s.execHook(tx,
+			`UPDATE observations SET deleted_at = ?, updated_at = datetime('now') WHERE id = ?`,
+			deletedAt, existing.ID,
+		)
+		return err
+	}
+	proposedDeletedAt := ""
+	if payload.DeletedAt != nil {
+		proposedDeletedAt = *payload.DeletedAt
+	}
+	mutationAt := observationMutationTimestamp(existing.UpdatedAt, proposedDeletedAt)
+	if err := s.captureObservationRevisionTx(tx, existing, revisionOpSoftDelete, mutationAt); err != nil {
+		return err
 	}
 	_, err = s.execHook(tx,
-		`UPDATE observations SET deleted_at = ?, updated_at = datetime('now') WHERE id = ?`,
-		deletedAt, existing.ID,
+		`UPDATE observations SET deleted_at = ?, updated_at = ? WHERE id = ?`,
+		mutationAt, mutationAt, existing.ID,
 	)
 	return err
 }

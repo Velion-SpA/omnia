@@ -110,7 +110,7 @@ var (
 	}
 	storeFormatContext = func(s *store.Store, project, scope string) (string, error) { return s.FormatContext(project, scope) }
 	storeStats         = func(s *store.Store) (*store.Stats, error) { return s.Stats() }
-	storeExport        = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
+	storeExport        = func(s *store.Store) (*store.ExportData, error) { return s.ExportPortable() }
 	jsonMarshalIndent  = json.MarshalIndent
 	runDiagnostics     = func(ctx context.Context, s *store.Store, project, check string) (diagnostic.Report, error) {
 		runner := diagnostic.NewRunner()
@@ -673,10 +673,12 @@ func main() {
 		exitFunc(1)
 	}
 
-	if shouldCheckForUpdates(os.Args[1:]) {
+	args := os.Args[1:]
+	updateCheckNeedsConfig := recordedTimeCommand(args)
+	if !updateCheckNeedsConfig && shouldCheckForUpdates(args) {
 		printUpdateCheckResult(checkForUpdates(version))
 	}
-	if handleConfigFreeCommand(os.Args[1:]) {
+	if handleConfigFreeCommand(args) {
 		return
 	}
 
@@ -701,6 +703,25 @@ func main() {
 	if dir := envx.Get(datadir.DataDirEnv); dir != "" {
 		cfg.DataDir = dir
 	}
+	if appCfg, err := config.Load(config.DefaultPath()); err == nil {
+		applyTimeTravelConfig(&cfg, appCfg)
+	}
+	var preparedSearch searchCommandPlan
+	var preparedContext contextCommandPlan
+	if updateCheckNeedsConfig {
+		resolvedAsOf := ""
+		switch strings.ToLower(strings.TrimSpace(args[0])) {
+		case "search":
+			preparedSearch = prepareSearchCommand(args[1:], cfg.TimeTravelEnabled)
+			resolvedAsOf = preparedSearch.asOf
+		case "context":
+			preparedContext = prepareContextCommand(args[1:], cfg.TimeTravelEnabled)
+			resolvedAsOf = preparedContext.asOf
+		}
+		if shouldCheckForUpdatesWithResolvedAsOf(args, resolvedAsOf) {
+			printUpdateCheckResult(checkForUpdates(version))
+		}
+	}
 
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
@@ -714,7 +735,7 @@ func main() {
 	case "tui":
 		cmdTUI(cfg)
 	case "search":
-		cmdSearch(cfg)
+		cmdSearchPrepared(cfg, preparedSearch)
 	case "recall-fix":
 		cmdRecallFix(cfg)
 	case "recall-backfill":
@@ -725,6 +746,8 @@ func main() {
 		cmdDelete(cfg)
 	case "timeline":
 		cmdTimeline(cfg)
+	case "bisect":
+		cmdBisect(cfg)
 	case "conflicts":
 		cmdConflicts(cfg)
 	case "forget-scan":
@@ -740,7 +763,7 @@ func main() {
 	case "doctor":
 		cmdDoctor(cfg)
 	case "context":
-		cmdContext(cfg)
+		cmdContextPrepared(cfg, preparedContext)
 	case "stats":
 		cmdStats(cfg)
 	case "export":
@@ -778,14 +801,39 @@ func main() {
 	}
 }
 
+func applyTimeTravelConfig(cfg *store.Config, appCfg *config.Config) {
+	cfg.TimeTravelEnabled = appCfg.TimeTravel.Enabled
+	cfg.HistoryRevisionCap = appCfg.TimeTravel.MaxRevisionsPerMemory
+}
+
 func shouldCheckForUpdates(args []string) bool {
+	return shouldCheckForUpdatesWithResolvedAsOf(args, "")
+}
+
+func shouldCheckForUpdatesWithTimeTravel(args []string, timeTravelEnabled bool) bool {
+	if len(args) == 0 {
+		return false
+	}
+	resolvedAsOf := ""
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "search":
+		resolvedAsOf = prepareSearchCommand(args[1:], timeTravelEnabled).asOf
+	case "context":
+		resolvedAsOf = prepareContextCommand(args[1:], timeTravelEnabled).asOf
+	}
+	return shouldCheckForUpdatesWithResolvedAsOf(args, resolvedAsOf)
+}
+
+func shouldCheckForUpdatesWithResolvedAsOf(args []string, resolvedAsOf string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve":
+	case "mcp", "serve", "bisect", "export", "import":
 		return false
+	case "search", "context":
+		return strings.TrimSpace(resolvedAsOf) == ""
 	case "recall-fix":
 		// #1399 slice 2: invoked synchronously and frequently by the
 		// PostToolUse forced-activation hook on every tool call (after its
@@ -797,6 +845,31 @@ func shouldCheckForUpdates(args []string) bool {
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
 	}
 	return true
+}
+
+func recordedTimeCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "search", "context":
+		return true
+	}
+	return false
+}
+
+func parseAsOfArgument(args []string, i int) (value string, consumeNext, matched bool) {
+	arg := args[i]
+	if strings.HasPrefix(arg, "--as-of=") {
+		return strings.TrimPrefix(arg, "--as-of="), false, true
+	}
+	if arg != "--as-of" {
+		return "", false, false
+	}
+	if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+		return "", false, true
+	}
+	return args[i+1], true, true
 }
 
 func handleConfigFreeCommand(args []string) bool {
@@ -1250,6 +1323,7 @@ func cmdMCP(cfg store.Config) {
 		// flag that gates SaveObservation's decision ladder — the envelope's
 		// own kill-switch can never drift from the store's kill-switch.
 		mcpCfg.WriteHygieneEnabled = appCfg.WriteHygiene.Enabled
+		mcpCfg.TimeTravelEnabled = appCfg.TimeTravel.Enabled
 		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
 		// enabled, run the worker on the same ctx cancelled at shutdown so
 		// mem_save embeds new memories out-of-band. nil when disabled.
@@ -1291,54 +1365,85 @@ func cmdTUI(cfg store.Config) {
 	}
 }
 
-func cmdSearch(cfg store.Config) {
-	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: omnia search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N] [--explain]")
-		exitFunc(1)
-	}
+type searchCommandPlan struct {
+	query   string
+	opts    store.SearchOptions
+	explain bool
+	asOf    string
+	asOfErr error
+}
 
-	// Collect the query (everything that's not a flag)
+func prepareSearchCommand(args []string, timeTravelEnabled bool) searchCommandPlan {
+	plan := searchCommandPlan{opts: store.SearchOptions{Limit: 10}}
 	var queryParts []string
-	opts := store.SearchOptions{Limit: 10}
-	explain := false
 
-	for i := 2; i < len(os.Args); i++ {
-		switch os.Args[i] {
+	for i := 0; i < len(args); i++ {
+		if value, consumeNext, matched := parseAsOfArgument(args, i); matched {
+			plan.asOf = value
+			if consumeNext {
+				i++
+			}
+			continue
+		}
+		switch args[i] {
 		case "--type":
-			if i+1 < len(os.Args) {
-				opts.Type = os.Args[i+1]
+			if i+1 < len(args) {
+				plan.opts.Type = args[i+1]
 				i++
 			}
 		case "--project":
-			if i+1 < len(os.Args) {
-				opts.Project = os.Args[i+1]
+			if i+1 < len(args) {
+				plan.opts.Project = args[i+1]
 				i++
 			}
 		case "--limit":
-			if i+1 < len(os.Args) {
-				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
-					opts.Limit = n
+			if i+1 < len(args) {
+				if n, err := strconv.Atoi(args[i+1]); err == nil {
+					plan.opts.Limit = n
 				}
 				i++
 			}
 		case "--scope":
-			if i+1 < len(os.Args) {
-				opts.Scope = os.Args[i+1]
+			if i+1 < len(args) {
+				plan.opts.Scope = args[i+1]
 				i++
 			}
 		case "--explain":
-			// Per-hit score breakdown (Requirement: Per-Hit Score
-			// Breakdown) — a bare flag, no value to consume.
-			explain = true
+			plan.explain = true
 		default:
-			queryParts = append(queryParts, os.Args[i])
+			queryParts = append(queryParts, args[i])
 		}
 	}
+	plan.query = strings.Join(queryParts, " ")
+	plan.asOf, plan.asOfErr = resolveCommandAsOf(plan.asOf, timeTravelEnabled)
+	return plan
+}
 
-	query := strings.Join(queryParts, " ")
+func resolveCommandAsOf(asOf string, timeTravelEnabled bool) (string, error) {
+	if !timeTravelEnabled {
+		return "", nil
+	}
+	return store.NormalizeAsOf(asOf)
+}
+
+func cmdSearch(cfg store.Config) {
+	cmdSearchPrepared(cfg, prepareSearchCommand(os.Args[2:], cfg.TimeTravelEnabled))
+}
+
+func cmdSearchPrepared(cfg store.Config, plan searchCommandPlan) {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: omnia search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N] [--as-of TIMESTAMP] [--explain]")
+		exitFunc(1)
+	}
+
+	query, opts, explain, asOf := plan.query, plan.opts, plan.explain, plan.asOf
 	if query == "" {
 		fmt.Fprintln(os.Stderr, "error: search query is required")
 		exitFunc(1)
+	}
+	if plan.asOfErr != nil {
+		fatal(plan.asOfErr)
+		return
 	}
 
 	s, err := storeNew(cfg)
@@ -1359,8 +1464,23 @@ func cmdSearch(cfg store.Config) {
 	// back to plain FTS5 lexical results, and --explain below must label
 	// that fallback as lexical, not fusion (blocking fix: --explain
 	// mislabels fusion vs lexical on mid-query FTS5 fallback).
-	recallSvc := buildRecallServiceForCLI(s, cfg.DataDir)
-	results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, query, opts)
+	asOfEnabled := cfg.TimeTravelEnabled && strings.TrimSpace(asOf) != ""
+	var results []store.SearchResult
+	var relevance map[int64]float64
+	var fusionRan bool
+	if asOfEnabled {
+		results, err = s.SearchAsOf(query, opts, asOf)
+		relevance, fusionRan = map[int64]float64{}, false
+		for _, result := range results {
+			if result.Rank == cliExactSentinelRank {
+				continue
+			}
+			relevance[result.ID] = -result.Rank
+		}
+	} else {
+		recallSvc := buildRecallServiceForCLI(s, cfg.DataDir)
+		results, relevance, fusionRan, err = recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, query, opts)
+	}
 	if err != nil {
 		fatal(err)
 		return
@@ -1368,6 +1488,9 @@ func cmdSearch(cfg store.Config) {
 
 	if len(results) == 0 {
 		fmt.Printf("No memories found for: %q\n", query)
+		if asOfEnabled {
+			printRecordedTimeSearchDisclaimer()
+		}
 		return
 	}
 
@@ -1384,7 +1507,7 @@ func cmdSearch(cfg store.Config) {
 	// other row's normalized relevance toward 0.
 	var rankingCfg config.RankingConfig
 	var normalizedRelevance map[int64]float64
-	now := time.Now()
+	now := store.ReadInstant(asOf)
 	if explain {
 		rankingCfg = loadRankingConfigForCLI()
 		nonSentinel := make([]store.SearchResult, 0, len(results))
@@ -1419,6 +1542,14 @@ func cmdSearch(cfg store.Config) {
 		}
 		fmt.Println()
 	}
+	if asOfEnabled {
+		printRecordedTimeSearchDisclaimer()
+	}
+}
+
+func printRecordedTimeSearchDisclaimer() {
+	fmt.Println("Recorded-time view: history starts when time_travel is enabled; retained revisions may not cover earlier timestamps.")
+	fmt.Println("Search limitation: matches current indexed text only; text found only in older revisions is not searchable.")
 }
 
 // printScoreBreakdown renders BuildReceipt's map[string]any output as one
@@ -1788,22 +1919,48 @@ func cmdTimeline(cfg store.Config) {
 	}
 }
 
-func cmdContext(cfg store.Config) {
-	project := ""
-	scope := ""
+type contextCommandPlan struct {
+	project string
+	scope   string
+	asOf    string
+	asOfErr error
+}
 
-	for i := 2; i < len(os.Args); i++ {
-		switch os.Args[i] {
+func prepareContextCommand(args []string, timeTravelEnabled bool) contextCommandPlan {
+	var plan contextCommandPlan
+	for i := 0; i < len(args); i++ {
+		if value, consumeNext, matched := parseAsOfArgument(args, i); matched {
+			plan.asOf = value
+			if consumeNext {
+				i++
+			}
+			continue
+		}
+		switch args[i] {
 		case "--scope":
-			if i+1 < len(os.Args) {
-				scope = os.Args[i+1]
+			if i+1 < len(args) {
+				plan.scope = args[i+1]
 				i++
 			}
 		default:
-			if project == "" {
-				project = os.Args[i]
+			if plan.project == "" {
+				plan.project = args[i]
 			}
 		}
+	}
+	plan.asOf, plan.asOfErr = resolveCommandAsOf(plan.asOf, timeTravelEnabled)
+	return plan
+}
+
+func cmdContext(cfg store.Config) {
+	cmdContextPrepared(cfg, prepareContextCommand(os.Args[2:], cfg.TimeTravelEnabled))
+}
+
+func cmdContextPrepared(cfg store.Config, plan contextCommandPlan) {
+	project, scope, asOf := plan.project, plan.scope, plan.asOf
+	if plan.asOfErr != nil {
+		fatal(plan.asOfErr)
+		return
 	}
 
 	// Omnia v0.3 Context Economy (design obs #1643/D8, spec obs #1642 PR3):
@@ -1846,17 +2003,28 @@ func cmdContext(cfg store.Config) {
 	}
 	defer s.Close()
 
-	ctx, err := storeFormatContext(s, project, scope)
+	var ctx string
+	if cfg.TimeTravelEnabled && strings.TrimSpace(asOf) != "" {
+		ctx, err = s.FormatContextAsOf(project, scope, asOf)
+	} else {
+		ctx, err = storeFormatContext(s, project, scope)
+	}
 	if err != nil {
 		fatal(err)
 	}
 
 	if ctx == "" {
 		fmt.Println("No previous session memories found.")
+		if cfg.TimeTravelEnabled && strings.TrimSpace(asOf) != "" {
+			fmt.Println("Recorded-time view: history starts when time_travel is enabled; retained revisions may not cover earlier timestamps.")
+		}
 		return
 	}
 
 	fmt.Print(ctx)
+	if cfg.TimeTravelEnabled && strings.TrimSpace(asOf) != "" {
+		fmt.Println("Recorded-time view: history starts when time_travel is enabled; retained revisions may not cover earlier timestamps.")
+	}
 }
 
 func cmdStats(cfg store.Config) {
@@ -1906,7 +2074,7 @@ func cmdExport(cfg store.Config) {
 		fatal(err)
 	}
 
-	if err := os.WriteFile(outFile, out, 0644); err != nil {
+	if err := replaceFile(outFile, out, 0o600); err != nil {
 		fatal(err)
 	}
 
@@ -1914,6 +2082,39 @@ func cmdExport(cfg store.Config) {
 	fmt.Printf("  Sessions:     %d\n", len(data.Sessions))
 	fmt.Printf("  Observations: %d\n", len(data.Observations))
 	fmt.Printf("  Prompts:      %d\n", len(data.Prompts))
+	fmt.Printf("  Relations:    %d\n", len(data.Relations))
+	fmt.Printf("  Anchors:      %d\n", len(data.Anchors))
+	fmt.Printf("  Procedures:   %d\n", len(data.Procedures))
+	if data.Counts.DuplicatesCollapsed > 0 {
+		fmt.Printf("  Duplicate sync_id rows collapsed: %d\n", data.Counts.DuplicatesCollapsed)
+	}
+}
+
+func replaceFile(path string, data []byte, mode os.FileMode) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		if err != nil {
+			_ = os.Remove(name)
+		}
+	}()
+	if err = tmp.Chmod(mode); err == nil {
+		_, err = tmp.Write(data)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(name, path)
+	}
+	return err
 }
 
 func cmdImport(cfg store.Config) {
@@ -1942,8 +2143,8 @@ func cmdImport(cfg store.Config) {
 		fatal(fmt.Errorf("read %s: %w", inFile, err))
 	}
 
-	var data store.ExportData
-	if err := json.Unmarshal(raw, &data); err != nil {
+	data, err := store.DecodeExportData(raw)
+	if err != nil {
 		fatal(fmt.Errorf("parse %s: %w", inFile, err))
 	}
 
@@ -1953,7 +2154,7 @@ func cmdImport(cfg store.Config) {
 	}
 	defer s.Close()
 
-	result, err := s.Import(&data)
+	result, err := s.Import(data)
 	if err != nil {
 		fatal(err)
 	}
@@ -1962,6 +2163,12 @@ func cmdImport(cfg store.Config) {
 	fmt.Printf("  Sessions:     %d\n", result.SessionsImported)
 	fmt.Printf("  Observations: %d\n", result.ObservationsImported)
 	fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
+	fmt.Printf("  Relations:    %d\n", result.RelationsImported)
+	fmt.Printf("  Anchors:      %d\n", result.AnchorsImported)
+	fmt.Printf("  Procedures:   %d\n", result.ProceduresImported)
+	if result.ConflictsSkipped > 0 {
+		fmt.Printf("  Skipped (older than local, kept local): %d\n", result.ConflictsSkipped)
+	}
 }
 
 func cmdSync(cfg store.Config) {
@@ -3182,6 +3389,7 @@ Commands:
                      Cascade-delete a project: soft-deletes observations (or hard if --hard),
                      removes prompts; with --hard also removes sessions
   timeline <obs_id>  Show chronological context around an observation [--before N] [--after N]
+  bisect <subcommand> Locate a regression: start --good T|ID --bad T|ID, good, bad, status, reset
   conflicts <sub>   Inspect and manage memory conflict relations
                        list     [--project P]  [--status S]  [--since RFC3339]  [--limit N]
                        show     <relation_id>
@@ -3210,7 +3418,7 @@ Commands:
                        untouched) — there is no --apply all; --apply and
                        --dry-run cannot be combined.
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
-  context [project]  Show recent context from previous sessions
+  context [project] [--as-of TIMESTAMP]  Show recent or recorded-time context
   stats              Show memory system statistics
   export [file]      Export all memories to JSON (default: omnia-export.json)
   import <file>      Import memories from a JSON export file

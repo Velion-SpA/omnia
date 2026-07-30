@@ -299,14 +299,6 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 			t.Fatalf("set created_at for %q: %v", title, err)
 		}
 	}
-	exportedBeforePin, err := s.ExportProject("engram")
-	if err != nil {
-		t.Fatalf("export project before pin: %v", err)
-	}
-	exportedBeforePinJSON, err := json.Marshal(exportedBeforePin)
-	if err != nil {
-		t.Fatalf("marshal export before pin: %v", err)
-	}
 	var updatedAtBeforePin string
 	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtBeforePin); err != nil {
 		t.Fatalf("get updated_at before pin: %v", err)
@@ -319,8 +311,10 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtAfterPin); err != nil {
 		t.Fatalf("get updated_at after pin: %v", err)
 	}
-	if updatedAtAfterPin != updatedAtBeforePin {
-		t.Fatalf("pin should not change updated_at: before=%q after=%q", updatedAtBeforePin, updatedAtAfterPin)
+	beforePinTime, _ := parseObservationTime(updatedAtBeforePin)
+	afterPinTime, _ := parseObservationTime(updatedAtAfterPin)
+	if !afterPinTime.After(beforePinTime) {
+		t.Fatalf("pin should advance updated_at: before=%q after=%q", updatedAtBeforePin, updatedAtAfterPin)
 	}
 	pinned, err := s.PinnedObservations("engram", "project")
 	if err != nil {
@@ -359,10 +353,6 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	if strings.Contains(string(exportedJSON), `"pinned"`) {
 		t.Fatalf("pinned state must stay out of sync/export JSON, got %s", exportedJSON)
 	}
-	if string(exportedJSON) != string(exportedBeforePinJSON) {
-		t.Fatalf("pinning must not change export payload:\nbefore: %s\nafter:  %s", exportedBeforePinJSON, exportedJSON)
-	}
-
 	if err := s.UnpinObservation(ids[0]); err != nil {
 		t.Fatalf("unpin observation: %v", err)
 	}
@@ -370,8 +360,9 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtAfterUnpin); err != nil {
 		t.Fatalf("get updated_at after unpin: %v", err)
 	}
-	if updatedAtAfterUnpin != updatedAtBeforePin {
-		t.Fatalf("unpin should not change updated_at: before=%q after=%q", updatedAtBeforePin, updatedAtAfterUnpin)
+	afterUnpinTime, _ := parseObservationTime(updatedAtAfterUnpin)
+	if !afterUnpinTime.After(afterPinTime) {
+		t.Fatalf("unpin should advance updated_at: pin=%q unpin=%q", updatedAtAfterPin, updatedAtAfterUnpin)
 	}
 	pinned, err = s.PinnedObservations("engram", "project")
 	if err != nil {
@@ -3930,6 +3921,646 @@ func TestExportImportEdgeBranches(t *testing.T) {
 			t.Fatalf("expected prompt import error, got %v", err)
 		}
 	})
+}
+
+func TestPortableExportV2DeterministicFullGraph(t *testing.T) {
+	s := newTestStore(t)
+	seed := func(s *Store, base int) {
+		_, err := s.db.Exec(fmt.Sprintf(`
+		INSERT INTO sessions (id, project, directory, started_at) VALUES ('s1', 'omnia', '/repo', '2026-01-01T00:00:00Z');
+		INSERT INTO observations (id,sync_id,session_id,type,title,content,project,scope,pinned,source,trust_tag,created_at,updated_at)
+			VALUES (%d,'obs-b','s1','discovery','second','second content','omnia','project',0,'agent','standard','2026-01-03T00:00:00Z','2026-01-03T00:00:00Z'),
+			       (%d,'obs-a','s1','decision','portable','portable content','omnia','project',1,'user','high','2026-01-02T00:00:00Z','2026-01-02T00:00:00Z');
+		INSERT INTO user_prompts (id,sync_id,session_id,content,project,created_at)
+			VALUES (%d,'prompt-a','s1','keep everything','omnia','2026-01-04T00:00:00Z');
+		INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+			VALUES ('rel-a', 'obs-a', 'obs-b', 'related', 'judged', '2026-01-04T00:00:00Z', '2026-01-04T00:00:00Z');
+		INSERT INTO memory_anchors (sync_id, obs_sync_id, file_path, line_start, line_end, content_hash, created_at)
+			VALUES ('anc-a', 'obs-a', 'internal/store/store.go', 1, 2, 'hash', '2026-01-05T00:00:00Z');
+		INSERT INTO procedures (sync_id, project, polarity, "trigger", steps, steps_summary, expected_outcome, postcondition_kind, source_obs_sync_ids, created_at, updated_at)
+			VALUES ('proc-a', 'omnia', 'playbook', 'export memory', '[{"order":1,"template":"run export"}]', 'run export', 'portable file', 'tests_pass', '["obs-a"]', '2026-01-06T00:00:00Z', '2026-01-06T00:00:00Z');
+	`, base+1, base, base+2))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed(s, 40)
+
+	legacy, err := s.Export()
+	if err != nil || legacy.SchemaVersion != 0 || len(legacy.Relations) != 0 {
+		t.Fatalf("legacy Export boundary changed: data=%+v err=%v", legacy, err)
+	}
+	baseQuery, baseQueryIt, nonTxRead := s.hooks.query, s.hooks.queryIt, false
+	assertTx := func(db queryer) {
+		if _, ok := db.(*sql.Tx); !ok {
+			nonTxRead = true
+		}
+	}
+	s.hooks.query = func(db queryer, query string, args ...any) (*sql.Rows, error) {
+		assertTx(db)
+		return baseQuery(db, query, args...)
+	}
+	s.hooks.queryIt = func(db queryer, query string, args ...any) (rowScanner, error) {
+		assertTx(db)
+		return baseQueryIt(db, query, args...)
+	}
+	first, err := s.ExportPortable()
+	if err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	if nonTxRead {
+		t.Fatal("portable export did not use one read transaction")
+	}
+	other := newTestStore(t)
+	seed(other, 400)
+	second, err := other.ExportPortable()
+	if err != nil {
+		t.Fatalf("second export: %v", err)
+	}
+	firstJSON, _ := json.Marshal(first)
+	secondJSON, _ := json.Marshal(second)
+	if string(firstJSON) != string(secondJSON) {
+		t.Fatalf("portable exports depend on local IDs:\n%s\n%s", firstJSON, secondJSON)
+	}
+	wantCounts := ExportCounts{Sessions: 1, Observations: 2, Prompts: 1, Relations: 1, Anchors: 1, Procedures: 1}
+	if first.SchemaVersion != 2 || first.Checksum == "" || first.Counts != wantCounts ||
+		first.Observations[0].SyncID != "obs-a" || len(first.Relations)+len(first.Anchors)+len(first.Procedures) != 3 || first.Procedures[0]["steps_summary"] != "run export" {
+		t.Fatalf("portable metadata/full graph mismatch: %+v", first)
+	}
+	decoded, err := DecodeExportData(firstJSON)
+	if err != nil || !decoded.Observations[0].Pinned || derefString(decoded.Observations[0].Source) != "user" ||
+		derefString(decoded.Observations[0].TrustTag) != "high" {
+		t.Fatalf("pinned/provenance read mismatch: data=%+v err=%v", decoded, err)
+	}
+}
+
+func TestPortableExportV2EmptyAndRejectsInvalidInput(t *testing.T) {
+	s := newTestStore(t)
+	data, err := s.ExportPortable()
+	if err != nil {
+		t.Fatalf("empty export: %v", err)
+	}
+	raw, _ := json.Marshal(data)
+	for _, collection := range []string{"sessions", "observations", "prompts", "relations", "anchors", "procedures"} {
+		if !strings.Contains(string(raw), `"`+collection+`":[]`) {
+			t.Fatalf("empty %s must be an array: %s", collection, raw)
+		}
+	}
+
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "malformed", raw: `{"schema_version":`, want: "unexpected end"},
+		{name: "negative", raw: `{"schema_version":-1}`, want: "unsupported schema version"},
+		{name: "one", raw: `{"schema_version":1}`, want: "unsupported schema version"},
+		{name: "future", raw: `{"schema_version":3}`, want: "unsupported schema version"},
+		{name: "checksum mismatch", raw: strings.Replace(string(raw), data.Checksum, strings.Repeat("0", len(data.Checksum)), 1), want: "checksum mismatch"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := DecodeExportData([]byte(tt.raw)); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestPortableExportV2ReportsDuplicateSyncIDCollapse(t *testing.T) {
+	s := newTestStore(t)
+	// Bypass the normal insert path (the schema allows duplicate sync_id
+	// for observations/user_prompts — no UNIQUE constraint) to reproduce
+	// two rows sharing the same sync_id, exactly what canonicalPortable
+	// silently collapses to one row during export.
+	if _, err := s.db.Exec(`
+		INSERT INTO sessions (id, project, directory, started_at) VALUES ('s1', 'omnia', '/repo', '2026-01-01T00:00:00Z');
+		INSERT INTO observations (id,sync_id,session_id,type,title,content,project,scope,created_at,updated_at)
+			VALUES (1,'dup-obs','s1','decision','first','first content','omnia','project','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+			       (2,'dup-obs','s1','decision','second','second content','omnia','project','2026-01-02T00:00:00Z','2026-01-02T00:00:00Z');
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := s.ExportPortable()
+	if err != nil {
+		t.Fatalf("ExportPortable: %v", err)
+	}
+	if len(data.Observations) != 1 {
+		t.Fatalf("expected canonicalization to collapse to 1 observation, got %d", len(data.Observations))
+	}
+	if data.Counts.DuplicatesCollapsed != 1 {
+		t.Fatalf("Counts.DuplicatesCollapsed = %d, want 1 (silent collapse must be surfaced)", data.Counts.DuplicatesCollapsed)
+	}
+}
+
+func TestPortableExportV2BackfillsEmptySyncIDSoExportIsAlwaysImportable(t *testing.T) {
+	s := newTestStore(t)
+	// Defensively shouldn't happen given migrate()'s startup backfill (it
+	// only runs once, at New()) — but reachable within the same process via
+	// a future insert-path bug or direct DB tampering after the store is
+	// already open, exactly like this raw SQL insert bypassing the normal
+	// insert path.
+	if _, err := s.db.Exec(`
+		INSERT INTO sessions (id, project, directory, started_at) VALUES ('s1', 'omnia', '/repo', '2026-01-01T00:00:00Z');
+		INSERT INTO observations (id,sync_id,session_id,type,title,content,project,scope,created_at,updated_at)
+			VALUES (1,'','s1','decision','no sync id','content','omnia','project','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := s.ExportPortable()
+	if err != nil {
+		t.Fatalf("ExportPortable: %v", err)
+	}
+	if len(data.Observations) != 1 || strings.TrimSpace(data.Observations[0].SyncID) == "" {
+		t.Fatalf("export must backfill the empty sync_id before serializing: %+v", data.Observations)
+	}
+
+	fresh := newTestStore(t)
+	if _, err := fresh.Import(data); err != nil {
+		t.Fatalf("import of export with previously-empty sync_id must succeed, got: %v", err)
+	}
+}
+
+func TestPortableImportV2CoreIsAtomicIdempotentAndRecencySafe(t *testing.T) {
+	src := newTestStore(t)
+	if _, err := src.db.Exec(`
+		INSERT INTO sessions (id,project,directory,started_at,summary)
+			VALUES ('s1','portable','/source','2026-01-01T00:00:00Z','source'),(' s1 ','portable','/padded','2026-01-01T00:00:00Z','padded');
+		INSERT INTO observations (sync_id,session_id,type,title,content,project,scope,pinned,error_signature,outcome,source,trust_tag,created_at,updated_at)
+			VALUES ('obs-a','s1','decision','source title','source content','portable','project',1,'sig','worked','user','high','2026-01-02T00:00:00Z','2026-01-02T00:00:00Z');
+		INSERT INTO user_prompts (sync_id,session_id,content,project,created_at)
+			VALUES ('prompt-a','s1','source prompt','portable','2026-01-03T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := newTestStore(t)
+	if _, err := dst.db.Exec(`
+		INSERT INTO sessions (id,project,directory,started_at,summary)
+			VALUES ('s1','local','/local','2030-01-01T00:00:00Z','local');
+		INSERT INTO observations (sync_id,session_id,type,title,content,project,scope,pinned,source,trust_tag,created_at,updated_at)
+			VALUES (' obs-a ','s1','note','local title','newer local content','local','personal',0,'agent','standard','2030-01-01T00:00:00Z','2030-01-01T00:00:00Z'),
+			       ('obs-a','s1','note','duplicate','duplicate','local','project',0,'agent','standard','2031-01-01T00:00:00Z','2031-01-01T00:00:00Z');
+		INSERT INTO user_prompts (sync_id,session_id,content,project,created_at)
+			VALUES (' prompt-a ','s1','newer local prompt','local','2030-01-01T00:00:00Z'),
+			       ('prompt-a','s1','duplicate','local','2031-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	var result *ImportResult
+	for i := 0; i < 2; i++ {
+		result, err = dst.Import(data)
+		if err != nil {
+			t.Fatalf("import %d: %v", i+1, err)
+		}
+	}
+	var sessions, observations, prompts int
+	var directory, title, content, prompt, source, trust string
+	var pinned bool
+	if err := dst.db.QueryRow(`SELECT count(*),max(CASE WHEN id='s1' THEN directory ELSE '' END) FROM sessions WHERE trim(id)='s1'`).Scan(&sessions, &directory); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.db.QueryRow(`SELECT count(*),title,content,pinned,source,trust_tag FROM observations WHERE trim(sync_id)='obs-a'`).Scan(
+		&observations, &title, &content, &pinned, &source, &trust,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.db.QueryRow(`SELECT count(*),content FROM user_prompts WHERE trim(sync_id)='prompt-a'`).Scan(&prompts, &prompt); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 2 || observations != 1 || prompts != 1 {
+		t.Fatalf("v2 re-import duplicated core rows: sessions=%d observations=%d prompts=%d", sessions, observations, prompts)
+	}
+	// Sessions have no updated_at/recency concept, so the imported session
+	// still wins unconditionally (unchanged pre-existing behavior).
+	if directory != "/source" {
+		t.Fatalf("v2 session collision must still restore imported fields: directory=%q", directory)
+	}
+	// Observations and prompts DO have a recency concept. The destination's
+	// local rows here are newer than the import (2030/2031 vs 2026), so the
+	// import must be recency-safe and keep the newer local content instead
+	// of silently reverting it to the stale snapshot.
+	if title != "local title" || content != "newer local content" || pinned || source != "agent" || trust != "standard" {
+		t.Fatalf("v2 recency-safe import must keep newer local observation content: title=%q content=%q pinned=%v source=%q trust=%q",
+			title, content, pinned, source, trust)
+	}
+	if prompt != "newer local prompt" {
+		t.Fatalf("v2 recency-safe import must keep newer local prompt content: prompt=%q", prompt)
+	}
+	if result.ConflictsSkipped != 2 {
+		t.Fatalf("expected 2 skipped conflicts (stale observation + stale prompt), got %d", result.ConflictsSkipped)
+	}
+	atomic := newTestStore(t)
+	bad := *data
+	bad.Observations = append([]Observation(nil), data.Observations...)
+	bad.Observations[0].SessionID = "missing"
+	bad.Checksum, _ = portableChecksum(&bad)
+	if _, err := atomic.Import(&bad); err == nil || !strings.Contains(err.Error(), "import observation") {
+		t.Fatalf("expected atomic core import failure, got %v", err)
+	}
+	if err := atomic.db.QueryRow(`SELECT count(*) FROM sessions WHERE id='s1'`).Scan(&sessions); err != nil || sessions != 0 {
+		t.Fatalf("failed v2 import left a partial session: count=%d err=%v", sessions, err)
+	}
+	for _, tt := range []struct{ name, table, incoming, tombstone string }{{"observation ASCII-space", "deletion_tombstones", "obs-a", " obs-a "}, {"prompt ASCII-space", "prompt_tombstones", "prompt-a", " prompt-a "}, {"observation tab", "deletion_tombstones", "\tobs-a\t", "\tobs-a\t"}, {"prompt tab", "prompt_tombstones", "\tprompt-a\t", "\tprompt-a\t"}} {
+		t.Run(tt.name+" tombstone wins", func(t *testing.T) {
+			dst := newTestStore(t)
+			incoming := *data
+			query := `INSERT INTO deletion_tombstones (sync_id) VALUES (?)`
+			if tt.table == "prompt_tombstones" {
+				incoming.Prompts = append([]Prompt(nil), data.Prompts...)
+				incoming.Prompts[0].SyncID, query = tt.incoming, `INSERT INTO prompt_tombstones (sync_id) VALUES (?)`
+			} else {
+				incoming.Observations = append([]Observation(nil), data.Observations...)
+				incoming.Observations[0].SyncID = tt.incoming
+			}
+			incoming.Checksum, _ = portableChecksum(&incoming)
+			if _, err := dst.db.Exec(query, tt.tombstone); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := dst.Import(&incoming); err == nil || !strings.Contains(err.Error(), "tombstoned") {
+				t.Fatalf("expected tombstone rejection, got %v", err)
+			}
+			var rows, proofs int
+			_ = dst.db.QueryRow(`SELECT count(*) FROM sessions`).Scan(&rows)
+			_ = dst.db.QueryRow(`SELECT count(*) FROM ` + tt.table).Scan(&proofs)
+			if rows != 0 || proofs != 1 {
+				t.Fatalf("tombstone preflight was not atomic: rows=%d proofs=%d", rows, proofs)
+			}
+		})
+	}
+}
+
+// TestPortableImportV2SkipsOlderImportedObservation guards against the
+// "accidentally restore an old backup" data-loss scenario: export the store
+// on Monday, keep editing the observation through the week (updated_at moves
+// forward, content changes), then re-import Monday's snapshot. The import
+// must NOT silently revert the observation to Monday's content — the
+// destination's newer local edit must survive, and the skip must be counted
+// so a human can see it happened.
+func TestPortableImportV2SkipsOlderImportedObservation(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`
+		INSERT INTO sessions (id,project,directory,started_at,summary) VALUES ('s1','portable','/live','2026-01-01T00:00:00Z','live');
+		INSERT INTO observations (sync_id,session_id,type,title,content,project,scope,pinned,source,trust_tag,created_at,updated_at)
+			VALUES ('obs-x','s1','decision','title A','content A','portable','project',0,'agent','standard','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	monday, err := s.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`
+		UPDATE observations SET title='title B',content='content B',updated_at='2026-01-08T00:00:00Z' WHERE sync_id='obs-x'`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Import(monday)
+	if err != nil {
+		t.Fatalf("re-import of stale snapshot failed: %v", err)
+	}
+	var title, content string
+	if err := s.db.QueryRow(`SELECT title,content FROM observations WHERE sync_id='obs-x'`).Scan(&title, &content); err != nil {
+		t.Fatal(err)
+	}
+	if title != "title B" || content != "content B" {
+		t.Fatalf("stale re-import must not revert newer local observation content: title=%q content=%q", title, content)
+	}
+	if result.ConflictsSkipped != 1 {
+		t.Fatalf("expected exactly 1 skipped conflict for the stale observation, got %d", result.ConflictsSkipped)
+	}
+	if result.ObservationsImported != 1 {
+		t.Fatalf("expected ObservationsImported to still count the processed row, got %d", result.ObservationsImported)
+	}
+
+	// Re-importing the SAME (now stale) snapshot again must stay idempotent:
+	// no duplicate rows, content still untouched, still reported as skipped.
+	result2, err := s.Import(monday)
+	if err != nil {
+		t.Fatalf("second re-import of stale snapshot failed: %v", err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM observations WHERE sync_id='obs-x'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("stale re-import must not duplicate rows: count=%d", count)
+	}
+	if result2.ConflictsSkipped != 1 {
+		t.Fatalf("expected second stale re-import to also report 1 skipped conflict, got %d", result2.ConflictsSkipped)
+	}
+}
+
+func TestPortableImportV2RelationsAndAnchorsAreValidatedAtomicAndIdempotent(t *testing.T) {
+	src := newTestStore(t)
+	if _, err := src.db.Exec(`
+		INSERT INTO sessions (id,project,directory,started_at) VALUES ('s1','portable','/source','2026-01-01T00:00:00Z');
+		INSERT INTO observations (sync_id,session_id,type,title,content,project,scope,created_at,updated_at)
+			VALUES ('obs-a','s1','decision','A','A','portable','project','2026-01-02T00:00:00Z','2026-01-02T00:00:00Z'),
+			       ('obs-b','s1','discovery','B','B','portable','project','2026-01-03T00:00:00Z','2026-01-03T00:00:00Z');
+		INSERT INTO memory_relations (sync_id,source_id,target_id,relation,judgment_status,created_at,updated_at)
+			VALUES ('rel-new','obs-a','obs-b','supersedes','judged','2026-01-04T00:00:00Z','2026-01-04T00:00:00Z'),
+			       ('rel-old','obs-a','obs-b','related','judged','2026-01-03T00:00:00Z','2026-01-03T00:00:00Z');
+		UPDATE memory_relations SET superseded_at='2026-01-04T00:00:00Z',
+			superseded_by_relation_id=(SELECT id FROM memory_relations WHERE sync_id='rel-new') WHERE sync_id='rel-old';
+		INSERT INTO memory_anchors (sync_id,obs_sync_id,file_path,line_start,line_end,content_hash,anchor_status,created_at)
+			VALUES ('anc-active','obs-a','a.go',1,2,'hash-a','active','2026-01-04T00:00:00Z'),
+			       ('anc-stale','obs-b','b.go',3,4,'hash-b','stale','2026-01-05T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	valid, err := src.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clone := func(data *ExportData) *ExportData {
+		t.Helper()
+		raw, err := json.Marshal(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := DecodeExportData(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	dst := newTestStore(t)
+	if _, err := dst.db.Exec(`
+		INSERT INTO memory_relations (sync_id,source_id,target_id,relation,judgment_status)
+			VALUES (' rel-old ','missing','missing','pending','pending');
+		INSERT INTO memory_anchors (sync_id,obs_sync_id,file_path,line_start,line_end,content_hash,anchor_status)
+			VALUES (' anc-active ','missing','old.go',9,9,'old','traveled')`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := dst.Import(valid); err != nil {
+			t.Fatalf("import %d: %v", i+1, err)
+		}
+	}
+	var relations, anchors int
+	var relation, target, status, anchorOwner, filePath string
+	if err := dst.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relations); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.db.QueryRow(`SELECT r.relation,p.sync_id FROM memory_relations r
+		JOIN memory_relations p ON p.id=r.superseded_by_relation_id WHERE r.sync_id='rel-old'`).Scan(&relation, &target); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.db.QueryRow(`SELECT count(*),max(anchor_status),max(obs_sync_id),max(file_path)
+		FROM memory_anchors`).Scan(&anchors, &status, &anchorOwner, &filePath); err != nil {
+		t.Fatal(err)
+	}
+	if relations != 2 || anchors != 2 || relation != RelationRelated || target != "rel-new" ||
+		status != AnchorStatusStale || anchorOwner != "obs-b" || filePath != "b.go" {
+		t.Fatalf("graph did not converge: relations=%d anchors=%d relation=%q target=%q status=%q owner=%q file=%q",
+			relations, anchors, relation, target, status, anchorOwner, filePath)
+	}
+
+	current := clone(valid)
+	current.Observations = nil
+	current.Counts.Observations = 0
+	current.Checksum, _ = portableChecksum(current)
+	mixed := newTestStore(t)
+	if _, err := mixed.db.Exec(`
+		INSERT INTO sessions (id,project,directory,started_at) VALUES ('s1','local','/local','2025-01-01T00:00:00Z');
+		INSERT INTO observations (sync_id,session_id,type,title,content,scope,created_at,updated_at)
+			VALUES (' obs-a ','s1','note','current-a','current-a','project','2025-01-01T00:00:00Z','2025-01-01T00:00:00Z'),
+			       (' obs-b ','s1','note','current-b','current-b','project','2025-01-01T00:00:00Z','2025-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mixed.Import(current); err != nil {
+		t.Fatalf("current canonical graph reference rejected: %v", err)
+	}
+	currentIDs := []string{" obs-a ", " obs-b "}
+	gotRelations, err := mixed.GetRelationsForObservations(currentIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotRelations[" obs-a "].AsSource) != 2 ||
+		gotRelations[" obs-a "].AsSource[0].SourceTitle != "current-a" ||
+		gotRelations[" obs-a "].AsSource[0].TargetTitle != "current-b" {
+		t.Fatalf("runtime relation identity lost padded endpoints: %+v", gotRelations)
+	}
+	gotAnchors, err := mixed.GetAnchorsForObservations(currentIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotAnchors[" obs-a "]) != 1 || len(gotAnchors[" obs-b "]) != 1 {
+		t.Fatalf("runtime anchor identity lost padded owners: %+v", gotAnchors)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*ExportData)
+		want   string
+	}{
+		{"dangling relation endpoint", func(d *ExportData) { d.Relations[0]["target_id"] = "missing" }, "target_id"},
+		{"invalid relation type", func(d *ExportData) { d.Relations[0]["relation"] = "causes" }, "relation type"},
+		{"invalid judgment status", func(d *ExportData) { d.Relations[0]["judgment_status"] = "approved" }, "judgment status"},
+		{"dangling supersede reference", func(d *ExportData) { d.Relations[0]["superseded_by_relation_sync_id"] = "missing" }, "superseded"},
+		{"dangling anchor owner", func(d *ExportData) { d.Anchors[0]["obs_sync_id"] = "missing" }, "obs_sync_id"},
+		{"invalid anchor status", func(d *ExportData) { d.Anchors[0]["anchor_status"] = "unknown" }, "anchor status"},
+		{"invalid anchor field type", func(d *ExportData) { d.Anchors[0]["line_start"] = "one" }, "decode anchor"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			data := clone(valid)
+			tt.mutate(data)
+			data.Checksum, _ = portableChecksum(data)
+			target := newTestStore(t)
+			if _, err := target.Import(data); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+			for _, table := range []string{"sessions", "observations", "memory_relations", "memory_anchors"} {
+				var count int
+				if err := target.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+					t.Fatalf("failed graph import mutated %s: count=%d err=%v", table, count, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPortableImportV2ProceduresRoundTripScaleAndAtomic(t *testing.T) {
+	src := newTestStore(t)
+	if err := src.CreateSession("portable-session", "omnia", "/tmp/omnia"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := src.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO procedures
+		(sync_id,project,scope,polarity,"trigger",steps,steps_summary,expected_outcome,postcondition_kind,
+		 postcondition_expr,confidence,state,reuse_confirmed,contradicted_count,source_obs_sync_ids,
+		 induced_by_actor,induced_by_kind,induced_by_model,created_at,updated_at,last_reused_at,review_after,retired_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const total = 1000
+	for i := 0; i < total; i++ {
+		if _, err := stmt.Exec(fmt.Sprintf("proc-%04d", i), "omnia", "project", ProcedurePolarityPlaybook, "portable trigger",
+			`[{"order":1,"template":"run {{command}}","slots":["command"]}]`, "INDEXED SENTINEL",
+			"portable outcome", PostconditionCustom, "exit == 0", 0.75, ProcedureStateTrusted, 4, 1,
+			`["obs-deleted"]`, "alice", "human", "none", "2026-01-01T00:00:00Z",
+			"2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z", "2026-02-01T00:00:00Z", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = stmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.db.Exec(`UPDATE procedures SET project=NULL,expected_outcome=NULL,postcondition_expr=NULL,
+		induced_by_actor=NULL,induced_by_kind=NULL,induced_by_model=NULL WHERE sync_id='proc-0000'`); err != nil {
+		t.Fatal(err)
+	}
+	exported, err := src.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWire, _ := json.Marshal(exported)
+
+	dst := newTestStore(t)
+	for i := 0; i < 2; i++ {
+		result, err := dst.Import(exported)
+		if err != nil || result.ProceduresImported != total {
+			t.Fatalf("import %d: result=%+v err=%v", i+1, result, err)
+		}
+	}
+	var count, reuse, contradicted int
+	var summary, state, lastReused string
+	if err := dst.db.QueryRow(`SELECT count(*),max(steps_summary),max(state),max(reuse_confirmed),
+		max(contradicted_count),max(last_reused_at) FROM procedures`).Scan(
+		&count, &summary, &state, &reuse, &contradicted, &lastReused,
+	); err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := dst.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotWire, _ := json.Marshal(roundTrip)
+	if count != total || summary != "INDEXED SENTINEL" || state != ProcedureStateTrusted || reuse != 4 ||
+		contradicted != 1 || lastReused != "2026-01-03T00:00:00Z" || string(gotWire) != string(wantWire) {
+		t.Fatalf("procedure round-trip lost fields or determinism: count=%d summary=%q state=%q", count, summary, state)
+	}
+
+	bad := *exported
+	bad.Procedures = append([]PortableRow(nil), exported.Procedures...)
+	bad.Procedures[0] = PortableRow{}
+	for key, value := range exported.Procedures[0] {
+		bad.Procedures[0][key] = value
+	}
+	bad.Procedures[0]["state"] = "unknown"
+	bad.Checksum, _ = portableChecksum(&bad)
+	atomic := newTestStore(t)
+	if _, err := atomic.Import(&bad); err == nil || !strings.Contains(err.Error(), "procedure state") {
+		t.Fatalf("expected invalid procedure state, got %v", err)
+	}
+	var sessions, procedures int
+	_ = atomic.db.QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessions)
+	_ = atomic.db.QueryRow(`SELECT count(*) FROM procedures`).Scan(&procedures)
+	if sessions != 0 || procedures != 0 {
+		t.Fatalf("invalid procedure partially mutated file: sessions=%d procedures=%d", sessions, procedures)
+	}
+}
+
+func TestPortableImportPreflightAndLegacyMergeStayExplicit(t *testing.T) {
+	src := newTestStore(t)
+	if err := src.CreateSession("s1", "portable", "/source"); err != nil {
+		t.Fatal(err)
+	}
+	valid, err := src.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name   string
+		mutate func(*ExportData)
+		want   string
+	}{
+		{"future version", func(data *ExportData) { data.SchemaVersion++ }, "unsupported schema version"},
+		{"count mismatch", func(data *ExportData) { data.Counts.Sessions++ }, "count mismatch"},
+		{"checksum mismatch", func(data *ExportData) { data.Checksum = "bad" }, "checksum mismatch"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data := *valid
+			tt.mutate(&data)
+			dst := newTestStore(t)
+			if _, err := dst.Import(&data); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q, got %v", tt.want, err)
+			}
+			var count int
+			if err := dst.db.QueryRow(`SELECT count(*) FROM sessions`).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("preflight failure mutated store: count=%d err=%v", count, err)
+			}
+		})
+	}
+	legacy := newTestStore(t)
+	if err := legacy.CreateSession("s1", "local", "/local"); err != nil {
+		t.Fatal(err)
+	}
+	data := &ExportData{
+		Sessions:     []Session{{ID: "s1", Project: "legacy", Directory: "/incoming", StartedAt: Now()}},
+		Observations: []Observation{{SyncID: "legacy-obs", SessionID: "s1", Type: "note", Title: "legacy", Content: "append", Scope: "project", CreatedAt: Now(), UpdatedAt: Now()}},
+		Prompts:      []Prompt{{SyncID: "legacy-prompt", SessionID: "s1", Content: "append", CreatedAt: Now()}},
+	}
+	if _, err := legacy.Import(data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Import(data); err != nil {
+		t.Fatal(err)
+	}
+	var directory string
+	var observations, prompts int
+	_ = legacy.db.QueryRow(`SELECT directory FROM sessions WHERE id='s1'`).Scan(&directory)
+	_ = legacy.db.QueryRow(`SELECT count(*) FROM observations WHERE sync_id='legacy-obs'`).Scan(&observations)
+	_ = legacy.db.QueryRow(`SELECT count(*) FROM user_prompts WHERE sync_id='legacy-prompt'`).Scan(&prompts)
+	if directory != "/local" || observations != 2 || prompts != 2 {
+		t.Fatalf("legacy merge semantics changed: directory=%q observations=%d prompts=%d", directory, observations, prompts)
+	}
+}
+
+func TestPortableImportConvergesLegacyDuplicateSelfExport(t *testing.T) {
+	src := newTestStore(t)
+	if err := src.CreateSession("s1", "legacy", "/legacy"); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"old", "alpha", "beta", "tab"} {
+		at := "2025-01-01T00:00:00Z"
+		if suffix != "old" {
+			at = "2026-01-01T00:00:00Z"
+		}
+		legacy := &ExportData{
+			Observations: []Observation{{SyncID: "dup-obs" + map[string]string{"beta": " ", "tab": "\t"}[suffix], SessionID: "s1", Type: "note", Title: suffix, Content: suffix, Scope: "project", CreatedAt: at, UpdatedAt: at}},
+			Prompts:      []Prompt{{SyncID: "dup-prompt" + map[string]string{"beta": " ", "tab": "\t"}[suffix], SessionID: "s1", Content: suffix, CreatedAt: at}},
+		}
+		if _, err := src.Import(legacy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := src.ExportPortable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Observations) != 2 || len(data.Prompts) != 2 || data.Observations[1].SyncID != "dup-obs\t" || data.Prompts[1].SyncID != "dup-prompt\t" ||
+		data.Observations[0].Content != "beta" || data.Observations[1].Content != "tab" || data.Prompts[0].Content != "beta" || data.Prompts[1].Content != "tab" {
+		t.Fatalf("portable export did not canonicalize legacy duplicates: %+v %+v", data.Observations, data.Prompts)
+	}
+	dst := newTestStore(t)
+	if _, err := dst.Import(data); err != nil {
+		t.Fatal(err)
+	}
+	var observations, prompts int
+	_ = dst.db.QueryRow(`SELECT count(*) FROM observations`).Scan(&observations)
+	_ = dst.db.QueryRow(`SELECT count(*) FROM user_prompts`).Scan(&prompts)
+	if observations != 2 || prompts != 2 {
+		t.Fatalf("self-export/import did not converge: observations=%d prompts=%d", observations, prompts)
+	}
 }
 
 func TestNewErrorBranches(t *testing.T) {

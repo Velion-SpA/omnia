@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1202,6 +1203,28 @@ func TestExportUsesProjectScopedStoreExportWhenProjectProvided(t *testing.T) {
 	}
 	if projectExportCalled != 1 {
 		t.Fatalf("expected project-scoped export hook to be called once, got %d", projectExportCalled)
+	}
+}
+
+func TestPortableDeliveryDoesNotChangeSyncExportWire(t *testing.T) {
+	resetSyncTestHooks(t)
+	s := newTestStore(t)
+	if _, err := s.UpsertProcedure(store.Procedure{
+		SyncID: "proc-local", Polarity: store.ProcedurePolarityPlaybook, Trigger: "stay local",
+		PostconditionKind: store.PostconditionCustom,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := storeExportData(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(`"schema_version"`)) || bytes.Contains(raw, []byte(`"procedures"`)) {
+		t.Fatalf("sync export wire changed to portable payload: %s", raw)
 	}
 }
 
