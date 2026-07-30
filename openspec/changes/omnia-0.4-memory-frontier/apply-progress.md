@@ -663,3 +663,144 @@ capability of the whole v0.4 release)
 4. **Backup files (`.bak-<timestamp>`) accumulate indefinitely** — by design (never delete data the user might
    need to recover), but there is no `omnia security` subcommand to list/prune them yet. Left as a documented
    follow-up, not blocking this capability's REQ-430–437 contract.
+
+## 2026-07-30 — PR 4/5 `memory-at-rest-security`: Adversarial Security Review Remediation (2 BLOCKERS + 2 SHOULD-FIX)
+An independent adversarial SECURITY review of `memory-at-rest-security` returned a BLOCK verdict on 2 real
+security findings, plus should-fix/nit items. This pass fixes the 2 blockers and the 2 highest-priority
+should-fix items, as 4 new commits on top of the original 3 (`a8e75c2`, `6923715`, `0c16c6c` — not amended).
+Strict TDD throughout: every fix has a RED test confirmed failing against the pre-fix code before the GREEN
+implementation landed.
+
+### BLOCKER #1 fixed — raw rotated encryption key no longer printed to stderr on a keychain-Set failure
+`cmd/omnia/security.go`'s `cmdSecurityRotateKey`: if the keychain `Set` call fails AFTER both `omnia.db` and
+`embeddings.db` have already been re-encrypted with the NEW key (a real, previously-untested failure mode —
+transient keychain failure, permission issue, keychain locked mid-operation), the old code printed the raw
+64-char hex key directly to stderr so the operator could recover it manually — capturable via shell
+redirection, terminal scrollback, CI log capture, or a pasted support ticket. The operator genuinely does need
+the key in this exact window (the keychain still holds the STALE old key, both files are now unreadable with
+it), so the fix is not to withhold the key, only to stop putting it on stderr: `writeRotateRecoveryFile`
+(new, `cmd/omnia/security.go`) writes the key plus the keychain service/account and recovery instructions
+(macOS `security add-generic-password`/Linux `secret-tool store` commands) to a
+`<dataDir>/security-rotate-recovery-<UTC-timestamp>.txt` file, mode `0600` — mirroring the existing
+`.bak-<timestamp>` naming convention from `migrate_encryption.go`. Only the recovery FILE'S PATH (never the
+raw key) is now printed to stderr. If even the recovery-file write itself fails, stderr says so explicitly and
+warns the key is unrecoverable once the process exits — still never echoing the key. TDD:
+`TestCmdSecurityRotateKey_KeychainSetFails_WritesRecoveryFileNotStderr` forces `fakeSecurityKeychain.setErr`
+after a successful rotate, confirmed RED against the pre-fix code (`stderr must NEVER contain the raw rotated
+key` failure — the leak reproduced exactly as described), then GREEN after the fix; asserts (a) stderr never
+contains the new key, (b) a `security-rotate-recovery-*.txt` file exists with mode `0600`, (c) stderr mentions
+that file's path, (d) the file itself contains the key. The existing happy-path test
+(`TestCmdSecurityRotateKey_RotatesAndUpdatesKeychainOnlyAfterSuccess`) is unaffected.
+
+### BLOCKER #2 fixed — encryption key no longer embedded in `VACUUM INTO` SQL/URI text
+`internal/store/migrate_encryption.go` and `internal/embed/migrate_encryption.go`'s `MigrateToEncrypted` and
+`RotateKey` functions used to build `VACUUM INTO 'file:%s?vfs=adiantum&hexkey=%s'` via `fmt.Sprintf`, embedding
+the raw encryption key directly in SQL/URI text — exactly what the vendored `ncruces/go-sqlite3/vfs/adiantum`
+package's own docs (`vfs/adiantum/api.go`) warn against: a URI-embedded key "makes your key easily accessible
+to other parts of your application (e.g. through `vfs.Filename.URIParameters`)," recommending `PRAGMA
+hexkey=...` immediately after opening a connection instead — precisely the pattern this same PR's
+`openAdiantumDB`/`openEncryptedEmbedDB` already use correctly for READS. The migration/rotate-key code
+reintroduced the unsafe URI form specifically because `VACUUM INTO`'s destination file is created implicitly
+by the statement itself, with no connection object to issue a PRAGMA against before the file is written — so
+naively there was no obvious hook for the safe pattern.
+
+**Fix** (4 call sites: `MigrateToEncrypted` + `RotateKey`, in both `internal/store` and `internal/embed`):
+replaced every `VACUUM INTO ...&hexkey=...` construction with SQLite's **online backup/restore API**
+(`sqlite3.Conn.Backup`/`.Restore`, from the vendored `ncruces/go-sqlite3` package's raw, non-`database/sql`
+API) — the same lower-level mechanism `VACUUM INTO` is itself documented to be implemented on top of, so the
+resulting bytes are equivalent, but it lets this code open BOTH sides of the copy itself and issue `PRAGMA
+hexkey=...` before any page is written or read, exactly matching the doc-recommended mitigation:
+- New `encryptNewFile(ctx, dstPath, hexKey, plainSrcURI)` (one copy per package — `internal/store` and
+  `internal/embed` must never import each other, an existing architecture guardrail): opens `dstPath` itself
+  via `sqlite3.OpenContext` with `?vfs=adiantum` (no key in the URI), sets `PRAGMA hexkey=...` immediately via
+  `Conn.Exec` on that connection (never a URI parameter), registers `fts5`/`vec1` as needed, then calls
+  `dst.Restore("main", plainSrcURI)` to copy the PLAINTEXT source's full content (schema, data, and any FTS5/
+  Vec1 shadow tables) into the now-correctly-keyed destination.
+- New `decryptToPlainFile(ctx, srcPath, hexKey, dstPath)`: the mirror-image helper `RotateKey` needs, since its
+  SOURCE (not just its destination) is encrypted. Opens `srcPath` itself with the OLD key via `PRAGMA hexkey`
+  (never a URI), then calls `src.Backup("main", plainURI)` to back it up into a brand-new PLAINTEXT
+  intermediate temp file (`<dbPath>.rotating.plain.tmp`, removed via `defer` after use).
+- `RotateKey` now composes both: `decryptToPlainFile` (old key, via PRAGMA) → plaintext intermediate →
+  `encryptNewFile` (new key, via PRAGMA) → final new-key-encrypted temp file. The old and new keys never
+  coexist on the same connection, SQL statement, or URI, and neither is ever embedded in SQL/URI text.
+  `MigrateToEncrypted`'s source is already plaintext, so it calls `encryptNewFile` directly (one hop, no
+  intermediate needed). `MigrateToPlaintext` was NOT touched — its existing `VACUUM INTO 'file:...?vfs=os'`
+  destination never embeds a key (plaintext target, no key needed) and was already safe.
+- **Empirical confirmation** (this was the trickiest fix, flagged in the task as needing verification that the
+  library cleanly supports it): `Conn.Backup`/`Conn.Restore` DOES work correctly for this exact use case,
+  including copying FTS5 virtual tables (`observations_fts`) and surviving the full 10k-row fixture test
+  unmodified — the backup API operates at the raw page/btree level (the same level `VACUUM INTO` itself uses
+  internally), not through SQL execution against the schema, so it never needed the FTS5/Vec1 module
+  registered on the internally-opened "other side" of the copy (only the side this code opens and controls
+  directly needs the module registered, for the `PRAGMA`/verification queries run against it). No fallback to
+  a more fragile dump-and-load-by-table approach was needed.
+- TDD: `TestMigrateEncryption_SourceNeverEmbedsHexKeyInVacuumIntoURI` (added to both packages) is a static
+  regression guard scanning `migrate_encryption.go`'s own source for the literal `vfs=adiantum&hexkey=`
+  substring — confirmed RED against the pre-fix code in both packages (the vulnerable pattern was present
+  twice per file, exactly as the review described), GREEN after the fix (the string construction no longer
+  exists at all, having been replaced by `Conn.Backup`/`Conn.Restore` + `PRAGMA`). All pre-existing migration/
+  rotate-key tests (including the 10k-row fixture) pass unmodified — confirming the behavior is unchanged,
+  only the key's transport mechanism is safer.
+
+### SHOULD-FIX #3 fixed — enabling `encryption.enabled` on an existing plaintext store now fails with an actionable hint
+`internal/store/encryption.go`'s `openEngramDB` and `internal/embed/store.go`'s `OpenStore` used to route
+straight to the encrypted-open path whenever `encryption.enabled` was true, with no check for whether the
+on-disk file was still plaintext. An operator who flips `encryption.enabled: true` in `config.yaml` on an
+existing plaintext store and restarts (the natural first move, instead of running `omnia security encrypt`
+first) got a generic, unhelpful SQLite error (empirically: `PRAGMA journal_mode = WAL: sqlite3: file is not a
+database` in `internal/store`, `create schema: sqlite3: file is not a database` in `internal/embed`) with no
+indication the fix is to migrate first. Fixed: both call sites now reuse the existing
+`isPlaintextSQLiteFile` detection helper (already defined in each package's own `migrate_encryption.go`,
+previously unused at the open call site) BEFORE attempting the encrypted open — if the file EXISTS and is
+detectably plaintext, they now fail fast with `"<path> is a plaintext SQLite database but
+encryption.enabled=true — run \`omnia security encrypt\` first to migrate it"` instead of routing through to
+the keychain/adiantum open attempt at all. A brand-new/nonexistent file is unaffected — it still creates
+fresh and encrypted from scratch, exactly as before. TDD:
+`TestNew_EncryptionEnabled_ExistingPlaintextStore_FailsWithMigrationHint` /
+`TestOpenStore_EncryptionEnabled_ExistingPlaintextStore_FailsWithMigrationHint` seed a plaintext store first
+(disabled encryption), then reopen with `encryption.enabled=true`; confirmed RED against the pre-fix code
+(the cryptic SQLite errors above, reproduced exactly), GREEN after the fix (clear error mentioning `omnia
+security encrypt`). Companion tests
+(`TestNew_EncryptionEnabled_NewStore_StillCreatesFreshEncryptedFile` /
+`TestOpenStore_EncryptionEnabled_NewStore_StillCreatesFreshEncryptedFile`) confirm the brand-new-store path is
+unaffected by the new guard.
+
+### SHOULD-FIX #5 fixed — `spec.md` REQ-434 corrected to match `design.md` ADR-3's fail-closed contract
+`spec.md`'s REQ-434 scenario said the system MUST unconditionally degrade to unencrypted-with-warning when the
+keychain is unavailable — contradicting `design.md`'s ADR-3 (and the actual, already-correct code and tests),
+which refuses to open by default (fail-closed) and degrades ONLY when the operator explicitly sets
+`encryption.allow_plaintext_fallback: true`. Since the CODE was already correct and safe, this fix changed
+ONLY the spec document text, not any code behavior:
+`openspec/changes/omnia-0.4-memory-frontier/specs/memory-at-rest-security/spec.md`'s REQ-434 now states the
+fail-closed default explicitly and splits the single contradictory scenario into two: (1) keychain unavailable
++ `allow_plaintext_fallback` unset/false → refuse to open with a clear error (the default, safe path), and (2)
+keychain unavailable + `allow_plaintext_fallback: true` explicitly set → degrade to unencrypted with a loud
+warning and exactly one audit entry. No test changes needed — the existing `TestNew_EncryptionEnabled_
+KeychainUnavailable_DefaultRefusesToOpen`/`_FallbackOpensUnencryptedWithAudit` pairs (and their `internal/embed`
+mirrors) already exercised and confirmed exactly this fail-closed-by-default, explicit-opt-in-fallback
+contract — the bug was purely in the spec document, never in the implementation.
+
+### Explicitly out of scope for this pass (per the task's own instruction — not attempted)
+- Should-fix #4 (hex-key charset/length validation before splicing into `PRAGMA`) — left as a documented known
+  limitation.
+- Should-fix #6 (decrypt/rotate-key no-op on `config.Load` failure) — left as-is; an intentional convention
+  match with the rest of the codebase, not a clear bug per the reviewer's own note.
+- Nit #7 (additional test coverage for interrupted-migration cleanup, non-hex keychain values) — left for a
+  future pass.
+
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo, all ~60 packages, including the 10k-row encrypt/decrypt migration
+  fixture)
+- `gofmt -l` on every changed file — clean
+- `git diff --check` — clean
+
+### Design Deviations
+None. All 4 fixes match the task's own prescribed approach; BLOCKER #2's `Conn.Backup`/`Conn.Restore` pattern
+was explicitly anticipated as option (a) in the task instructions ("VACUUM INTO a plain unencrypted temp path,
+then open THAT temp file via a normal connection and re-key it") — implemented as a 2-hop backup/restore
+composition rather than a literal same-file re-key (re-keying an EXISTING plaintext file in place via a
+post-hoc `PRAGMA` would not actually re-encrypt already-written pages), which achieves the same "never embed
+the key in SQL/URI text" goal while remaining correct for both migration directions (`MigrateToEncrypted`'s
+plaintext-only source and `RotateKey`'s encrypted-old-key source).
