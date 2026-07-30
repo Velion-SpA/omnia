@@ -108,10 +108,15 @@ type Server struct {
 	// SetSearch was never called — handleSearch then calls s.store.Search
 	// directly, byte-for-byte today's FTS5-only behavior.
 	search SearchFunc
+
+	// version is reported by GET /health. Defaults to "dev" (matching
+	// cmd/omnia's own build-info fallback); SetVersion wires in the real
+	// build version from main.
+	version string
 }
 
 func New(s *store.Store, port int) *Server {
-	srv := &Server{store: s, port: port, listen: net.Listen, serve: http.Serve}
+	srv := &Server{store: s, port: port, listen: net.Listen, serve: http.Serve, version: "dev"}
 	srv.mux = http.NewServeMux()
 	srv.routes()
 	return srv
@@ -143,6 +148,11 @@ func (s *Server) SetAutoEmbed(w *embed.Worker) { s.autoEmbed = w }
 // Pass nil (or never call this) to keep GET /search on the legacy
 // s.store.Search-only path.
 func (s *Server) SetSearch(fn SearchFunc) { s.search = fn }
+
+// SetVersion configures the build version reported by GET /health.
+// Pass the real build version (e.g. cmd/omnia's ldflags-injected `version`);
+// omitting this call leaves the "dev" default from New.
+func (s *Server) SetVersion(v string) { s.version = v }
 
 // enqueueAutoEmbed schedules an out-of-band embedding for a just-saved memory
 // (non-blocking). It is a no-op when the worker is disabled. A fetch or
@@ -318,8 +328,8 @@ func (s *Server) routes() {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"status":  "ok",
-		"service": "engram",
-		"version": "0.1.0",
+		"service": "omnia",
+		"version": s.version,
 	})
 }
 

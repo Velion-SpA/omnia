@@ -743,6 +743,49 @@ func TestOnWriteNotCalledOnReadOperations(t *testing.T) {
 	}
 }
 
+func TestHealthReportsOmniaServiceAndConfiguredVersion(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	srv.SetVersion("1.2.3")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /health body: %v", err)
+	}
+	if body["service"] != "omnia" {
+		t.Fatalf("expected service %q, got %q", "omnia", body["service"])
+	}
+	if body["version"] != "1.2.3" {
+		t.Fatalf("expected version %q (from SetVersion), got %q", "1.2.3", body["version"])
+	}
+}
+
+func TestHealthDefaultsVersionWhenUnset(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /health body: %v", err)
+	}
+	if body["service"] != "omnia" {
+		t.Fatalf("expected service %q, got %q", "omnia", body["service"])
+	}
+	if body["version"] == "" || body["version"] == nil {
+		t.Fatalf("expected a non-empty default version, got %v", body["version"])
+	}
+}
+
 func TestOnWriteNotCalledOnFailedWrites(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)
