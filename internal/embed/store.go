@@ -271,6 +271,10 @@ func (s *Store) SearchScoped(ctx context.Context, query []float32, k int, projec
 // SearchScoped. project == "" scans every row (Search's behavior); a
 // non-empty project restricts the scan to that project's rows via WHERE.
 func (s *Store) search(ctx context.Context, query []float32, k int, project string) ([]Hit, error) {
+	if hits, ok := s.tryVecSearch(ctx, query, k, project); ok {
+		return hits, nil
+	}
+
 	q := `SELECT sync_id, obs_id, vector FROM embeddings`
 	var args []any
 	if project != "" {
@@ -367,6 +371,10 @@ func (s *Store) Graph(k int, minScore float32) ([]GraphNode, []GraphEdge, error)
 // added, so the whole-store view is byte-for-byte unaffected by this
 // addition.
 func (s *Store) GraphScoped(projects []string, k int, minScore float32) ([]GraphNode, []GraphEdge, error) {
+	if nodes, edges, ok := s.tryVecGraph(projects, k, minScore); ok {
+		return nodes, edges, nil
+	}
+
 	q := `SELECT sync_id, obs_id, COALESCE(project,''), COALESCE(type,''), COALESCE(title,''), vector FROM embeddings`
 	var args []any
 	if len(projects) > 0 {
@@ -407,11 +415,10 @@ func (s *Store) GraphScoped(projects []string, k int, minScore float32) ([]Graph
 	n := len(recs)
 
 	// Candidate neighbor lists, in BOTH directions, computed from the upper
-	// triangle so each dot product is evaluated once.
-	type neighbor struct {
-		idx   int
-		score float32
-	}
+	// triangle so each dot product is evaluated once. neighbor/finishGraph
+	// (vec1.go) are the SAME shared selection logic the Vec1 KNN path above
+	// uses, guaranteeing both produce the identical graph for the same
+	// candidate universe (spec REQ-462).
 	nbrs := make([][]neighbor, n)
 	for i := 0; i < n; i++ {
 		vi := recs[i].vec
@@ -428,48 +435,12 @@ func (s *Store) GraphScoped(projects []string, k int, minScore float32) ([]Graph
 		}
 	}
 
-	// Keep each node's top-k candidates and union the directed picks into a single
-	// undirected, deduped edge set keyed by the ordered index pair. dot is
-	// symmetric, so the score is identical from either endpoint.
-	type pair struct{ a, b int }
-	edgeScore := make(map[pair]float32)
-	for i := range nbrs {
-		list := nbrs[i]
-		sort.Slice(list, func(x, y int) bool { return list[x].score > list[y].score })
-		if k > 0 && len(list) > k {
-			list = list[:k]
-		}
-		for _, nb := range list {
-			a, b := i, nb.idx
-			if a > b {
-				a, b = b, a
-			}
-			edgeScore[pair{a, b}] = nb.score
-		}
-	}
-
 	nodes := make([]GraphNode, n)
 	for i := range recs {
 		nodes[i] = recs[i].node
 	}
-	edges := make([]GraphEdge, 0, len(edgeScore))
-	for p, sc := range edgeScore {
-		nodes[p.a].Degree++
-		nodes[p.b].Degree++
-		edges = append(edges, GraphEdge{
-			Source: recs[p.a].node.ObsID,
-			Target: recs[p.b].node.ObsID,
-			Weight: sc,
-		})
-	}
-	// Deterministic edge order for stable output and tests.
-	sort.Slice(edges, func(i, j int) bool {
-		if edges[i].Source != edges[j].Source {
-			return edges[i].Source < edges[j].Source
-		}
-		return edges[i].Target < edges[j].Target
-	})
-	return nodes, edges, nil
+	outNodes, edges := finishGraph(nodes, nbrs, k)
+	return outNodes, edges, nil
 }
 
 // DeleteBySyncID physically removes a single row by sync_id (memory-provenance
