@@ -73,3 +73,20 @@ None.
 - `go test ./...` — passed
 ### Design Deviations
 None. (Idle worker deferred as noted above — not a deviation, the spec permits explicit-invocation-only.)
+
+## PR 10A — Learned Ranker: Feature + Model Foundation
+- Completed tasks: 10.1–10.4. Tasks 10.5–10.6 (cold-start fallback) live at the MCP integration boundary,
+  completed in PR 10B, not here — the feature/model package below has no caller-side cold-start decision to make.
+- Boundary: `internal/ranker` package only — feature vector construction and a pure-Go L2-regularized
+  logistic regression, trainable and serializable. No wiring into recall/search yet.
+### TDD Cycle Evidence
+| Task | RED | GREEN | REFACTOR |
+|---|---|---|---|
+| 10.1–10.2 | `features_test.go` failed, package/`BuildFeatures` did not exist | Feature vector traces only to existing recall/config/store fields | None needed |
+| 10.3–10.4 | `model_test.go` failed, package/`Train` did not exist | Batch gradient descent separates positive/negative labels; versioned serialize/load round-trips | Feature-schema-hash versioning |
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed
+### Design Deviations
+None.
