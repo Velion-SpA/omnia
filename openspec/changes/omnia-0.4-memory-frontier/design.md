@@ -27,7 +27,7 @@ touching the default path, and makes both migrations non-destructive.
 
 **Choice**: Introduce `openDB` driver selection at the two composition points (`internal/store/store.go:847`
 `New`, and `:897` `newWithoutRepair`; `internal/embed/store.go:79` `OpenStore`). Default driver name stays
-`"sqlite"` (modernc). When `security.enabled` or `vec_index.enabled` is set, resolve to the ncruces driver
+`"sqlite"` (modernc). When `encryption.enabled` or `vec_index.enabled` is set, resolve to the ncruces driver
 (registered under its own name) with the appropriate VFS/extension. `openDB` is already a package var
 (`store.go:35`) — the seam exists.
 **Alternatives**: (a) swap everything to ncruces unconditionally — rejected: needless blast radius on the
@@ -64,9 +64,9 @@ shells to the `git` binary specifically to avoid cgo (`internal/anchor/anchor.go
 `defaultRunGit:100`). Reusing "shell to the system tool" for the keychain is idiomatic here and keeps the
 binary pure-Go. Service=`omnia`, account=`db-key-v1`; a 32-byte key from `crypto/rand` generated once on
 first enable. Injectable runner (mirror `Probe.runGit`) so tests never touch the real keychain.
-**Degradation (explicit, never silent)**: if `security.enabled` is true but no keychain CLI is reachable
+**Degradation (explicit, never silent)**: if `encryption.enabled` is true but no keychain CLI is reachable
 (headless/Linux-without-libsecret/CI), the store REFUSES to open and returns a clear error by default. An
-explicit `security.allow_plaintext_fallback: true` opt-in downgrades to the unencrypted modernc path with
+explicit `encryption.allow_plaintext_fallback: true` opt-in downgrades to the unencrypted modernc path with
 a prominent stderr warning and an audit entry — a conscious operator choice, never an automatic silent
 downgrade. Losing the keychain entry = data unrecoverable; stated plainly in the spec threat model.
 
@@ -209,7 +209,7 @@ cartridge content (capability 6).
 tag is surfaced in read receipts and every audit `Entry` (already carries `TrustTag`, `audit.go:46`), and
 that capability 2/3 decisions are audited (ADR-7).
 
-**Interfaces**: Config `SecurityConfig{Enabled bool; KeychainService string; AllowPlaintextFallback bool}`.
+**Interfaces**: Config `EncryptionConfig{Enabled bool; KeychainService string; AllowPlaintextFallback bool}`.
 CLI `omnia security encrypt` / `omnia security decrypt` / `omnia security rotate-key`.
 
 **Migration (non-destructive, mirrors `datadir.Migrate` `datadir.go:140`)**: on first enable, for each of
@@ -298,8 +298,8 @@ capability 4 (when both on, `embeddings.db` uses ncruces + adiantum + vec togeth
 
 | File | Action | Description |
 |------|--------|-------------|
-| `internal/config/config.go` | Modify | 7 new blocks (`CodeGraph`,`Enforcement`,`Consolidation`,`Security`,`Ranker`,`Cartridge`,`VecIndex`) + `applyDefaults` param defaults; all `Enabled` default-OFF. |
-| `internal/store/store.go` | Modify | Driver selection at `New`/`newWithoutRepair` (ADR-1); route `openDB` to ncruces+adiantum when `security.enabled`. |
+| `internal/config/config.go` | Modify | 7 new blocks (`CodeGraph`,`Enforcement`,`Consolidation`,`Encryption`,`Ranker`,`Cartridge`,`VecIndex`) + `applyDefaults` param defaults; all `Enabled` default-OFF. |
+| `internal/store/store.go` | Modify | Driver selection at `New`/`newWithoutRepair` (ADR-1); route `openDB` to ncruces+adiantum when `encryption.enabled`. |
 | `internal/store/anchors.go` | Modify | Add `BlameLine` reverse walk + `CodeDecisionGraph` projection (1). |
 | `internal/store/relations.go` | Modify | Add `RelationConsolidates` verb (3). |
 | `internal/store/procedures.go` | Reuse | `ListProcedures`/`SearchProcedures` feed the gate (2). |
@@ -329,7 +329,7 @@ type ConsolidationConfig struct {
     Enabled bool `yaml:"enabled"`; Model string `yaml:"model"`; MinScore float32 `yaml:"min_score"`
     K, MinClusterSize, MaxClusterSize, IdleAfterMinutes int; Idle bool `yaml:"idle"`
 }
-type SecurityConfig struct {
+type EncryptionConfig struct {
     Enabled bool `yaml:"enabled"`; KeychainService string `yaml:"keychain_service"`
     AllowPlaintextFallback bool `yaml:"allow_plaintext_fallback"`
 }

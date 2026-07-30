@@ -109,6 +109,74 @@ type Config struct {
 	// convention. The standalone `omnia review-due` CLI is NOT gated by
 	// this flag — it is its own explicit, opt-in command.
 	Review ReviewConfig `yaml:"review"`
+
+	CodeGraph     CodeGraphConfig     `yaml:"code_graph"`
+	Enforcement   EnforcementConfig   `yaml:"enforcement"`
+	Consolidation ConsolidationConfig `yaml:"consolidation"`
+	Encryption    EncryptionConfig    `yaml:"encryption"`
+	Ranker        RankerConfig        `yaml:"learned_ranker"`
+	Cartridge     CartridgeConfig     `yaml:"cartridge"`
+	VecIndex      VecIndexConfig      `yaml:"vector_index"`
+}
+
+// CodeGraphConfig configures the default-off code-to-decision graph capability.
+type CodeGraphConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// EnforcementConfig configures default-off trusted-procedure enforcement.
+type EnforcementConfig struct {
+	Enabled             bool                      `yaml:"enabled"`
+	Mode                string                    `yaml:"mode"`
+	Commands            EnforcementCommandsConfig `yaml:"commands"`
+	AllowCustomCommands bool                      `yaml:"allow_custom_commands"`
+	TimeoutSeconds      int                       `yaml:"timeout_seconds"`
+}
+
+// EnforcementCommandsConfig holds operator-owned postcondition commands.
+type EnforcementCommandsConfig struct {
+	Tests string `yaml:"tests"`
+	Lint  string `yaml:"lint"`
+	Build string `yaml:"build"`
+}
+
+// ConsolidationConfig configures local, opt-in memory consolidation.
+type ConsolidationConfig struct {
+	Enabled          bool    `yaml:"enabled"`
+	Model            string  `yaml:"model"`
+	MinScore         float32 `yaml:"min_score"`
+	K                int     `yaml:"k"`
+	MinClusterSize   int     `yaml:"min_cluster_size"`
+	MaxClusterSize   int     `yaml:"max_cluster_size"`
+	Idle             bool    `yaml:"idle"`
+	IdleAfterMinutes int     `yaml:"idle_after_minutes"`
+}
+
+// EncryptionConfig configures optional at-rest database protection.
+type EncryptionConfig struct {
+	Enabled                bool   `yaml:"enabled"`
+	KeychainService        string `yaml:"keychain_service"`
+	AllowPlaintextFallback bool   `yaml:"allow_plaintext_fallback"`
+}
+
+// RankerConfig configures the optional locally trained recall ranker.
+type RankerConfig struct {
+	Enabled          bool   `yaml:"enabled"`
+	MinTrainExamples int    `yaml:"min_train_examples"`
+	ModelDir         string `yaml:"model_dir"`
+}
+
+// CartridgeConfig configures the optional per-repository warm-start digest.
+type CartridgeConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	TopMemories int    `yaml:"top_memories"`
+	Dir         string `yaml:"dir"`
+}
+
+// VecIndexConfig configures the optional SQLite vector index.
+type VecIndexConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	Quantization string `yaml:"quantization"`
 }
 
 type TimeTravelConfig struct {
@@ -801,6 +869,31 @@ func applyDefaults(cfg *Config, data []byte) {
 	}
 	if cfg.Procedural.ReviewAfterDays == 0 {
 		cfg.Procedural.ReviewAfterDays = 14
+	}
+	// v0.4 Enabled fields are intentionally never defaulted; only tuning values are.
+	if cfg.Enforcement.Mode == "" {
+		cfg.Enforcement.Mode = "flag"
+	}
+	if cfg.Consolidation.MinScore == 0 {
+		cfg.Consolidation.MinScore = 0.5
+	}
+	if cfg.Consolidation.K == 0 {
+		cfg.Consolidation.K = 8
+	}
+	if cfg.Consolidation.MinClusterSize == 0 {
+		cfg.Consolidation.MinClusterSize = 3
+	}
+	if cfg.Consolidation.MaxClusterSize == 0 {
+		cfg.Consolidation.MaxClusterSize = 12
+	}
+	if cfg.Ranker.MinTrainExamples == 0 {
+		cfg.Ranker.MinTrainExamples = 50
+	}
+	if cfg.Cartridge.TopMemories == 0 {
+		cfg.Cartridge.TopMemories = 50
+	}
+	if cfg.VecIndex.Quantization == "" {
+		cfg.VecIndex.Quantization = "none"
 	}
 	// Injection.Budget.Enabled intentionally has NO default override — its
 	// zero value (false) IS the default, mirroring Recall.Enabled/

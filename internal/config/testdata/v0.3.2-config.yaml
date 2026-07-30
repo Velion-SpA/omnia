@@ -1,0 +1,51 @@
+engram:
+  base_url: http://v032.example
+  default_project: legacy
+backfill_days: 17
+routes:
+  github/velion/omnia: omnia
+projects: [omnia, legacy]
+project_hidden: [hidden]
+project_aliases:
+  Legacy Name: legacy
+project_groups:
+  omnia: [legacy]
+embeddings:
+  enabled: true
+  base_url: http://ollama.example
+  model: legacy-model
+  dim: 512
+  db_path: /tmp/legacy.db
+recall:
+  enabled: true
+  rrf_k: 42
+  dense_k: 9
+  strong_floor: 0.7
+  base_floor: 0.4
+  max_results: 12
+  fts_relax_on_zero: false
+  ranking:
+    enabled: true
+    recency_half_life_days: 5
+    weights: {recency: 2, importance: 3, relevance: 4}
+    importance_overrides: {decision: 9}
+structural_forgetting: {enabled: true}
+procedural:
+  enabled: true
+  trust_threshold: 6
+  confidence_floor: 0.3
+  review_after_days: 20
+injection:
+  budget: {enabled: true, max_tokens: 100}
+  context_budget: {enabled: true, max_tokens: 200}
+  diversity: {enabled: true, lambda: 0.2, similarity_threshold: 0.8}
+  type_lens: {enabled: true}
+write_hygiene:
+  enabled: false
+  noop_threshold: 0.91
+  update_threshold: 0.81
+  shrink_guard: 0.71
+  candidate_limit: 7
+  min_content_length: 11
+time_travel: {enabled: true, max_revisions_per_memory: 8}
+review: {due_nudge: true}
