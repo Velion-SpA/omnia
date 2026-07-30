@@ -1,116 +1,110 @@
-# SQLite Vector Index Specification
+# SQLite Vec1 Index Specification
 
 ## Change metadata
 
 - Change: omnia-0.4-memory-frontier
 - Capability: sqlite-vec-index
 - Kind: ADDED (new capability, default-OFF)
-- REQ range: REQ-460 through REQ-467
+- REQ range: REQ-460 through REQ-469
 
 ## Purpose
 
-Replace/augment the brute-force O(N) cosine scan (`Store.Search`/`search`, `internal/embed/store.go:164,186`,
-over the `embeddings` table's `vector BLOB` column, `:52`) with a vector-native index inside SQLite, still
-`CGO_ENABLED=0`. Covers the same read surfaces brute-force serves today: `Search`, `SearchScoped`, and the
-`Graph`/`GraphScoped` k-NN used by consolidation (capability 3). KNN-flat only — no HNSW/ANN in this slice.
-Migration MUST be non-destructive to existing `embeddings.db` data.
+Provide opt-in bundled Vec1 v0.35.2 flat/cos exact float32 KNN. Modernc brute force remains default/fallback.
 
 ## Requirements
 
 ### Requirement: REQ-460 Default-Off Config Gate
 
-A new `VectorIndexConfig` (`yaml: vector_index`, field `enabled`, default `false`) MUST gate this capability.
-When disabled, `Search`/`SearchScoped`/`Graph`/`GraphScoped` MUST remain byte-for-byte identical to the current
-brute-force implementation.
+`vector_index.enabled` MUST default to `false`. When absent or false, all covered reads MUST remain byte-for-byte identical to pre-v0.4 brute force.
 
-#### Scenario: Disabled — brute-force path is unchanged
+#### Scenario: Disabled parity
+- GIVEN the flag is absent or false
+- WHEN any covered read surface is called
+- THEN it returns the pre-v0.4 brute-force result bytes
 
-- GIVEN `vector_index.enabled` is absent or `false`
-- WHEN `Search`/`SearchScoped` is called
-- THEN results are produced by the existing brute-force cosine scan, byte-for-byte identical to pre-v0.4
+### Requirement: REQ-461 Non-Destructive Index Lifecycle
 
-### Requirement: REQ-461 Non-Destructive Migration
+The index MUST use additive dual-write, backfill, and reindex steps without changing `embeddings` rows.
 
-Enabling the vector index MUST NOT delete, truncate, or mutate existing `embeddings` rows. Migration MUST be
-additive (a new index structure built alongside/over existing vectors) or a safe dual-write — never a
-destructive rewrite.
+#### Scenario: Backfill and reindex preserve rows
+- GIVEN an existing embeddings store
+- WHEN the index is enabled, backfilled, or reindexed
+- THEN the original rows and row count remain intact
 
-#### Scenario: Edge case — migrating an existing embeddings.db
+### Requirement: REQ-462 Exact Read-Surface and Project Parity
 
-- GIVEN an `embeddings.db` with 1,000 existing vectors and `vector_index.enabled` set to `true` for the first
-  time
-- WHEN the migration runs
-- THEN all 1,000 original rows remain present and unmodified in the `embeddings` table afterward
+Enabled Vec1 reads MUST match brute-force float32 flat/cos top-k, except ties, for all covered reads. Scoped reads MUST NOT return another project's vectors.
 
-### Requirement: REQ-462 Read-Surface Parity
+#### Scenario: Scoped exact KNN
+- GIVEN indexed vectors in two projects
+- WHEN a project-scoped read is executed
+- THEN it returns only that project's brute-force-equivalent top-k
 
-`Search`, `SearchScoped`, `Graph`, and `GraphScoped` MUST return equivalent top-k results (same top matches,
-ties aside) whether served by the brute-force path or the new vector index.
+### Requirement: REQ-463 Float32 Flat/Cos Only
 
-#### Scenario: Happy path — same top-k via new index
+v0.4 MUST index float32 vectors with exact Vec1 flat/cos KNN. It MUST NOT introduce HNSW, ANN, int8, or binary formats.
 
-- GIVEN a query vector and a corpus of 500 embeddings, indexed by the new vector index
-- WHEN `Search` is called with the index enabled and again with it disabled
-- THEN both calls return the same top-k `sync_id`s in the same order
+#### Scenario: Unsupported format is not indexed
+- GIVEN a non-float32 vector format
+- WHEN index maintenance runs
+- THEN it does not create an int8 or binary index entry
 
-### Requirement: REQ-463 KNN-Flat Only
+### Requirement: REQ-464 CGO-Free Approved Vec1 Path
 
-This capability MUST implement KNN-flat retrieval only. No HNSW or other approximate-nearest-neighbor index
-MUST be introduced in this slice.
+The capability MUST use bundled Vec1 registration from `github.com/ncruces/go-sqlite3@v0.35.2` and build with `CGO_ENABLED=0`.
 
-#### Scenario: No ANN structure present
+#### Scenario: Registered CGO-free Vec1
+- GIVEN vector indexing is enabled on a supported host
+- WHEN the vector store opens
+- THEN bundled Vec1 is registered and available without cgo
 
-- GIVEN the vector index is enabled
-- WHEN its on-disk structures are inspected
-- THEN no HNSW graph or other ANN index artifact exists
+### Requirement: REQ-465 Fallback on Unavailable or Corrupt Index
 
-### Requirement: REQ-464 CGO-Free Constraint
+If Vec1 cannot open, is unavailable, corrupt, or query-fails, reads MUST use brute force and MUST NOT fail solely for the index.
 
-The vector index implementation MUST NOT introduce a cgo dependency. The binary MUST still build successfully
-with `CGO_ENABLED=0` across the existing goreleaser target platforms.
+#### Scenario: Corrupt index fallback
+- GIVEN a corrupt or unavailable index
+- WHEN a covered read is called
+- THEN it returns the brute-force result
 
-#### Scenario: Build stays cgo-free
+### Requirement: REQ-466 Active Dimension Lock and Mismatch Fallback
 
-- GIVEN the vector index capability is present in the codebase (enabled or not)
-- WHEN `CGO_ENABLED=0 go build ./...` is run
-- THEN the build succeeds with no cgo dependency introduced
+The first indexed float32 vector MUST establish the active dimension. Different-dimension vectors MUST be skipped with counts/reason during lifecycle work; different-dimension queries MUST use brute force.
 
-### Requirement: REQ-465 Fallback On Index Failure
-
-If the vector index fails to open or query, the system MUST fall back to the brute-force path rather than
-failing the caller.
-
-#### Scenario: Index open failure falls back
-
-- GIVEN the vector index file is corrupted or fails to open
-- WHEN `Search` is called
-- THEN the call succeeds via the brute-force fallback path, with no error surfaced to the caller
-
-### Requirement: REQ-466 Migration Verification Reporting
-
-The migration path MUST report how many vectors were indexed versus skipped (e.g. dimension mismatches),
-mirroring `Search`'s existing decode-skip semantics (`internal/embed/store.go:207-210`).
-
-#### Scenario: Migration reports skip counts
-
-- GIVEN an `embeddings.db` with 998 valid vectors and 2 rows with a mismatched dimension
-- WHEN migration runs
-- THEN the migration report shows 998 indexed and 2 skipped, naming the skip reason
+#### Scenario: Dimension mismatch
+- GIVEN an active index dimension and a different-dimension vector
+- WHEN it is indexed or queried
+- THEN lifecycle reporting records the skip and reads use brute force
 
 ### Requirement: REQ-467 Existing Data Intact Post-Migration
 
-After migration completes, a row-count (or equivalent integrity) check MUST confirm no `embeddings` row was
-lost relative to the pre-migration count.
+Lifecycle operations MUST verify no embeddings row was lost.
 
-#### Scenario: Row count matches before and after
+#### Scenario: Integrity verification
+- GIVEN N embeddings before lifecycle work
+- WHEN lifecycle work completes
+- THEN verification confirms N embeddings remain
 
-- GIVEN an `embeddings.db` with N rows before migration
-- WHEN migration completes
-- THEN a post-migration row count also equals N
+### Requirement: REQ-468 Native Vec1 BLOB and Target Safety
+
+The canonical Omnia float32 source MUST remain little-endian. Each Vec1 BLOB MUST be explicitly re-encoded in machine-native byte order; it MUST NOT be treated as a generic little-endian Vec1 representation. v0.4 MUST support only little-endian targets.
+
+#### Scenario: Unsupported host fallback
+- GIVEN a non-little-endian host or failed native re-encoding
+- WHEN vector indexing is requested
+- THEN Vec1 is unavailable and brute force serves reads
+
+### Requirement: REQ-469 Pinned Score Parity
+
+For bundled Vec1 v0.35.2 flat/cos, normalized score MUST equal `1 - distance`. The contract MUST be tested for self, orthogonal, and antipodal vectors and MUST NOT use newer trunk score semantics.
+
+#### Scenario: Score anchors
+- GIVEN normalized self, orthogonal, and antipodal vectors
+- WHEN Vec1 distance is converted to score
+- THEN scores are respectively 1, 0, and -1
 
 ## Out of Scope (Non-Goals)
 
-- HNSW or other approximate-nearest-neighbor indexes.
-- Changing the embedding model or its vector dimension.
-- The separate memory `engram.db` store (this capability covers the embeddings store only,
-  `internal/embed/store.go`).
+- HNSW or other ANN indexes.
+- int8 or binary vectors in v0.4.
+- Changing the embedding model, active dimension, or `engram.db`.

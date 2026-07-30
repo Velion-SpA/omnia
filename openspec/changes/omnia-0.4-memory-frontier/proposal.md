@@ -73,8 +73,8 @@ a decision to the exact line of code it governs. v0.4 does all four, locally.
   similarity floors, with byte-for-byte cold-start fallback to today's floors.
 - `repo-cartridge`: a precomputed, versioned per-repo digest (top memories + code-graph state) keyed to a
   commit, so a fresh agent session opens "warm" instead of cold-querying.
-- `sqlite-vec-index`: a vector-native, still-CGO-free SQLite index replacing/augmenting the current brute-force
-  O(N) cosine scan, with a non-destructive migration path.
+- `sqlite-vec-index`: an opt-in, bundled Vec1 flat/cos index for exact float32 KNN, with a non-destructive
+  migration path and retained brute-force fallback.
 
 ### Modified Capabilities
 - None. All behavior is additive and gated default-OFF.
@@ -294,30 +294,33 @@ shipping cartridges between machines/cloud (local artifact for this slice).
 memories are included and how "most relevant" is computed; partial-invalidation vs. full-rebuild on commit change;
 interaction with `learned-ranker` and `sleep-consolidation` outputs.
 
-### 7. `sqlite-vec-index` — sqlite-vec sin CGO (Bet M: planned in v0.3.2, deferred)
+### 7. `sqlite-vec-index` — SQLite Vec1 flat/cos without CGO (Bet M: planned in v0.3.2, deferred)
 
-**Problem.** Semantic search currently does a brute-force O(N) cosine scan that decodes every stored vector blob
-per query (`internal/embed/store.go:164` `Search`, `:186` `search`, `:264` `Graph`), over a plain `embeddings`
-table with a `vector BLOB` column (`internal/embed/store.go:52`). This is fine at ~1k vectors but does not scale.
+**Problem.** Semantic search currently decodes stored vector blobs for brute-force cosine search. v0.4 adds an
+opt-in native-query path while retaining that path as the compatibility fallback.
 
 **In scope.**
-- A **vector-native index inside SQLite** (via a pure-Go SQLite→WASM path such as `ncruces/go-sqlite3`,
-  supporting int8/binary quantization) replacing/augmenting the brute-force scan — still `CGO_ENABLED=0`.
-- Cover the same read surfaces that brute-force serves today: `Search`, `SearchScoped`, and the `Graph`/
-  `GraphScoped` k-NN used by consolidation (capability 3).
-- A **non-destructive migration path** for existing `embeddings.db` data.
+- `github.com/ncruces/go-sqlite3@v0.35.2` bundled **Vec1** flat/cos under `CGO_ENABLED=0`, registered through
+  its supported Vec1 registration path; this replaces the unsupported sqlite-vec vec0 assumption.
+- Exact **float32-only** KNN for `Search`, `SearchScoped`, `Graph`, and `GraphScoped`, preserving project scope.
+- Additive dual-write, backfill, and reindex lifecycle for `embeddings.db`; existing rows remain intact.
+- A first active dimension lock. v0.4 supports little-endian targets only: the canonical source remains little-endian,
+  while each derived Vec1 BLOB is explicitly re-encoded in machine-native byte order. Mismatched vectors,
+  unavailable/corrupt indexes, and unsupported hosts use the existing brute-force path.
 
 **Confirmed product decisions.**
-- **KNN flat only for now — no HNSW/ANN yet** ("KNN flat por ahora, sin HNSW aún").
-- Must not break existing embeddings data: the migration is additive (an index alongside/over existing vectors)
-  or a safe dual-write, decided in design after verifying the current storage shape — never a destructive rewrite.
+- **KNN flat/cos only — no HNSW/ANN.** Results must match brute-force top-k except tie ordering.
+- **No int8 or binary vectors in v0.4.** They are deferred, not alternative v0.4 index formats.
+- For pinned Vec1 v0.35.2 flat/cos, normalized score is `1 - distance`; self, orthogonal, and antipodal parity
+  tests lock this contract because newer trunk semantics differ.
+- Modernc-backed brute-force stays the disabled/default path and fallback. The index is default-OFF and
+  non-destructive.
 
-**Out of scope.** HNSW/approximate indexes; changing the embedding model or dimension; the separate memory
-`engram.db` (this is the embeddings store only, which is Omnia-owned and writable — `internal/embed/store.go`).
+**Out of scope.** HNSW/approximate indexes; int8/binary quantization; changing the embedding model or dimension;
+the separate memory `engram.db` (this capability covers the embeddings store only).
 
-**Open (implementation-level, for design).** Clean swap vs. dual-write vs. additive index; whether `modernc.org/
-sqlite` gains an extension or the embeddings store moves to `ncruces/go-sqlite3`; quantization defaults; keeping
-`Graph`'s O(N²) cluster build correct (or accelerated) on top of the new index.
+**Open (implementation-level, for design).** Exact storage schema, lifecycle command/scheduling, row mapping, and
+how the driver boundary coexists with the retained modernc read path.
 
 ---
 
@@ -342,7 +345,7 @@ sqlite` gains an extension or the embeddings store moves to `ncruces/go-sqlite3`
 | `internal/config/config.go` | Modified | 7 new default-OFF config blocks + `applyDefaults` entries. |
 | `internal/store/` | Modified/New | reverse blame query + graph read (1); enforcement selection over `procedures` (2); digest + source-pointer relations (3); provenance surfacing + encrypted open path (4); audit writes (2,3). |
 | `internal/anchor/` | Reused | git probe + `HeadSHA` for blame (1) and cartridge invalidation (6). |
-| `internal/embed/` | Modified/New | vector-native index replacing brute-force scan (7); k-NN reuse for consolidation (3). |
+| `internal/embed/` | Modified/New | opt-in Vec1 float32 flat/cos index with retained brute-force fallback (7); k-NN reuse for consolidation (3). |
 | `internal/recall/`, `internal/eval/` | Modified/Reused | learned re-rank over fusion features (5); eval gate (5). |
 | `internal/audit/` | Reused/Modified | gate + consolidation decisions recorded (2,3,4). |
 | `internal/mcp/`, `cmd/omnia/main.go` | New | new MCP tools (`mem_blame`, enforcement) + CLI subcommands (`blame`, `enforce`, `consolidate`, `rank-train`, `cartridge`). |
@@ -355,7 +358,7 @@ sqlite` gains an extension or the embeddings store moves to `ncruces/go-sqlite3`
 | CGO creep (SQLCipher/vec/crypto need cgo) | High | Hard gate: pure-Go only. Encryption (4) and vector index (7) design phases MUST prove a CGO_ENABLED=0 path or descope. |
 | Enforcement false positives block valid work | Med | Default = flag-not-block; blocking opt-in; explicit override; every decision audited. |
 | Encryption migration corrupts/locks existing DBs | Med | Non-destructive migration + backup + reversible; keychain-unavailable degrades to unencrypted-with-warning, never data loss. |
-| Vector-index migration breaks existing `embeddings.db` | Med | Additive/dual-write migration; verified against live storage shape before implementation; brute-force path retained as fallback. |
+| Vec1 lifecycle or dimension/index state is unavailable | Med | Additive dual-write/backfill/reindex; retain brute-force fallback for corrupt, unavailable, or mismatched index data. |
 | Learned ranker regresses recall on small corpora | Med | Cold-start = byte-for-byte current floors; enabling gated on eval-harness proof of no regression. |
 | Scope too large for clean review | High | Independently-flagged capabilities; chained/stacked PRs planned at tasks phase. |
 | Consolidation digests drift from / bury sources | Low | Digests augment only; sources stay live; pointers mandatory; opt-in + idle-only. |
@@ -380,7 +383,7 @@ sqlite` gains an extension or the embeddings store moves to `ncruces/go-sqlite3`
 - System **git** binary (already required by `internal/anchor`) — for `code-decision-graph` and `repo-cartridge`
   invalidation.
 - OS **keychain** API access — for `memory-at-rest-security`; behavior on headless/Linux/CI is a design question.
-- A pure-Go **sqlite-vec-capable SQLite** (`ncruces/go-sqlite3` or equivalent) — for `sqlite-vec-index`.
+- `github.com/ncruces/go-sqlite3@v0.35.2` bundled **Vec1** — the approved pure-Go vector path for `sqlite-vec-index`.
 - Existing internal packages: `store`, `embed`, `anchor`, `recall`, `eval`, `audit`, `config`, `mcp`.
 
 ## Success Criteria
@@ -398,8 +401,8 @@ sqlite` gains an extension or the embeddings store moves to `ncruces/go-sqlite3`
 - [ ] With judgments/outcomes present, the learned ranker matches or beats hand-tuned floors on the token-cost-
       normalized eval harness; with none, it is byte-for-byte identical to today (5).
 - [ ] A repo cartridge built at a commit loads a fresh session warm and is correctly invalidated at a new HEAD (6).
-- [ ] Semantic search returns the same top-k as the brute-force path via the new vector index, with existing
-      `embeddings.db` data intact after migration (7).
+- [ ] Float32 semantic search returns the same exact flat/cos top-k as brute-force (ties aside) via opt-in Vec1,
+      with project scope and existing `embeddings.db` data intact after migration (7).
 
 ## Open Product Questions / Judgment Calls (for user review before spec)
 
@@ -413,9 +416,7 @@ resolved by judgment and that the user may want to confirm or correct:
 3. **Encryption scope.** Product requirement fixed (encrypted at rest, keychain key, stated threat model); the
    full-DB-vs-field-level choice is deferred to design as a HOW question under CGO=0. Confirm that is acceptable
    rather than a product decision you want to make now.
-4. **Vector index = replace vs. augment.** I left this as an additive/non-destructive migration decided in design;
-   confirm you do not require an immediate full swap.
-5. **Naming.** MCP tool / CLI names (`mem_blame`/`blame`, `mem_enforce`/`enforce`, `consolidate`, `rank-train`,
+4. **Naming.** MCP tool / CLI names (`mem_blame`/`blame`, `mem_enforce`/`enforce`, `consolidate`, `rank-train`,
    `cartridge`) are provisional and can be renamed at spec time.
 
 If any answer differs, it changes spec-level requirements — surface before the spec phase runs.

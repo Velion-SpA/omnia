@@ -10,10 +10,10 @@
 
 | Field | Value |
 |-------|-------|
-| Estimated changed lines | ~4,300–4,600 across 11 PRs (5 new packages: `keychain`, `enforce`, `consolidate`, `ranker`, `cartridge`; 3 heavily-modified core files: `config.go`, `store.go`, `embed/store.go`; MCP/CLI wiring; full TDD suites per capability) |
+| Estimated changed lines | ~4,600–5,100 across 15 chained PRs. The original PR 2 map (~430–560) omitted direct consumers; revised PR 2A is ~230–300, PR 2B ~270–350, and PR 3 ~280–360. |
 | 400-line budget risk | High |
 | Chained PRs recommended | Yes |
-| Suggested split | PR 1 → PR 11, stacked to main, in the order below |
+| Suggested split | PR 1 → PR 2A → PR 2B → PR 3 → PR 4 → PR 5 → PR 6A → PR 6B → PR 7 → PR 8 → PR 9A → PR 9B → PR 10A → PR 10B → PR 11 |
 | Delivery strategy | ask-on-risk |
 | Chain strategy | stacked-to-main |
 
@@ -22,28 +22,35 @@ Chained PRs recommended: Yes
 Chain strategy: stacked-to-main
 400-line budget risk: High
 
-Two of the seven capabilities (`sqlite-vec-index`, `memory-at-rest-security`) and the flagship
-(`memory-enforcement-gate`) are each pre-split into 2 PRs specifically because either half alone is estimated
-to exceed 400 lines — this is why the release is 11 PRs, not 7. PR 9 (consolidation), PR 10 (ranker), and PR 11
-(cartridge) remain the largest single-capability PRs (~430–540 lines each); if a realized diff exceeds budget,
-split further at apply time or request a maintainer `size:exception` on that PR specifically — do not silently
-inflate a later PR's diff to compensate.
+The cached chain strategy is **stacked-to-main**: every slice targets `main` only after its predecessor has
+merged; feature-branch-chain is not permitted for this release. Merge order is PR 1 → PR 2A → PR 2B → PR 3 →
+PR 4 → PR 5 → PR 6A → PR 6B → PR 7 → PR 8 → PR 9A → PR 9B → PR 10A → PR 10B → PR 11. `ask-on-risk` applies
+only to newly discovered >400-line splits or a required `size:exception`; it does not re-open the cached chain
+strategy. Every unit must record planned and actual changed lines before apply: a forecast or actual diff above
+400 MUST split into the next named child PR or obtain an explicit maintainer `size:exception`. PR 6, PR 9, and
+PR 10 are pre-split below; PR 11 retains its prior ~430–540 estimate and therefore MUST be split or receive
+`size:exception` before its apply phase. PR 2A proves connector/state, PR 2B owns lifecycle and production
+composition while reads stay brute-force, and PR 3 alone routes Vec1 reads.
 
 ### Suggested Work Units
 
 | Unit | Goal | Likely PR | Notes |
 |------|------|-----------|-------|
-| 1 | Config scaffolding: 7 default-OFF blocks + `applyDefaults` | PR 1 | Base `main`. Foundation all other units need; independently landable/revertible. |
-| 2 | `sqlite-vec-index` A: dual-driver + vec0 table + dual-write + backfill | PR 2 | Base `main` after PR 1. Introduces `ncruces/go-sqlite3`. |
-| 3 | `sqlite-vec-index` B: vec-KNN reads + parity + fallback | PR 3 | Base `main` after PR 2. |
-| 4 | `memory-at-rest-security` A: `internal/keychain` + adiantum VFS wiring | PR 4 | Base `main` after PR 3. Shares the ncruces driver seam from PR 2. |
-| 5 | `memory-at-rest-security` B: non-destructive migration + CLI + audit/provenance | PR 5 | Base `main` after PR 4. |
-| 6 | `code-decision-graph`: `BlameLine`/`CodeDecisionGraph` + `mem_blame`/`omnia blame` | PR 6 | Base `main` after PR 5. No new deps. |
-| 7 | `memory-enforcement-gate` A: matcher + sandboxed command runner | PR 7 | Base `main` after PR 6. |
-| 8 | `memory-enforcement-gate` B: MCP/CLI wiring + override + audit taxonomy | PR 8 | Base `main` after PR 7. Flagship completes here. |
-| 9 | `sleep-consolidation`: clustering + `Client.Generate` + digest writer + CLI | PR 9 | Base `main` after PR 8. |
-| 10 | `learned-ranker`: pure-Go logistic re-ranker + eval-gated promotion | PR 10 | Base `main` after PR 9. |
-| 11 | `repo-cartridge`: build/load/invalidate | PR 11 | Base `main` after PR 10. Consumes PR 6 + PR 10 output, degrades gracefully if either disabled. |
+| 1 | Config scaffolding: 7 default-OFF blocks + `applyDefaults` | PR 1 | Complete; base `main`. |
+| 2 | Vec1 connector, derived state, active dimension, maintenance API, config correction | PR 2A | Depends on PR 1; no production composition or read routing. |
+| 3 | Derived-index lifecycle, all embed-store composition, `embed --reindex` | PR 2B | Depends on PR 2A; reads remain brute force. |
+| 4 | Vec1 KNN reads, parity, fallback, and graph routing | PR 3 | Depends on PR 2B. |
+| 5 | Keychain + adiantum VFS wiring | PR 4 | Depends on PR 3; reforecast before apply. |
+| 6 | Non-destructive encryption migration + CLI + audit/provenance | PR 5 | Depends on PR 4; reforecast before apply. |
+| 7 | Code-decision graph store/query foundation | PR 6A | Depends on PR 5; ~200–260 lines. |
+| 8 | `mem_blame`/`omnia blame` wiring and contract tests | PR 6B | Depends on PR 6A; ~180–240 lines. |
+| 9 | Enforcement matcher + command runner | PR 7 | Depends on PR 6B; reforecast before apply. |
+| 10 | Enforcement MCP/CLI, override, and audit taxonomy | PR 8 | Depends on PR 7; reforecast before apply. |
+| 11 | Consolidation cluster + Ollama client foundation | PR 9A | Depends on PR 8; ~218 lines. |
+| 12 | Consolidation digest, CLI, and idle integration | PR 9B | Depends on PR 9A; ~263 lines. |
+| 13 | Learned-ranker feature/model and cold-start foundation | PR 10A | Depends on PR 9B; ~350 lines. |
+| 14 | Ranker train/eval/live integration | PR 10B | Depends on PR 10A; ~252 lines. |
+| 15 | Repo cartridge | PR 11 | Depends on PR 10B; previous ~430–540 estimate requires split or `size:exception`. |
 
 ---
 
@@ -57,50 +64,107 @@ Satisfies: all 7 capabilities' REQ-4x0/REQ-450/REQ-460 "Default-Off Config Gate"
   types don't exist.
 - [x] 1.2 [GREEN] Add the 7 structs (design's "Interfaces / Contracts") to `internal/config/config.go` near
   `TimeTravelConfig` (`:114`); wire `applyDefaults` (`:694`) param-only defaults (Enforcement.Mode="flag";
-  Consolidation.MinScore/K/MinClusterSize/MaxClusterSize; Ranker.MinTrainExamples=50; Cartridge.TopMemories;
-  VecIndex.Quantization="none") — no `Enabled` field gets a default.
+  Consolidation.MinScore/K/MinClusterSize/MaxClusterSize; Ranker.MinTrainExamples=50; Cartridge.TopMemories).
+  `VecIndex` has only `Enabled`; no format, quantization, int8, or binary option is part of v0.4.
 - [x] 1.3 [REFACTOR] Match doc-comment style of `TimeTravelConfig`/`ReviewConfig` (`:114`/`:238`); confirm no
   `*KeyPresent` probe (`:591`/`:612` pattern) is needed anywhere — all 7 are plain-bool default-false.
 - [x] 1.4 Verification: `CGO_ENABLED=0 go build ./... && go vet ./...` clean; `go test ./internal/config/...`
   green; zero-v0.4-keys config round-trips byte-for-byte vs a v0.3.2 fixture.
 
-## Phase 2: `sqlite-vec-index` A — Driver + Dual-Write (PR 2, base: `main` after PR 1)
+## Phase 2: `sqlite-vec-index` A — Vec1 Connector + Derived State (PR 2A, depends on PR 1)
 
-Satisfies: REQ-460 (gate), REQ-461 (non-destructive), REQ-464 (CGO-free), REQ-466/467 (migration reporting/intact).
+Satisfies: REQ-460, REQ-461, REQ-463, REQ-464, REQ-466–468. This PR proves only the isolated
+foundation: no production composition and all read surfaces remain brute force.
 
-- [ ] 2.1 [RED] `internal/embed/store_ncruces_test.go`: open `Store` with `vector_index.enabled=true` over a
-  1,000-row fixture; assert a `vec_embeddings` table now exists AND all 1,000 `embeddings` rows are unchanged
-  (REQ-461) — fails, no driver switch yet.
-- [ ] 2.2 [GREEN] Add `github.com/ncruces/go-sqlite3`; implement driver selection at `OpenStore`'s `sql.Open`
-  call (`embed/store.go:79`, mirrors ADR-1's `store.go:35`/`:847`); create `vec_embeddings` vec0 table alongside
-  `embeddings` (`store.go:52`).
-- [ ] 2.3 [RED] Backfill test: seed 998 valid + 2 dimension-mismatched rows; run first-enable backfill; assert
-  report shows 998 indexed / 2 skipped with reason (REQ-466) and `embeddings` row count still 1,000 (REQ-467).
-- [ ] 2.4 [GREEN] Implement `Upsert` dual-write (`store.go:95`) and a one-time backfill pass on first enable /
-  `omnia embed --reindex`.
-- [ ] 2.5 [REFACTOR] Extract the backfill loop shared by first-enable and `--reindex`; confirm
-  `CGO_ENABLED=0 go build ./...` still succeeds (REQ-464).
-- [ ] 2.6 Verification: `go test ./internal/embed/... -run VecIndex` green; disabled-path
-  (`vector_index.enabled=false`) confirms zero `vec_embeddings` writes, `embeddings` shape unchanged (REQ-460).
+- [ ] 2.1 [RED] `internal/embed/store_vec1_test.go`: the options-based `OpenStore` seam keeps an absent/false
+  flag on modernc with byte-for-byte brute-force behavior; enabled test setup requires a private Vec1 connector,
+  not a globally registered driver (REQ-460/464).
+- [ ] 2.2 [GREEN] Pin `github.com/ncruces/go-sqlite3@v0.35.2` in `go.mod`/`go.sum`; add options-based connector
+  selection in `internal/embed/store.go` using `driver.Open(dsn, vec1.Register)` on every physical connection.
+  Keep the connector private to `internal/embed`; do not route production callers yet.
+- [ ] 2.3 [RED] In `internal/embed/store_vec1_test.go`, assert enabled setup creates same-DB
+  `vec_embeddings USING vec1(vector, project)`, rebuilds `{index:"flat", distance:"cos"}`, and never creates
+  an int8, binary, ANN, or second-database artifact (REQ-461/463).
+- [ ] 2.4 [GREEN] Add derived Vec1 DDL and readiness/state metadata in `internal/embed/store.go`; map only the
+  stable `embeddings.rowid` to `vec_embeddings.rowid`, mirror `COALESCE(project,'')`, and preserve
+  `embeddings` as authoritative.
+- [ ] 2.5 [RED] Test first valid source vector establishes `active_dim` in rowid order; canonical little-endian
+  source blobs are re-encoded into a separate native-endian Vec1 float32 blob on supported little-endian targets.
+  A byte-order/state mismatch or unsupported host leaves Vec1 unavailable (REQ-466/468).
+- [ ] 2.6 [GREEN] Implement active-dimension and byte-order state validation plus native-endian derived encoding;
+  skip mixed dimensions without changing source rows or resetting a ready index.
+- [ ] 2.7 [RED] Seed 998 matching + 2 mixed-dimension rows; first-enable backfill and the internal reindex API
+  report indexed/skipped counts and reasons while verifying all 1,000 canonical rows survive (REQ-461/466/467).
+- [ ] 2.8 [GREEN] Implement first-enable backfill and a source-preserving `Reindex`/report API that discards only
+  derived state, writes readiness only after count/dimension verification, and leaves failed/crashed work unready.
+- [ ] 2.9 [REFACTOR] Share DDL/state/backfill helpers; run focused RED→GREEN→REFACTOR tests plus
+  `CGO_ENABLED=0 go build ./...`. Assert disabled-path byte parity and explicitly document that v0.4 has no
+  int8/binary format or production/read routing in PR 2A.
+- [ ] 2.10 [RED] In `internal/config/v04_config_test.go`, add a failing contract test that `VecIndexConfig`
+  exposes only `Enabled` and `vector_index` accepts no quantization/int8/binary knob; name this the correction
+  to historical checked task 1.2, whose unreleased PR1 field/default/test expectation is now invalid.
+- [ ] 2.11 [GREEN] Remove `VecIndexConfig.Quantization`, its `applyDefaults` value, and every
+  `vector_index.quantization` config/environment parsing, fixture, and test expectation from
+  `internal/config/config.go` and `internal/config/v04_config_test.go`; retain only `enabled` defaulting false.
+- [ ] 2.12 [REFACTOR] Audit config comments and fixtures for the removed knob; run the focused config suite and
+  disabled byte-parity assertion. Keep PR1's historical boxes checked, but make this unchecked PR2A amendment
+  the sole strict-TDD owner of the correction.
 
-## Phase 3: `sqlite-vec-index` B — Vec-KNN Reads + Parity (PR 3, base: `main` after PR 2)
+## Phase 2B: `sqlite-vec-index` B — Derived Lifecycle + Composition (PR 2B, depends on PR 2A)
 
-Satisfies: REQ-462 (parity), REQ-463 (KNN-flat only), REQ-465 (fallback).
+Satisfies: REQ-460, REQ-461, REQ-463–468. This PR wires every embed-store opener and maintenance only;
+`Search`, `SearchScoped`, `Graph`, and `GraphScoped` remain brute force until PR 3.
 
-- [ ] 3.1 [RED] Parity test: 500-embedding fixture, `Search` with flag on vs off returns identical top-k
-  `sync_id`s in identical order (REQ-462) — fails, `Search` still brute-forces only.
-- [ ] 3.2 [GREEN] Implement vec0-KNN `Search`/`SearchScoped` (`store.go:164`/`:179`) reading `vec_embeddings`
-  when enabled/populated; keep `search` (`:186`) untouched as the fallback body.
-- [ ] 3.3 [RED] Corrupted-index test: force the vec table to fail open/query; assert `Search` still returns
-  correct results via brute-force fallback, no error surfaced (REQ-465).
-- [ ] 3.4 [GREEN] Wrap vec0 query calls with a fallback branch to `search` (`:186`) on any open/query error.
-- [ ] 3.5 [RED] `Graph`/`GraphScoped` test: per-node vec0 KNN (`store.go:264`/`:282`) produces the same edge set
-  as the existing O(N²) scan on a fixture; no HNSW/ANN artifact on disk (REQ-463).
-- [ ] 3.6 [GREEN] Implement per-node vec0 KNN lookup inside `Graph`/`GraphScoped`, gated by the same flag;
-  brute-force remains the else-branch.
-- [ ] 3.7 [REFACTOR] Share the vec0-query helper between `Search`/`SearchScoped` and `Graph`/`GraphScoped`.
-- [ ] 3.8 Verification: full `internal/embed` suite green under both driver paths; `CGO_ENABLED=0 go build ./...`
-  clean; disabled-path byte-for-byte vs a golden brute-force fixture (REQ-460).
+- [ ] 2.13 [RED] `internal/embed/store_vec1_test.go`: upsert, update, delete, and prune mirror their source-rowid
+  lifecycle into the derived table transactionally; forced Vec1 failure preserves the source mutation, marks the
+  index stale/unhealthy, and does not surface an index-only write failure.
+- [ ] 2.14 [GREEN] Implement derived-row upsert/update/delete/prune lifecycle in `internal/embed/store.go` with
+  source-first fallback transactions, stale diagnostics, active-dimension skips, and no alternative int8/binary
+  write path.
+- [ ] 2.15 [RED] Add enabled/disabled composition tests for direct openers: `cmdEmbed` (`cmd/omnia/embed.go`),
+  `buildAutoEmbedWorker`/`buildCLIEmbedPurgeStore` (`cmd/omnia/autoembed.go`), `buildRecallService` and
+  `buildRecallServiceForCLI` (`cmd/omnia/recall.go`), and eval's `defaultRunEvalHarness` reuse of that recall
+  builder (`cmd/omnia/eval.go`). Enabled paths receive Vec1 options; disabled paths keep modernc and no derived writes.
+- [ ] 2.16 [GREEN] Thread the Vec1-aware `OpenStore` options/config through those seams, including MCP, serve,
+  CLI search, and eval through their shared recall builder; preserve project metadata and brute-force read methods.
+- [ ] 2.17 [RED] Add `cmd/omnia/dashboard_test.go` and `internal/dashboard/local_datasource_test.go` coverage:
+  `cmdDashboard` → `dashboard.Config` (`internal/dashboard/handlers.go`) → `newLocalDataSource`
+  (`internal/dashboard/local_datasource.go`) forwards enabled Vec1 options, while disabled stays modernc/FTS-safe.
+- [ ] 2.18 [GREEN] Add the dashboard config field and thread it through `cmd/omnia/dashboard.go`,
+  `internal/dashboard/handlers.go`, and `newLocalDataSource`; dashboard semantic/graph searches remain their
+  existing brute-force store methods until PR 3.
+- [ ] 2.19 [RED] `cmd/omnia/embed_test.go`: `omnia embed --reindex` invokes the maintenance API, reports
+  indexed/skipped reasons and source-row integrity, and remains unavailable/inert when the capability is off.
+- [ ] 2.20 [GREEN] Add `--reindex` CLI plumbing and report rendering through the shared maintenance API.
+- [ ] 2.21 [REFACTOR] Extract one shared options builder for all direct openers; verify focused
+  lifecycle/composition/CLI tests, disabled byte parity, and `CGO_ENABLED=0 go build ./...` under strict
+  RED→GREEN→REFACTOR evidence.
+
+## Phase 3: `sqlite-vec-index` C — Vec1 KNN Reads + Parity (PR 3, depends on PR 2B)
+
+Satisfies: REQ-460, REQ-462, REQ-463, REQ-465, REQ-466, REQ-468, REQ-469.
+
+- [ ] 3.1 [RED] `internal/embed/store_vec1_test.go`: pinned v0.35.2 flat/cos distance conversion gives scores
+  `1 - distance` for normalized self/orthogonal/antipodal vectors: 1, 0, and -1 (within tolerance), never newer
+  trunk or `2 - distance` semantics (REQ-469).
+- [ ] 3.2 [GREEN] Add the private Vec1 score-conversion helper and lock it to the pinned dependency contract.
+- [ ] 3.3 [RED] On a 500-vector/two-project fixture, enabled `Search` and `SearchScoped` return brute-force
+  equivalent top-k IDs/scores except ties; scoped KNN cannot return another project's vector (REQ-462).
+- [ ] 3.4 [GREEN] Route ready Vec1 `Search`/`SearchScoped` through metadata-filtered KNN, join canonical rows by
+  rowid only after filtering, convert scores, and retain the existing brute-force search as the fallback body.
+- [ ] 3.5 [RED] Force unavailable/corrupt/open/query/stale-index paths and a mixed-dimension query; assert each
+  silently serves the correct brute-force result, while canonical source-table errors still propagate (REQ-465/466/468).
+- [ ] 3.6 [GREEN] Centralize availability, dimension, and error fallback so any unhealthy derived index disables
+  Vec1 for that `Store` instance without weakening project scoping or default-OFF byte parity.
+- [ ] 3.7 [RED] `Graph`/`GraphScoped` parity test: per-node Vec1 KNN yields the existing O(N²) edge set (except
+  ties), respects project filtering, and produces no HNSW, ANN, int8, or binary artifact (REQ-462/463).
+- [ ] 3.8 [GREEN] Route only ready `Graph`/`GraphScoped` through the shared exact Vec1 query helper; keep their
+  brute-force branches for disabled, unavailable, corrupt, and mixed-dimension cases.
+- [ ] 3.9 [REFACTOR] Consolidate KNN query/score/fallback helpers without changing the canonical source codec;
+  cover default-OFF byte parity, scoped filtering, score anchors, and all fallback branches.
+- [ ] 3.10 Verification: `go test ./internal/embed/... -run VecIndex` and the full embed suite green under both
+  paths; `CGO_ENABLED=0 go build ./...` clean; record strict RED→GREEN→REFACTOR evidence and v0.4's explicit
+  no-int8/binary, flat/cos-only contract.
 
 ## Phase 4: `memory-at-rest-security` A — Keychain + Adiantum VFS (PR 4, base: `main` after PR 3)
 
@@ -143,7 +207,7 @@ Satisfies: REQ-433 (threat model), REQ-435 (reversible), REQ-436 (provenance), R
 - [ ] 5.4 [GREEN] Implement `omnia security encrypt`/`decrypt`/`rotate-key` CLI (dispatch `main.go:730`),
   reversing the migration via the keychain key.
 - [ ] 5.5 [RED] Provenance/audit test: an observation written with `source="user"` is retrievable with
-  `trust_tag: "user"` in its receipt (REQ-436, `provenance.go:26`); confirm PR 7/8's gate decisions and PR 9's
+  `trust_tag: "user"` in its receipt (REQ-436, `provenance.go:26`); confirm PR 7/8's gate decisions and PR 9B's
   consolidation actions each produce one audit entry (REQ-437, cross-phase check once those land).
 - [ ] 5.6 [GREEN] Surface `TrustTag` consistently in read receipts (already carried by `Entry.TrustTag`,
   `audit.go:31`) — no schema change needed.
@@ -153,7 +217,7 @@ Satisfies: REQ-433 (threat model), REQ-435 (reversible), REQ-436 (provenance), R
 - [ ] 5.8 Verification: full `internal/store`/`internal/embed`/`internal/audit` suites green under both driver
   paths; migration test against a 10k-row fixture; disabled-path byte-for-byte.
 
-## Phase 6: `code-decision-graph` (PR 6, base: `main` after PR 5)
+## Phase 6: `code-decision-graph` A — Store + Graph Foundation (PR 6A, depends on PR 5)
 
 Satisfies: REQ-400–406.
 
@@ -170,6 +234,8 @@ Satisfies: REQ-400–406.
   (REQ-404) — fails, method doesn't exist.
 - [ ] 6.6 [GREEN] Implement `CodeDecisionGraph(project string) (nodes, edges, error)` as a thin projection over
   `ListActiveAnchors` — no new table/engine.
+### Phase 6B: `code-decision-graph` B — MCP/CLI Surface (PR 6B, depends on PR 6A)
+
 - [ ] 6.7 [RED] Not-a-git-repo test: `mem_blame` on a file outside any repo returns zero anchors with a clear
   reason, never a crash-like error (REQ-406).
 - [ ] 6.8 [GREEN] Wire `mem_blame` MCP tool (gated `code_graph.enabled` in `mcp.MCPConfig`) and `omnia blame
@@ -181,7 +247,7 @@ Satisfies: REQ-400–406.
   (`code_graph.enabled=false`) confirms "capability disabled", no anchor table touched (REQ-400); no LLM call
   anywhere in this path (REQ-405).
 
-## Phase 7: `memory-enforcement-gate` A — Matcher + Command Runner (PR 7, base: `main` after PR 6)
+## Phase 7: `memory-enforcement-gate` A — Matcher + Command Runner (PR 7, base: `main` after PR 6B)
 
 Satisfies: REQ-411 (trusted-only feed), REQ-412 (mechanical, no LLM), REQ-413 (verdict contract), REQ-414
 (flag-default).
@@ -231,7 +297,7 @@ Satisfies: REQ-410 (gate), REQ-415 (override), REQ-416 (audit), REQ-417 (no auto
 - [ ] 8.10 Verification: full `internal/enforce`/`internal/mcp`/`internal/audit` suites green; disabled-path
   byte-for-byte; `CGO_ENABLED=0 go build ./...` clean.
 
-## Phase 9: `sleep-consolidation` (PR 9, base: `main` after PR 8)
+## Phase 9: `sleep-consolidation` A — Cluster + Client Foundation (PR 9A, depends on PR 8)
 
 Satisfies: REQ-420–426.
 
@@ -248,6 +314,8 @@ Satisfies: REQ-420–426.
   on `Embeddings.BaseURL`, sibling to `Embed` (`embed/client.go:78`) — fails, method doesn't exist.
 - [ ] 9.6 [GREEN] Add `Generate(ctx, prompt) (string, error)` to `embed.Client`: low-temperature, fixed prompt,
   `/api/chat` call.
+### Phase 9B: `sleep-consolidation` B — Digest + Integration (PR 9B, depends on PR 9A)
+
 - [ ] 9.7 [RED] Digest-write test: a qualifying 3-memory cluster produces one `observations` row `type="digest"`
   + 3 `memory_relations` rows with a new `RelationConsolidates` verb, system provenance; all 3 sources remain
   independently retrievable via `mem_search` after (REQ-422/426).
@@ -267,7 +335,7 @@ Satisfies: REQ-420–426.
 - [ ] 9.14 Verification: `internal/consolidate`/`internal/embed`/`internal/store` suites green; disabled-path
   byte-for-byte; `CGO_ENABLED=0 go build ./...` clean.
 
-## Phase 10: `learned-ranker` (PR 10, base: `main` after PR 9)
+## Phase 10: `learned-ranker` A — Feature + Model Foundation (PR 10A, depends on PR 9B)
 
 Satisfies: REQ-440–446.
 
@@ -286,6 +354,8 @@ Satisfies: REQ-440–446.
   `DefaultFuseParams`/`AdaptiveFloor` (`recall.go:74`/`:96`) (REQ-441).
 - [ ] 10.6 [GREEN] Implement the cold-start fallback: below `MinTrainExamples` (default 50), no `current`
   model, or decode error → use `DefaultFuseParams`/`AdaptiveFloor` unchanged (REQ-446).
+### Phase 10B: `learned-ranker` B — Train + Live Integration (PR 10B, depends on PR 10A)
+
 - [ ] 10.7 [RED] `omnia rank-train` test: training runs `eval.RunOnce` (`harness.go:37`) after fitting and
   refuses to write `current` on any regression (REQ-444).
 - [ ] 10.8 [GREEN] Implement `omnia rank-train` CLI (dispatch `:730`): train → `eval.RunOnce` gate → promote
@@ -300,7 +370,7 @@ Satisfies: REQ-440–446.
 - [ ] 10.12 Verification: `internal/ranker` suite + `internal/eval` gate integration green; disabled-path and
   cold-start byte-for-byte; `CGO_ENABLED=0 go build ./...` clean.
 
-## Phase 11: `repo-cartridge` (PR 11, base: `main` after PR 10)
+## Phase 11: `repo-cartridge` (PR 11, depends on PR 10B; split or obtain `size:exception` if >400)
 
 Satisfies: REQ-450–456.
 
@@ -310,7 +380,7 @@ Satisfies: REQ-450–456.
 - [ ] 11.2 [GREEN] Create `internal/cartridge/build.go`: `{schema_version, repo_root, head_sha, built_at,
   top_memories[], anchors[], trusted_procedures[], ranker_model_version?}` at
   `<dataDir>/cartridges/<repo-id>-<head-sha>.json`, keyed via `HeadSHA` (`anchor.go:192`); `top_memories` ranked
-  by the active ranker (PR 10) or current fused order if disabled; anchors from PR 6's `CodeDecisionGraph`;
+  by the active ranker (PR 10B) or current fused order if disabled; anchors from PR 6A's `CodeDecisionGraph`;
   `trusted` procedures for the project.
 - [ ] 11.3 [RED] Stale-commit test: a cartridge built at `abc123`, current HEAD `def456` — `cartridge load`
   reports stale (commit mismatch), never served as current (REQ-452).
