@@ -799,6 +799,8 @@ func main() {
 		cmdEval(os.Args[2:])
 	case "rank-train":
 		cmdRankTrain(cfg)
+	case "cartridge":
+		cmdCartridge(cfg)
 	case "version", "--version", "-v":
 		fmt.Printf("omnia %s\n", version)
 	case "help", "--help", "-h":
@@ -3501,6 +3503,13 @@ Commands:
   rank-train         Train the optional local learned re-ranker from mem_judge/outcome
                      signal and promote it only if the eval harness shows no regression
                        [--config PATH]. Disabled by default (ranker.enabled).
+  cartridge <sub>    Precomputed, versioned per-repo warm-start digest (top memories +
+                     code-decision graph + trusted procedures), keyed to a commit.
+                     Disabled by default (cartridge.enabled).
+                       build [--repo PATH] [--project NAME] [--config PATH]
+                       load  [--repo PATH] [--project NAME] [--config PATH]
+                     Invalidated by commit: a stale or missing cartridge always
+                     degrades to cold-start, never an error.
 
   version            Print version
   help               Show this help

@@ -374,31 +374,31 @@ Satisfies: REQ-440–446.
 
 Satisfies: REQ-450–456.
 
-- [ ] 11.1 [RED] `internal/cartridge/build_test.go`: building at commit `abc123` produces a JSON artifact tagged
+- [x] 11.1 [RED] `internal/cartridge/build_test.go`: building at commit `abc123` produces a JSON artifact tagged
   commit `abc123` + a format version, containing `top_memories`/`anchors`/`trusted_procedures` (REQ-451/456) —
   fails, package doesn't exist.
-- [ ] 11.2 [GREEN] Create `internal/cartridge/build.go`: `{schema_version, repo_root, head_sha, built_at,
+- [x] 11.2 [GREEN] Create `internal/cartridge/build.go`: `{schema_version, repo_root, head_sha, built_at,
   top_memories[], anchors[], trusted_procedures[], ranker_model_version?}` at
   `<dataDir>/cartridges/<repo-id>-<head-sha>.json`, keyed via `HeadSHA` (`anchor.go:192`); `top_memories` ranked
   by the active ranker (PR 10B) or current fused order if disabled; anchors from PR 6A's `CodeDecisionGraph`;
   `trusted` procedures for the project.
-- [ ] 11.3 [RED] Stale-commit test: a cartridge built at `abc123`, current HEAD `def456` — `cartridge load`
+- [x] 11.3 [RED] Stale-commit test: a cartridge built at `abc123`, current HEAD `def456` — `cartridge load`
   reports stale (commit mismatch), never served as current (REQ-452).
-- [ ] 11.4 [GREEN] Implement `cartridge load`'s `HeadSHA` comparison and stale/cold-start branch.
-- [ ] 11.5 [RED] Missing-cartridge test: no cartridge file exists → session falls back to cold-query, no error
+- [x] 11.4 [GREEN] Implement `cartridge load`'s `HeadSHA` comparison and stale/cold-start branch.
+- [x] 11.5 [RED] Missing-cartridge test: no cartridge file exists → session falls back to cold-query, no error
   (REQ-453).
-- [ ] 11.6 [GREEN] Implement the missing/corrupt-file → cold-start fallback path (never an error to the
+- [x] 11.6 [GREEN] Implement the missing/corrupt-file → cold-start fallback path (never an error to the
   caller).
-- [ ] 11.7 [RED] Version-mismatch test: an older-format cartridge is detected and rejected, falling back to
+- [x] 11.7 [RED] Version-mismatch test: an older-format cartridge is detected and rejected, falling back to
   cold-start rather than misreading (REQ-456).
-- [ ] 11.8 [GREEN] Implement the `schema_version` check on load.
-- [ ] 11.9 [RED] Disabled-gate CLI test: `cartridge.enabled=false` → `cartridge build`/`load` report disabled,
+- [x] 11.8 [GREEN] Implement the `schema_version` check on load.
+- [x] 11.9 [RED] Disabled-gate CLI test: `cartridge.enabled=false` → `cartridge build`/`load` report disabled,
   no file written/read (REQ-450).
-- [ ] 11.10 [GREEN] Wire `omnia cartridge build [--repo]` / `load [--repo]` CLI (nested-subcommand-namespace,
+- [x] 11.10 [GREEN] Wire `omnia cartridge build [--repo]` / `load [--repo]` CLI (nested-subcommand-namespace,
   mirrors `cloud`/`embed`/`migrate`/`eval` `main.go:775-791`); gate both behind `cartridge.enabled`.
-- [ ] 11.11 [REFACTOR] Add an explicit content-shape assertion in the build test confirming no weight-level/
+- [x] 11.11 [REFACTOR] Add an explicit content-shape assertion in the build test confirming no weight-level/
   KV-cache artifact is ever included in the cartridge payload (REQ-455); confirm the artifact never syncs to
   cloud (REQ-454).
-- [ ] 11.12 Verification: `internal/cartridge` suite green; disabled-path confirms build/load are no-ops,
+- [x] 11.12 Verification: `internal/cartridge` suite green; disabled-path confirms build/load are no-ops,
   session startup unchanged (REQ-450); `CGO_ENABLED=0 go build ./...` clean; **release-wide regression**:
   `go test ./...` green with every v0.4 flag off = byte-for-byte v0.3.2 across all 11 PRs.
