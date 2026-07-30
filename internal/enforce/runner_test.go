@@ -2,6 +2,10 @@ package enforce
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +74,61 @@ func TestRunCommand_UnknownBinaryIsAFailureNotAnError(t *testing.T) {
 	}
 	if res.ExitCode == 0 {
 		t.Fatalf("expected a non-zero exit code from the shell, got %+v", res)
+	}
+}
+
+// TestRunCommand_TimeoutKillsBackgroundedGrandchild (SHOULD-FIX finding:
+// exec.CommandContext's default cancellation only kills the direct sh -c
+// child, not the whole process tree) reproduces a command that forks and
+// backgrounds a child — exactly how real postcondition commands like "go
+// test ./..." or "npm test" fan out per-package/per-worker subprocesses —
+// and verifies the backgrounded child is actually gone, not orphaned and
+// still running, once RunCommand returns its timeout verdict.
+func TestRunCommand_TimeoutKillsBackgroundedGrandchild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group kill is unix-specific (see runner_windows.go); this scenario's POSIX shell syntax does not translate to cmd /C either")
+	}
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+
+	// Background a real child ("sleep 30 &"), capture ITS pid (not the
+	// shell's) via $!, then "wait" so the shell blocks until the hard
+	// timeout fires. This mirrors the reviewer's exact repro.
+	command := "sleep 30 & echo $! > " + pidFile + "; wait"
+
+	start := time.Now()
+	res := RunCommand(context.Background(), dir, command, 1)
+	elapsed := time.Since(start)
+
+	if !res.TimedOut {
+		t.Fatalf("expected TimedOut=true, got %+v", res)
+	}
+	// The backgrounded child inherits the same stdout/stderr pipe Go uses
+	// to capture output; if only the direct sh -c process is killed, that
+	// child keeps the pipe's write end open and cmd.Wait() itself blocks
+	// until it exits ~30s later on its own — silently defeating the whole
+	// point of a 1s timeout, not just leaking a background process.
+	if elapsed > 10*time.Second {
+		t.Fatalf("RunCommand took %s to return after a 1s timeout — the backgrounded grandchild was never killed, so it (and the pipe it inherited) kept RunCommand blocked until it exited on its own", elapsed)
+	}
+
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read backgrounded child's pid file: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatalf("parse child pid %q: %v", pidBytes, err)
+	}
+
+	// Poll for a short grace window instead of asserting instantaneously —
+	// the kernel needs a moment to actually reap the killed process.
+	deadline := time.Now().Add(2 * time.Second)
+	for processExists(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("backgrounded child pid %d is still alive after RunCommand returned a timeout verdict — only the direct sh -c child was killed, not the whole process group", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

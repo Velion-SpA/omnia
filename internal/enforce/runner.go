@@ -64,6 +64,18 @@ func RunCommand(ctx context.Context, repoRoot, command string, timeoutSeconds in
 	if repoRoot != "" {
 		cmd.Dir = repoRoot
 	}
+	// Put the shell in its own process group and, on timeout, kill the
+	// WHOLE group instead of relying on exec.CommandContext's default
+	// cancellation (which only kills the direct sh -c/cmd /C child). A
+	// realistic postcondition command (test suites, linters, build tools)
+	// commonly forks/backgrounds subprocesses — without this, a killed
+	// direct child still leaves those grandchildren running (and, since
+	// they inherit this process's stdout/stderr pipe, can even keep
+	// RunCommand itself blocked well past the configured timeout).
+	setProcessGroup(cmd)
+	cmd.Cancel = func() error {
+		return killProcessGroup(cmd)
+	}
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
