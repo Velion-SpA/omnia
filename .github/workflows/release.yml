@@ -22,11 +22,49 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run GoReleaser
+      # Build exactly once without publishing so missing assets/checksums/formulae fail closed.
+      # After validation, the workflow uploads these exact dist/ assets with gh.
+      - name: Build release candidate (no publish)
         uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
-          args: release --clean
+          args: release --clean --skip=publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Validate release provenance
+        run: >-
+          sh scripts/validate-release.sh
+          --tag "${GITHUB_REF_NAME}"
+          --commit "${GITHUB_SHA}"
+          --dist dist
+          --evidence dist/release-provenance.json
+
+      - name: Upload release provenance evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnia-${{ github.ref_name }}-release-provenance
+          path: dist/release-provenance.json
+          if-no-files-found: error
+
+      # Publish the exact dist/ bundle that passed validation. GoReleaser remains
+      # the sole artifact producer; gh only creates the GitHub release and uploads files.
+      # `gh` is preinstalled on ubuntu-latest and uses GH_TOKEN below.
+      - name: Publish validated release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "dist/omnia_${version}_linux_amd64.tar.gz" \
+            "dist/omnia_${version}_linux_arm64.tar.gz" \
+            "dist/omnia_${version}_darwin_amd64.tar.gz" \
+            "dist/omnia_${version}_darwin_arm64.tar.gz" \
+            "dist/omnia_${version}_windows_amd64.zip" \
+            "dist/omnia_${version}_windows_arm64.zip" \
+            dist/checksums.txt

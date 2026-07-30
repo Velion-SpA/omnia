@@ -63,10 +63,13 @@ brews:
       owner: Velion-SpA
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    # Auto-push to the tap needs a HOMEBREW_TAP_TOKEN secret with write access to
-    # Velion-SpA/homebrew-tap. Until that secret exists, skip the push (goreleaser
-    # still generates the formula); the tap formula is updated out of band.
-    skip_upload: "true"
+    # GoReleaser is the sole artifact producer; release workflow preflight retains
+    # generated formula/checksums as evidence before `gh` uploads exact dist assets.
+    # Auto-push needs HOMEBREW_TAP_TOKEN with write access to Velion-SpA/homebrew-tap.
+    # Until that external credential and tap review are available, the operator
+    # must manually copy dist/Formula/omnia.rb and dist/checksums.txt to
+    # Velion-SpA/homebrew-tap after validating dist/release-provenance.json.
+    skip_upload: true
     directory: Formula
     name: omnia
     homepage: "https://github.com/Velion-SpA/omnia"
