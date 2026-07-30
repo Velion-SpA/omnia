@@ -207,6 +207,13 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 			require("marked_by_kind")
 			require("project")
 		}
+	case SyncEntityEmbedding:
+		if field("sync_id") == "" && entityKey == "" {
+			missing = append(missing, "sync_id")
+		}
+		if op == SyncOpUpsert {
+			require("vector")
+		}
 	default:
 		result.ReasonCode = UpgradeReasonBlockedLegacyMutationManual
 		result.Message = fmt.Sprintf("unsupported sync mutation %q/%q", entity, op)
