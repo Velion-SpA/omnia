@@ -173,10 +173,14 @@ type CartridgeConfig struct {
 	Dir         string `yaml:"dir"`
 }
 
-// VecIndexConfig configures the optional SQLite vector index.
+// VecIndexConfig configures the optional SQLite vector index (v0.4
+// sqlite-vec-index, design ADR-4). Float32 flat/cos is an implementation
+// invariant, not a selectable format: v0.4's supported contract is exactly
+// `vector_index.enabled` — no quantization, int8, or binary knob exists
+// (design's "Config correction ownership": PR2A removes PR1's unreleased
+// VecIndexConfig.Quantization field with no compatibility alias).
 type VecIndexConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	Quantization string `yaml:"quantization"`
+	Enabled bool `yaml:"enabled"`
 }
 
 type TimeTravelConfig struct {
@@ -891,9 +895,6 @@ func applyDefaults(cfg *Config, data []byte) {
 	}
 	if cfg.Cartridge.TopMemories == 0 {
 		cfg.Cartridge.TopMemories = 50
-	}
-	if cfg.VecIndex.Quantization == "" {
-		cfg.VecIndex.Quantization = "none"
 	}
 	// Injection.Budget.Enabled intentionally has NO default override — its
 	// zero value (false) IS the default, mirroring Recall.Enabled/

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/velion/omnia/internal/config"
@@ -117,7 +118,33 @@ func TestV04MemoryFrontier_OptInUsesParameterDefaults(t *testing.T) {
 	if !cfg.Cartridge.Enabled || cfg.Cartridge.TopMemories != 50 {
 		t.Errorf("Cartridge = %+v; want enabled with top_memories=50", cfg.Cartridge)
 	}
-	if !cfg.VecIndex.Enabled || cfg.VecIndex.Quantization != "none" {
-		t.Errorf("VecIndex = %+v; want enabled with quantization=none", cfg.VecIndex)
+	if !cfg.VecIndex.Enabled {
+		t.Errorf("VecIndex = %+v; want enabled", cfg.VecIndex)
+	}
+}
+
+// TestV04MemoryFrontier_VecIndexHasNoQuantizationKnob is the PR2A correction
+// to historical task 1.2 (design "Config correction ownership"): v0.4's
+// sqlite-vec-index is float32 flat/cos only, an implementation invariant,
+// not a selectable format. VecIndexConfig must expose ONLY `enabled` — no
+// quantization, int8, or binary field, default, or YAML/environment mapping.
+func TestV04MemoryFrontier_VecIndexHasNoQuantizationKnob(t *testing.T) {
+	typ := reflect.TypeOf(config.VecIndexConfig{})
+	if typ.NumField() != 1 {
+		t.Fatalf("VecIndexConfig must expose exactly one field (Enabled); got %d fields: %+v", typ.NumField(), typ)
+	}
+	if typ.Field(0).Name != "Enabled" {
+		t.Fatalf("VecIndexConfig's only field must be Enabled; got %q", typ.Field(0).Name)
+	}
+
+	// A YAML document naming an unsupported quantization knob must not
+	// silently populate or resurrect it — Load only recognizes `enabled`.
+	path := writeTempConfig(t, "vector_index: {enabled: true, quantization: \"pq\"}\n")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.VecIndex.Enabled {
+		t.Errorf("VecIndex.Enabled: got false, want true (enabled key must still parse)")
 	}
 }

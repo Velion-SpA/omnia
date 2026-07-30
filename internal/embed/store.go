@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -47,6 +48,12 @@ type Hit struct {
 // Store is Omnia's own writable embeddings database.
 type Store struct {
 	db *sql.DB
+	// vec is nil unless WithVecIndex(true) was passed to OpenStore AND the
+	// bundled Vec1 connector registered successfully on a supported host
+	// (v0.4 sqlite-vec-index, design ADR-4). Every method that consults vec
+	// is nil-receiver-safe: a nil vec always means "brute force only,"
+	// preserving byte-for-byte pre-v0.4 behavior (spec REQ-460).
+	vec *vecIndex
 }
 
 const createTable = `
@@ -71,21 +78,53 @@ CREATE INDEX IF NOT EXISTS idx_emb_project ON embeddings(project);`
 // engramdb/state pattern: mkdir the parent, open a pure-Go SQLite file in WAL
 // mode. MaxOpenConns is 1 — writes are serialized within the embed run and the
 // brute-force search loads all rows on a single connection anyway.
-func OpenStore(path string) (*Store, error) {
+//
+// opts is variadic so every pre-v0.4 call site (`OpenStore(path)`) is
+// unaffected: with no options, this is byte-for-byte the pre-v0.4 modernc
+// path. Passing WithVecIndex(true) additionally opts this Store into the
+// v0.4 sqlite-vec-index capability (design ADR-4) — when the flag is off,
+// absent, or the host/connector can't support it, OpenStore silently keeps
+// the modernc/brute-force path; Vec1 never causes OpenStore itself to fail.
+func OpenStore(path string, opts ...Option) (*Store, error) {
+	var cfg storeOptions
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("embed: create store dir: %w", err)
 	}
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("embed: open %s: %w", path, err)
+
+	var db *sql.DB
+	usingVec1Connector := false
+	if cfg.vecIndexEnabled && hostIsLittleEndian() {
+		if vdb, verr := openVec1DB(dsn); verr == nil {
+			db, usingVec1Connector = vdb, true
+		} else {
+			log.Printf("[embed/vec1] connector unavailable (%v); vector_index falls back to brute force", verr)
+		}
+	} else if cfg.vecIndexEnabled {
+		log.Printf("[embed/vec1] vector_index.enabled but this host is not little-endian; unsupported, using brute force")
+	}
+	if db == nil {
+		var err error
+		db, err = sql.Open("sqlite", dsn)
+		if err != nil {
+			return nil, fmt.Errorf("embed: open %s: %w", path, err)
+		}
 	}
 	db.SetMaxOpenConns(1)
 	if _, err := db.ExecContext(context.Background(), createTable); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("embed: create schema: %w", err)
 	}
-	return &Store{db: db}, nil
+
+	var vec *vecIndex
+	if usingVec1Connector {
+		vec = setupVecIndex(db)
+	}
+	return &Store{db: db, vec: vec}, nil
 }
 
 // Close releases the database connection.
