@@ -146,3 +146,49 @@ func normalize(v []float32) ([]float32, error) {
 	}
 	return out, nil
 }
+
+type chatRequest struct {
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+	Options  chatOptions   `json:"options"`
+}
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+type chatOptions struct {
+	Temperature float32 `json:"temperature"`
+}
+type chatResponse struct {
+	Message chatMessage `json:"message"`
+}
+
+// Generate asks the configured local Ollama model to produce a deterministic digest.
+func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
+	body, err := json.Marshal(chatRequest{Model: c.model, Messages: []chatMessage{{Role: "user", Content: prompt}}, Options: chatOptions{Temperature: .1}})
+	if err != nil {
+		return "", fmt.Errorf("embed: marshal chat: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("embed: new chat request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("embed: chat post: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("embed: chat status %d", resp.StatusCode)
+	}
+	var out chatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("embed: decode chat: %w", err)
+	}
+	if strings.TrimSpace(out.Message.Content) == "" {
+		return "", fmt.Errorf("embed: chat returned no content")
+	}
+	return out.Message.Content, nil
+}
