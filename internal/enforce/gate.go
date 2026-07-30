@@ -49,6 +49,12 @@ type Result struct {
 	Verdict     string      `json:"verdict"`
 	Violations  []Violation `json:"violations"`
 	Overridable bool        `json:"overridable"`
+	// Note carries fail-safe diagnostic context for a `pass` verdict that
+	// was NOT driven by a normal postcondition evaluation — currently only
+	// set by Evaluate (evaluate.go) when a procedure-lookup error forces an
+	// unscoped pass (design.md: "cannot scope → pass with note"). Empty for
+	// every ordinary pass/flag/block/override outcome derived from Decide.
+	Note string `json:"note,omitempty"`
 }
 
 // DecideOptions bundles the configuration one Decide call needs.
@@ -70,7 +76,13 @@ type DecideOptions struct {
 // Evaluate (evaluate.go), the single function mem_enforce/omnia enforce
 // both call.
 func Decide(ctx context.Context, procedures []store.Procedure, opts DecideOptions) Result {
-	var violations []Violation
+	// Initialized as []Violation{}, not left as a nil slice: evaluate.go's
+	// error path already constructs []Violation{} for its "no violations"
+	// pass, so both paths in this package serialize the same JSON shape
+	// ("violations":[]) instead of one producing null — omnia enforce's
+	// JSON output is consumed by hooks/CI (REQ-418) where that
+	// null-vs-empty-array difference matters.
+	violations := []Violation{}
 	for _, p := range procedures {
 		v := evaluatePostcondition(ctx, opts.Config, opts.RepoRoot, p)
 		if v.Outcome != outcomePassed {

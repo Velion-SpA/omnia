@@ -2,14 +2,33 @@ package enforce
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/velion/omnia/internal/audit"
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/store"
 )
+
+// fakeErroringProcedureSource is a ProcedureSource test double that always
+// fails — used to force a genuine matcher lookup error (e.g. a corrupted
+// procedure store, a disk I/O error) so Evaluate's fail-safe path can be
+// exercised. This seam (ProcedureSource) exists specifically to allow this
+// kind of error injection, but had zero tests exercising it before this one.
+type fakeErroringProcedureSource struct {
+	err error
+}
+
+func (f fakeErroringProcedureSource) ListProcedures(store.ListProceduresOptions) ([]store.Procedure, error) {
+	return nil, f.err
+}
+
+func (f fakeErroringProcedureSource) SearchProcedures(query, polarity, state string, limit int) ([]store.Procedure, error) {
+	return nil, f.err
+}
 
 // setEnforceAuditHome redirects the package-level audit log to a throwaway
 // HOME so tests never touch the real user's ~/.local/state/omnia/audit.jsonl
@@ -177,5 +196,45 @@ func TestEvaluate_NeverWritesToTouchedFiles(t *testing.T) {
 	}
 	if string(after) != string(original) {
 		t.Fatalf("gate must never modify a touched file; got %q, want %q", after, original)
+	}
+}
+
+// TestEvaluate_MatcherErrorPassesWithNoteAndAudits (SHOULD-FIX finding: a
+// MatchTrustedProcedures error was silently discarded and reported as an
+// indistinguishable clean `pass`) verifies that a genuine procedure-lookup
+// error still yields `pass` (fail-safe bias must NOT change — a matcher
+// error must never escalate to block or flag, even under mode:block), but
+// now carries a Note explaining why, and that note reaches the audit trail
+// so a broken procedure store never looks like a healthy, empty gate.
+func TestEvaluate_MatcherErrorPassesWithNoteAndAudits(t *testing.T) {
+	setEnforceAuditHome(t)
+	src := fakeErroringProcedureSource{err: errors.New("procedure store: disk I/O error (simulated corruption)")}
+
+	result := Evaluate(context.Background(), src, EvalOptions{
+		Config:       config.EnforcementConfig{Enabled: true, Mode: "block"},
+		Project:      "enforcetest",
+		FilesTouched: []string{"internal/enforce/matcher.go"},
+		Actor:        "cli",
+	})
+
+	if result.Verdict != VerdictPass {
+		t.Fatalf("Verdict = %q, want %q — a matcher lookup error must never escalate, even under mode:block", result.Verdict, VerdictPass)
+	}
+	if result.Note == "" {
+		t.Fatalf("expected a non-empty Note explaining the unscoped pass, got %+v", result)
+	}
+	if !strings.Contains(result.Note, "disk I/O error") {
+		t.Fatalf("expected the Note to surface the underlying matcher error, got %q", result.Note)
+	}
+
+	entries := mustReadAuditEntries(t)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 audit entry, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Verdict != VerdictPass {
+		t.Fatalf("audit Verdict = %q, want %q", entries[0].Verdict, VerdictPass)
+	}
+	if entries[0].Note == "" {
+		t.Fatalf("expected the matcher error to reach the audit trail via Note, got %+v", entries[0])
 	}
 }
