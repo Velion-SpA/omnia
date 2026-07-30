@@ -28,6 +28,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/velion/omnia/internal/anchor"
 	"github.com/velion/omnia/internal/audit"
+	"github.com/velion/omnia/internal/codegraph"
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/diagnostic"
 	"github.com/velion/omnia/internal/embed"
@@ -170,6 +171,7 @@ type MCPConfig struct {
 	// enabled (spec write-gate REQ "Default-On With Kill-Switch").
 	WriteHygieneEnabled bool
 	TimeTravelEnabled   bool
+	CodeGraph           config.CodeGraphConfig
 }
 
 const recordedTimeDisclaimer = "\n---\nRecorded-time view: history starts when time_travel is enabled; retained revisions may not cover earlier timestamps."
@@ -428,6 +430,16 @@ func shouldRegister(name string, allowlist map[string]bool) bool {
 
 func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) {
 	writeQueue := newWriteQueue(defaultMCPWriteQueueSize)
+
+	if cfg.CodeGraph.Enabled && shouldRegister("mem_blame", allowlist) {
+		srv.AddTool(mcp.NewTool("mem_blame",
+			mcp.WithDescription("Return the opt-in deterministic code-to-decision anchors covering file:line."),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithString("file", mcp.Required(), mcp.Description("Source file, absolute or repo-relative.")),
+			mcp.WithNumber("line", mcp.Required(), mcp.Description("1-based source line.")),
+			mcp.WithString("repo_root", mcp.Description("Optional repository root.")),
+		), handleBlame(s))
+	}
 
 	// ─── mem_search (profile: agent, core — always in context) ─────────
 	if shouldRegister("mem_search", allowlist) {
@@ -1127,6 +1139,28 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 			),
 			handleCompare(s, activity),
 		)
+	}
+}
+
+func handleBlame(s *store.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		file, _ := req.GetArguments()["file"].(string)
+		lineValue, ok := req.GetArguments()["line"].(float64)
+		if !ok {
+			return mcp.NewToolResultError("line is required"), nil
+		}
+		repoRoot, _ := req.GetArguments()["repo_root"].(string)
+		repoRoot, file, err := codegraph.Normalize(repoRoot, file)
+		if err != nil {
+			out, _ := jsonMarshal(map[string]any{"line": lineValue, "hits": []any{}, "note": "no repo context"})
+			return mcp.NewToolResultText(string(out)), nil
+		}
+		hits, err := s.BlameLine(repoRoot, file, int(lineValue))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out, _ := jsonMarshal(map[string]any{"line": int(lineValue), "hits": hits})
+		return mcp.NewToolResultText(string(out)), nil
 	}
 }
 

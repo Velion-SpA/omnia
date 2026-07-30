@@ -752,6 +752,8 @@ func main() {
 		cmdConflicts(cfg)
 	case "forget-scan":
 		cmdForgetScan(cfg)
+	case "blame":
+		cmdBlame(cfg)
 	case "review-due":
 		cmdReviewDue(cfg)
 	case "dedupe":
@@ -1297,6 +1299,7 @@ func cmdMCP(cfg store.Config) {
 	// buildRecallService reads it below. appCfg/appCfgErr are the same
 	// values hoisted above (before storeNew) for ContextTokenBudget wiring.
 	if appCfgErr == nil {
+		mcpCfg.CodeGraph = appCfg.CodeGraph
 		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir)
 		// memory-recall-ranking (task 5.4): thread recall.ranking.* through to
 		// handleSearch regardless of whether hybrid recall itself is enabled —
@@ -3399,10 +3402,11 @@ Commands:
                                 [--semantic]  [--concurrency N]  [--timeout-per-call SECONDS]
                                 [--max-semantic N]  [--yes]
                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
-  forget-scan        Reconcile code anchors against the live git tree (structural forgetting)
+	  forget-scan        Reconcile code anchors against the live git tree (structural forgetting)
                        [--project P] [--repo PATH] [--apply] [--semantic] [--yes]
                        Dry-run by default: reports checked/traveled/staled counts, writes nothing.
                        Degrades gracefully with no git or outside a repo (reports 0 checked).
+  blame <file>:<line> Query opt-in code-to-decision graph anchors.
   review-due         List memories past their spaced-review due date (Play G)
                        [--project P] [--json]. Compact only: count per
                        project/type + id/title, never full content.

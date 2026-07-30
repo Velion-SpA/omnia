@@ -157,27 +157,27 @@ Satisfies: REQ-433 (threat model), REQ-435 (reversible), REQ-436 (provenance), R
 
 Satisfies: REQ-400–406.
 
-- [ ] 6.1 [RED] `internal/store/anchors_test.go`: two anchors both covering line 50 of a fixture file —
+- [x] 6.1 [RED] `internal/store/anchors_test.go`: two anchors both covering line 50 of a fixture file —
   `BlameLine(repoRoot, file, 50)` must return BOTH linked memories, each tagged its own `anchor_status` (REQ-402)
   — fails, method doesn't exist.
-- [ ] 6.2 [GREEN] Implement `BlameLine(repoRoot, file string, line int) ([]BlameHit, error)` over
+- [x] 6.2 [GREEN] Implement `BlameLine(repoRoot, file string, line int) ([]BlameHit, error)` over
   `memory_anchors` (reusing `ListActiveAnchors`/`GetAnchorsForObservations`, `anchors.go:163`/`:362`) with
   design's overlap ranking: active-before-stale/traveled, narrowest-range-first, `blame_at` desc, `id` asc.
-- [ ] 6.3 [RED] Stale-anchor test: a stale anchor covering the line still appears, tagged
+- [x] 6.3 [RED] Stale-anchor test: a stale anchor covering the line still appears, tagged
   `anchor_status: "stale"`, never hidden (REQ-403).
-- [ ] 6.4 [GREEN] Confirm 6.2's ranking surfaces stale rows rather than filtering them.
-- [ ] 6.5 [RED] `CodeDecisionGraph(project)` test: 5 active anchors → 3 memories yields exactly 5 edges
+- [x] 6.4 [GREEN] Confirm 6.2's ranking surfaces stale rows rather than filtering them.
+- [x] 6.5 [RED] `CodeDecisionGraph(project)` test: 5 active anchors → 3 memories yields exactly 5 edges
   (REQ-404) — fails, method doesn't exist.
-- [ ] 6.6 [GREEN] Implement `CodeDecisionGraph(project string) (nodes, edges, error)` as a thin projection over
+- [x] 6.6 [GREEN] Implement `CodeDecisionGraph(project string) (nodes, edges, error)` as a thin projection over
   `ListActiveAnchors` — no new table/engine.
-- [ ] 6.7 [RED] Not-a-git-repo test: `mem_blame` on a file outside any repo returns zero anchors with a clear
+- [x] 6.7 [RED] Not-a-git-repo test: `mem_blame` on a file outside any repo returns zero anchors with a clear
   reason, never a crash-like error (REQ-406).
-- [ ] 6.8 [GREEN] Wire `mem_blame` MCP tool (gated `code_graph.enabled` in `mcp.MCPConfig`) and `omnia blame
+- [x] 6.8 [GREEN] Wire `mem_blame` MCP tool (gated `code_graph.enabled` in `mcp.MCPConfig`) and `omnia blame
   <file>:<line>` CLI (dispatch `main.go:730`, alongside `forget-scan` `:753`), mapping `ErrGitNotInstalled`/
   `ErrNotAGitRepo` to the empty-result contract.
-- [ ] 6.9 [REFACTOR] Share the `file:line` → repo-relative-path normalization helper between `mem_blame` and
+- [x] 6.9 [REFACTOR] Share the `file:line` → repo-relative-path normalization helper between `mem_blame` and
   the CLI.
-- [ ] 6.10 Verification: `internal/store`/`internal/mcp`/CLI tests green; disabled-path
+- [x] 6.10 Verification: `internal/store`/`internal/mcp`/CLI tests green; disabled-path
   (`code_graph.enabled=false`) confirms "capability disabled", no anchor table touched (REQ-400); no LLM call
   anywhere in this path (REQ-405).
 
