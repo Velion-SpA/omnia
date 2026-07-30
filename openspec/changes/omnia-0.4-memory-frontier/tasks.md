@@ -235,36 +235,36 @@ Satisfies: REQ-410 (gate), REQ-415 (override), REQ-416 (audit), REQ-417 (no auto
 
 Satisfies: REQ-420–426.
 
-- [ ] 9.1 [RED] `internal/consolidate/cluster_test.go`: 3 memories connected above `min_score` via a fixture
+- [x] 9.1 [RED] `internal/consolidate/cluster_test.go`: 3 memories connected above `min_score` via a fixture
   `embed.GraphScoped` output form one cluster via union-find (REQ-421) — fails, package doesn't exist.
-- [ ] 9.2 [GREEN] Create `internal/consolidate/cluster.go`: union-find over `embed.GraphScoped(project)`
+- [x] 9.2 [GREEN] Create `internal/consolidate/cluster.go`: union-find over `embed.GraphScoped(project)`
   (`store.go:282`) edges ≥ `MinScore` (default 0.5), per-node cap `K` (default 8).
-- [ ] 9.3 [RED] Cluster-size-bound tests: a 2-member cluster with `min_cluster_size=3` produces no digest,
+- [x] 9.3 [RED] Cluster-size-bound tests: a 2-member cluster with `min_cluster_size=3` produces no digest,
   reported "below minimum size" (REQ-423); a 40-member cluster with `max_cluster_size=20` still references all
   40 sources across one or more digests, none dropped (REQ-423).
-- [ ] 9.4 [GREEN] Implement size-bound handling: skip-below-minimum; cap-or-split-above-maximum via
+- [x] 9.4 [GREEN] Implement size-bound handling: skip-below-minimum; cap-or-split-above-maximum via
   highest-degree-node top-K neighborhood.
-- [ ] 9.5 [RED] `internal/embed/client_test.go`: `Client.Generate(ctx, prompt)` posts to Ollama's `/api/chat`
+- [x] 9.5 [RED] `internal/embed/client_test.go`: `Client.Generate(ctx, prompt)` posts to Ollama's `/api/chat`
   on `Embeddings.BaseURL`, sibling to `Embed` (`embed/client.go:78`) — fails, method doesn't exist.
-- [ ] 9.6 [GREEN] Add `Generate(ctx, prompt) (string, error)` to `embed.Client`: low-temperature, fixed prompt,
+- [x] 9.6 [GREEN] Add `Generate(ctx, prompt) (string, error)` to `embed.Client`: low-temperature, fixed prompt,
   `/api/chat` call.
-- [ ] 9.7 [RED] Digest-write test: a qualifying 3-memory cluster produces one `observations` row `type="digest"`
+- [x] 9.7 [RED] Digest-write test: a qualifying 3-memory cluster produces one `observations` row `type="digest"`
   + 3 `memory_relations` rows with a new `RelationConsolidates` verb, system provenance; all 3 sources remain
   independently retrievable via `mem_search` after (REQ-422/426).
-- [ ] 9.8 [GREEN] Add `RelationConsolidates` to the relation vocabulary (`relations.go:32`); implement the
+- [x] 9.8 [GREEN] Add `RelationConsolidates` to the relation vocabulary (`relations.go:32`); implement the
   digest writer (system-provenance relation rows, mirrors `MarkAnchorStale`'s supersedes-row pattern,
   `anchors.go:260`); add `digest` to `DefaultImportanceWeight` (weight 3, `config.go:398`).
-- [ ] 9.9 [RED] Ollama-unreachable test: consolidation exits cleanly with a log line, no digest/relation
+- [x] 9.9 [RED] Ollama-unreachable test: consolidation exits cleanly with a log line, no digest/relation
   written, no panic (REQ-424 degradation).
-- [ ] 9.10 [GREEN] Wrap the `Generate` call with the same degrade-on-unreachable pattern as recall's Ollama
+- [x] 9.10 [GREEN] Wrap the `Generate` call with the same degrade-on-unreachable pattern as recall's Ollama
   auto-detect.
-- [ ] 9.11 [RED] Disabled/idle-off test: `consolidation.enabled=false` → `omnia consolidate` no-op, no idle
+- [x] 9.11 [RED] Disabled/idle-off test: `consolidation.enabled=false` → `omnia consolidate` no-op, no idle
   worker starts even with `consolidation.idle=true` (REQ-420/425).
-- [ ] 9.12 [GREEN] Gate `omnia consolidate` CLI (dispatch `:730`) and the optional idle worker (mirrors
+- [x] 9.12 [GREEN] Gate `omnia consolidate` CLI (dispatch `:730`) and the optional idle worker (mirrors
   `buildAutoEmbedWorker`, `main.go:1331`) behind `consolidation.enabled`.
-- [ ] 9.13 [REFACTOR] Extract the cluster-selection + digest-writing pipeline into one orchestration function
+- [x] 9.13 [REFACTOR] Extract the cluster-selection + digest-writing pipeline into one orchestration function
   shared by the CLI and idle worker.
-- [ ] 9.14 Verification: `internal/consolidate`/`internal/embed`/`internal/store` suites green; disabled-path
+- [x] 9.14 Verification: `internal/consolidate`/`internal/embed`/`internal/store` suites green; disabled-path
   byte-for-byte; `CGO_ENABLED=0 go build ./...` clean.
 
 ## Phase 10: `learned-ranker` (PR 10, base: `main` after PR 9)

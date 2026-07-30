@@ -37,6 +37,7 @@ const (
 	RelationConflictsWith = "conflicts_with"
 	RelationSupersedes    = "supersedes"
 	RelationNotConflict   = "not_conflict"
+	RelationConsolidates  = "consolidates"
 )
 
 // Valid judgment_status values.
@@ -56,6 +57,7 @@ var validRelationVerbs = map[string]bool{
 	RelationConflictsWith: true,
 	RelationSupersedes:    true,
 	RelationNotConflict:   true,
+	RelationConsolidates:  true,
 }
 
 // isValidRelationVerb returns true if v is an accepted mem_judge relation verb.

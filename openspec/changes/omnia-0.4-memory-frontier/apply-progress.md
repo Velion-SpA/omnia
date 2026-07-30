@@ -18,3 +18,21 @@
 - The v0.3.2 fixture has no v0.4 keys and its legacy config snapshot is byte-for-byte equal to `v0.3.2-config.golden.yaml`.
 ### Design Deviations
 None. The design, tasks, code, and security specification now consistently use `EncryptionConfig` with the `encryption` key; no `security` alias is provided.
+
+
+## PR 9 — Sleep Consolidation
+- Completed tasks: 9.1–9.14.
+- Boundary: local default-off clustering, local Ollama digest generation, retained source relations, CLI wiring, and audit only.
+### TDD Cycle Evidence
+| Task | RED | GREEN | REFACTOR |
+|---|---|---|---|
+| 9.1–9.4 | `cluster_test.go` failed with missing `Clusters`, then with an unsafe dropped remainder | Union-find clustering and balanced splitting pass | Deterministic degree/id ordering and no-drop split |
+| 9.5–9.6 | `generate_test.go` failed because `Client.Generate` did not exist | Local `/api/chat` client passes | Fixed low-temperature request contract |
+| 9.7–9.10 | `consolidate_test.go` initially failed due to missing session linkage | Digest, retained consolidates relations, and unreachable no-op pass | Single `Run` orchestration function |
+| 9.11–9.13 | Disabled invocation test added before command completion | Disabled CLI and runner are no-ops | CLI delegates to shared orchestration |
+| 9.14 | Full suite was run after implementation | CGO-free build, vet, unit/coverage suites passed | `git diff --check` clean |
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed
+- `go test -cover ./...` — passed

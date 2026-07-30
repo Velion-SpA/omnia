@@ -784,6 +784,8 @@ func main() {
 		cmdDashboard(os.Args[2:])
 	case "embed":
 		cmdEmbed(os.Args[2:])
+	case "consolidate":
+		cmdConsolidate(os.Args[2:])
 	case "collect":
 		cmdCollect(os.Args[2:])
 	case "migrate":
