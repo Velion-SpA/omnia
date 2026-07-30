@@ -10,7 +10,7 @@ require (
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/gofrs/flock v0.13.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/mark3labs/mcp-go v0.55.0
+	github.com/mark3labs/mcp-go v0.57.0
 	github.com/natefinch/atomic v1.0.1
 	github.com/yuin/goldmark v1.8.2
 	golang.org/x/crypto v0.53.0
