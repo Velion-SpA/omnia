@@ -1999,7 +1999,8 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 
 	supported := (entity == SyncEntitySession && (op == SyncOpUpsert || op == SyncOpDelete)) ||
 		((entity == SyncEntityObservation || entity == SyncEntityPrompt) && (op == SyncOpUpsert || op == SyncOpDelete)) ||
-		(entity == SyncEntityRelation && op == SyncOpUpsert)
+		(entity == SyncEntityRelation && op == SyncOpUpsert) ||
+		(entity == SyncEntityEmbedding && op == SyncOpUpsert)
 	if !supported {
 		return blocked(UpgradeReasonBlockedLegacyMutationManual, fmt.Sprintf("unsupported legacy mutation %q/%q", entity, op)), nil
 	}
@@ -2330,6 +2331,32 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 			return cloudUpgradeLegacyMutationEvaluation{}, err
 		}
 		return repairable("relation payload is missing required fields for canonical bootstrap", "repair fills missing relation fields from local memory_relations table and mutation project", string(encoded)), nil
+
+	case SyncEntityEmbedding:
+		// Embeddings live in a separate local store (internal/embed) that this
+		// transaction cannot query, so unlike the entities above there is no
+		// local table to backfill missing fields from. EnqueueEmbeddingMutation
+		// already validates sync_id and vector are present before a mutation
+		// is ever written, so any row reaching here either decodes cleanly
+		// (supported, nothing to repair) or is genuinely malformed (blocked).
+		var body syncEmbeddingPayload
+		if err := decodeSyncPayload([]byte(payload), &body); err != nil {
+			return blocked(UpgradeReasonBlockedLegacyMutationManual, fmt.Sprintf("decode embedding payload: %v", err)), nil
+		}
+		body.SyncID = strings.TrimSpace(body.SyncID)
+		if body.SyncID == "" && strings.TrimSpace(mutation.EntityKey) != "" {
+			body.SyncID = strings.TrimSpace(mutation.EntityKey)
+		}
+		if body.SyncID == "" {
+			return blocked(UpgradeReasonBlockedLegacyMutationManual, "embedding payload sync_id is required"), nil
+		}
+		if strings.TrimSpace(mutation.EntityKey) != "" && strings.TrimSpace(mutation.EntityKey) != body.SyncID {
+			return blocked(UpgradeReasonBlockedLegacyMutationManual, fmt.Sprintf("embedding entity_key %q does not match payload sync_id %q", mutation.EntityKey, body.SyncID)), nil
+		}
+		if len(body.Vector) == 0 {
+			return blocked(UpgradeReasonBlockedLegacyMutationManual, "embedding payload vector is required"), nil
+		}
+		return cloudUpgradeLegacyMutationEvaluation{}, nil
 	}
 
 	return cloudUpgradeLegacyMutationEvaluation{}, nil
