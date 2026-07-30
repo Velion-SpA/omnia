@@ -15,27 +15,27 @@ a leaf package or a new read/method over existing tables plus a CLI subcommand (
 
 The unifying architectural move that resolves BOTH hardest problems is a **dual-driver strategy**: keep
 `modernc.org/sqlite` (`internal/store/store.go:32`, `internal/embed/store.go:14`) as the default, and add
-`github.com/ncruces/go-sqlite3` (pure-Go SQLite-on-wazero, `CGO_ENABLED=0`) as an OPT-IN driver selected
-only when encryption (4) or the vector index (7) is enabled. The on-disk SQLite file format is identical
-between the two drivers, so a plaintext DB written by modernc opens unchanged under ncruces and vice
-versa — only the encrypting VFS changes on-disk bytes. This lets encryption and vec adopt ncruces without
-touching the default path, and makes both migrations non-destructive.
+`github.com/ncruces/go-sqlite3` (pure-Go SQLite-on-wazero, `CGO_ENABLED=0`) only at opt-in composition
+points. Encryption selects ncruces for each encrypted DB; the Vec1 index selects it only for
+`internal/embed`'s existing `embeddings.db`. The on-disk SQLite file format is identical between the two
+drivers, so a plaintext DB written by modernc opens unchanged under ncruces and vice versa — only the
+encrypting VFS changes on-disk bytes. This keeps vector ownership out of the core store, preserves the
+default path, and makes both migrations non-destructive.
 
 ## Cross-Cutting Architecture Decisions (ADR)
 
 ### ADR-1 — Dual SQLite driver, flag-selected, coexisting
 
-**Choice**: Introduce `openDB` driver selection at the two composition points (`internal/store/store.go:847`
-`New`, and `:897` `newWithoutRepair`; `internal/embed/store.go:79` `OpenStore`). Default driver name stays
-`"sqlite"` (modernc). When `encryption.enabled` or `vec_index.enabled` is set, resolve to the ncruces driver
-(registered under its own name) with the appropriate VFS/extension. `openDB` is already a package var
-(`store.go:35`) — the seam exists.
+**Choice**: Keep modernc as the default. `internal/store` selects ncruces only for encryption at `New` /
+`newWithoutRepair`; `internal/embed.OpenStore` selects it when encryption or Vec1 is enabled. Vec1 registration
+is owned only by the embedding connector (ADR-4), not the core-store `openDB` seam. The package must use the
+ncruces connector API where per-connection initialization is required, rather than relying on a globally
+registered driver name.
 **Alternatives**: (a) swap everything to ncruces unconditionally — rejected: needless blast radius on the
-default path and a WASM startup cost every install pays even with all flags off; (b) stay on modernc and
-solve encryption/vec in-process — rejected: modernc exposes no stable encrypting-VFS API and no vector
-extension.
-**Rationale**: keeps the OFF path literally the current code; confines ncruces to opted-in installs; one
-driver abstraction serves both hard problems.
+default path; (b) stay on modernc and solve encryption/Vec1 in-process — rejected: modernc exposes no stable
+encrypting-VFS API and no bundled Vec1 registration path.
+**Rationale**: keeps the OFF path literally the current code and confines ncruces to opted-in installs without
+coupling the core store to the embedding index.
 
 ### ADR-2 — Encryption at rest = FULL-DATABASE via ncruces `adiantum` VFS (resolves hardest problem #1)
 
@@ -70,18 +70,31 @@ explicit `encryption.allow_plaintext_fallback: true` opt-in downgrades to the un
 a prominent stderr warning and an audit entry — a conscious operator choice, never an automatic silent
 downgrade. Losing the keychain entry = data unrecoverable; stated plainly in the spec threat model.
 
-### ADR-4 — Vec index = ADDITIVE, dual-write, brute-force retained (resolves hardest problem #2)
+### ADR-4 — Vec1 index = additive, exact, and recoverable (resolves hardest problem #2)
 
-**Choice**: When `vec_index.enabled`, open `embeddings.db` with ncruces + the sqlite-vec extension and
-create a `vec_embeddings` vec0 virtual table ALONGSIDE the existing `embeddings` table. `Upsert`
-(`internal/embed/store.go:95`) dual-writes to both. Reads (`Search`/`SearchScoped`/`Graph`/`GraphScoped`)
-consult the vec index when enabled, else the current brute-force scan (`:186`), which is NEVER removed.
-**Alternatives**: clean swap to vec0-only (rejected — destructive, no fallback); keep modernc and add vec
-(rejected — modernc cannot load the extension).
-**Rationale**: the `embeddings` table + `vector BLOB` stay the source of truth, so no existing data can be
-lost or corrupted; the vec table is a derived index rebuildable from it. A one-time backfill pass builds
-`vec_embeddings` from existing rows on first enable. This is the proposal's "additive index alongside the
-current vector BLOB column, a feature flag deciding which path serves reads" made concrete.
+**Choice**: `internal/embed` alone owns the optional Vec1 connector for the existing `embeddings.db`; it
+calls `driver.Open(dsn, vec1.Register)` from pinned `github.com/ncruces/go-sqlite3@v0.35.2`. `driver.Open`
+installs the callback on every physical connection, so the extension is never assumed to be process-global.
+The existing `MaxOpenConns(1)` remains a concurrency policy, not the registration mechanism. With the flag
+off, `OpenStore` continues to use modernc and makes no Vec1 calls. With it on, the same database contains an
+additive `vec_embeddings` Vec1 virtual table; no second embedding database is created. The standard
+`embeddings` table remains authoritative and brute-force remains available.
+
+**Pinned contract**: configure only float32 Vec1 NN mode: `flat` + `cos`; do not train a model or enable
+quantization, int8, binary, IVF, or ANN. The supported registration and test path are
+[`driver.Open`](https://github.com/ncruces/go-sqlite3/blob/v0.35.2/driver/driver.go#L132-L151),
+[`vec1.Register`](https://github.com/ncruces/go-sqlite3/blob/v0.35.2/ext/vec1/vec1.go#L11-L14), and the
+maintainer's [Vec1 integration test](https://github.com/ncruces/go-sqlite3/blob/v0.35.2/ext/vec1/vec1_test.go#L16-L48).
+
+**Rationale**: Vec1 flat mode is exhaustive/exact; it is a derived acceleration structure, not a source of
+truth. Keeping it in `embeddings.db` preserves the existing lifecycle and lets a disabled or unhealthy index
+fall back without moving data. The connector is deliberately private to `internal/embed`; core-store driver
+and encryption composition must not acquire a dependency on Vec1.
+
+**Config correction ownership**: PR 2A removes PR 1's unreleased `VecIndexConfig.Quantization` field, its
+`applyDefaults` value, and every YAML/environment mapping, fixture, or test expectation for it. No compatibility
+alias is retained: the supported v0.4 contract is exactly `vector_index.enabled`. Float32 flat/cos is an
+implementation invariant, not a selectable format.
 
 ### ADR-5 — Config: 7 default-OFF blocks + `applyDefaults`, params-only defaults
 
@@ -274,23 +287,77 @@ or missing/corrupt file → ignored, cold start; a stale cartridge is NEVER serv
 
 ## Capability 7 — `sqlite-vec-index`
 
-**Data model**: additive `vec_embeddings` vec0 virtual table alongside the current `embeddings` table
-(`internal/embed/store.go:52`); `vector BLOB` stays the source of truth (ADR-4).
+**Data model and query contract**: `embeddings` remains the sole authoritative table. Create the derived
+virtual table in that same DB and configure it once before population:
 
-**Algorithm/reads**: with the flag on and the vec table populated, `Search`/`SearchScoped` run a vec0 KNN
-query; `Graph`/`GraphScoped` (`:264`/`:282`) build the k-NN graph via per-node vec KNN (top-K neighbors)
-instead of the O(N²) pairwise scan, keeping "KNN flat." Quantization defaults to `none` (float32) to
-guarantee identical top-k vs brute-force; `int8` is opt-in (`vec_index.quantization`). `Upsert` dual-writes.
+```sql
+CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec1(vector, project);
+INSERT INTO vec_embeddings(cmd, vector)
+VALUES ('rebuild', '{index:"flat", distance:"cos"}');
+-- Scoped (omit the predicate for unscoped Search):
+SELECT e.sync_id, e.obs_id, v.distance
+FROM vec_embeddings(?1, ?2) AS v JOIN embeddings AS e ON e.rowid = v.rowid
+WHERE v.project = ?3;
+```
 
-**Interfaces**: Config `VecIndexConfig{Enabled bool; Quantization string}`. No new user-facing command;
-migration/backfill runs on first open when enabled (or via `omnia embed --reindex`).
+`vec_embeddings.rowid` is always the current `embeddings.rowid`; it is never an observation ID or an
+application-generated key. Each write mirrors `COALESCE(project,'')` as Vec1 metadata, so scoped KNN filters
+inside Vec1 before K results are accumulated. The join obtains current `sync_id`/`obs_id` only after the
+metadata-filtered KNN result. Delete/prune remove the derived row by source rowid in the same mutation
+transaction. A maintenance operation that can rewrite source rowids must mark the index stale and run a full
+reindex; no caller persists a Vec1 rowid.
 
-**Failure/degradation**: ncruces/extension unavailable, vec table empty, or a dim-mismatch row → fall back
-to the retained brute-force scan (`:186`), zero data change. Backfill failure → keep brute-force, log,
-never corrupt `embeddings`.
+**Dimensions and native bytes**: Vec1 accepts only machine-endian packed IEEE-754 float32 BLOBs and fixes a
+table's dimension at its first vector. Omnia retains its canonical little-endian `embeddings.vector` BLOB.
+On an empty index, backfill selects the first valid source vector in `rowid` order, records its `active_dim`
+and byte order in derived-index metadata, then indexes only valid vectors of that dimension. A write or query
+with another dimension remains in `embeddings` and uses brute force; it cannot poison or reset the active
+index. `omnia embed --reindex` is the explicit recovery/model-change operation: discard only derived Vec1
+state, choose the first valid source dimension again, and report indexed/skipped counts and reasons.
 
-**Interactions**: accelerates the k-NN `Graph` that capability 3 consumes; shares the ncruces driver with
-capability 4 (when both on, `embeddings.db` uses ncruces + adiantum + vec together).
+The v0.4 release supports Vec1 only on little-endian target architectures. It encodes a separate native-endian
+float32 BLOB for Vec1 from the canonical source vector; it never reuses the little-endian source BLOB by
+assumption. If the persisted byte-order marker does not match the process, disable Vec1 and use brute force;
+a compatible little-endian release may recreate and rebuild from `embeddings`. This is required because the
+[Vec1 format is machine-endian](https://sqlite.org/vec1/doc/trunk/doc/vec1ref.md#vector-format), whereas
+Omnia's source codec is deliberately little-endian. Cross-endian index portability is not supported.
+
+**Write, backfill, and recovery**: normal upsert/update/delete first attempts source and derived changes in
+one transaction. If any Vec1 operation fails, roll back that transaction, commit the source-table mutation in
+a source-only transaction, mark the derived index unhealthy/stale, log the cause, and serve all reads by
+brute force until a successful reindex. First-enable backfill/reindex writes a completion marker only after
+its derived transaction, count verification, and dimension report succeed; a failure or crash leaves no
+"ready" marker and never changes source rows. Vec1 registration/open/schema/integrity/query errors, an empty
+or stale index, and index corruption all disable Vec1 for that `Store` instance and fall back silently to the
+existing caller contract (with diagnostic logging); source-table errors still propagate normally.
+
+**Production composition and PR ownership**: PR 2A adds the private options-based connector; PR 2B owns
+production propagation of one shared `OpenStore` option derived from `Config.VecIndex.Enabled`. Every direct
+production opener must pass it: `cmd/omnia/embed.go`; both `buildAutoEmbedWorker` and
+`buildCLIEmbedPurgeStore` in `cmd/omnia/autoembed.go`; `buildRecallService` in `cmd/omnia/recall.go` (therefore
+CLI search, serve/MCP, and `cmd/omnia/eval.go`); and `internal/dashboard/local_datasource.go`, with
+`cmd/omnia/dashboard.go` carrying the config into that boundary. Callers never invoke `driver.Open` or
+`vec1.Register` themselves. PR 2B wires connector/lifecycle behavior only and leaves `Search`,
+`SearchScoped`, `Graph`, and `GraphScoped` on brute force. PR 3 alone owns KNN score conversion and read
+routing for those four methods.
+
+**Score parity**: current Omnia stores non-zero unit-normalized vectors and returns `dot(query, stored)`.
+The pinned Vec1 artifact used by `go-sqlite3@v0.35.2` computes cosine distance as `d = 1 - cosine` (including
+its generated bundled source at
+[`_vec1CosDist`](https://github.com/ncruces/go-sqlite3-wasm/blob/v3.2.35303/vec1/vec1.go#L10155-L10186)).
+Therefore, for Omnia's normalized vectors, `score = float32(1 - d)`, not `2 - d`; this recovers the current
+dot-product score. The newer Vec1 trunk reference documents `2 - cosine`, so implementation must pin the
+module, assert self/orthogonal/antipodal distance semantics in focused tests, and retain score-parity tests
+with a numeric tolerance. No throughput claim is part of this design.
+
+**Interfaces**: `VecIndexConfig{Enabled bool}` only. No new top-level command is added. PR 2B adds the opt-in
+`--reindex` maintenance flag to the existing `omnia embed` command; it reports indexed/skipped reasons and
+rebuilds only derived state. Capability 3 may use Vec1 only when it is ready; otherwise
+`Graph`/`GraphScoped` retain their current brute-force algorithm.
+
+**Interactions**: encryption may compose its VFS initialization and `vec1.Register` in the same `internal/embed`
+connection initializer, in documented order and with an integration test. Vec1 itself has no ownership outside
+that package.
 
 ---
 
@@ -298,12 +365,12 @@ capability 4 (when both on, `embeddings.db` uses ncruces + adiantum + vec togeth
 
 | File | Action | Description |
 |------|--------|-------------|
-| `internal/config/config.go` | Modify | 7 new blocks (`CodeGraph`,`Enforcement`,`Consolidation`,`Encryption`,`Ranker`,`Cartridge`,`VecIndex`) + `applyDefaults` param defaults; all `Enabled` default-OFF. |
+| `internal/config/config.go`, `internal/config/v04_config_test.go` | Modify | Keep 7 default-OFF blocks; PR 2A removes the unreleased VecIndex quantization field/default/mapping/test contract so VecIndex exposes only `Enabled`. |
 | `internal/store/store.go` | Modify | Driver selection at `New`/`newWithoutRepair` (ADR-1); route `openDB` to ncruces+adiantum when `encryption.enabled`. |
 | `internal/store/anchors.go` | Modify | Add `BlameLine` reverse walk + `CodeDecisionGraph` projection (1). |
 | `internal/store/relations.go` | Modify | Add `RelationConsolidates` verb (3). |
 | `internal/store/procedures.go` | Reuse | `ListProcedures`/`SearchProcedures` feed the gate (2). |
-| `internal/embed/store.go` | Modify | ncruces+vec0 path, dual-write, backfill, vec-KNN reads; brute-force retained (7). |
+| `internal/embed/store.go` | Modify | PR 2A/B: private connector, rowid mapping, native-float32 derived lifecycle and reindex; PR 3: KNN read routing/score fallback. Brute force retained. |
 | `internal/embed/client.go` | Modify | Add `Generate` (Ollama `/api/chat`) for consolidation (3). |
 | `internal/audit/audit.go` | Modify | `ActionEnforce`/`ActionConsolidate` + gate fields (ADR-7). |
 | `internal/recall/…` | Reuse | Fusion untouched; ranker sits above it at the mcp boundary (5). |
@@ -314,6 +381,8 @@ capability 4 (when both on, `embeddings.db` uses ncruces + adiantum + vec togeth
 | new `internal/consolidate/` | Create | Clustering + prompt + digest writer (3). |
 | new `internal/ranker/` | Create | Pure-Go logistic re-ranker + train/serialize (5). |
 | new `internal/cartridge/` | Create | Build/load/invalidate JSON cartridge (6). |
+| `cmd/omnia/embed.go`, `cmd/omnia/autoembed.go`, `cmd/omnia/recall.go`, `cmd/omnia/eval.go` | Modify | PR 2B passes the shared VecIndex store option through CLI writer/reindex, autoembed/purge, recall, serve/MCP, and eval composition without changing reads. |
+| `cmd/omnia/dashboard.go`, `internal/dashboard/local_datasource.go` | Modify | PR 2B carries VecIndex config to the dashboard's direct embedding-store opener; PR 3's store methods decide KNN versus brute force. |
 | `cmd/omnia/main.go` | Modify | Dispatch `blame`/`enforce`/`consolidate`/`security`/`rank-train`/`cartridge`; register gated MCP tools; optional idle worker. |
 
 ## Interfaces / Contracts (new config blocks — mirror existing shape)
@@ -335,7 +404,7 @@ type EncryptionConfig struct {
 }
 type RankerConfig struct{ Enabled bool; MinTrainExamples int `yaml:"min_train_examples"`; ModelDir string `yaml:"model_dir"` }
 type CartridgeConfig struct{ Enabled bool; TopMemories int `yaml:"top_memories"`; Dir string `yaml:"dir"` }
-type VecIndexConfig struct{ Enabled bool; Quantization string `yaml:"quantization"` } // none|int8, default none
+type VecIndexConfig struct{ Enabled bool `yaml:"enabled"` } // Vec1 float32 flat/cos only
 ```
 
 ## Testing Strategy
@@ -343,7 +412,9 @@ type VecIndexConfig struct{ Enabled bool; Quantization string `yaml:"quantizatio
 | Layer | What | Approach |
 |-------|------|----------|
 | Unit | overlap ranking (1), matcher (2), clustering/union-find (3), logistic train (5), invalidation (6) | Table tests; inject fake git/keychain/Ollama runners (the `Probe.runGit` pattern). |
-| Unit | encryption round-trip (4), vec vs brute-force parity (7) | Encrypt→reopen→read equals plaintext; assert vec top-k == brute-force top-k on a fixture store. |
+| Unit | encryption round-trip (4), vec vs brute-force parity (7) | Encrypt→reopen→read equals plaintext; assert Vec1 top-k and converted scores match brute-force on a fixture store. |
+| Composition | every direct production embedding-store opener (7) | PR 2B proves enabled passes the shared connector option and disabled stays modernc; PR 3 proves only store read methods route KNN. |
+| Config | unreleased VecIndex scaffold removal (7) | PR 2A proves only `enabled` remains: no quantization field, default, environment/YAML mapping, fixture, or behavioral branch. |
 | Integration | driver selection (ADR-1), non-destructive migrations (4/7) | Full `internal/store` suite MUST pass under the ncruces path; migrate a seeded plaintext DB, assert data intact + reversible. |
 | Invariant | "opts into none ⇒ byte-for-byte v0.3.2" | Each capability's disabled-is-no-op test (existing convention). |
 | Eval | ranker non-regression (5) | `internal/eval` gate blocks promotion on any regression. |
@@ -352,16 +423,19 @@ type VecIndexConfig struct{ Enabled bool; Quantization string `yaml:"quantizatio
 
 Per-capability rollback = set the flag `false` (or leave absent) → inert (1,2,3,5,6). Encryption (4):
 `omnia security decrypt` restores plaintext via the keychain key. Vec (7): disabling reverts reads to the
-retained brute-force path with no data change. Both DB migrations are copy-then-atomic-rename with a
-retained backup (mirroring `datadir.Migrate`), never in-place destructive.
+retained brute-force path with no data change. Because the PR 1 quantization scaffold was never released,
+PR 2A removes it without a compatibility migration; any pre-release config must remove that unsupported key.
+Encryption DB migrations are copy-then-atomic-rename with a retained backup (mirroring `datadir.Migrate`),
+never in-place destructive. Vec1 rebuilds only its derived table from unchanged source rows through
+`omnia embed --reindex`.
 
 ## Open Questions
 
 These are EMPIRICAL/validation items, not unresolved architecture — Codex has a concrete decision for every
 capability:
-- [ ] Confirm the exact ncruces symbols for adiantum VFS registration and sqlite-vec extension loading at
-  implementation time (driver+VFS+additive strategy are fixed; only the API surface needs pinning). Keep
-  the brute-force + modernc fallbacks as the safety net if a symbol is unavailable.
+- [ ] Verify the combined adiantum-VFS + `vec1.Register` initializer against the pinned ncruces release before
+  implementation. Vec1 registration, flat/cos DDL, score conversion, and fallback ownership are fixed; keep
+  modernc/brute-force as the safety net if the combined initializer cannot open.
 - [ ] One empirical tuning pass on consolidation thresholds (`MinScore`/`K`/cluster sizes) and the ranker's
   `MinTrainExamples`, same "needs one tuning pass" caveat the procedural defaults already carry.
 - [ ] Linux keychain coverage beyond `secret-tool` (e.g. headless servers) — degrade per ADR-3.
