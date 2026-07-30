@@ -237,6 +237,9 @@ func TestUpdateInstructions(t *testing.T) {
 	if msg == "" {
 		t.Fatal("expected non-empty update instructions")
 	}
+	if strings.Contains(msg, "github.com/velion/omnia/cmd/omnia@") {
+		t.Fatalf("update instructions contain stale module path: %q", msg)
+	}
 }
 
 func withCheckServer(t *testing.T, handler http.Handler) {

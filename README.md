@@ -67,11 +67,12 @@ control and an admin dashboard.
 # Homebrew (macOS / Linux)
 brew install velion-spa/tap/omnia
 
-# or with Go
-go install github.com/velion/omnia/cmd/omnia@latest
+# or from the canonical source with Go
+git clone https://github.com/Velion-SpA/omnia.git
+cd omnia
+go install ./cmd/omnia
 
-# or from source
-git clone https://github.com/Velion-SpA/omnia && cd omnia
+# or build a standalone binary from the same checkout
 go build -o bin/omnia ./cmd/omnia
 ```
 
