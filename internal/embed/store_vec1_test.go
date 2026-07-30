@@ -552,6 +552,9 @@ func TestVecSearch_CrowdingOutFixHoldsUnderVec1(t *testing.T) {
 	if _, err := store.VecBackfill(ctx); err != nil {
 		t.Fatalf("VecBackfill: %v", err)
 	}
+	if !store.vec.usable() {
+		t.Fatal("Vec1 must be usable after backfill — this test must actually exercise the Vec1 pushdown path, otherwise it would pass trivially via brute-force fallback and no longer guard the behavior it's named for")
+	}
 
 	scopedHits, err := store.SearchScoped(ctx, query, 5, "target")
 	if err != nil {

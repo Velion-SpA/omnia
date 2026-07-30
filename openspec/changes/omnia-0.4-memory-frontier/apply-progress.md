@@ -362,3 +362,73 @@ merge. All three are fixed with new RED→GREEN test coverage, on top of the ori
 - `go test ./...` — passed (full repo, all packages)
 ### Design Deviations
 None beyond what's described above.
+
+## 2026-07-30 — PR 2A + PR 2B + Phase 3 — sqlite-vec-index: Review Remediation
+An independent adversarial review of the sqlite-vec-index capability found three SHOULD-FIX issues (plus two
+findings explicitly deferred, see "Deliberately not fixed" below). All three fixed findings are addressed with
+new/updated test coverage, on top of the original 5 commits (not amended).
+### Findings fixed
+1. **SHOULD-FIX — `GraphScoped`'s brute-force logic had been extracted into a helper shared with the Vec1
+   path.** `store.go`'s `Graph`/`GraphScoped` used to have their own self-contained edge-dedup/degree/sort
+   logic; a prior pass extracted it into a `finishGraph`/`neighbor` helper called by BOTH the brute-force path
+   (`store.go`) and the Vec1 path (`vec1_search.go`'s `tryVecGraph`). The two paths were behaviorally identical
+   either way (map-accumulation + explicit final sort is order-independent), so there was no live bug — but the
+   coupling meant a future Vec1-only tuning change to the shared helper could silently regress the brute-force
+   fallback, defeating the point of "never edit the brute-force path, only wrap it in a new branch." Fixed:
+   `store.go`'s `GraphScoped` now has its own private, self-contained `neighbor`/`pair`/`edgeScore` logic again
+   — restored verbatim from `origin/main`'s pre-v0.4 version (the only addition is the pre-existing
+   `tryVecGraph` wrapper call at the top, which was already a correctly-shaped new branch). `vec1_search.go`
+   keeps its OWN private copy, renamed `vec1Neighbor`/`vec1FinishGraph` so it can never be confused with or
+   accidentally shared by the brute-force path again. Verification: manually diffed the restored `GraphScoped`
+   function body (everything after the `tryVecGraph` wrapper) against `git show origin/main:internal/embed/
+   store.go` — byte-for-byte identical (`diff` on the extracted function bodies produced zero lines of
+   difference besides the wrapper). `Graph` itself was never touched (already a one-line delegate to
+   `GraphScoped`, unchanged). Existing brute-force/Vec1-parity tests
+   (`TestVecGraph_MatchesBruteForceEdgeSetAndRespectsProjectScope`, `TestStore_Prune*`, and the rest of
+   `store_test.go`) pass unmodified — no test changes were needed for this finding since it was a pure
+   decoupling refactor, not a behavior change. Since some duplication is the intended trade-off here (the
+   design's "never edit the brute-force path" constraint outweighs DRY for this one helper), no shared-helper
+   regression test was added; the manual diff above is the confirmation artifact for this finding.
+2. **SHOULD-FIX — `Prune()` rerouted through `DeleteBySyncID` even when Vec1 is disabled, changing
+   disabled-path behavior.** `Prune`'s per-id delete loop used to issue the original inline `DELETE FROM
+   embeddings WHERE sync_id = ?` statement directly; it had been changed to call `DeleteBySyncID`
+   unconditionally (to reuse the Vec1 dual-write logic when enabled). This silently changed the disabled path
+   in two ways: (a) the error text became double-wrapped (`"embed: Prune delete %s: embed: DeleteBySyncID %s:
+   %w"` instead of the original single `"embed: Prune delete %s: %w"`), and (b) it introduced a new
+   `res.RowsAffected()` failure surface that never existed in `Prune`'s original disabled-path code — a real
+   "byte-for-byte identical when disabled" violation. Fixed with a new `if !s.vec.healthyOK() { ... } else {
+   ... }` branch inside the delete loop: the disabled branch is the untouched original single statement +
+   single error wrap (byte-for-byte restored from `origin/main`); a new branch below it reuses `DeleteBySyncID`
+   only when Vec1 IS healthy, which is new capability behavior, not a disabled-path regression. TDD: wrote
+   `TestStore_Prune_DisabledPathErrorTextIsSingleWrapped` first — it forces the underlying per-id `DELETE` to
+   fail deterministically via a SQL trigger (`RAISE(ABORT, ...)` scoped to one sync_id, so the listing `SELECT`
+   still succeeds) and asserts the resulting error text has the single-wrap prefix and contains neither
+   `"DeleteBySyncID"` nor `"rows affected"`. Confirmed RED against the pre-fix code (`got "embed: Prune delete
+   a: embed: DeleteBySyncID a: constraint failed: forced prune failure (1811)"` — the double-wrap smoking gun,
+   caught exactly as expected), then GREEN after the fix (single wrap, no `DeleteBySyncID`/`rows affected`
+   substrings, and the row survives the failed delete). `TestStore_Prune`/`TestStore_Prune_EmptyLiveSetRemovesAll`
+   (pre-existing, unmodified) and the Vec1 dual-write Prune coverage
+   (`TestVecIndex_UpsertUpdateDeletePrune_MirrorDerivedTable`) still pass, confirming the Vec1-enabled path is
+   unaffected.
+3. **SHOULD-FIX — the crowding-out-under-Vec1 test didn't verify Vec1 was actually engaged.**
+   `TestVecSearch_CrowdingOutFixHoldsUnderVec1` asserted the crowding-out fix holds under Vec1, but — unlike its
+   sibling `TestVecScore_SelfOrthogonalAntipodal` — never confirmed Vec1 was actually used for the query. If
+   Vec1 had silently fallen back to brute force for any reason, the test would have still passed trivially via
+   the brute-force path, without guarding the Vec1-specific pushdown behavior it's named for. Fixed: added `if
+   !store.vec.usable() { t.Fatal(...) }` immediately after the `VecBackfill` call, mirroring the exact pattern
+   already established by `TestVecScore_SelfOrthogonalAntipodal` (and the `build(true)` helpers in the
+   parity/graph tests). Confirmed the test still passes with this assertion in place — Vec1 is genuinely
+   engaged for this scenario, not silently falling back.
+### Deliberately not fixed (explicitly out of scope for this pass)
+- **Finding #4 — dimension-change silently disables backfill until `--reindex`.** Left as a documented known
+  limitation; not addressed in this remediation pass.
+- **Finding #5 — in-memory Vec1 state is set before `tx.Commit()` is confirmed.** Left as a documented known
+  limitation; not addressed in this remediation pass.
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo, all packages)
+- `gofmt -l` on every changed file — clean
+- `git diff --check` — clean
+### Design Deviations
+None beyond what's described above.
