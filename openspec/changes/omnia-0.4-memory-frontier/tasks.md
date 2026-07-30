@@ -252,24 +252,24 @@ Satisfies: REQ-400–406.
 Satisfies: REQ-411 (trusted-only feed), REQ-412 (mechanical, no LLM), REQ-413 (verdict contract), REQ-414
 (flag-default).
 
-- [ ] 7.1 [RED] `internal/enforce/matcher_test.go`: one `trusted` procedure matches touched files alongside two
+- [x] 7.1 [RED] `internal/enforce/matcher_test.go`: one `trusted` procedure matches touched files alongside two
   matching `candidate`/`retired` procedures; assert only the trusted one is selected (REQ-411) — fails, package
   doesn't exist.
-- [ ] 7.2 [GREEN] Create `internal/enforce/matcher.go`: candidate set = `ListProcedures{State:trusted,
+- [x] 7.2 [GREEN] Create `internal/enforce/matcher.go`: candidate set = `ListProcedures{State:trusted,
   Project}` narrowed via `SearchProcedures` (FTS5 over trigger+steps_summary, `procedures.go:390`) against
   touched file paths.
-- [ ] 7.3 [RED] Runner test: a `tests_pass` procedure with a configured command that exits non-zero yields a
+- [x] 7.3 [RED] Runner test: a `tests_pass` procedure with a configured command that exits non-zero yields a
   failing postcondition with exit code + output preview, no LLM call anywhere (REQ-412).
-- [ ] 7.4 [GREEN] Create `internal/enforce/runner.go`: `exec.CommandContext` in repo root with a hard timeout
+- [x] 7.4 [GREEN] Create `internal/enforce/runner.go`: `exec.CommandContext` in repo root with a hard timeout
   (`EnforcementConfig.TimeoutSeconds`); exit 0 = pass for `tests_pass`/`lint_clean`/`build_green`; `custom`
   evaluates `postcondition_expr` only when `AllowCustomCommands` is true.
-- [ ] 7.5 [RED] Verdict-contract test: all applicable postconditions pass → verdict exactly `pass`; one fails
+- [x] 7.5 [RED] Verdict-contract test: all applicable postconditions pass → verdict exactly `pass`; one fails
   with `Mode` unset (default "flag") → verdict exactly `flag`, never halts (REQ-413/414).
-- [ ] 7.6 [GREEN] Implement the verdict decision: any failing postcondition ⇒ `flag` (default) or `block`
+- [x] 7.6 [GREEN] Implement the verdict decision: any failing postcondition ⇒ `flag` (default) or `block`
   (`mode: "block"` explicit).
-- [ ] 7.7 [REFACTOR] Extract the "command not configured for this kind" skip-with-note branch (fail-safe, never
+- [x] 7.7 [REFACTOR] Extract the "command not configured for this kind" skip-with-note branch (fail-safe, never
   block) into its own helper.
-- [ ] 7.8 Verification: `internal/enforce` unit suite green with injected fake command runner; `go vet`/
+- [x] 7.8 Verification: `internal/enforce` unit suite green with injected fake command runner; `go vet`/
   `go build` clean; nothing yet reachable from MCP/CLI (wiring deferred to Phase 8).
 
 ## Phase 8: `memory-enforcement-gate` B — MCP/CLI + Audit (PR 8, base: `main` after PR 7)
