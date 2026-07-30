@@ -42,8 +42,8 @@ composition while reads stay brute-force, and PR 3 alone routes Vec1 reads.
 | 4 | Vec1 KNN reads, parity, fallback, and graph routing | PR 3 | Depends on PR 2B. |
 | 5 | Keychain + adiantum VFS wiring | PR 4 | Depends on PR 3; reforecast before apply. |
 | 6 | Non-destructive encryption migration + CLI + audit/provenance | PR 5 | Depends on PR 4; reforecast before apply. |
-| 7 | Code-decision graph store/query foundation | PR 6A | Depends on PR 5; ~200–260 lines. |
-| 8 | `mem_blame`/`omnia blame` wiring and contract tests | PR 6B | Depends on PR 6A; ~180–240 lines. |
+| 7 | Code-decision graph store/query foundation | PR 6A | Complete (232 lines). Landed ahead of PR 2–5 — no hard dependency on the vec-index/encryption chain per design, only the suggested review order. |
+| 8 | `mem_blame`/`omnia blame` wiring and contract tests | PR 6B | Complete (488 lines incl. docs). Depends on PR 6A only. |
 | 9 | Enforcement matcher + command runner | PR 7 | Depends on PR 6B; reforecast before apply. |
 | 10 | Enforcement MCP/CLI, override, and audit taxonomy | PR 8 | Depends on PR 7; reforecast before apply. |
 | 11 | Consolidation cluster + Ollama client foundation | PR 9A | Depends on PR 8; ~218 lines. |
@@ -221,29 +221,29 @@ Satisfies: REQ-433 (threat model), REQ-435 (reversible), REQ-436 (provenance), R
 
 Satisfies: REQ-400–406.
 
-- [ ] 6.1 [RED] `internal/store/anchors_test.go`: two anchors both covering line 50 of a fixture file —
+- [x] 6.1 [RED] `internal/store/anchors_test.go`: two anchors both covering line 50 of a fixture file —
   `BlameLine(repoRoot, file, 50)` must return BOTH linked memories, each tagged its own `anchor_status` (REQ-402)
   — fails, method doesn't exist.
-- [ ] 6.2 [GREEN] Implement `BlameLine(repoRoot, file string, line int) ([]BlameHit, error)` over
+- [x] 6.2 [GREEN] Implement `BlameLine(repoRoot, file string, line int) ([]BlameHit, error)` over
   `memory_anchors` (reusing `ListActiveAnchors`/`GetAnchorsForObservations`, `anchors.go:163`/`:362`) with
   design's overlap ranking: active-before-stale/traveled, narrowest-range-first, `blame_at` desc, `id` asc.
-- [ ] 6.3 [RED] Stale-anchor test: a stale anchor covering the line still appears, tagged
+- [x] 6.3 [RED] Stale-anchor test: a stale anchor covering the line still appears, tagged
   `anchor_status: "stale"`, never hidden (REQ-403).
-- [ ] 6.4 [GREEN] Confirm 6.2's ranking surfaces stale rows rather than filtering them.
-- [ ] 6.5 [RED] `CodeDecisionGraph(project)` test: 5 active anchors → 3 memories yields exactly 5 edges
+- [x] 6.4 [GREEN] Confirm 6.2's ranking surfaces stale rows rather than filtering them.
+- [x] 6.5 [RED] `CodeDecisionGraph(project)` test: 5 active anchors → 3 memories yields exactly 5 edges
   (REQ-404) — fails, method doesn't exist.
-- [ ] 6.6 [GREEN] Implement `CodeDecisionGraph(project string) (nodes, edges, error)` as a thin projection over
+- [x] 6.6 [GREEN] Implement `CodeDecisionGraph(project string) (nodes, edges, error)` as a thin projection over
   `ListActiveAnchors` — no new table/engine.
 ### Phase 6B: `code-decision-graph` B — MCP/CLI Surface (PR 6B, depends on PR 6A)
 
-- [ ] 6.7 [RED] Not-a-git-repo test: `mem_blame` on a file outside any repo returns zero anchors with a clear
+- [x] 6.7 [RED] Not-a-git-repo test: `mem_blame` on a file outside any repo returns zero anchors with a clear
   reason, never a crash-like error (REQ-406).
-- [ ] 6.8 [GREEN] Wire `mem_blame` MCP tool (gated `code_graph.enabled` in `mcp.MCPConfig`) and `omnia blame
+- [x] 6.8 [GREEN] Wire `mem_blame` MCP tool (gated `code_graph.enabled` in `mcp.MCPConfig`) and `omnia blame
   <file>:<line>` CLI (dispatch `main.go:730`, alongside `forget-scan` `:753`), mapping `ErrGitNotInstalled`/
   `ErrNotAGitRepo` to the empty-result contract.
-- [ ] 6.9 [REFACTOR] Share the `file:line` → repo-relative-path normalization helper between `mem_blame` and
+- [x] 6.9 [REFACTOR] Share the `file:line` → repo-relative-path normalization helper between `mem_blame` and
   the CLI.
-- [ ] 6.10 Verification: `internal/store`/`internal/mcp`/CLI tests green; disabled-path
+- [x] 6.10 Verification: `internal/store`/`internal/mcp`/CLI tests green; disabled-path
   (`code_graph.enabled=false`) confirms "capability disabled", no anchor table touched (REQ-400); no LLM call
   anywhere in this path (REQ-405).
 
