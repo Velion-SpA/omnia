@@ -46,7 +46,7 @@ composition while reads stay brute-force, and PR 3 alone routes Vec1 reads.
 | 8 | `mem_blame`/`omnia blame` wiring and contract tests | PR 6B | Complete (488 lines incl. docs). Depends on PR 6A only. |
 | 9 | Enforcement matcher + command runner | PR 7 | Depends on PR 6B; reforecast before apply. |
 | 10 | Enforcement MCP/CLI, override, and audit taxonomy | PR 8 | Depends on PR 7; reforecast before apply. |
-| 11 | Consolidation cluster + Ollama client foundation | PR 9A | Depends on PR 8; ~218 lines. |
+| 11 | Consolidation cluster + Ollama client foundation | PR 9A | Complete (~197 lines). Landed independently of PR 2-8 — no hard dependency, only the suggested review order. |
 | 12 | Consolidation digest, CLI, and idle integration | PR 9B | Depends on PR 9A; ~263 lines. |
 | 13 | Learned-ranker feature/model and cold-start foundation | PR 10A | Depends on PR 9B; ~350 lines. |
 | 14 | Ranker train/eval/live integration | PR 10B | Depends on PR 10A; ~252 lines. |
@@ -301,18 +301,18 @@ Satisfies: REQ-410 (gate), REQ-415 (override), REQ-416 (audit), REQ-417 (no auto
 
 Satisfies: REQ-420–426.
 
-- [ ] 9.1 [RED] `internal/consolidate/cluster_test.go`: 3 memories connected above `min_score` via a fixture
+- [x] 9.1 [RED] `internal/consolidate/cluster_test.go`: 3 memories connected above `min_score` via a fixture
   `embed.GraphScoped` output form one cluster via union-find (REQ-421) — fails, package doesn't exist.
-- [ ] 9.2 [GREEN] Create `internal/consolidate/cluster.go`: union-find over `embed.GraphScoped(project)`
+- [x] 9.2 [GREEN] Create `internal/consolidate/cluster.go`: union-find over `embed.GraphScoped(project)`
   (`store.go:282`) edges ≥ `MinScore` (default 0.5), per-node cap `K` (default 8).
-- [ ] 9.3 [RED] Cluster-size-bound tests: a 2-member cluster with `min_cluster_size=3` produces no digest,
+- [x] 9.3 [RED] Cluster-size-bound tests: a 2-member cluster with `min_cluster_size=3` produces no digest,
   reported "below minimum size" (REQ-423); a 40-member cluster with `max_cluster_size=20` still references all
   40 sources across one or more digests, none dropped (REQ-423).
-- [ ] 9.4 [GREEN] Implement size-bound handling: skip-below-minimum; cap-or-split-above-maximum via
+- [x] 9.4 [GREEN] Implement size-bound handling: skip-below-minimum; cap-or-split-above-maximum via
   highest-degree-node top-K neighborhood.
-- [ ] 9.5 [RED] `internal/embed/client_test.go`: `Client.Generate(ctx, prompt)` posts to Ollama's `/api/chat`
+- [x] 9.5 [RED] `internal/embed/client_test.go`: `Client.Generate(ctx, prompt)` posts to Ollama's `/api/chat`
   on `Embeddings.BaseURL`, sibling to `Embed` (`embed/client.go:78`) — fails, method doesn't exist.
-- [ ] 9.6 [GREEN] Add `Generate(ctx, prompt) (string, error)` to `embed.Client`: low-temperature, fixed prompt,
+- [x] 9.6 [GREEN] Add `Generate(ctx, prompt) (string, error)` to `embed.Client`: low-temperature, fixed prompt,
   `/api/chat` call.
 ### Phase 9B: `sleep-consolidation` B — Digest + Integration (PR 9B, depends on PR 9A)
 
