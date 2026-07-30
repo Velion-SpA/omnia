@@ -35,6 +35,7 @@ import (
 	"github.com/velion/omnia/internal/embed"
 	projectpkg "github.com/velion/omnia/internal/project"
 	"github.com/velion/omnia/internal/purge"
+	"github.com/velion/omnia/internal/ranker"
 	"github.com/velion/omnia/internal/recall"
 	"github.com/velion/omnia/internal/store"
 	"github.com/velion/omnia/internal/timeutil"
@@ -92,6 +93,12 @@ type MCPConfig struct {
 	// Behavior) even though RankResults is unconditionally called — it is a
 	// pure no-op when RecallRanking.Enabled is false.
 	RecallRanking config.RankingConfig
+
+	// LearnedRanker holds a promoted local model for the optional final rerank
+	// pass. Zero value (Enabled=false) or a nil LearnedRankerModel is a pure
+	// no-op — ApplyLearnedRanker returns its input unchanged.
+	LearnedRanker      config.RankerConfig
+	LearnedRankerModel *ranker.Model
 
 	// AnchorProbe resolves optional mem_save `code_anchors` into persisted
 	// memory_anchors rows (omnia-structural-forgetting, PR1 — the write
@@ -1402,6 +1409,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		// (Requirement: Backward-Compatible Default Behavior).
 		now := store.ReadInstant(asOf)
 		results = RankResults(results, relevance, cfg.RecallRanking, now)
+		results = ApplyLearnedRanker(results, relevance, cfg.LearnedRanker, cfg.LearnedRankerModel, cfg.RecallRanking, now)
 
 		// Batch-load relations for all results (REQ-002). Avoids N+1.
 		syncIDs := make([]string, 0, len(results))
