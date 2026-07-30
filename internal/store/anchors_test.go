@@ -4,6 +4,68 @@ import (
 	"testing"
 )
 
+func TestBlameLineReturnsAllCoveringAnchorsInDeterministicOrder(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, decision := addTestObs(t, s, "Narrow decision", "decision", "testproject", "project")
+	_, bugfix := addTestObs(t, s, "Wide bugfix", "bugfix", "testproject", "project")
+	for _, p := range []UpsertAnchorParams{
+		{ObsSyncID: decision, RepoRoot: "/repo", FilePath: "fixture.go", Symbol: "Narrow", LineStart: 45, LineEnd: 55, BlameSHA: "narrow", BlameAt: "2025-01-02T00:00:00Z", ContentHash: "narrow"},
+		{ObsSyncID: bugfix, RepoRoot: "/repo", FilePath: "fixture.go", Symbol: "Wide", LineStart: 40, LineEnd: 60, BlameSHA: "wide", BlameAt: "2025-01-01T00:00:00Z", ContentHash: "wide"},
+	} {
+		if _, err := s.UpsertAnchor(p); err != nil {
+			t.Fatalf("UpsertAnchor: %v", err)
+		}
+	}
+	hits, err := s.BlameLine("/repo", "fixture.go", 50)
+	if err != nil {
+		t.Fatalf("BlameLine: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("expected 2 hits, got %+v", hits)
+	}
+	if hits[0].Anchor.Symbol != "Narrow" || hits[0].AnchorStatus != AnchorStatusActive || hits[0].Memory.SyncID != decision {
+		t.Fatalf("unexpected first hit: %+v", hits[0])
+	}
+	if hits[1].Anchor.Symbol != "Wide" || hits[1].AnchorStatus != AnchorStatusActive || hits[1].Memory.SyncID != bugfix {
+		t.Fatalf("unexpected second hit: %+v", hits[1])
+	}
+}
+
+func TestBlameLineIncludesStaleAnchors(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, syncID := addTestObs(t, s, "Stale decision", "decision", "testproject", "project")
+	anchorID := addTestAnchor(t, s, syncID, "fixture.go", "Stale")
+	if err := s.MarkAnchorStale(anchorID, nil); err != nil {
+		t.Fatalf("MarkAnchorStale: %v", err)
+	}
+	hits, err := s.BlameLine("/repo", "fixture.go", 15)
+	if err != nil {
+		t.Fatalf("BlameLine: %v", err)
+	}
+	if len(hits) != 1 || hits[0].AnchorStatus != AnchorStatusStale || hits[0].Memory.SyncID != syncID {
+		t.Fatalf("expected stale hit, got %+v", hits)
+	}
+}
+
+func TestCodeDecisionGraphProjectsEachActiveAnchorAsOneEdge(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, first := addTestObs(t, s, "First", "decision", "graph-project", "project")
+	_, second := addTestObs(t, s, "Second", "bugfix", "graph-project", "project")
+	_, third := addTestObs(t, s, "Third", "pattern", "graph-project", "project")
+	for i, syncID := range []string{first, first, second, second, third} {
+		if _, err := s.UpsertAnchor(UpsertAnchorParams{ObsSyncID: syncID, RepoRoot: "/repo", FilePath: "graph.go", Symbol: string(rune('A' + i)), LineStart: i + 1, LineEnd: i + 1, ContentHash: string(rune('a' + i))}); err != nil {
+			t.Fatalf("UpsertAnchor: %v", err)
+		}
+	}
+	nodes, edges, err := s.CodeDecisionGraph("graph-project")
+	if err != nil {
+		t.Fatalf("CodeDecisionGraph: %v", err)
+	}
+	if len(nodes) != 3 || len(edges) != 5 {
+		t.Fatalf("expected 3 nodes and 5 edges, got nodes=%+v edges=%+v", nodes, edges)
+	}
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 // addTestAnchor upserts a minimal active anchor linked to obsSyncID and

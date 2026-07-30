@@ -49,6 +49,21 @@ type MemoryAnchor struct {
 	NewBlameSHA *string
 }
 
+type BlameHit struct {
+	Anchor       MemoryAnchor `json:"anchor"`
+	AnchorStatus string       `json:"anchor_status"`
+	Memory       Observation  `json:"memory"`
+}
+
+type CodeDecisionNode struct {
+	Memory Observation `json:"memory"`
+}
+
+type CodeDecisionEdge struct {
+	Anchor MemoryAnchor `json:"anchor"`
+	Memory Observation  `json:"memory"`
+}
+
 // UpsertAnchorParams holds the inputs for UpsertAnchor.
 type UpsertAnchorParams struct {
 	// ObsSyncID is the TEXT sync_id of the memory this anchor is linked to (required).
@@ -401,4 +416,64 @@ func (s *Store) GetAnchorsForObservations(syncIDs []string) (map[string][]Memory
 		return nil, fmt.Errorf("GetAnchorsForObservations: rows error: %w", err)
 	}
 	return result, nil
+}
+
+func (s *Store) BlameLine(repoRoot, file string, line int) ([]BlameHit, error) {
+	if strings.TrimSpace(file) == "" || line < 1 {
+		return nil, fmt.Errorf("BlameLine: file and positive line are required")
+	}
+	query := `
+		SELECT a.id, a.sync_id, a.obs_sync_id, ifnull(a.repo_root,''), a.file_path, ifnull(a.symbol,''),
+		       a.line_start, a.line_end, ifnull(a.blame_sha,''), ifnull(a.blame_at,''), a.content_hash,
+		       a.anchor_status, a.created_at, a.checked_at, a.staled_at, a.new_blame_sha,
+		       o.id, o.sync_id, o.session_id, o.type, o.title, o.content, o.scope, o.created_at, o.updated_at
+		FROM memory_anchors a JOIN observations o ON o.sync_id = a.obs_sync_id
+		WHERE a.file_path = ? AND a.line_start <= ? AND a.line_end >= ? AND o.deleted_at IS NULL`
+	args := []any{file, line, line}
+	if strings.TrimSpace(repoRoot) != "" {
+		query += " AND ifnull(a.repo_root,'') = ?"
+		args = append(args, repoRoot)
+	}
+	query += ` ORDER BY CASE a.anchor_status WHEN 'active' THEN 0 ELSE 1 END,
+		(a.line_end - a.line_start) ASC, ifnull(a.blame_at,'') DESC, a.id ASC`
+	rows, err := s.queryHook(s.db, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("BlameLine: %w", err)
+	}
+	defer rows.Close()
+	var out []BlameHit
+	for rows.Next() {
+		var hit BlameHit
+		if err := rows.Scan(&hit.Anchor.ID, &hit.Anchor.SyncID, &hit.Anchor.ObsSyncID, &hit.Anchor.RepoRoot, &hit.Anchor.FilePath, &hit.Anchor.Symbol, &hit.Anchor.LineStart, &hit.Anchor.LineEnd, &hit.Anchor.BlameSHA, &hit.Anchor.BlameAt, &hit.Anchor.ContentHash, &hit.Anchor.AnchorStatus, &hit.Anchor.CreatedAt, &hit.Anchor.CheckedAt, &hit.Anchor.StaledAt, &hit.Anchor.NewBlameSHA, &hit.Memory.ID, &hit.Memory.SyncID, &hit.Memory.SessionID, &hit.Memory.Type, &hit.Memory.Title, &hit.Memory.Content, &hit.Memory.Scope, &hit.Memory.CreatedAt, &hit.Memory.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("BlameLine: scan: %w", err)
+		}
+		hit.AnchorStatus = hit.Anchor.AnchorStatus
+		out = append(out, hit)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("BlameLine: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) CodeDecisionGraph(project string) ([]CodeDecisionNode, []CodeDecisionEdge, error) {
+	anchors, err := s.ListActiveAnchors(project)
+	if err != nil {
+		return nil, nil, err
+	}
+	nodes := make([]CodeDecisionNode, 0)
+	edges := make([]CodeDecisionEdge, 0, len(anchors))
+	seen := map[string]bool{}
+	for _, anc := range anchors {
+		obs, err := s.GetObservationBySyncID(anc.ObsSyncID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("CodeDecisionGraph: %w", err)
+		}
+		edges = append(edges, CodeDecisionEdge{Anchor: anc, Memory: *obs})
+		if !seen[obs.SyncID] {
+			seen[obs.SyncID] = true
+			nodes = append(nodes, CodeDecisionNode{Memory: *obs})
+		}
+	}
+	return nodes, edges, nil
 }
