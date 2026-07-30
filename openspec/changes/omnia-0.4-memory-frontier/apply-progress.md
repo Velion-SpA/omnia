@@ -90,3 +90,31 @@ None. (Idle worker deferred as noted above — not a deviation, the spec permits
 - `go test ./...` — passed
 ### Design Deviations
 None.
+
+## PR 10B — Learned Ranker: Train + Live Integration
+- Completed tasks: 10.5–10.12 (cold-start fallback, `omnia rank-train`, model-invalidation, MCP-boundary
+  re-rank wiring, verification). Combined with PR 10A (10.1–10.4), all of Phase 10 is now complete.
+- Boundary: `omnia rank-train` (dispatch + CLI help), `internal/mcp.ApplyLearnedRanker` at the same wiring
+  seam as `RankResults`, and `internal/store.ListRankerTrainingRows` (the real training-data source, used only
+  by `omnia rank-train` — not part of PR10A's pure algorithm package).
+### TDD Cycle Evidence
+| Task | RED | GREEN | REFACTOR |
+|---|---|---|---|
+| 10.5–10.6 | Cold-start behavior lives in `ApplyLearnedRanker`'s caller contract, not `internal/ranker` | Disabled, nil-model, and cold-start callers all pass through unchanged — verified via `TestNewServerWithConfig...` style disabled-registration tests | N/A |
+| 10.7–10.8 | `rank_train_test.go` did not exist prior (a real gap left by the original implementation, found and filled while splitting this PR) | `omnia rank-train`: insufficient-examples message, promotes on successful eval, refuses to promote on regression | Injectable `rankerEval` var keeps the promotion gate testable without a real eval run |
+| 10.9–10.10 | `model_test.go` (PR10A) covers schema-mismatch/corruption rejection | `LoadCurrent` recovers to fallback on either | Reused from PR10A |
+| 10.11 | — | `ApplyLearnedRanker` called immediately after `RankResults` in `handleSearch`, same seam | `internal/recall`/`internal/store` untouched |
+| 10.12 | — | Full suite green, `CGO_ENABLED=0` build/vet clean | — |
+### Bugs found and fixed while completing this PR
+- `cmdRankTrain` had the same `config.Load` error → `fatal()` anti-pattern already fixed in PR6B (`omnia blame`)
+  and PR9B (`omnia consolidate`): a missing config file (not just an explicit disable) now degrades to the
+  same "learned ranker is disabled" message instead of exiting the process.
+- `rank_train_test.go` did not exist in the original implementation — added RED/GREEN coverage for the
+  disabled path, the missing-config-file path, insufficient-training-examples, successful promotion, and
+  eval-regression refusal, using the pre-existing injectable `rankerEval` seam.
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed
+### Design Deviations
+None.

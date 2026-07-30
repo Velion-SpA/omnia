@@ -49,7 +49,7 @@ composition while reads stay brute-force, and PR 3 alone routes Vec1 reads.
 | 11 | Consolidation cluster + Ollama client foundation | PR 9A | Complete (~197 lines). Landed independently of PR 2-8 — no hard dependency, only the suggested review order. |
 | 12 | Consolidation digest, CLI, and idle integration | PR 9B | Depends on PR 9A; ~263 lines. |
 | 13 | Learned-ranker feature/model foundation (cold-start integration lands in PR 10B, not here) | PR 10A | Complete (350 lines). Landed independently of PR 2-9 — no hard dependency, only the suggested review order. |
-| 14 | Ranker train/eval/live integration | PR 10B | Depends on PR 10A; ~252 lines. |
+| 14 | Ranker train/eval/live integration, incl. cold-start fallback at the MCP boundary | PR 10B | Complete (~300 lines). Depends on PR 10A only. |
 | 15 | Repo cartridge | PR 11 | Depends on PR 10B; previous ~430–540 estimate requires split or `size:exception`. |
 
 ---
@@ -350,24 +350,24 @@ Satisfies: REQ-440–446.
 - [x] 10.4 [GREEN] Create `internal/ranker/model.go`: L2-regularized logistic regression, batch gradient
   descent, serialize to `<dataDir>/ranker/model-<version>.json` + `current` pointer, versioned by a hash of
   `{feature-schema, train-set size, trained-at}` (REQ-445).
-- [ ] 10.5 [RED] Cold-start test: `enabled=true`, zero judgments/outcomes, ranking byte-for-byte identical to
+- [x] 10.5 [RED] Cold-start test: `enabled=true`, zero judgments/outcomes, ranking byte-for-byte identical to
   `DefaultFuseParams`/`AdaptiveFloor` (`recall.go:74`/`:96`) (REQ-441).
-- [ ] 10.6 [GREEN] Implement the cold-start fallback: below `MinTrainExamples` (default 50), no `current`
+- [x] 10.6 [GREEN] Implement the cold-start fallback: below `MinTrainExamples` (default 50), no `current`
   model, or decode error → use `DefaultFuseParams`/`AdaptiveFloor` unchanged (REQ-446).
 ### Phase 10B: `learned-ranker` B — Train + Live Integration (PR 10B, depends on PR 10A)
 
-- [ ] 10.7 [RED] `omnia rank-train` test: training runs `eval.RunOnce` (`harness.go:37`) after fitting and
+- [x] 10.7 [RED] `omnia rank-train` test: training runs `eval.RunOnce` (`harness.go:37`) after fitting and
   refuses to write `current` on any regression (REQ-444).
-- [ ] 10.8 [GREEN] Implement `omnia rank-train` CLI (dispatch `:730`): train → `eval.RunOnce` gate → promote
+- [x] 10.8 [GREEN] Implement `omnia rank-train` CLI (dispatch `:730`): train → `eval.RunOnce` gate → promote
   `current` only if no regression.
-- [ ] 10.9 [RED] Model-invalidation test: a model trained against an older feature shape is detected invalid
+- [x] 10.9 [RED] Model-invalidation test: a model trained against an older feature shape is detected invalid
   and not used live (REQ-445); a corrupted model file falls back silently to default floors, no error surfaced
   (REQ-446).
-- [ ] 10.10 [GREEN] Implement the feature-schema-hash check on load; wrap model load in a recover-to-fallback
+- [x] 10.10 [GREEN] Implement the feature-schema-hash check on load; wrap model load in a recover-to-fallback
   path.
-- [ ] 10.11 [REFACTOR] Place the re-rank pass at the `internal/mcp` wiring boundary — the same seam as
+- [x] 10.11 [REFACTOR] Place the re-rank pass at the `internal/mcp` wiring boundary — the same seam as
   `RecallRanking`/`RankResults` (`main.go:1300`/`:1304`) — keeping `internal/recall`/`internal/store` untouched.
-- [ ] 10.12 Verification: `internal/ranker` suite + `internal/eval` gate integration green; disabled-path and
+- [x] 10.12 Verification: `internal/ranker` suite + `internal/eval` gate integration green; disabled-path and
   cold-start byte-for-byte; `CGO_ENABLED=0 go build ./...` clean.
 
 ## Phase 11: `repo-cartridge` (PR 11, depends on PR 10B; split or obtain `size:exception` if >400)
