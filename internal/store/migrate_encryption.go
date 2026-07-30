@@ -43,6 +43,62 @@ type EncryptionMigrationResult struct {
 
 const observationsRowCountQuery = `SELECT COUNT(*) FROM observations`
 
+// encryptNewFile creates a brand-new adiantum-encrypted database file at
+// dstPath containing a full copy of the SQLite database readable (without
+// any key) at plainSrcURI. The destination's encryption key is established
+// via `PRAGMA hexkey=...` on a connection this function opens and controls
+// directly, immediately after connecting — NEVER via a URI parameter (the
+// adiantum package's own docs warn a URI-embedded key is visible via
+// vfs.Filename.URIParameters to any code that inspects the open filename;
+// the PRAGMA form never appears there, mirroring openAdiantumDB's own
+// read-path pattern). The actual copy uses SQLite's online backup/restore
+// API (Conn.Restore) — the same mechanism VACUUM INTO is itself implemented
+// on top of — so the resulting bytes are equivalent, but the destination
+// connection (and its key) are ours to control from the very first byte,
+// unlike VACUUM INTO's implicit, un-hookable target-file creation.
+func encryptNewFile(ctx context.Context, dstPath, hexKey, plainSrcURI string) error {
+	dst, err := sqlite3.OpenContext(ctx, "file:"+dstPath+"?vfs=adiantum")
+	if err != nil {
+		return fmt.Errorf("open new encrypted target: %w", err)
+	}
+	defer dst.Close()
+	if err := dst.Exec("PRAGMA hexkey='" + hexKey + "'"); err != nil {
+		return fmt.Errorf("set encryption key on new target: %w", err)
+	}
+	if err := fts5.Register(dst); err != nil {
+		return fmt.Errorf("register fts5 on new target: %w", err)
+	}
+	if err := dst.Restore("main", plainSrcURI); err != nil {
+		return fmt.Errorf("restore into new encrypted target: %w", err)
+	}
+	return nil
+}
+
+// decryptToPlainFile opens srcPath (adiantum-encrypted with hexKey) and
+// backs its full content up into a brand-new plaintext file at dstPath.
+// This is RotateKey's intermediate step: the OLD key is only ever
+// established via a PRAGMA on a connection this function fully controls
+// (never a URI parameter), and the NEW key (set separately by
+// encryptNewFile) never has to coexist with the old key in the same
+// connection, SQL statement, or URI.
+func decryptToPlainFile(ctx context.Context, srcPath, hexKey, dstPath string) error {
+	src, err := sqlite3.OpenContext(ctx, "file:"+srcPath+"?vfs=adiantum")
+	if err != nil {
+		return fmt.Errorf("open encrypted source: %w", err)
+	}
+	defer src.Close()
+	if err := src.Exec("PRAGMA hexkey='" + hexKey + "'"); err != nil {
+		return fmt.Errorf("set encryption key on source: %w", err)
+	}
+	if err := fts5.Register(src); err != nil {
+		return fmt.Errorf("register fts5 on source: %w", err)
+	}
+	if err := src.Backup("main", "file:"+dstPath+"?vfs=os"); err != nil {
+		return fmt.Errorf("back up source into plaintext target: %w", err)
+	}
+	return nil
+}
+
 // isPlaintextSQLiteFile reports whether path exists and starts with the
 // literal, well-known SQLite file-format magic header — the same
 // deterministic check used to decide "needs migration" vs "brand new" vs
@@ -64,13 +120,14 @@ func isPlaintextSQLiteFile(path string) (exists bool, plaintext bool, err error)
 	return true, n >= 15 && string(header[:15]) == "SQLite format 3", nil
 }
 
-// MigrateToEncrypted encrypts the omnia.db file at dbPath in place:
-// VACUUM INTO an adiantum-encrypted sibling temp file, verify the
-// observations row count matches, atomically rename the original aside as
-// a timestamped .bak, then rename the encrypted copy into place. Any
-// failure aborts BEFORE the rename — the original plaintext file is never
-// touched or left half-migrated (design: "abort-and-keep-plaintext on any
-// step failure").
+// MigrateToEncrypted encrypts the omnia.db file at dbPath in place: back it
+// up into a brand-new adiantum-encrypted sibling temp file (via
+// encryptNewFile's Conn.Restore, never a VACUUM INTO URI-embedded key),
+// verify the observations row count matches, atomically rename the
+// original aside as a timestamped .bak, then rename the encrypted copy
+// into place. Any failure aborts BEFORE the rename — the original
+// plaintext file is never touched or left half-migrated (design:
+// "abort-and-keep-plaintext on any step failure").
 //
 // A missing dbPath (brand-new store, nothing to migrate — the normal
 // New/openEngramDB path already creates a fresh encrypted file directly)
@@ -98,12 +155,13 @@ func MigrateToEncrypted(ctx context.Context, dbPath, hexKey string) (EncryptionM
 		return EncryptionMigrationResult{}, fmt.Errorf("engram: migrate to encrypted: count source rows: %w", err)
 	}
 
+	srcDB.Close()
+
 	tmpPath := dbPath + ".encrypting.tmp"
 	os.Remove(tmpPath) // best-effort: clear any stale temp from a previous aborted attempt
-	vacuumSQL := fmt.Sprintf(`VACUUM INTO 'file:%s?vfs=adiantum&hexkey=%s'`, tmpPath, hexKey)
-	if _, err := srcDB.ExecContext(ctx, vacuumSQL); err != nil {
+	if err := encryptNewFile(ctx, tmpPath, hexKey, "file:"+dbPath); err != nil {
 		os.Remove(tmpPath)
-		return EncryptionMigrationResult{}, fmt.Errorf("engram: migrate to encrypted: vacuum into encrypted target: %w", err)
+		return EncryptionMigrationResult{}, fmt.Errorf("engram: migrate to encrypted: %w", err)
 	}
 
 	after, verr := countRowsInEncryptedFile(ctx, tmpPath, hexKey, observationsRowCountQuery)
@@ -115,7 +173,6 @@ func MigrateToEncrypted(ctx context.Context, dbPath, hexKey string) (EncryptionM
 		os.Remove(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("engram: migrate to encrypted: row count mismatch (before=%d after=%d); aborting, original untouched", before, after)
 	}
-	srcDB.Close()
 
 	backupPath := fmt.Sprintf("%s.bak-%s", dbPath, time.Now().UTC().Format("20060102T150405Z"))
 	if err := os.Rename(dbPath, backupPath); err != nil {
@@ -212,10 +269,13 @@ func MigrateToPlaintext(ctx context.Context, dbPath, hexKey string) (EncryptionM
 }
 
 // RotateKey re-encrypts the ALREADY-encrypted omnia.db file at dbPath from
-// oldHexKey to newHexKey directly (VACUUM INTO a new-key-encrypted sibling
-// temp file from an old-key-encrypted source), verifies the row count,
-// atomically renames the old-key file aside as a timestamped .bak, then
-// renames the new-key copy into place. `omnia security rotate-key` MUST
+// oldHexKey to newHexKey: first backs it up (decryptToPlainFile, keyed via
+// PRAGMA, never a URI) into a plaintext intermediate temp file, then
+// re-encrypts that intermediate (encryptNewFile, newHexKey via PRAGMA) into
+// a new-key sibling temp file — the old and new keys are never embedded in
+// SQL/URI text, and never coexist on the same connection. Verifies the row
+// count, atomically renames the old-key file aside as a timestamped .bak,
+// then renames the new-key copy into place. `omnia security rotate-key` MUST
 // call this BEFORE updating the keychain entry to newHexKey (never after):
 // if this fails, the original file and the still-current keychain entry
 // (oldHexKey) are both untouched, so the store remains fully readable.
@@ -253,13 +313,21 @@ func RotateKey(ctx context.Context, dbPath, oldHexKey, newHexKey string) (Encryp
 	if err := srcDB.QueryRowContext(ctx, observationsRowCountQuery).Scan(&before); err != nil {
 		return EncryptionMigrationResult{}, fmt.Errorf("engram: rotate key: count source rows (wrong old key?): %w", err)
 	}
+	srcDB.Close()
+
+	tmpPlainPath := dbPath + ".rotating.plain.tmp"
+	os.Remove(tmpPlainPath)
+	if err := decryptToPlainFile(ctx, dbPath, oldHexKey, tmpPlainPath); err != nil {
+		os.Remove(tmpPlainPath)
+		return EncryptionMigrationResult{}, fmt.Errorf("engram: rotate key: %w", err)
+	}
+	defer os.Remove(tmpPlainPath)
 
 	tmpPath := dbPath + ".rotating.tmp"
 	os.Remove(tmpPath)
-	vacuumSQL := fmt.Sprintf(`VACUUM INTO 'file:%s?vfs=adiantum&hexkey=%s'`, tmpPath, newHexKey)
-	if _, err := srcDB.ExecContext(ctx, vacuumSQL); err != nil {
+	if err := encryptNewFile(ctx, tmpPath, newHexKey, "file:"+tmpPlainPath); err != nil {
 		os.Remove(tmpPath)
-		return EncryptionMigrationResult{}, fmt.Errorf("engram: rotate key: vacuum into new-key target: %w", err)
+		return EncryptionMigrationResult{}, fmt.Errorf("engram: rotate key: %w", err)
 	}
 
 	after, verr := countRowsInEncryptedFile(ctx, tmpPath, newHexKey, observationsRowCountQuery)
@@ -271,7 +339,6 @@ func RotateKey(ctx context.Context, dbPath, oldHexKey, newHexKey string) (Encryp
 		os.Remove(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("engram: rotate key: row count mismatch (before=%d after=%d); aborting, original untouched", before, after)
 	}
-	srcDB.Close()
 
 	backupPath := fmt.Sprintf("%s.bak-%s", dbPath, time.Now().UTC().Format("20060102T150405Z"))
 	if err := os.Rename(dbPath, backupPath); err != nil {

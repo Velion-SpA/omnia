@@ -198,6 +198,23 @@ func TestRotateKey_AlreadyPlaintextEmbeddingsStore_ReturnsError(t *testing.T) {
 	}
 }
 
+// ─── security regression: never embed the key in VACUUM INTO URI text ───
+
+// TestMigrateEncryption_SourceNeverEmbedsHexKeyInVacuumIntoURI mirrors
+// internal/store's own regression guard of the same name — see that file
+// for the full rationale (adiantum's own docs warn a URI-embedded key is
+// visible via vfs.Filename.URIParameters; a PRAGMA on a directly-controlled
+// connection never appears there).
+func TestMigrateEncryption_SourceNeverEmbedsHexKeyInVacuumIntoURI(t *testing.T) {
+	src, err := os.ReadFile("migrate_encryption.go")
+	if err != nil {
+		t.Fatalf("read migrate_encryption.go: %v", err)
+	}
+	if strings.Contains(string(src), "vfs=adiantum&hexkey=") {
+		t.Fatal("migrate_encryption.go must never embed the encryption key in a VACUUM INTO URI's hexkey= parameter — use PRAGMA hexkey on a directly-controlled connection instead")
+	}
+}
+
 func TestRotateKey_MissingEmbeddingsFile_IsNoop(t *testing.T) {
 	dir := t.TempDir()
 	result, err := RotateKey(context.Background(), dir+"/does-not-exist.db", "irrelevant", "irrelevant2", false)

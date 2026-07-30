@@ -271,6 +271,30 @@ func TestRotateKey_MissingFile_IsNoop(t *testing.T) {
 	}
 }
 
+// ─── security regression: never embed the key in VACUUM INTO URI text ───
+
+// TestMigrateEncryption_SourceNeverEmbedsHexKeyInVacuumIntoURI is a static
+// regression guard for a real security bug: `VACUUM INTO
+// 'file:...?vfs=adiantum&hexkey=...'` embeds the raw encryption key
+// directly in SQL/URI text. The adiantum package's own docs
+// (vfs/adiantum/api.go) warn this "makes your key easily accessible to
+// other parts of your application (e.g. through vfs.Filename.URIParameters)"
+// and recommend invoking `PRAGMA hexkey=...` immediately after opening a
+// connection instead — exactly what openAdiantumDB already does for reads.
+// This scans the package's own source rather than instrumenting a runtime
+// SQL spy, since the fix removes the vulnerable string construction
+// entirely (via Conn.Backup/Conn.Restore) rather than gating it behind a
+// flag.
+func TestMigrateEncryption_SourceNeverEmbedsHexKeyInVacuumIntoURI(t *testing.T) {
+	src, err := os.ReadFile("migrate_encryption.go")
+	if err != nil {
+		t.Fatalf("read migrate_encryption.go: %v", err)
+	}
+	if strings.Contains(string(src), "vfs=adiantum&hexkey=") {
+		t.Fatal("migrate_encryption.go must never embed the encryption key in a VACUUM INTO URI's hexkey= parameter — use PRAGMA hexkey on a directly-controlled connection instead")
+	}
+}
+
 // ─── 5.8 Verification: migration against a 10k-row fixture ───
 
 func TestMigrateToEncrypted_TenThousandRowFixture_PreservesAllRows(t *testing.T) {

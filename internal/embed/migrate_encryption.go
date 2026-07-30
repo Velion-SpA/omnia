@@ -70,12 +70,76 @@ func migrateInit(key string, includeVec1 bool) func(*sqlite3.Conn) error {
 	}
 }
 
+// encryptNewFile creates a brand-new adiantum-encrypted embeddings.db file
+// at dstPath containing a full copy of the SQLite database readable
+// (without any key) at plainSrcURI. The destination's encryption key is
+// established via `PRAGMA hexkey=...` on a connection this function opens
+// and controls directly, immediately after connecting — NEVER via a URI
+// parameter (the adiantum package's own docs warn a URI-embedded key is
+// visible via vfs.Filename.URIParameters to any code that inspects the
+// open filename; the PRAGMA form never appears there, mirroring
+// openEncryptedEmbedDB's own read-path pattern). includeVec1 registers the
+// Vec1 extension on the destination when vector_index.enabled is ALSO
+// true, so an existing vec_embeddings virtual table survives the copy. The
+// actual copy uses SQLite's online backup/restore API (Conn.Restore) — the
+// same mechanism VACUUM INTO is itself implemented on top of — so the
+// resulting bytes are equivalent, but the destination connection (and its
+// key) are ours to control from the very first byte, unlike VACUUM INTO's
+// implicit, un-hookable target-file creation.
+func encryptNewFile(ctx context.Context, dstPath, hexKey, plainSrcURI string, includeVec1 bool) error {
+	dst, err := sqlite3.OpenContext(ctx, "file:"+dstPath+"?vfs=adiantum")
+	if err != nil {
+		return fmt.Errorf("open new encrypted target: %w", err)
+	}
+	defer dst.Close()
+	if err := dst.Exec("PRAGMA hexkey='" + hexKey + "'"); err != nil {
+		return fmt.Errorf("set encryption key on new target: %w", err)
+	}
+	if includeVec1 {
+		if err := vec1.Register(dst); err != nil {
+			return fmt.Errorf("register vec1 on new target: %w", err)
+		}
+	}
+	if err := dst.Restore("main", plainSrcURI); err != nil {
+		return fmt.Errorf("restore into new encrypted target: %w", err)
+	}
+	return nil
+}
+
+// decryptToPlainFile opens srcPath (adiantum-encrypted with hexKey) and
+// backs its full content up into a brand-new plaintext file at dstPath.
+// This is RotateKey's intermediate step: the OLD key is only ever
+// established via a PRAGMA on a connection this function fully controls
+// (never a URI parameter), and the NEW key (set separately by
+// encryptNewFile) never has to coexist with the old key in the same
+// connection, SQL statement, or URI.
+func decryptToPlainFile(ctx context.Context, srcPath, hexKey, dstPath string, includeVec1 bool) error {
+	src, err := sqlite3.OpenContext(ctx, "file:"+srcPath+"?vfs=adiantum")
+	if err != nil {
+		return fmt.Errorf("open encrypted source: %w", err)
+	}
+	defer src.Close()
+	if err := src.Exec("PRAGMA hexkey='" + hexKey + "'"); err != nil {
+		return fmt.Errorf("set encryption key on source: %w", err)
+	}
+	if includeVec1 {
+		if err := vec1.Register(src); err != nil {
+			return fmt.Errorf("register vec1 on source: %w", err)
+		}
+	}
+	if err := src.Backup("main", "file:"+dstPath+"?vfs=os"); err != nil {
+		return fmt.Errorf("back up source into plaintext target: %w", err)
+	}
+	return nil
+}
+
 // MigrateToEncrypted encrypts the embeddings.db file at dbPath in place,
-// mirroring internal/store.MigrateToEncrypted exactly (VACUUM INTO an
-// adiantum-encrypted sibling temp file, verify row count, atomic rename
-// with a retained timestamped .bak). includeVec1 registers the Vec1
-// extension on the source connection when vector_index.enabled is ALSO
-// true, so an existing vec_embeddings virtual table survives the copy.
+// mirroring internal/store.MigrateToEncrypted exactly (backs it up into a
+// brand-new adiantum-encrypted sibling temp file via encryptNewFile's
+// Conn.Restore, never a VACUUM INTO URI-embedded key; verifies row count;
+// atomic rename with a retained timestamped .bak). includeVec1 registers
+// the Vec1 extension on the source connection when vector_index.enabled is
+// ALSO true, so an existing vec_embeddings virtual table survives the copy.
 //
 // A missing dbPath and an already-encrypted dbPath are both no-ops.
 func MigrateToEncrypted(ctx context.Context, dbPath, hexKey string, includeVec1 bool) (EncryptionMigrationResult, error) {
@@ -105,13 +169,13 @@ func MigrateToEncrypted(ctx context.Context, dbPath, hexKey string, includeVec1 
 	if err := srcDB.QueryRowContext(ctx, embeddingsRowCountQuery).Scan(&before); err != nil {
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: count source rows: %w", err)
 	}
+	srcDB.Close()
 
 	tmpPath := dbPath + ".encrypting.tmp"
 	os.Remove(tmpPath)
-	vacuumSQL := fmt.Sprintf(`VACUUM INTO 'file:%s?vfs=adiantum&hexkey=%s'`, tmpPath, hexKey)
-	if _, err := srcDB.ExecContext(ctx, vacuumSQL); err != nil {
+	if err := encryptNewFile(ctx, tmpPath, hexKey, "file:"+dbPath, includeVec1); err != nil {
 		os.Remove(tmpPath)
-		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: vacuum into encrypted target: %w", err)
+		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: %w", err)
 	}
 
 	after, verr := countRowsWith(ctx, "file:"+tmpPath+"?vfs=adiantum", migrateInit(hexKey, includeVec1), embeddingsRowCountQuery)
@@ -123,7 +187,6 @@ func MigrateToEncrypted(ctx context.Context, dbPath, hexKey string, includeVec1 
 		os.Remove(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: row count mismatch (before=%d after=%d); aborting, original untouched", before, after)
 	}
-	srcDB.Close()
 
 	backupPath := fmt.Sprintf("%s.bak-%s", dbPath, time.Now().UTC().Format("20060102T150405Z"))
 	if err := os.Rename(dbPath, backupPath); err != nil {
@@ -201,11 +264,13 @@ func MigrateToPlaintext(ctx context.Context, dbPath, hexKey string, includeVec1 
 }
 
 // RotateKey re-encrypts the ALREADY-encrypted embeddings.db file at dbPath
-// from oldHexKey to newHexKey directly, mirroring
-// internal/store.RotateKey exactly (see its doc for the "call before
-// updating the keychain" ordering contract, and for why a missing dbPath is
-// a no-op rather than an error). includeVec1 mirrors MigrateToEncrypted's
-// own parameter.
+// from oldHexKey to newHexKey: first backs it up (decryptToPlainFile, keyed
+// via PRAGMA, never a URI) into a plaintext intermediate temp file, then
+// re-encrypts that intermediate (encryptNewFile, newHexKey via PRAGMA) into
+// a new-key sibling temp file — mirroring internal/store.RotateKey exactly
+// (see its doc for the "call before updating the keychain" ordering
+// contract, and for why a missing dbPath is a no-op rather than an error).
+// includeVec1 mirrors MigrateToEncrypted's own parameter.
 func RotateKey(ctx context.Context, dbPath, oldHexKey, newHexKey string, includeVec1 bool) (EncryptionMigrationResult, error) {
 	existed, plaintext, err := isPlaintextSQLiteFile(dbPath)
 	if err != nil {
@@ -228,13 +293,21 @@ func RotateKey(ctx context.Context, dbPath, oldHexKey, newHexKey string, include
 	if err := srcDB.QueryRowContext(ctx, embeddingsRowCountQuery).Scan(&before); err != nil {
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: count source rows (wrong old key?): %w", err)
 	}
+	srcDB.Close()
+
+	tmpPlainPath := dbPath + ".rotating.plain.tmp"
+	os.Remove(tmpPlainPath)
+	if err := decryptToPlainFile(ctx, dbPath, oldHexKey, tmpPlainPath, includeVec1); err != nil {
+		os.Remove(tmpPlainPath)
+		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: %w", err)
+	}
+	defer os.Remove(tmpPlainPath)
 
 	tmpPath := dbPath + ".rotating.tmp"
 	os.Remove(tmpPath)
-	vacuumSQL := fmt.Sprintf(`VACUUM INTO 'file:%s?vfs=adiantum&hexkey=%s'`, tmpPath, newHexKey)
-	if _, err := srcDB.ExecContext(ctx, vacuumSQL); err != nil {
+	if err := encryptNewFile(ctx, tmpPath, newHexKey, "file:"+tmpPlainPath, includeVec1); err != nil {
 		os.Remove(tmpPath)
-		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: vacuum into new-key target: %w", err)
+		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: %w", err)
 	}
 
 	after, verr := countRowsWith(ctx, "file:"+tmpPath+"?vfs=adiantum", migrateInit(newHexKey, includeVec1), embeddingsRowCountQuery)
@@ -246,7 +319,6 @@ func RotateKey(ctx context.Context, dbPath, oldHexKey, newHexKey string, include
 		os.Remove(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: row count mismatch (before=%d after=%d); aborting, original untouched", before, after)
 	}
-	srcDB.Close()
 
 	backupPath := fmt.Sprintf("%s.bak-%s", dbPath, time.Now().UTC().Format("20060102T150405Z"))
 	if err := os.Rename(dbPath, backupPath); err != nil {
