@@ -51,17 +51,17 @@ inflate a later PR's diff to compensate.
 
 Satisfies: all 7 capabilities' REQ-4x0/REQ-450/REQ-460 "Default-Off Config Gate" scenarios (foundation only).
 
-- [ ] 1.1 [RED] `internal/config/config_test.go`: assert `Config{}` zero-value has `CodeGraph`/`Enforcement`/
-  `Consolidation`/`Security`/`Ranker`/`Cartridge`/`VecIndex`, all `Enabled == false`; assert `Load` on YAML
+- [x] 1.1 [RED] `internal/config/config_test.go`: assert `Config{}` zero-value has `CodeGraph`/`Enforcement`/
+  `Consolidation`/`Encryption`/`Ranker`/`Cartridge`/`VecIndex`, all `Enabled == false`; assert `Load` on YAML
   mentioning none of the 7 keys produces a `Config` byte-for-byte identical to a pre-v0.4 golden fixture — fails,
   types don't exist.
-- [ ] 1.2 [GREEN] Add the 7 structs (design's "Interfaces / Contracts") to `internal/config/config.go` near
+- [x] 1.2 [GREEN] Add the 7 structs (design's "Interfaces / Contracts") to `internal/config/config.go` near
   `TimeTravelConfig` (`:114`); wire `applyDefaults` (`:694`) param-only defaults (Enforcement.Mode="flag";
   Consolidation.MinScore/K/MinClusterSize/MaxClusterSize; Ranker.MinTrainExamples=50; Cartridge.TopMemories;
   VecIndex.Quantization="none") — no `Enabled` field gets a default.
-- [ ] 1.3 [REFACTOR] Match doc-comment style of `TimeTravelConfig`/`ReviewConfig` (`:114`/`:238`); confirm no
+- [x] 1.3 [REFACTOR] Match doc-comment style of `TimeTravelConfig`/`ReviewConfig` (`:114`/`:238`); confirm no
   `*KeyPresent` probe (`:591`/`:612` pattern) is needed anywhere — all 7 are plain-bool default-false.
-- [ ] 1.4 Verification: `CGO_ENABLED=0 go build ./... && go vet ./...` clean; `go test ./internal/config/...`
+- [x] 1.4 Verification: `CGO_ENABLED=0 go build ./... && go vet ./...` clean; `go test ./internal/config/...`
   green; zero-v0.4-keys config round-trips byte-for-byte vs a v0.3.2 fixture.
 
 ## Phase 2: `sqlite-vec-index` A — Driver + Dual-Write (PR 2, base: `main` after PR 1)
@@ -112,13 +112,13 @@ Satisfies: REQ-430 (gate), REQ-431 (keychain key), REQ-432 (transparent encrypti
 - [ ] 4.2 [GREEN] Create `internal/keychain/keychain.go`: `Get`/`Set(service, account, value)` via `os/exec` to
   macOS `/usr/bin/security` or Linux `secret-tool`, injectable runner; `GenerateKey()` via `crypto/rand` (32
   bytes), service=`omnia`, account=`db-key-v1`.
-- [ ] 4.3 [RED] Driver-selection test: `security.enabled=true` + fake keychain with a key present opens via
+- [ ] 4.3 [RED] Driver-selection test: `encryption.enabled=true` + fake keychain with a key present opens via
   ncruces+adiantum; a written observation reads back identical to the plaintext path (REQ-432) — fails, no
   adiantum wiring yet.
 - [ ] 4.4 [GREEN] Wire `openDB` (`store.go:35`/`:847`/`:897`; `embed/store.go:79`) to resolve the ncruces+
-  adiantum VFS when `security.enabled`, sourcing the key via `internal/keychain` (generate-once-on-first-enable,
+  adiantum VFS when `encryption.enabled`, sourcing the key via `internal/keychain` (generate-once-on-first-enable,
   REQ-431).
-- [ ] 4.5 [RED] Keychain-unavailable test: `security.enabled=true` + fake runner returns "CLI not found"; with
+- [ ] 4.5 [RED] Keychain-unavailable test: `encryption.enabled=true` + fake runner returns "CLI not found"; with
   `allow_plaintext_fallback` at its default `false`, assert the store REFUSES to open with a clear error; with
   it `true`, assert the store opens unencrypted with a stderr warning + audit entry (REQ-434).
 - [ ] 4.6 [GREEN] Implement the degradation branch: unreachable keychain + `allow_plaintext_fallback=false`
@@ -126,7 +126,7 @@ Satisfies: REQ-430 (gate), REQ-431 (keychain key), REQ-432 (transparent encrypti
 - [ ] 4.7 [REFACTOR] Extract the keychain-or-fail decision into one helper shared by `store.go` and
   `embed/store.go` driver selection.
 - [ ] 4.8 Verification: `internal/keychain` + affected `internal/store`/`internal/embed` tests green;
-  `CGO_ENABLED=0 go build ./...` clean; disabled-path (`security.enabled=false`) byte-for-byte (REQ-430).
+  `CGO_ENABLED=0 go build ./...` clean; disabled-path (`encryption.enabled=false`) byte-for-byte (REQ-430).
 
 ## Phase 5: `memory-at-rest-security` B — Migration + CLI + Audit (PR 5, base: `main` after PR 4)
 
