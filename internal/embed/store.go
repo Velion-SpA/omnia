@@ -569,9 +569,21 @@ func (s *Store) Prune(ctx context.Context, liveSyncIDs []string) (int, error) {
 	}
 
 	for _, id := range toDelete {
-		// Reuses DeleteBySyncID so Prune gets the exact same Vec1
-		// dual-write/fallback contract for free (design capability 7),
-		// rather than duplicating it here.
+		if !s.vec.healthyOK() {
+			// Disabled path: the ORIGINAL pre-v0.4 statement, untouched — no
+			// derived write, no RowsAffected() call, no double-wrapped error
+			// text (review remediation SHOULD-FIX #2: routing this through
+			// DeleteBySyncID unconditionally changed disabled-path behavior).
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM embeddings WHERE sync_id = ?`, id); err != nil {
+				return 0, fmt.Errorf("embed: Prune delete %s: %w", id, err)
+			}
+			continue
+		}
+		// Vec1 enabled: reuse DeleteBySyncID so Prune gets the exact same
+		// derived dual-write/fallback contract for free (design capability
+		// 7), rather than duplicating it here. This is a NEW branch that
+		// only ever runs when Vec1 is healthy, so it never changes the
+		// disabled-path behavior above.
 		if _, err := s.DeleteBySyncID(ctx, id); err != nil {
 			return 0, fmt.Errorf("embed: Prune delete %s: %w", id, err)
 		}

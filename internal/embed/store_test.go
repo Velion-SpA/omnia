@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -250,6 +251,55 @@ func TestStore_Prune_EmptyLiveSetRemovesAll(t *testing.T) {
 	}
 	if n, _ := store.Count(ctx); n != 0 {
 		t.Errorf("Count after prune-all: got %d, want 0", n)
+	}
+}
+
+// TestStore_Prune_DisabledPathErrorTextIsSingleWrapped (review remediation,
+// SHOULD-FIX #2): when Vec1 is disabled, Prune's per-id delete failure must
+// wrap the underlying error EXACTLY as it always did pre-v0.4 — a single
+// "embed: Prune delete %s: %w" around the raw sqlite error — never routed
+// through DeleteBySyncID's own wrapping/RowsAffected() call, which would
+// double-wrap the message and introduce a failure surface that never existed
+// in Prune's original disabled-path code.
+func TestStore_Prune_DisabledPathErrorTextIsSingleWrapped(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	mustUpsert(t, store, unitRow("a", 1, []float32{1, 0, 0}))
+
+	// Force the per-id DELETE itself to fail deterministically (the listing
+	// SELECT must still succeed) via a trigger that only aborts deleting "a".
+	if _, err := store.db.Exec(`CREATE TRIGGER block_delete_a BEFORE DELETE ON embeddings WHEN OLD.sync_id = 'a' BEGIN SELECT RAISE(ABORT, 'forced prune failure'); END;`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	_, err = store.Prune(ctx, nil) // nothing live -> attempts to delete "a"
+	if err == nil {
+		t.Fatal("Prune must return an error when the underlying DELETE fails")
+	}
+
+	const wantPrefix = "embed: Prune delete a: "
+	if !strings.HasPrefix(err.Error(), wantPrefix) {
+		t.Errorf("Prune error text: got %q, want prefix %q (matching origin/main's disabled-path wrap)", err.Error(), wantPrefix)
+	}
+	if strings.Contains(err.Error(), "DeleteBySyncID") {
+		t.Errorf("Prune's disabled-path error must not be routed through DeleteBySyncID (double-wrap): got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "rows affected") {
+		t.Errorf("Prune's disabled-path must not introduce a RowsAffected() failure surface that never existed originally: got %q", err.Error())
+	}
+
+	// The row must still exist — the failed delete must not have removed it.
+	n, cerr := store.Count(ctx)
+	if cerr != nil {
+		t.Fatalf("Count: %v", cerr)
+	}
+	if n != 1 {
+		t.Errorf("row count after failed Prune delete: got %d, want 1 (delete must not silently succeed)", n)
 	}
 }
 
