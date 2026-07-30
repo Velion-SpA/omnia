@@ -465,7 +465,7 @@ type RankingWeights struct {
 // baseline (1).
 func DefaultImportanceWeight(obsType string) float32 {
 	switch obsType {
-	case "decision", "architecture":
+	case "decision", "architecture", "digest":
 		return 3
 	case "bugfix", "pattern", "manual":
 		return 2

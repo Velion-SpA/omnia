@@ -51,3 +51,25 @@ None.
 | Public MCP response | `internal/mcp/mcp_blame_test.go` | Full observation content leaked | Grouped preview-only response passed | Projection keeps store rows internal |
 | Input/degradation contract | `internal/mcp/mcp_blame_test.go`, `internal/codegraph/path_test.go` | Empty hits were `null`; fractional lines truncated | Explicit empty array, integer validation, real git-root validation passed | Shared normalization remains CLI/MCP seam |
 | Runtime surfaces | `cmd/omnia/blame_test.go`, `internal/mcp/mcp_blame_test.go`, `internal/store/anchors_test.go` | Existing graph fixture had only two memories | CLI/MCP enabled paths, disabled registration, and 5→3 graph passed | None needed |
+
+## PR 9 (9A + 9B) — Sleep Consolidation
+- Completed tasks: 9.1–9.14.
+- Boundary: local, default-OFF clustering over the existing k-NN graph, local Ollama digest generation
+  (no cloud API), retained source relations (never hard-deleted), `omnia consolidate` CLI, and audit.
+  The optional idle-time worker (mirroring `buildAutoEmbedWorker`) was **not** implemented in this slice —
+  spec REQ allows either explicit invocation or an idle worker; only explicit invocation ships here.
+  A future increment can add the idle worker without changing this contract.
+### TDD Cycle Evidence
+| Task | RED | GREEN | REFACTOR |
+|---|---|---|---|
+| 9.1–9.4 | `cluster_test.go` failed with missing `Clusters`, then with an unsafe dropped remainder | Union-find clustering and balanced splitting pass | Deterministic degree/id ordering and no-drop split |
+| 9.5–9.6 | `generate_test.go` failed because `Client.Generate` did not exist | Local `/api/chat` client passes | Fixed low-temperature request contract |
+| 9.7–9.10 | `consolidate_test.go` initially failed due to missing session linkage | Digest, retained consolidates relations, and unreachable no-op pass | Single `Run` orchestration function |
+| 9.11–9.13 | Disabled invocation test added before command completion; also found and fixed a real bug where a missing (not just disabled) config file caused `cmdConsolidate` to `fatal()`/exit instead of degrading to disabled | Disabled CLI and runner are no-ops for both the explicit-disabled and missing-config-file cases | CLI delegates to shared orchestration |
+| 9.14 | Full suite was run after implementation | CGO-free build, vet, unit/coverage suites passed | `git diff --check` clean |
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed
+### Design Deviations
+None. (Idle worker deferred as noted above — not a deviation, the spec permits explicit-invocation-only.)
