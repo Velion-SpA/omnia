@@ -17,7 +17,7 @@ import (
 // ever opens the embeddings store or constructs an Ollama HTTP client on
 // the default path.
 func TestBuildAutoEmbedWorker_DisabledReturnsNil(t *testing.T) {
-	got := buildAutoEmbedWorker(config.EmbeddingsConfig{Enabled: false}, nil, "", false)
+	got := buildAutoEmbedWorker(config.EmbeddingsConfig{Enabled: false}, nil, "", false, config.EncryptionConfig{})
 	if got != nil {
 		t.Fatalf("buildAutoEmbedWorker(disabled) = %v, want nil (embeddings.enabled=false must not construct a Worker)", got)
 	}
@@ -35,7 +35,7 @@ func TestBuildAutoEmbedWorker_EnabledBuildsWorker(t *testing.T) {
 		DBPath:  filepath.Join(t.TempDir(), "embeddings.db"),
 	}
 
-	got := buildAutoEmbedWorker(embCfg, nil, "", false)
+	got := buildAutoEmbedWorker(embCfg, nil, "", false, config.EncryptionConfig{})
 	if got == nil {
 		t.Fatal("buildAutoEmbedWorker(enabled) = nil, want a non-nil *embed.Worker")
 	}
@@ -57,7 +57,7 @@ func TestBuildAutoEmbedWorker_EnabledButStoreUnavailableReturnsNil(t *testing.T)
 	got := buildAutoEmbedWorker(config.EmbeddingsConfig{
 		Enabled: true,
 		DBPath:  filepath.Join(blocker, "embeddings.db"),
-	}, nil, "", false)
+	}, nil, "", false, config.EncryptionConfig{})
 	if got != nil {
 		t.Fatal("buildAutoEmbedWorker: expected nil when the embeddings store cannot be opened")
 	}
@@ -91,7 +91,7 @@ func TestBuildAutoEmbedWorker_WithStoreStillBuildsWorker(t *testing.T) {
 		Dim:    768,
 		DBPath: filepath.Join(t.TempDir(), "embeddings.db"),
 	}
-	worker := buildAutoEmbedWorker(embCfg, s, "", false)
+	worker := buildAutoEmbedWorker(embCfg, s, "", false, config.EncryptionConfig{})
 	if worker == nil {
 		t.Fatal("buildAutoEmbedWorker: expected a non-nil *embed.Worker")
 	}
@@ -111,7 +111,7 @@ func TestBuildAutoEmbedWorker_VecIndexEnabledThreadsThroughToOpenStore(t *testin
 
 	disabledCfg := baseCfg
 	disabledCfg.DBPath = filepath.Join(t.TempDir(), "embeddings.db")
-	if got := buildAutoEmbedWorker(disabledCfg, nil, "", false); got == nil {
+	if got := buildAutoEmbedWorker(disabledCfg, nil, "", false, config.EncryptionConfig{}); got == nil {
 		t.Fatal("buildAutoEmbedWorker(vecIndexEnabled=false): expected a non-nil worker")
 	}
 	if dbHasVecEmbeddingsTable(t, disabledCfg.DBPath) {
@@ -120,7 +120,7 @@ func TestBuildAutoEmbedWorker_VecIndexEnabledThreadsThroughToOpenStore(t *testin
 
 	enabledCfg := baseCfg
 	enabledCfg.DBPath = filepath.Join(t.TempDir(), "embeddings.db")
-	if got := buildAutoEmbedWorker(enabledCfg, nil, "", true); got == nil {
+	if got := buildAutoEmbedWorker(enabledCfg, nil, "", true, config.EncryptionConfig{}); got == nil {
 		t.Fatal("buildAutoEmbedWorker(vecIndexEnabled=true): expected a non-nil worker")
 	}
 	if !dbHasVecEmbeddingsTable(t, enabledCfg.DBPath) {

@@ -645,6 +645,18 @@ type Config struct {
 	DisableFTSRelax    bool
 	TimeTravelEnabled  bool
 	HistoryRevisionCap int
+	// EncryptionEnabled/EncryptionKeychainService/EncryptionAllowPlaintextFallback
+	// mirror internal/config.EncryptionConfig's Enabled/KeychainService/
+	// AllowPlaintextFallback fields (duplicated here, not imported —
+	// internal/store must not depend on internal/config, same convention
+	// every other field on this struct documents). EncryptionEnabled's zero
+	// value (false) is the default-OFF gate (spec REQ-430): New/
+	// newWithoutRepair then open dbPath via the exact pre-v0.4 modernc path,
+	// byte-for-byte. See encryption.go for the driver-selection/degradation
+	// logic this gates (design ADR-2/ADR-3).
+	EncryptionEnabled                bool
+	EncryptionKeychainService        string
+	EncryptionAllowPlaintextFallback bool
 }
 
 func DefaultConfig() (Config, error) {
@@ -844,7 +856,7 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	dbPath := datadir.DBPath(cfg.DataDir)
-	db, err := openDB("sqlite", dbPath)
+	db, err := openEngramDB(cfg, dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)
 	}
@@ -894,7 +906,7 @@ func newWithoutRepair(cfg Config) (*Store, error) {
 	}
 
 	dbPath := datadir.DBPath(cfg.DataDir)
-	db, err := openDB("sqlite", dbPath)
+	db, err := openEngramDB(cfg, dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)
 	}

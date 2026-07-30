@@ -65,3 +65,24 @@ func TestCmdSearchAsOfUsesRecordedStateAndDisclosesLimitation(t *testing.T) {
 		t.Fatalf("zero-hit recorded-time context output:\n%s", stdout)
 	}
 }
+
+// TestApplyEncryptionConfig (v0.4 memory-at-rest-security, PR4, spec REQ-430):
+// confirms config.yaml's encryption.* thread into store.Config BEFORE
+// storeNew constructs the *store.Store, mirroring applyTimeTravelConfig's
+// own test above and write_hygiene_wiring_test.go's established pattern.
+func TestApplyEncryptionConfig(t *testing.T) {
+	cfg := store.Config{}
+	app := config.Config{Encryption: config.EncryptionConfig{
+		Enabled: true, KeychainService: "custom-service", AllowPlaintextFallback: true,
+	}}
+	applyEncryptionConfig(&cfg, &app)
+	if !cfg.EncryptionEnabled {
+		t.Error("EncryptionEnabled = false, want true")
+	}
+	if cfg.EncryptionKeychainService != "custom-service" {
+		t.Errorf("EncryptionKeychainService = %q, want %q", cfg.EncryptionKeychainService, "custom-service")
+	}
+	if !cfg.EncryptionAllowPlaintextFallback {
+		t.Error("EncryptionAllowPlaintextFallback = false, want true")
+	}
+}

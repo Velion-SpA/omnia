@@ -45,7 +45,14 @@ import (
 // (Config.VecIndex.Enabled) through to embed.OpenStore (design capability 7:
 // "every direct production opener must pass it"). false reproduces the
 // pre-v0.4 OpenStore behavior exactly.
-func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig, s *store.Store, dataDir string, vecIndexEnabled bool) *embed.Worker {
+//
+// encCfg threads v0.4's memory-at-rest-security capability config through to
+// embed.OpenStore the same way: a zero-value/disabled EncryptionConfig
+// reproduces pre-v0.4 behavior exactly, and it MUST be passed once an
+// operator has migrated embeddings.db to an encrypted file (`omnia security
+// encrypt`) — otherwise this worker would try to reopen the now-encrypted
+// file via plain modernc and fail.
+func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig, s *store.Store, dataDir string, vecIndexEnabled bool, encCfg config.EncryptionConfig) *embed.Worker {
 	if !embCfg.Enabled {
 		return nil
 	}
@@ -59,7 +66,7 @@ func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig, s *store.Store, dataDi
 		return nil
 	}
 	dbPath := config.ResolveEmbeddingsDBPath(embCfg.DBPath, dataDir)
-	embStore, err := embed.OpenStore(dbPath, vecIndexStoreOptions(vecIndexEnabled)...)
+	embStore, err := embed.OpenStore(dbPath, embedStoreOptions(vecIndexEnabled, encCfg)...)
 	if err != nil {
 		// Fail closed: the periodic `omnia embed`/Reconcile run still catches
 		// anything saved meanwhile. A missing vector store must never make a
@@ -110,7 +117,7 @@ var buildCLIEmbedPurgeStore = func(dataDir string) *embed.Store {
 		return nil
 	}
 	dbPath := config.ResolveEmbeddingsDBPath(appCfg.Embeddings.DBPath, dataDir)
-	embStore, err := embed.OpenStore(dbPath, vecIndexStoreOptions(appCfg.VecIndex.Enabled)...)
+	embStore, err := embed.OpenStore(dbPath, embedStoreOptions(appCfg.VecIndex.Enabled, appCfg.Encryption)...)
 	if err != nil {
 		log.Printf("[delete] embeddings store unavailable (%v); vector purge skipped", err)
 		return nil

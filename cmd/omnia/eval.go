@@ -257,13 +257,15 @@ func defaultRunEvalHarness(ctx context.Context, opts evalRunOptions) (eval.RunSu
 		var recallCfg config.RecallConfig
 		var embCfg config.EmbeddingsConfig
 		var vecIndexEnabled bool
+		var encCfg config.EncryptionConfig
 		if appCfgErr == nil {
 			injectionCfg = appCfg.Injection
 			recallCfg = appCfg.Recall
 			embCfg = appCfg.Embeddings
 			vecIndexEnabled = appCfg.VecIndex.Enabled
+			encCfg = appCfg.Encryption
 		}
-		recallSvc := buildRecallService(s, recallCfg, embCfg, cfg.DataDir, vecIndexEnabled)
+		recallSvc := buildRecallService(s, recallCfg, embCfg, cfg.DataDir, vecIndexEnabled, encCfg)
 		fetch = pipelineBackedFetcher(s, recallSvc, injectionCfg)
 	}
 

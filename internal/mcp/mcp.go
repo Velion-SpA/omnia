@@ -1646,6 +1646,16 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			if r.ReviewAfter != nil {
 				entry["review_after"] = *r.ReviewAfter
 			}
+			// v0.4 memory-at-rest-security (spec REQ-436): surface the
+			// write-time trust tag (classifyTrust, provenance.go:26) in the
+			// RETRIEVAL receipt, not just mem_save's own write-time echo
+			// (handleSave already sets TrustTag on its response). Nullable/
+			// additive — r.TrustTag is nil only for pre-provenance-foundation
+			// rows that predate this column, in which case the field is
+			// simply omitted rather than surfacing a misleading empty string.
+			if r.TrustTag != nil {
+				entry["trust_tag"] = *r.TrustTag
+			}
 			// Recall reliability #1399, slice 1: surface outcome feedback and
 			// whether this hit came from the error-signature lane (a proven
 			// prior fix) rather than a loose lexical/BM25 match.
@@ -2880,11 +2890,19 @@ func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 		}
 		duplicateMeta := fmt.Sprintf("\nDuplicates: %d", obs.DuplicateCount)
 		revisionMeta := fmt.Sprintf("\nRevisions: %d", obs.RevisionCount)
+		// v0.4 memory-at-rest-security (spec REQ-436): surface the
+		// write-time trust tag in the retrieval receipt, mirroring the
+		// Topic:/Tool: metadata line convention above. Nullable/additive —
+		// omitted for pre-provenance-foundation rows with a nil TrustTag.
+		trustMeta := ""
+		if obs.TrustTag != nil {
+			trustMeta = fmt.Sprintf("\nTrust: %s", *obs.TrustTag)
+		}
 
 		result := fmt.Sprintf("#%d [%s] %s\n%s\nSession: %s%s%s\nCreated: %s",
 			obs.ID, obs.Type, obs.Title,
 			obs.Content,
-			obs.SessionID, obsProject+scope+topic, toolName+duplicateMeta+revisionMeta,
+			obs.SessionID, obsProject+scope+topic, toolName+duplicateMeta+revisionMeta+trustMeta,
 			timeutil.FormatLocal(obs.CreatedAt),
 		)
 		var extra map[string]any

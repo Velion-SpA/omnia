@@ -22,6 +22,7 @@ require (
 require (
 	github.com/ncruces/go-sqlite3-wasm/v3 v3.2.35303 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect
+	lukechampine.com/adiantum v1.1.1 // indirect
 )
 
 require (

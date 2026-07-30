@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/velion/omnia/internal/config"
 	_ "modernc.org/sqlite" // register "sqlite" driver for the raw inspection below
 )
 
@@ -30,12 +31,12 @@ func dbHasVecEmbeddingsTable(t *testing.T, dbPath string) bool {
 	return true
 }
 
-// TestVecIndexStoreOptions_FalseIsPreV04Default proves the shared options
-// builder produces a disabled Option when enabled=false, matching every
-// direct opener's pre-v0.4 behavior (spec REQ-460).
-func TestVecIndexStoreOptions_FalseIsPreV04Default(t *testing.T) {
-	opts := vecIndexStoreOptions(false)
-	if len(opts) != 1 {
-		t.Fatalf("vecIndexStoreOptions(false): got %d options, want 1", len(opts))
+// TestEmbedStoreOptions_FalseIsPreV04Default proves the shared options
+// builder produces disabled Options when both flags are false/zero,
+// matching every direct opener's pre-v0.4 behavior (spec REQ-460, REQ-430).
+func TestEmbedStoreOptions_FalseIsPreV04Default(t *testing.T) {
+	opts := embedStoreOptions(false, config.EncryptionConfig{})
+	if len(opts) != 2 {
+		t.Fatalf("embedStoreOptions(false, {}): got %d options, want 2", len(opts))
 	}
 }

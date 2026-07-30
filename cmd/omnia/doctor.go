@@ -62,7 +62,7 @@ func cmdDoctor(cfg store.Config) {
 	if err != nil {
 		report = diagnostic.ErrorReport(project, err)
 		if jsonOut {
-			writeDoctorJSON(report)
+			writeDoctorJSON(report, cfg.EncryptionEnabled)
 		} else {
 			fmt.Fprintf(os.Stderr, "omnia doctor failed: %s\n", err)
 		}
@@ -73,11 +73,19 @@ func cmdDoctor(cfg store.Config) {
 	}
 
 	if jsonOut {
-		writeDoctorJSON(report)
+		writeDoctorJSON(report, cfg.EncryptionEnabled)
 		return
 	}
-	renderDoctorText(report)
+	renderDoctorText(report, cfg.EncryptionEnabled)
 }
+
+// encryptionThreatModelText is v0.4 memory-at-rest-security's REQ-433
+// fixed statement: it must be discoverable in `omnia doctor`/status output
+// whenever encryption is active, and must state BOTH what it protects and
+// what it explicitly does NOT.
+const encryptionThreatModelText = "Encryption at rest protects against disk theft or a lost laptop " +
+	"while the process is NOT running. It does NOT protect against a live-process memory dump " +
+	"or an attacker who already has the unlocked OS keychain."
 
 func printDoctorUsage() {
 	fmt.Fprintln(os.Stdout, "usage: omnia doctor [--json] [--project PROJECT] [--check CODE]")
@@ -222,8 +230,26 @@ func writeDoctorRepairJSON(plan diagnostic.RepairPlan) {
 	fmt.Println(string(out))
 }
 
-func writeDoctorJSON(report diagnostic.Report) {
-	out, err := jsonMarshalIndent(report, "", "  ")
+// writeDoctorJSON marshals report as-is when encryptionEnabled is false
+// (byte-for-byte pre-v0.4 JSON shape, spec REQ-430's discipline extended to
+// this output too). When encryption is active, an additive
+// "encryption_threat_model" field is appended (spec REQ-433) — never
+// changing the shape of the existing report fields.
+func writeDoctorJSON(report diagnostic.Report, encryptionEnabled bool) {
+	if !encryptionEnabled {
+		out, err := jsonMarshalIndent(report, "", "  ")
+		if err != nil {
+			fatal(err)
+			return
+		}
+		fmt.Println(string(out))
+		return
+	}
+	wrapped := struct {
+		diagnostic.Report
+		EncryptionThreatModel string `json:"encryption_threat_model"`
+	}{report, encryptionThreatModelText}
+	out, err := jsonMarshalIndent(wrapped, "", "  ")
 	if err != nil {
 		fatal(err)
 		return
@@ -231,7 +257,7 @@ func writeDoctorJSON(report diagnostic.Report) {
 	fmt.Println(string(out))
 }
 
-func renderDoctorText(report diagnostic.Report) {
+func renderDoctorText(report diagnostic.Report, encryptionEnabled bool) {
 	fmt.Printf("Omnia Doctor: %s\n", report.Status)
 	if report.Project != "" {
 		fmt.Printf("Project: %s\n", report.Project)
@@ -251,5 +277,12 @@ func renderDoctorText(report diagnostic.Report) {
 				fmt.Printf("    evidence: %s\n", string(finding.Evidence))
 			}
 		}
+	}
+	// spec REQ-433: the explicit threat model MUST be discoverable in
+	// `omnia doctor` output whenever encryption is active. Additive-only:
+	// omitted entirely when encryption is disabled (the default), so the
+	// disabled path stays byte-for-byte pre-v0.4 output.
+	if encryptionEnabled {
+		fmt.Printf("\nEncryption: %s\n", encryptionThreatModelText)
 	}
 }

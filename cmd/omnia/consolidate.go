@@ -29,12 +29,19 @@ func cmdConsolidate(args []string) {
 	if err != nil {
 		fatal(err)
 	}
+	// cmdConsolidate is dispatched standalone (not through run()'s shared
+	// store.Config composition root), so v0.4 memory-at-rest-security's
+	// config.yaml wiring must be applied here directly — mirrors
+	// applyEncryptionConfig (main.go) exactly.
+	cfg.EncryptionEnabled = app.Encryption.Enabled
+	cfg.EncryptionKeychainService = app.Encryption.KeychainService
+	cfg.EncryptionAllowPlaintextFallback = app.Encryption.AllowPlaintextFallback
 	s, err := store.New(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
-	es, err := embed.OpenStore(config.ResolveEmbeddingsDBPath(app.Embeddings.DBPath, cfg.DataDir))
+	es, err := embed.OpenStore(config.ResolveEmbeddingsDBPath(app.Embeddings.DBPath, cfg.DataDir), embedStoreOptions(app.VecIndex.Enabled, app.Encryption)...)
 	if err != nil {
 		fatal(err)
 	}

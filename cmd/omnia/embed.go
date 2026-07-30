@@ -72,7 +72,7 @@ func cmdEmbed(args []string) {
 	// file and can never prune the primary instance's vectors.
 	dataDir := engramdb.ResolveDataDir("")
 	dbPath := config.ResolveEmbeddingsDBPath(cfg.Embeddings.DBPath, dataDir)
-	store, err := embed.OpenStore(dbPath, vecIndexStoreOptions(cfg.VecIndex.Enabled)...)
+	store, err := embed.OpenStore(dbPath, embedStoreOptions(cfg.VecIndex.Enabled, cfg.Encryption)...)
 	if err != nil {
 		fatal(fmt.Errorf("open embeddings store: %w", err))
 	}

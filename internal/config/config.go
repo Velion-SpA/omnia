@@ -896,6 +896,13 @@ func applyDefaults(cfg *Config, data []byte) {
 	if cfg.Cartridge.TopMemories == 0 {
 		cfg.Cartridge.TopMemories = 50
 	}
+	// EncryptionConfig.KeychainService defaults to "omnia" (design ADR-3:
+	// "Service=omnia, account=db-key-v1") regardless of Enabled, matching
+	// every other v0.4 tuning-param default above — Enabled itself is
+	// never defaulted (v0.4's byte-for-byte-off invariant).
+	if cfg.Encryption.KeychainService == "" {
+		cfg.Encryption.KeychainService = "omnia"
+	}
 	// Injection.Budget.Enabled intentionally has NO default override — its
 	// zero value (false) IS the default, mirroring Recall.Enabled/
 	// Ranking.Enabled/StructuralForgetting.Enabled/Procedural.Enabled's own

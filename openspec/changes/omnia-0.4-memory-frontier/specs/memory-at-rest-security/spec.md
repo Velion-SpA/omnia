@@ -67,16 +67,27 @@ dump or an attacker who already has the unlocked keychain.
 
 ### Requirement: REQ-434 Keychain-Unavailable Degradation
 
-When keychain access fails (e.g. headless server, Linux without a keychain daemon, CI), the system MUST
-degrade to unencrypted-with-warning. It MUST NEVER fail the write path or lose data because the keychain is
-unavailable.
+When keychain access fails (e.g. headless server, Linux without a keychain daemon, CI), the system's default
+posture MUST be fail-closed: refuse to open the store rather than silently open it unencrypted. Degrading to
+unencrypted-with-warning is permitted ONLY as an explicit, conscious operator opt-in via
+`encryption.allow_plaintext_fallback: true`. In neither case may the keychain being unavailable corrupt or
+lose existing data.
 
-#### Scenario: Edge case — keychain unavailable on a headless host
+#### Scenario: Edge case — keychain unavailable on a headless host, no explicit fallback opt-in (default)
 
 - GIVEN `encryption.enabled = true` on a host with no accessible OS keychain
+- AND `encryption.allow_plaintext_fallback` is unset or `false` (the default)
 - WHEN the store is opened
-- THEN the store opens unencrypted, a clear warning is logged/surfaced, and normal read/write operations
-  succeed without data loss
+- THEN the store refuses to open and returns a clear, actionable error — it does NOT silently fall back to
+  unencrypted, and no data is lost or corrupted
+
+#### Scenario: Edge case — keychain unavailable on a headless host, fallback explicitly allowed
+
+- GIVEN `encryption.enabled = true` on a host with no accessible OS keychain
+- AND `encryption.allow_plaintext_fallback = true` is explicitly set
+- WHEN the store is opened
+- THEN the store opens unencrypted, a clear warning is logged/surfaced, exactly one audit entry records the
+  degradation, and normal read/write operations succeed without data loss
 
 ### Requirement: REQ-435 Reversible Migration
 

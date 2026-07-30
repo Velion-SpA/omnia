@@ -3,11 +3,13 @@ package consolidate
 import (
 	"context"
 	"fmt"
+	"github.com/velion/omnia/internal/audit"
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/embed"
 	"github.com/velion/omnia/internal/store"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 )
 
@@ -92,5 +94,44 @@ func TestRunDisabledIsNoop(t *testing.T) {
 	r, _ := s.Search("digest", store.SearchOptions{Project: "p"})
 	if len(r) != 0 {
 		t.Fatal("digest written")
+	}
+}
+
+// TestRun_AppendsActionConsolidateAuditEntry (v0.4 memory-at-rest-security,
+// spec REQ-437 cross-phase check: "every consolidation action (capability
+// 3) MUST produce a corresponding entry in the native audit log"): confirms
+// the ActionConsolidate audit.Append call already wired in Run (ADR-7)
+// actually produces exactly one entry per written digest, correlated to
+// the digest's own observation ID. Isolates HOME so this exercises the
+// REAL audit.Append (not a test seam) without touching the developer's own
+// audit.jsonl, mirroring TestHandleSave_AuditAppendFailure_DoesNotBlockSave's
+// (internal/mcp/provenance_test.go) isolation convention.
+func TestRun_AppendsActionConsolidateAuditEntry(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Setenv("HOME", t.TempDir())
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	s, es, c, cfg, _ := setupRun(t, true)
+	n, err := Run(context.Background(), s, es, c, cfg, "p")
+	if err != nil || n != 1 {
+		t.Fatalf("%d %v", n, err)
+	}
+	r, err := s.Search("digest", store.SearchOptions{Project: "p"})
+	if err != nil || len(r) == 0 || r[0].Type != "digest" {
+		t.Fatalf("digest %#v %v", r, err)
+	}
+
+	entries, err := audit.EntriesForObservation(int(r[0].ID))
+	if err != nil {
+		t.Fatalf("EntriesForObservation: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 audit entry for the digest, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Action != audit.ActionConsolidate {
+		t.Errorf("Action = %q, want %q", entries[0].Action, audit.ActionConsolidate)
+	}
+	if entries[0].Result != "ok" {
+		t.Errorf("Result = %q, want %q", entries[0].Result, "ok")
 	}
 }

@@ -65,6 +65,17 @@ type Config struct {
 	// using their existing brute-force store methods regardless of this
 	// flag until those store methods themselves route through Vec1.
 	VecIndexEnabled bool
+	// EncryptionEnabled/EncryptionKeychainService/EncryptionAllowPlaintextFallback
+	// mirror config.EncryptionConfig's Enabled/KeychainService/
+	// AllowPlaintextFallback fields (duplicated here, not imported — same
+	// convention VecIndexEnabled above documents: internal/dashboard must
+	// not depend on internal/config). Required once embeddings.db has been
+	// migrated to an encrypted file (`omnia security encrypt`): without
+	// this, the dashboard's direct embedding-store opener would try to
+	// reopen it via plain modernc and fail, degrading to FTS-only.
+	EncryptionEnabled                bool
+	EncryptionKeychainService        string
+	EncryptionAllowPlaintextFallback bool
 }
 
 // Server is the Omnia dashboard HTTP server. It depends only on a DataSource, so

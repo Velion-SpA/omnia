@@ -54,6 +54,7 @@ func buildDashboardConfig(configPath, daemonURLFlag, dataDirFlag, actor string, 
 		configGroups    map[string][]string
 		embCfg          config.EmbeddingsConfig
 		vecIndexEnabled bool
+		encCfg          config.EncryptionConfig
 	)
 	if cfg, err := config.Load(configPath); err == nil {
 		if resolvedDaemon == "" {
@@ -66,6 +67,7 @@ func buildDashboardConfig(configPath, daemonURLFlag, dataDirFlag, actor string, 
 		configGroups = cfg.ProjectGroups
 		embCfg = cfg.Embeddings
 		vecIndexEnabled = cfg.VecIndex.Enabled
+		encCfg = cfg.Encryption
 		// EMBM-3/blocking-fix: an internally-inconsistent embeddings config
 		// (a truncation/expansion Dim mismatched against the model's MRL
 		// capability, see config.ValidateEmbeddings) must never silently
@@ -118,5 +120,9 @@ func buildDashboardConfig(configPath, daemonURLFlag, dataDirFlag, actor string, 
 		EmbeddingsDim:     embCfg.Dim,
 		EmbeddingsDBPath:  embeddingsDBPath,
 		VecIndexEnabled:   vecIndexEnabled,
+
+		EncryptionEnabled:                encCfg.Enabled,
+		EncryptionKeychainService:        encCfg.KeychainService,
+		EncryptionAllowPlaintextFallback: encCfg.AllowPlaintextFallback,
 	}
 }
