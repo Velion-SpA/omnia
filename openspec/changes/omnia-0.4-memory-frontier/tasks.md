@@ -196,25 +196,25 @@ Satisfies: REQ-430 (gate), REQ-431 (keychain key), REQ-432 (transparent encrypti
 
 Satisfies: REQ-433 (threat model), REQ-435 (reversible), REQ-436 (provenance), REQ-437 (audit coverage).
 
-- [ ] 5.1 [RED] Migration test: seed a 1,000-row plaintext `omnia.db`; run first-enable migration; assert an
+- [x] 5.1 [RED] Migration test: seed a 1,000-row plaintext `omnia.db`; run first-enable migration; assert an
   encrypted file atomically replaces it, row counts match pre/post, and a timestamped `.bak` of the original
   survives until next clean startup — fails, no migration exists.
-- [ ] 5.2 [GREEN] Implement migrate-on-first-enable: fetch/generate key → `VACUUM INTO` (or dump+load) an
+- [x] 5.2 [GREEN] Implement migrate-on-first-enable: fetch/generate key → `VACUUM INTO` (or dump+load) an
   encrypted target → fsync + row-count verify → atomic rename → retain timestamped `.bak`; abort-and-keep-
   plaintext on any step failure (never a half-encrypted DB).
-- [ ] 5.3 [RED] `omnia security decrypt` test: given an encrypted store, decrypt restores a plaintext DB
+- [x] 5.3 [RED] `omnia security decrypt` test: given an encrypted store, decrypt restores a plaintext DB
   readable by the default modernc driver, identical row counts, never locking the user out (REQ-435).
-- [ ] 5.4 [GREEN] Implement `omnia security encrypt`/`decrypt`/`rotate-key` CLI (dispatch `main.go:730`),
+- [x] 5.4 [GREEN] Implement `omnia security encrypt`/`decrypt`/`rotate-key` CLI (dispatch `main.go:730`),
   reversing the migration via the keychain key.
-- [ ] 5.5 [RED] Provenance/audit test: an observation written with `source="user"` is retrievable with
+- [x] 5.5 [RED] Provenance/audit test: an observation written with `source="user"` is retrievable with
   `trust_tag: "user"` in its receipt (REQ-436, `provenance.go:26`); confirm PR 7/8's gate decisions and PR 9B's
   consolidation actions each produce one audit entry (REQ-437, cross-phase check once those land).
-- [ ] 5.6 [GREEN] Surface `TrustTag` consistently in read receipts (already carried by `Entry.TrustTag`,
+- [x] 5.6 [GREEN] Surface `TrustTag` consistently in read receipts (already carried by `Entry.TrustTag`,
   `audit.go:31`) — no schema change needed.
-- [ ] 5.7 [REFACTOR] Document the explicit threat model (REQ-433: protects disk theft/lost-laptop while the
+- [x] 5.7 [REFACTOR] Document the explicit threat model (REQ-433: protects disk theft/lost-laptop while the
   process is stopped; does NOT protect live-memory-dump or an attacker holding the unlocked keychain) in `omnia
   doctor`/status output.
-- [ ] 5.8 Verification: full `internal/store`/`internal/embed`/`internal/audit` suites green under both driver
+- [x] 5.8 Verification: full `internal/store`/`internal/embed`/`internal/audit` suites green under both driver
   paths; migration test against a 10k-row fixture; disabled-path byte-for-byte.
 
 ## Phase 6: `code-decision-graph` A — Store + Graph Foundation (PR 6A, depends on PR 5)

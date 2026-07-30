@@ -758,6 +758,8 @@ func main() {
 		cmdBlame(cfg)
 	case "enforce":
 		cmdEnforce(cfg)
+	case "security":
+		cmdSecurity(cfg)
 	case "review-due":
 		cmdReviewDue(cfg)
 	case "dedupe":

@@ -313,3 +313,66 @@ func TestCmdDoctorSyncMutationRequiredFieldsBlockedEnvelope(t *testing.T) {
 		t.Fatalf("unexpected evidence: %v", evidence)
 	}
 }
+
+// TestCmdDoctor_EncryptionEnabled_StatesThreatModel (v0.4
+// memory-at-rest-security, spec REQ-433): when encryption is active, the
+// stated threat model — protects at-rest/lost-device while the process is
+// stopped; does NOT protect a live-process memory dump or an attacker
+// holding the unlocked keychain — MUST be discoverable in `omnia doctor`'s
+// output (text and JSON).
+func TestCmdDoctor_EncryptionEnabled_StatesThreatModel(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.EncryptionEnabled = true
+	seedDoctorSession(t, cfg, "manual-save-engram", "engram", "/work/engram")
+
+	withArgs(t, "engram", "doctor", "--project", "engram", "--check", "manual_session_name_project_mismatch")
+	stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatalf("stderr=%q", stderr)
+	}
+	if !strings.Contains(stdout, "disk theft") && !strings.Contains(stdout, "lost laptop") {
+		t.Fatalf("expected the at-rest/lost-device threat model text, got stdout=%q", stdout)
+	}
+	if !strings.Contains(stdout, "does NOT protect") {
+		t.Fatalf("expected the negative-scope statement (live-process/unlocked-keychain), got stdout=%q", stdout)
+	}
+}
+
+// TestCmdDoctor_EncryptionDisabled_NoThreatModelText is the flag-off
+// regression pin: the threat model banner must never appear (or otherwise
+// change doctor's output) when encryption is disabled — byte-for-byte the
+// pre-v0.4 output.
+func TestCmdDoctor_EncryptionDisabled_NoThreatModelText(t *testing.T) {
+	cfg := testConfig(t)
+	seedDoctorSession(t, cfg, "manual-save-engram", "engram", "/work/engram")
+
+	withArgs(t, "engram", "doctor", "--project", "engram", "--check", "manual_session_name_project_mismatch")
+	stdout, _ := captureOutput(t, func() { cmdDoctor(cfg) })
+	if strings.Contains(stdout, "disk theft") || strings.Contains(stdout, "unlocked keychain") {
+		t.Fatalf("threat model text must not appear when encryption is disabled, got stdout=%q", stdout)
+	}
+}
+
+// TestCmdDoctor_EncryptionEnabled_JSONIncludesThreatModel confirms the
+// same statement is present in --json mode too (REQ-433: "or its linked
+// documentation" — but the JSON envelope is the natural machine-readable
+// surface, so this pins it directly there as well).
+func TestCmdDoctor_EncryptionEnabled_JSONIncludesThreatModel(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.EncryptionEnabled = true
+	seedDoctorSession(t, cfg, "manual-save-engram", "engram", "/work/engram")
+
+	withArgs(t, "engram", "doctor", "--json", "--project", "engram", "--check", "manual_session_name_project_mismatch")
+	stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatalf("stderr=%q", stderr)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, stdout)
+	}
+	threatModel, ok := parsed["encryption_threat_model"].(string)
+	if !ok || threatModel == "" {
+		t.Fatalf("expected a non-empty encryption_threat_model field, got %#v", parsed["encryption_threat_model"])
+	}
+}

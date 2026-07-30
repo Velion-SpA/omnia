@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -342,5 +343,89 @@ func TestHandleDelete_NilAutoEmbed_HardDeleteStillSucceeds(t *testing.T) {
 	}
 	if len(*entries) != 1 || (*entries)[0].Action != audit.ActionHardDelete {
 		t.Fatalf("expected 1 ActionHardDelete audit entry, got %+v", *entries)
+	}
+}
+
+// ─── mem_search: trust_tag surfaced in the retrieval receipt (REQ-436) ───
+
+// TestHandleSearch_SurfacesTrustTagInStructuredReceipt (v0.4
+// memory-at-rest-security, spec REQ-436): an observation written with
+// source="user" must be retrievable with trust_tag: "user" in ITS RECEIPT —
+// this is about the RETRIEVAL surface (handleSearch's structured "results"
+// envelope), distinct from mem_save's own write-time echo (already covered
+// by TestHandleSave_ClassifiesSourceAndAppendsWriteAudit above) and from
+// audit.Entry.TrustTag (already carried since the provenance foundation).
+func TestHandleSearch_SurfacesTrustTagInStructuredReceipt(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	saveH := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	saveRes, err := saveH(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "trust tag receipt test",
+		"content": "content for trust tag retrieval",
+		"type":    "manual",
+		"project": "engram",
+		"source":  "user",
+	}}})
+	if err != nil || saveRes.IsError {
+		t.Fatalf("save setup failed: err=%v res=%v", err, saveRes)
+	}
+
+	searchH := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	searchRes, err := searchH(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query": "trust tag retrieval", "project": "engram",
+	}}})
+	if err != nil {
+		t.Fatalf("handleSearch error: %v", err)
+	}
+	body := callResultJSON(t, searchRes)
+	results, ok := body["results"].([]any)
+	if !ok || len(results) != 1 {
+		t.Fatalf("expected exactly 1 structured result, got %#v", body["results"])
+	}
+	entry, ok := results[0].(map[string]any)
+	if !ok {
+		t.Fatalf("result entry is not a map: %#v", results[0])
+	}
+	if got, _ := entry["trust_tag"].(string); got != "user" {
+		t.Errorf("trust_tag = %q, want %q", got, "user")
+	}
+}
+
+// TestHandleGetObservation_SurfacesTrustTag (v0.4 memory-at-rest-security,
+// spec REQ-436): mem_get_observation's plain-text receipt must also
+// include the write-time trust tag, mirroring the existing Topic:/Tool:
+// metadata line convention (TestHandleGetObservationIncludesTopicAndToolMetadata).
+func TestHandleGetObservation_SurfacesTrustTag(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	saveH := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	saveRes, err := saveH(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "get trust tag test",
+		"content": "content for get trust tag",
+		"type":    "manual",
+		"project": "engram",
+		"source":  "agent",
+	}}})
+	if err != nil || saveRes.IsError {
+		t.Fatalf("save setup failed: err=%v res=%v", err, saveRes)
+	}
+	obs, err := s.RecentObservations("engram", "project", 1)
+	if err != nil || len(obs) != 1 {
+		t.Fatalf("recent observations: %v (len=%d)", err, len(obs))
+	}
+
+	res, err := handleGetObservation(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id": float64(obs[0].ID),
+	}}})
+	if err != nil {
+		t.Fatalf("get observation handler error: %v", err)
+	}
+	text := callResultText(t, res)
+	if !strings.Contains(text, "Trust: agent") {
+		t.Fatalf("expected 'Trust: agent' in output, got %q", text)
 	}
 }
