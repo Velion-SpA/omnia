@@ -257,3 +257,113 @@ func TestVecBackfill_DisabledStoreIsInertNoop(t *testing.T) {
 		t.Error("VecReindex report.Enabled must be false when Vec1 is off")
 	}
 }
+
+// --- Phase 2B: derived lifecycle dual-write --------------------------------
+
+// TestVecIndex_UpsertUpdateDeletePrune_MirrorDerivedTable (task 2.13,
+// REQ-461): normal upsert/update/delete/prune mirror their source-rowid
+// lifecycle into the derived table transactionally.
+func TestVecIndex_UpsertUpdateDeletePrune_MirrorDerivedTable(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(t.TempDir()+"/emb.db", WithVecIndex(true))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	mustUpsert(t, store, unitRow("a", 1, []float32{1, 0, 0, 0}))
+	mustUpsert(t, store, unitRow("b", 2, []float32{0, 1, 0, 0}))
+
+	countVec := func() int {
+		var n int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM vec_embeddings`).Scan(&n); err != nil {
+			t.Fatalf("count vec_embeddings: %v", err)
+		}
+		return n
+	}
+	if n := countVec(); n != 2 {
+		t.Fatalf("derived rows after two upserts: got %d, want 2", n)
+	}
+
+	// Update: re-upserting the SAME sync_id with a new vector must replace,
+	// not duplicate, the derived row.
+	updated := unitRow("a", 1, []float32{0, 0, 1, 0})
+	mustUpsert(t, store, updated)
+	if n := countVec(); n != 2 {
+		t.Fatalf("derived rows after update-by-reupsert: got %d, want 2 (no duplication)", n)
+	}
+
+	// Delete: DeleteBySyncID must remove the derived row too.
+	removed, err := store.DeleteBySyncID(ctx, "b")
+	if err != nil {
+		t.Fatalf("DeleteBySyncID: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("DeleteBySyncID removed: got %d, want 1", removed)
+	}
+	if n := countVec(); n != 1 {
+		t.Fatalf("derived rows after delete: got %d, want 1", n)
+	}
+
+	// Prune: removing everything not in the live set must also prune the
+	// derived table.
+	mustUpsert(t, store, unitRow("c", 3, []float32{0, 1, 0, 0}))
+	if _, err := store.Prune(ctx, []string{"c"}); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if n := countVec(); n != 1 {
+		t.Fatalf("derived rows after prune (only 'c' live): got %d, want 1", n)
+	}
+}
+
+// TestVecIndex_ForcedFailurePreservesSourceMutationAndMarksUnhealthy (task
+// 2.13, REQ-465): a forced Vec1 write failure (the derived table dropped out
+// from under the Store) must still let the source-table mutation succeed,
+// and must permanently disable Vec1 for the rest of this Store's life —
+// never surface an index-only failure to the caller.
+func TestVecIndex_ForcedFailurePreservesSourceMutationAndMarksUnhealthy(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(t.TempDir()+"/emb.db", WithVecIndex(true))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	mustUpsert(t, store, unitRow("a", 1, []float32{1, 0, 0, 0}))
+	if !store.vec.healthyOK() {
+		t.Fatal("Vec1 must still be healthy before the forced failure")
+	}
+
+	// Force a genuine Vec1 failure by dropping the derived table out from
+	// under the Store (simulating corruption/unavailability).
+	if _, err := store.db.Exec(`DROP TABLE vec_embeddings`); err != nil {
+		t.Fatalf("drop vec_embeddings for the forced-failure setup: %v", err)
+	}
+
+	if err := store.Upsert(ctx, unitRow("b", 2, []float32{0, 1, 0, 0})); err != nil {
+		t.Fatalf("Upsert must succeed on the source table even when the derived write fails: %v", err)
+	}
+
+	// The source table must have BOTH rows — the mutation was never lost.
+	n, err := store.Count(ctx)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("source rows after forced derived failure: got %d, want 2", n)
+	}
+
+	if store.vec.healthyOK() {
+		t.Error("Vec1 must be marked unhealthy for the rest of this Store's life after a genuine derived-write failure")
+	}
+
+	// Subsequent reads must fall back to brute force cleanly (no error).
+	hits, err := store.Search(ctx, []float32{1, 0, 0, 0}, 5)
+	if err != nil {
+		t.Fatalf("Search after forced Vec1 failure must still succeed via brute force: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Errorf("brute-force fallback Search: got %d hits, want 2", len(hits))
+	}
+}
+

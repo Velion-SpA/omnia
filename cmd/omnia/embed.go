@@ -21,6 +21,7 @@ import (
 func cmdEmbed(args []string) {
 	fs := flag.NewFlagSet("embed", flag.ExitOnError)
 	force := fs.Bool("force", false, "re-embed every row, ignoring content/model hashes")
+	reindex := fs.Bool("reindex", false, "discard and rebuild the derived Vec1 index only (requires vector_index.enabled; never touches source rows)")
 	configPath := fs.String("config", config.DefaultPath(), "path to config file")
 	if err := fs.Parse(args); err != nil {
 		fatal(err)
@@ -28,9 +29,17 @@ func cmdEmbed(args []string) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
+	// A missing/unreadable config.yaml (the common fresh-install case) must
+	// degrade to the same "nothing to do" outcome as embeddings being
+	// explicitly disabled below — never a hard process exit. Mirrors the
+	// established convention already used by `omnia blame`/`omnia
+	// consolidate`/`omnia rank-train` (loadCodeGraphConfig et al.): ANY
+	// config.Load failure is treated as "capability disabled," not surfaced
+	// as a fatal error.
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fatal(fmt.Errorf("load config: %w", err))
+		logger.Info("embeddings disabled; nothing to do (no readable config.yaml; set embeddings.enabled: true to opt in)")
+		return
 	}
 	// EMBM-3: reject an internally-inconsistent embeddings config (a
 	// truncation Dim for a non-MRL model) before any Ollama call is made —
@@ -63,11 +72,16 @@ func cmdEmbed(args []string) {
 	// file and can never prune the primary instance's vectors.
 	dataDir := engramdb.ResolveDataDir("")
 	dbPath := config.ResolveEmbeddingsDBPath(cfg.Embeddings.DBPath, dataDir)
-	store, err := embed.OpenStore(dbPath)
+	store, err := embed.OpenStore(dbPath, vecIndexStoreOptions(cfg.VecIndex.Enabled)...)
 	if err != nil {
 		fatal(fmt.Errorf("open embeddings store: %w", err))
 	}
 	defer store.Close()
+
+	if *reindex && !cfg.VecIndex.Enabled {
+		fmt.Println("embed: --reindex requires vector_index.enabled: true; capability disabled, nothing to do")
+		return
+	}
 
 	client := embed.New(cfg.Embeddings.BaseURL, cfg.Embeddings.Model, cfg.Embeddings.Dim)
 	ctx := context.Background()
@@ -81,4 +95,32 @@ func cmdEmbed(args []string) {
 	fmt.Printf("embed: embedded %d / reused %d / pruned %d / skipped %d / errors %d (store now %d rows) in %s\n",
 		stats.Embedded, stats.Reused, stats.Pruned, stats.Skipped, stats.Errors, total,
 		time.Since(start).Round(time.Millisecond))
+
+	// v0.4 sqlite-vec-index (design capability 7): every normal `omnia embed`
+	// run keeps the derived Vec1 index caught up (VecBackfill is cheap when
+	// most rows were already dual-written during Reconcile above) and
+	// certifies readiness. `--reindex` is the stronger, explicit recovery/
+	// model-change operation: discard ALL derived state and rebuild from
+	// scratch. Both are no-ops (report.Enabled=false, nil error) when
+	// vector_index is off — never a hard failure.
+	if cfg.VecIndex.Enabled {
+		var (
+			report embed.VecMaintenanceReport
+			opName string
+		)
+		if *reindex {
+			report, err = store.VecReindex(ctx)
+			opName = "reindex"
+		} else {
+			report, err = store.VecBackfill(ctx)
+			opName = "backfill"
+		}
+		if err != nil {
+			fatal(fmt.Errorf("vector index %s: %w", opName, err))
+		}
+		if report.Enabled {
+			fmt.Printf("embed: vector index %s — indexed %d / skipped %d %v (active_dim=%d, total_rows=%d)\n",
+				opName, report.Indexed, report.Skipped, report.SkippedReasons, report.ActiveDim, report.TotalRows)
+		}
+	}
 }

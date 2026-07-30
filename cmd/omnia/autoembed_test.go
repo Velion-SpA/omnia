@@ -17,7 +17,7 @@ import (
 // ever opens the embeddings store or constructs an Ollama HTTP client on
 // the default path.
 func TestBuildAutoEmbedWorker_DisabledReturnsNil(t *testing.T) {
-	got := buildAutoEmbedWorker(config.EmbeddingsConfig{Enabled: false}, nil, "")
+	got := buildAutoEmbedWorker(config.EmbeddingsConfig{Enabled: false}, nil, "", false)
 	if got != nil {
 		t.Fatalf("buildAutoEmbedWorker(disabled) = %v, want nil (embeddings.enabled=false must not construct a Worker)", got)
 	}
@@ -35,7 +35,7 @@ func TestBuildAutoEmbedWorker_EnabledBuildsWorker(t *testing.T) {
 		DBPath:  filepath.Join(t.TempDir(), "embeddings.db"),
 	}
 
-	got := buildAutoEmbedWorker(embCfg, nil, "")
+	got := buildAutoEmbedWorker(embCfg, nil, "", false)
 	if got == nil {
 		t.Fatal("buildAutoEmbedWorker(enabled) = nil, want a non-nil *embed.Worker")
 	}
@@ -57,7 +57,7 @@ func TestBuildAutoEmbedWorker_EnabledButStoreUnavailableReturnsNil(t *testing.T)
 	got := buildAutoEmbedWorker(config.EmbeddingsConfig{
 		Enabled: true,
 		DBPath:  filepath.Join(blocker, "embeddings.db"),
-	}, nil, "")
+	}, nil, "", false)
 	if got != nil {
 		t.Fatal("buildAutoEmbedWorker: expected nil when the embeddings store cannot be opened")
 	}
@@ -91,9 +91,67 @@ func TestBuildAutoEmbedWorker_WithStoreStillBuildsWorker(t *testing.T) {
 		Dim:    768,
 		DBPath: filepath.Join(t.TempDir(), "embeddings.db"),
 	}
-	worker := buildAutoEmbedWorker(embCfg, s, "")
+	worker := buildAutoEmbedWorker(embCfg, s, "", false)
 	if worker == nil {
 		t.Fatal("buildAutoEmbedWorker: expected a non-nil *embed.Worker")
+	}
+}
+
+// TestBuildAutoEmbedWorker_VecIndexEnabledThreadsThroughToOpenStore (task
+// 2.15/2.16, design capability 7): passing vecIndexEnabled=true must make
+// the resulting embeddings store carry the derived Vec1 virtual table;
+// false must leave the store exactly as before (no derived table).
+func TestBuildAutoEmbedWorker_VecIndexEnabledThreadsThroughToOpenStore(t *testing.T) {
+	baseCfg := config.EmbeddingsConfig{
+		Enabled: true,
+		BaseURL: "http://127.0.0.1:11434",
+		Model:   "jina/jina-embeddings-v2-base-es",
+		Dim:     768,
+	}
+
+	disabledCfg := baseCfg
+	disabledCfg.DBPath = filepath.Join(t.TempDir(), "embeddings.db")
+	if got := buildAutoEmbedWorker(disabledCfg, nil, "", false); got == nil {
+		t.Fatal("buildAutoEmbedWorker(vecIndexEnabled=false): expected a non-nil worker")
+	}
+	if dbHasVecEmbeddingsTable(t, disabledCfg.DBPath) {
+		t.Error("buildAutoEmbedWorker(vecIndexEnabled=false) must not create vec_embeddings")
+	}
+
+	enabledCfg := baseCfg
+	enabledCfg.DBPath = filepath.Join(t.TempDir(), "embeddings.db")
+	if got := buildAutoEmbedWorker(enabledCfg, nil, "", true); got == nil {
+		t.Fatal("buildAutoEmbedWorker(vecIndexEnabled=true): expected a non-nil worker")
+	}
+	if !dbHasVecEmbeddingsTable(t, enabledCfg.DBPath) {
+		t.Error("buildAutoEmbedWorker(vecIndexEnabled=true) must create vec_embeddings in the SAME embeddings.db")
+	}
+}
+
+// TestBuildCLIEmbedPurgeStore_VecIndexEnabledThreadsThroughToOpenStore (task
+// 2.15/2.16) exercises the OTHER direct opener in this file — the one that
+// self-loads config via loadAppConfigWithRecallAutodetect (injectable var) —
+// proving it also threads Config.VecIndex.Enabled to embed.OpenStore.
+func TestBuildCLIEmbedPurgeStore_VecIndexEnabledThreadsThroughToOpenStore(t *testing.T) {
+	oldLoad := loadAppConfigWithRecallAutodetect
+	t.Cleanup(func() { loadAppConfigWithRecallAutodetect = oldLoad })
+
+	dbPath := filepath.Join(t.TempDir(), "embeddings.db")
+	loadAppConfigWithRecallAutodetect = func() (*config.Config, error) {
+		return &config.Config{
+			Embeddings: config.EmbeddingsConfig{Enabled: true, DBPath: dbPath},
+			VecIndex:   config.VecIndexConfig{Enabled: true},
+		}, nil
+	}
+
+	es := buildCLIEmbedPurgeStore("")
+	if es == nil {
+		t.Fatal("buildCLIEmbedPurgeStore: expected a non-nil *embed.Store")
+	}
+	es.Close()
+
+	if !dbHasVecEmbeddingsTable(t, dbPath) {
+		t.Error("buildCLIEmbedPurgeStore with vector_index.enabled=true must create vec_embeddings")
 	}
 }
 

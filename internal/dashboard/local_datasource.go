@@ -37,7 +37,7 @@ func newLocalDataSource(cfg Config, logger *slog.Logger) *localDataSource {
 	// Optional semantic-search layer. A failure to open the store leaves emb nil,
 	// and browse transparently falls back to keyword (FTS) search.
 	if cfg.EmbeddingsEnabled {
-		store, err := embed.OpenStore(cfg.EmbeddingsDBPath)
+		store, err := embed.OpenStore(cfg.EmbeddingsDBPath, embed.WithVecIndex(cfg.VecIndexEnabled))
 		if err != nil {
 			logger.Warn("embeddings store unavailable; semantic search disabled, using FTS", "err", err)
 		} else {

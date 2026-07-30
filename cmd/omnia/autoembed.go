@@ -40,7 +40,12 @@ import (
 // alternate OMNIA_DATA_DIR must never resolve to the same embeddings.db as
 // the canonical instance. Pass "" when the caller has no data dir opinion
 // (tests that always set an explicit DBPath are unaffected either way).
-func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig, s *store.Store, dataDir string) *embed.Worker {
+//
+// vecIndexEnabled threads v0.4's sqlite-vec-index capability flag
+// (Config.VecIndex.Enabled) through to embed.OpenStore (design capability 7:
+// "every direct production opener must pass it"). false reproduces the
+// pre-v0.4 OpenStore behavior exactly.
+func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig, s *store.Store, dataDir string, vecIndexEnabled bool) *embed.Worker {
 	if !embCfg.Enabled {
 		return nil
 	}
@@ -54,7 +59,7 @@ func buildAutoEmbedWorker(embCfg config.EmbeddingsConfig, s *store.Store, dataDi
 		return nil
 	}
 	dbPath := config.ResolveEmbeddingsDBPath(embCfg.DBPath, dataDir)
-	embStore, err := embed.OpenStore(dbPath)
+	embStore, err := embed.OpenStore(dbPath, vecIndexStoreOptions(vecIndexEnabled)...)
 	if err != nil {
 		// Fail closed: the periodic `omnia embed`/Reconcile run still catches
 		// anything saved meanwhile. A missing vector store must never make a
@@ -105,7 +110,7 @@ var buildCLIEmbedPurgeStore = func(dataDir string) *embed.Store {
 		return nil
 	}
 	dbPath := config.ResolveEmbeddingsDBPath(appCfg.Embeddings.DBPath, dataDir)
-	embStore, err := embed.OpenStore(dbPath)
+	embStore, err := embed.OpenStore(dbPath, vecIndexStoreOptions(appCfg.VecIndex.Enabled)...)
 	if err != nil {
 		log.Printf("[delete] embeddings store unavailable (%v); vector purge skipped", err)
 		return nil

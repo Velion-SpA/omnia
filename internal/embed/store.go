@@ -151,11 +151,59 @@ ON CONFLICT(sync_id) DO UPDATE SET
     dim=excluded.dim,
     vector=excluded.vector,
     embedded_at=excluded.embedded_at`
-	_, err = s.db.ExecContext(ctx, q,
+
+	if !s.vec.healthyOK() {
+		_, err = s.db.ExecContext(ctx, q,
+			r.SyncID, r.ObsID, r.Project, r.Type, r.TopicKey, r.Title,
+			r.UpdatedAt, r.ContentHash, r.Model, r.Dim, blob, r.EmbeddedAt)
+		if err != nil {
+			return fmt.Errorf("embed: upsert %s: %w", r.SyncID, err)
+		}
+		return nil
+	}
+
+	// Vec1 additive dual-write (design capability 7 "Write, backfill, and
+	// recovery"): attempt source and derived changes in ONE transaction. Any
+	// derived-write failure rolls back and retries the source mutation alone
+	// in a fresh transaction, so an index-only failure never surfaces to the
+	// caller (spec REQ-465).
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("embed: upsert %s: begin tx: %w", r.SyncID, err)
+	}
+	if _, err := tx.ExecContext(ctx, q,
+		r.SyncID, r.ObsID, r.Project, r.Type, r.TopicKey, r.Title,
+		r.UpdatedAt, r.ContentHash, r.Model, r.Dim, blob, r.EmbeddedAt); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("embed: upsert %s: %w", r.SyncID, err)
+	}
+	var rowid int64
+	if err := tx.QueryRowContext(ctx, `SELECT rowid FROM embeddings WHERE sync_id = ?`, r.SyncID).Scan(&rowid); err != nil {
+		tx.Rollback()
+		return s.upsertSourceOnly(ctx, q, r, blob, fmt.Errorf("locate rowid for derived write: %w", err))
+	}
+	if _, derr := s.vec.upsertRow(ctx, tx, rowid, r.Vector, r.Project); derr != nil {
+		tx.Rollback()
+		return s.upsertSourceOnly(ctx, q, r, blob, derr)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("embed: upsert %s: commit: %w", r.SyncID, err)
+	}
+	return nil
+}
+
+// upsertSourceOnly re-applies ONLY the source-table mutation in a fresh
+// transaction after a derived Vec1 write failed and the combined transaction
+// was rolled back (design: "roll back that transaction, commit the
+// source-table mutation in a source-only transaction, mark the derived
+// index unhealthy/stale ... never surface an index-only write failure").
+func (s *Store) upsertSourceOnly(ctx context.Context, q string, r Row, blob []byte, cause error) error {
+	s.vec.markUnhealthy(cause)
+	_, err := s.db.ExecContext(ctx, q,
 		r.SyncID, r.ObsID, r.Project, r.Type, r.TopicKey, r.Title,
 		r.UpdatedAt, r.ContentHash, r.Model, r.Dim, blob, r.EmbeddedAt)
 	if err != nil {
-		return fmt.Errorf("embed: upsert %s: %w", r.SyncID, err)
+		return fmt.Errorf("embed: upsert %s: source-only retry after derived failure: %w", r.SyncID, err)
 	}
 	return nil
 }
@@ -432,9 +480,51 @@ func (s *Store) GraphScoped(projects []string, k int, minScore float32) ([]Graph
 // that was never embedded (embeddings disabled, or not yet reconciled) is a
 // no-op, not an error: 0 rows removed, nil error.
 func (s *Store) DeleteBySyncID(ctx context.Context, syncID string) (int, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM embeddings WHERE sync_id = ?`, syncID)
+	if !s.vec.healthyOK() {
+		res, err := s.db.ExecContext(ctx, `DELETE FROM embeddings WHERE sync_id = ?`, syncID)
+		if err != nil {
+			return 0, fmt.Errorf("embed: DeleteBySyncID %s: %w", syncID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("embed: DeleteBySyncID %s rows affected: %w", syncID, err)
+		}
+		return int(n), nil
+	}
+
+	// Vec1 additive dual-write: mirror the delete into the derived table
+	// inside the same transaction as the source delete (design capability 7).
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return 0, fmt.Errorf("embed: DeleteBySyncID %s: begin tx: %w", syncID, err)
+	}
+	var rowid sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT rowid FROM embeddings WHERE sync_id = ?`, syncID).Scan(&rowid); err != nil && err != sql.ErrNoRows {
+		tx.Rollback()
+		return 0, fmt.Errorf("embed: DeleteBySyncID %s: locate rowid: %w", syncID, err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM embeddings WHERE sync_id = ?`, syncID)
+	if err != nil {
+		tx.Rollback()
 		return 0, fmt.Errorf("embed: DeleteBySyncID %s: %w", syncID, err)
+	}
+	if rowid.Valid {
+		if _, derr := tx.ExecContext(ctx, `DELETE FROM vec_embeddings WHERE rowid = ?`, rowid.Int64); derr != nil {
+			tx.Rollback()
+			s.vec.markUnhealthy(derr)
+			res2, err2 := s.db.ExecContext(ctx, `DELETE FROM embeddings WHERE sync_id = ?`, syncID)
+			if err2 != nil {
+				return 0, fmt.Errorf("embed: DeleteBySyncID %s: source-only retry after derived failure: %w", syncID, err2)
+			}
+			n2, err2 := res2.RowsAffected()
+			if err2 != nil {
+				return 0, fmt.Errorf("embed: DeleteBySyncID %s rows affected: %w", syncID, err2)
+			}
+			return int(n2), nil
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("embed: DeleteBySyncID %s: commit: %w", syncID, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -471,7 +561,10 @@ func (s *Store) Prune(ctx context.Context, liveSyncIDs []string) (int, error) {
 	}
 
 	for _, id := range toDelete {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM embeddings WHERE sync_id = ?`, id); err != nil {
+		// Reuses DeleteBySyncID so Prune gets the exact same Vec1
+		// dual-write/fallback contract for free (design capability 7),
+		// rather than duplicating it here.
+		if _, err := s.DeleteBySyncID(ctx, id); err != nil {
 			return 0, fmt.Errorf("embed: Prune delete %s: %w", id, err)
 		}
 	}

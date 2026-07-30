@@ -57,6 +57,14 @@ type Config struct {
 	EmbeddingsModel   string
 	EmbeddingsDim     int
 	EmbeddingsDBPath  string
+	// VecIndexEnabled threads v0.4's sqlite-vec-index capability flag
+	// (config.VecIndexConfig.Enabled) into the dashboard's direct embedding-
+	// store opener (design capability 7: "every direct production opener
+	// must pass it"). false (default) reproduces the pre-v0.4 embeddings
+	// store behavior exactly — the dashboard's semantic/graph searches keep
+	// using their existing brute-force store methods regardless of this
+	// flag until those store methods themselves route through Vec1.
+	VecIndexEnabled bool
 }
 
 // Server is the Omnia dashboard HTTP server. It depends only on a DataSource, so
