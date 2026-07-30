@@ -8394,6 +8394,22 @@ func TestValidateSyncMutationPayloadRelationRequiresServerFields(t *testing.T) {
 	}
 }
 
+func TestValidateSyncMutationPayloadRecognizesEmbedding(t *testing.T) {
+	payload := `{"sync_id":"obs-embed-1","project":"engram","model":"nomic-embed-text","dim":3,"vector":"AAAA","content_hash":"hash1","updated_at":"2026-07-30 00:00:00"}`
+	validation := ValidateSyncMutationPayload(SyncEntityEmbedding, SyncOpUpsert, payload, "obs-embed-1")
+	if validation.ReasonCode != "" {
+		t.Fatalf("expected a well-formed embedding payload to validate cleanly, got %+v", validation)
+	}
+}
+
+func TestValidateSyncMutationPayloadEmbeddingRequiresVectorOnUpsert(t *testing.T) {
+	payload := `{"sync_id":"obs-embed-2","project":"engram","model":"nomic-embed-text","dim":3,"content_hash":"hash1","updated_at":"2026-07-30 00:00:00"}`
+	validation := ValidateSyncMutationPayload(SyncEntityEmbedding, SyncOpUpsert, payload, "obs-embed-2")
+	if validation.ReasonCode != "sync_mutation_payload_missing_required_fields" || strings.Join(validation.MissingFields, ",") != "vector" {
+		t.Fatalf("expected missing vector, got %+v", validation)
+	}
+}
+
 func TestReadSQLiteLockSnapshotDoesNotMutateApplicationRows(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("s1", "engram", "/work/engram"); err != nil {
