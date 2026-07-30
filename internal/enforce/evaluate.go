@@ -2,6 +2,7 @@ package enforce
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/velion/omnia/internal/audit"
 	"github.com/velion/omnia/internal/config"
@@ -42,8 +43,18 @@ func Evaluate(ctx context.Context, src ProcedureSource, opts EvalOptions) Result
 	procedures, err := MatchTrustedProcedures(src, opts.Project, opts.FilesTouched, 0)
 	if err != nil {
 		// A lookup failure must never escalate to a block (fail-safe by
-		// design) — pass, and still audit the decision.
-		result := Result{Verdict: VerdictPass, Violations: []Violation{}, Overridable: false}
+		// design, design.md: "cannot scope → pass with note") — pass, but
+		// surface WHY via Note so this is never indistinguishable from a
+		// genuine "nothing matched" pass. appendAuditEntry carries the note
+		// into the audit trail too, so a procedure store that starts
+		// failing (DB corruption, disk I/O error) doesn't silently look
+		// like a healthy, empty gate forever.
+		result := Result{
+			Verdict:     VerdictPass,
+			Violations:  []Violation{},
+			Overridable: false,
+			Note:        fmt.Sprintf("procedure lookup failed, returning unscoped pass: %v", err),
+		}
 		appendAuditEntry(opts, result, nil)
 		return result
 	}
@@ -93,5 +104,6 @@ func appendAuditEntry(opts EvalOptions, result Result, procedures []store.Proced
 		PostconditionKind: kind,
 		ExitCode:          exitCode,
 		OverrideReason:    opts.OverrideReason,
+		Note:              result.Note,
 	})
 }

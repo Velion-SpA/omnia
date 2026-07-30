@@ -65,6 +65,14 @@ type Entry struct {
 	PostconditionKind string   `json:"postcondition_kind,omitempty"`
 	ExitCode          int      `json:"exit_code,omitempty"`
 	OverrideReason    string   `json:"override_reason,omitempty"`
+	// Note carries fail-safe diagnostic context for an ActionEnforce entry
+	// (ADR-7 extension): e.g. when a procedure-lookup error forced an
+	// unscoped `pass` verdict, this records why, so a broken procedure
+	// store never looks indistinguishable from a healthy gate that simply
+	// found nothing to enforce. Empty for ordinary pass/flag/block/override
+	// entries driven by a real evaluation. Additive and omitempty for the
+	// same JSONL backward-compatibility reason as the fields above.
+	Note string `json:"note,omitempty"`
 }
 
 // defaultLogPath returns ~/.local/state/omnia/audit.jsonl.
