@@ -119,7 +119,7 @@ func buildRecallServiceForCLI(s *store.Store, dataDir string) *recall.Service {
 	if err != nil {
 		return nil
 	}
-	return buildRecallService(s, appCfg.Recall, appCfg.Embeddings, dataDir)
+	return buildRecallService(s, appCfg.Recall, appCfg.Embeddings, dataDir, appCfg.VecIndex.Enabled)
 }
 
 // recallOrFTSSearch is the shared search-routing seam between `omnia search`
@@ -280,7 +280,12 @@ func loadRankingConfigForCLI() config.RankingConfig {
 // alternate OMNIA_DATA_DIR must never resolve to the same embeddings.db as
 // the canonical instance. Pass "" when the caller has no data dir opinion
 // (tests that always set an explicit DBPath are unaffected either way).
-func buildRecallService(s *store.Store, recallCfg config.RecallConfig, embCfg config.EmbeddingsConfig, dataDir string) *recall.Service {
+//
+// vecIndexEnabled threads v0.4's sqlite-vec-index capability flag through to
+// embed.OpenStore (design capability 7) — this is the SAME builder cmdMCP,
+// cmdServe, `omnia search`, and `omnia eval --injection` all share, so
+// enabling vector_index affects every one of those read surfaces uniformly.
+func buildRecallService(s *store.Store, recallCfg config.RecallConfig, embCfg config.EmbeddingsConfig, dataDir string, vecIndexEnabled bool) *recall.Service {
 	if !recallCfg.Enabled {
 		return nil
 	}
@@ -303,7 +308,7 @@ func buildRecallService(s *store.Store, recallCfg config.RecallConfig, embCfg co
 	}
 
 	dbPath := config.ResolveEmbeddingsDBPath(embCfg.DBPath, dataDir)
-	embStore, err := embed.OpenStore(dbPath)
+	embStore, err := embed.OpenStore(dbPath, vecIndexStoreOptions(vecIndexEnabled)...)
 	if err != nil {
 		// The embeddings store is Omnia's own file, not the read-only
 		// engram.db. If it can't even be opened, fail closed to the

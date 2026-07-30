@@ -25,7 +25,7 @@ func TestBuildRecallService_DisabledReturnsNil(t *testing.T) {
 	}
 	defer s.Close()
 
-	got := buildRecallService(s, config.RecallConfig{Enabled: false}, config.EmbeddingsConfig{}, "")
+	got := buildRecallService(s, config.RecallConfig{Enabled: false}, config.EmbeddingsConfig{}, "", false)
 	if got != nil {
 		t.Fatalf("buildRecallService(disabled) = %v, want nil (recall.enabled=false must not construct a Service)", got)
 	}
@@ -56,12 +56,15 @@ func TestBuildRecallService_EnabledBuildsWiredService(t *testing.T) {
 		MaxResults:  50,
 	}
 
-	got := buildRecallService(s, recallCfg, embCfg, "")
+	got := buildRecallService(s, recallCfg, embCfg, "", false)
 	if got == nil {
 		t.Fatal("buildRecallService(enabled) = nil, want a non-nil *recall.Service")
 	}
 	if got.Lexical == nil {
 		t.Error("expected non-nil Lexical (store-backed LexicalSearcher)")
+	}
+	if dbHasVecEmbeddingsTable(t, embCfg.DBPath) {
+		t.Error("buildRecallService(vecIndexEnabled=false, the default here) must not create vec_embeddings")
 	}
 	if got.Semantic == nil {
 		t.Error("expected non-nil Semantic (embed.Searcher) when the embeddings store opens successfully")
@@ -72,6 +75,35 @@ func TestBuildRecallService_EnabledBuildsWiredService(t *testing.T) {
 		got.Params.BaseFloor != recallCfg.BaseFloor ||
 		got.Params.MaxResults != recallCfg.MaxResults {
 		t.Errorf("Params = %+v, want fields copied from RecallConfig %+v", got.Params, recallCfg)
+	}
+}
+
+// TestBuildRecallService_VecIndexEnabledThreadsThroughToOpenStore (task
+// 2.15/2.16, design capability 7): buildRecallService is the SHARED builder
+// behind cmdMCP, cmdServe, `omnia search`, and `omnia eval --injection` — a
+// single vecIndexEnabled=true here must make the resulting embeddings.db
+// carry the derived Vec1 table for ALL of those read surfaces at once.
+func TestBuildRecallService_VecIndexEnabledThreadsThroughToOpenStore(t *testing.T) {
+	s, err := storeNew(testConfig(t))
+	if err != nil {
+		t.Fatalf("storeNew: %v", err)
+	}
+	defer s.Close()
+
+	embCfg := config.EmbeddingsConfig{
+		BaseURL: "http://127.0.0.1:11434",
+		Model:   "jina/jina-embeddings-v2-base-es",
+		Dim:     768,
+		DBPath:  filepath.Join(t.TempDir(), "embeddings.db"),
+	}
+	recallCfg := config.RecallConfig{Enabled: true, RRFK: 60, DenseK: 5, StrongFloor: 0.65, BaseFloor: 0.55, MaxResults: 50}
+
+	got := buildRecallService(s, recallCfg, embCfg, "", true)
+	if got == nil {
+		t.Fatal("buildRecallService(vecIndexEnabled=true) = nil, want a non-nil *recall.Service")
+	}
+	if !dbHasVecEmbeddingsTable(t, embCfg.DBPath) {
+		t.Error("buildRecallService(vecIndexEnabled=true) must create vec_embeddings in the SAME embeddings.db")
 	}
 }
 
@@ -96,7 +128,7 @@ func TestBuildRecallService_EnabledButStoreUnavailableReturnsNil(t *testing.T) {
 
 	got := buildRecallService(s, config.RecallConfig{Enabled: true}, config.EmbeddingsConfig{
 		DBPath: filepath.Join(blocker, "embeddings.db"),
-	}, "")
+	}, "", false)
 	if got != nil {
 		t.Fatal("buildRecallService: expected nil when the embeddings store cannot be opened")
 	}
@@ -134,7 +166,7 @@ func TestBuildRecallService_InvalidEmbeddingsConfigDegradesToNil(t *testing.T) {
 		MaxResults:  50,
 	}
 
-	got := buildRecallService(s, recallCfg, embCfg, "")
+	got := buildRecallService(s, recallCfg, embCfg, "", false)
 	if got != nil {
 		t.Fatal("buildRecallService: expected nil for an invalid (non-MRL truncated-dim) embeddings config — must fail closed to FTS5-only instead of silently building a broken embedder")
 	}

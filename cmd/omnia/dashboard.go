@@ -32,16 +32,30 @@ func cmdDashboard(args []string) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
+	dashCfg := buildDashboardConfig(*configPath, *daemonURL, *dataDir, *actor, *port, *projectsFlag, logger)
+	srv := dashboard.NewServer(dashCfg, logger)
+
+	if err := srv.Start(context.Background()); err != nil {
+		fatal(err)
+	}
+}
+
+// buildDashboardConfig resolves cmdDashboard's flag/config-file inputs into a
+// dashboard.Config, extracted from cmdDashboard itself so the config-
+// resolution logic (including v0.4's VecIndexEnabled threading, design
+// capability 7) is unit-testable without starting a real HTTP server.
+func buildDashboardConfig(configPath, daemonURLFlag, dataDirFlag, actor string, port int, projectsFlag string, logger *slog.Logger) dashboard.Config {
 	var (
-		resolvedDaemon = *daemonURL
-		configProjects []string
-		configRoutes   map[string]string
-		configHidden   []string
-		configAliases  map[string]string
-		configGroups   map[string][]string
-		embCfg         config.EmbeddingsConfig
+		resolvedDaemon  = daemonURLFlag
+		configProjects  []string
+		configRoutes    map[string]string
+		configHidden    []string
+		configAliases   map[string]string
+		configGroups    map[string][]string
+		embCfg          config.EmbeddingsConfig
+		vecIndexEnabled bool
 	)
-	if cfg, err := config.Load(*configPath); err == nil {
+	if cfg, err := config.Load(configPath); err == nil {
 		if resolvedDaemon == "" {
 			resolvedDaemon = cfg.Engram.BaseURL
 		}
@@ -51,6 +65,7 @@ func cmdDashboard(args []string) {
 		configAliases = cfg.ProjectAliases
 		configGroups = cfg.ProjectGroups
 		embCfg = cfg.Embeddings
+		vecIndexEnabled = cfg.VecIndex.Enabled
 		// EMBM-3/blocking-fix: an internally-inconsistent embeddings config
 		// (a truncation/expansion Dim mismatched against the model's MRL
 		// capability, see config.ValidateEmbeddings) must never silently
@@ -71,8 +86,8 @@ func cmdDashboard(args []string) {
 		resolvedDaemon = "http://127.0.0.1:7437"
 	}
 
-	if *projectsFlag != "" {
-		for _, p := range strings.Split(*projectsFlag, ",") {
+	if projectsFlag != "" {
+		for _, p := range strings.Split(projectsFlag, ",") {
 			p = strings.TrimSpace(p)
 			if p != "" {
 				configProjects = append(configProjects, p)
@@ -84,14 +99,14 @@ func cmdDashboard(args []string) {
 	// directory EngramDataDir uses (fixes #82: a --data-dir/OMNIA_DATA_DIR
 	// override must never resolve to the canonical instance's shared global
 	// embeddings.db).
-	resolvedDataDir := datadir.Resolve(*dataDir)
+	resolvedDataDir := datadir.Resolve(dataDirFlag)
 	embeddingsDBPath := config.ResolveEmbeddingsDBPath(embCfg.DBPath, resolvedDataDir)
 
-	srv := dashboard.NewServer(dashboard.Config{
-		Port:              *port,
+	return dashboard.Config{
+		Port:              port,
 		EngramURL:         resolvedDaemon,
-		EngramDataDir:     *dataDir,
-		Actor:             *actor,
+		EngramDataDir:     dataDirFlag,
+		Actor:             actor,
 		Projects:          configProjects,
 		Routes:            configRoutes,
 		ProjectHidden:     configHidden,
@@ -102,9 +117,6 @@ func cmdDashboard(args []string) {
 		EmbeddingsModel:   embCfg.Model,
 		EmbeddingsDim:     embCfg.Dim,
 		EmbeddingsDBPath:  embeddingsDBPath,
-	}, logger)
-
-	if err := srv.Start(context.Background()); err != nil {
-		fatal(err)
+		VecIndexEnabled:   vecIndexEnabled,
 	}
 }

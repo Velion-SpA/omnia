@@ -119,6 +119,98 @@ None.
 ### Design Deviations
 None.
 
+## PR 2A + PR 2B + Phase 3 — sqlite-vec-index (bundled Vec1)
+
+- Completed tasks: 2.1–2.21, 3.1–3.10 (all of Phase 2/Phase 2B/Phase 3).
+- Boundary: opt-in, additive Vec1 flat/cos exact float32 KNN index over the existing `embeddings.db`
+  (`github.com/ncruces/go-sqlite3@v0.35.2`, pinned). The `embeddings` table remains the sole authoritative
+  source of truth; the brute-force scan is never removed and is the permanent fallback for disabled, absent,
+  unhealthy, corrupt, or dimension-mismatched cases. Default-OFF: `vector_index.enabled` absent/false is
+  byte-for-byte identical to pre-v0.4 behavior by construction (every new code path is gated behind
+  `s.vec != nil` / `WithVecIndex`, added as new branches around the pre-existing statements, never replacing
+  them). Also lands PR1's config correction: `VecIndexConfig.Quantization` (unreleased) removed — v0.4's
+  contract is exactly `vector_index.enabled`, flat/cos float32 only, no quantization/int8/binary knob.
+- Empirical validation before implementation (per design's "Open Questions"): wrote small throwaway Go
+  programs against the real pinned dependency (`github.com/ncruces/go-sqlite3@v0.35.2` +
+  `github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303`) to lock down behavior the design flagged as needing
+  verification before implementation, all confirmed:
+  - `driver.Open(dsn, vec1.Register)` + `CREATE VIRTUAL TABLE ... USING vec1(vector, project)` +
+    `INSERT INTO ...(cmd, vector) VALUES ('rebuild', '{index:"flat", distance:"cos"}')` works under
+    `CGO_ENABLED=0`, and the 'rebuild' config persists across process restarts without reissue.
+  - Score anchors: self/orthogonal/antipodal distances are exactly 0/1/2, i.e. `score = 1 - distance` gives
+    1/0/-1 — confirms the PINNED bundled version, not the newer Vec1 trunk's `2 - distance` formula (verified
+    against the live `sqlite.org/vec1` trunk doc, which documents the newer formula explicitly).
+  - Vec1's metadata-column WHERE pushdown (`v.project = ?` / `v.project IN (...)`) filters BEFORE top-K
+    accumulation (not after) — reproduced the exact crowding-out scenario the brute-force `SearchScoped` fix
+    already guards and confirmed Vec1 preserves the same guarantee.
+  - The `SELECT e.sync_id, e.obs_id, v.distance FROM vec_embeddings(?, ?) AS v JOIN embeddings AS e ON
+    e.rowid = v.rowid WHERE v.project = ?` query shape from design.md works exactly as specified.
+  - Dimension-mismatched inserts/queries error cleanly (`unexpected vector blob size N bytes, expected M`);
+    the source table and vec1 table state remain intact after an isolated failed statement.
+### TDD Cycle Evidence
+| Task | Test File | RED | GREEN | REFACTOR |
+|---|---|---|---|---|
+| 2.1–2.2 | `internal/embed/store_vec1_test.go` | `WithVecIndex`/private connector referenced before existing; compile failure | Options-based `OpenStore`, `driver.Open(dsn, vec1.Register)` connector selection, disabled path unchanged | Connector isolated to `internal/embed/vec1_connector.go` |
+| 2.3–2.4 | same | `vec_embeddings`/`vec_index_state` assertions failed, tables didn't exist | Same-DB DDL + bookkeeping table; `embeddings` untouched | `vecStateDDL`/`vecTableDDL`/`vecRebuildFlatCos` constants |
+| 2.5–2.6 | same | `active_dim`/byte-order assertions failed, no state tracked | `vecIndex` struct + `hostIsLittleEndian`/`encodeNativeVector` + persisted `native_little_endian` marker, checked against host on every open | Nil-receiver-safe `vecIndex` methods (`usable`/`healthyOK`/`dim`/`markUnhealthy`/`reset`) |
+| 2.7–2.8 | same | `VecBackfill`/`VecReindex` didn't exist; 998+2-row report assertions failed | `vecPopulate` shared backfill/reindex core; readiness marker only written after count verification | **Found and fixed a real deadlock**: `vecPopulate`'s original implementation nested an `ExecContext` INSERT inside a still-open `Rows` loop on `MaxOpenConns(1)` — reproduced via an empirical 1000-row benchmark (hung past a 15s timeout), fixed by buffering source rows before issuing any derived write (mirrors `Search`/`GraphScoped`'s own pattern); verified fix: 1000-row `VecReindex` now completes in ~43ms |
+| 2.9, 2.12 | — | N/A (refactor/verify) | Shared DDL/state/backfill helpers in one file; disabled byte parity confirmed | `CGO_ENABLED=0 go build`/`go vet` clean |
+| 2.10–2.11 | `internal/config/v04_config_test.go` | New reflection-based contract test failed against the still-present `Quantization` field | Removed `VecIndexConfig.Quantization` + its `applyDefaults` value; `VecIndexConfig` now exposes only `Enabled` | N/A |
+| 2.13–2.14 | `internal/embed/store_vec1_test.go` | Upsert/Delete/Prune dual-write assertions failed (no derived mirroring existed) | Transactional dual-write in `Upsert`/`DeleteBySyncID` (`Prune` reuses `DeleteBySyncID`); forced-failure test (drop `vec_embeddings` mid-run) proves source mutation survives and Vec1 is marked permanently unhealthy | `vecIndex.upsertRow` isolated in `internal/embed/vec1_dualwrite.go` |
+| 2.15–2.16 | `cmd/omnia/autoembed_test.go`, `cmd/omnia/recall_test.go` | New composition tests failed (functions took no `vecIndexEnabled` parameter yet) | Threaded `Config.VecIndex.Enabled` through `buildAutoEmbedWorker`, `buildCLIEmbedPurgeStore`, `buildRecallService`/`buildRecallServiceForCLI` (shared by cmdMCP/cmdServe/`omnia search`/`omnia eval --injection`) | Extracted `vecIndexStoreOptions` shared helper (`cmd/omnia/vecindex.go`) |
+| 2.17–2.18 | `cmd/omnia/dashboard_test.go`, `internal/dashboard/local_datasource_test.go` (new) | Failed to compile (`VecIndexEnabled` field/param didn't exist) | Added `dashboard.Config.VecIndexEnabled`; extracted `buildDashboardConfig` from `cmdDashboard` for testability without starting a real HTTP server | `newLocalDataSource` passes `embed.WithVecIndex(cfg.VecIndexEnabled)` |
+| 2.19–2.20 | `cmd/omnia/embed_test.go` (new) | `--reindex` flag didn't exist; disabled-capability test failed | Added `--reindex`; `omnia embed` now also calls `VecBackfill`/`VecReindex` after every reconcile and prints the report | **Found and fixed a real pre-existing anti-pattern**: `cmdEmbed`'s `config.Load` failure called `fatal()` (hard process exit) instead of degrading to "capability disabled" like `omnia blame`/`consolidate`/`rank-train` already do — fixed and covered by `TestCmdEmbed_MissingConfigFileDegradesGracefully` |
+| 2.21 | — | N/A (refactor/verify) | — | `vecIndexStoreOptions` is the single shared options builder for every direct opener |
+| 3.1–3.2 | `internal/embed/store_vec1_test.go` | Score-anchor assertions failed (no Vec1 read routing existed) | `vecScore(d) = float32(1 - d)`, locked to self=1/orthogonal=0/antipodal=-1 | Isolated in `internal/embed/vec1_search.go` |
+| 3.3–3.4 | same | Parity assertions failed against brute force on a 500-vector, 2-project fixture | `tryVecSearch` routes `Search`/`SearchScoped` through metadata-filtered KNN + JOIN, converts scores, falls through to unmodified brute-force body on `ok=false` | Fixed a test-fixture bug found while writing this: `oneHot` vectors collapse into two tied similarity buckets, making top-k comparison ambiguous — switched to `angledVector` (distinct cosine per row) |
+| 3.5–3.6 | same | Forced-failure/dimension-mismatch assertions failed | Any genuine Vec1 error marks the Store instance permanently unhealthy and falls back; a query-dimension mismatch routes to brute force without touching health at all | Centralized in `tryVecSearch`/`tryVecGraph`'s shared `ok` return convention |
+| 3.7–3.8 | same | `GraphScoped` parity assertions failed (no per-node Vec1 KNN routing existed) | `tryVecGraph` runs one Vec1 KNN query per node (K = full scope size, guaranteeing the same candidate universe as the O(N²) brute-force scan) | Extracted `neighbor`/`finishGraph` as the ONE shared top-k-per-node/edge-dedup/degree/sort helper used by BOTH the brute-force and Vec1 paths |
+| 3.9–3.10 | — | N/A (refactor/verify) | — | `CGO_ENABLED=0 go build ./...`, `go vet ./...`, full `go test ./...` all green; disabled-path byte parity confirmed throughout |
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo, all packages)
+- `gofmt -l` on every changed/new file — clean
+- `git diff --check` — clean
+- Disabled path (`vector_index.enabled` absent or `false`): `Store.vec` stays nil; every new dual-write/read
+  branch is `if !s.vec.healthyOK() { <original unmodified statement> }` / `if hits, ok := s.tryVecSearch(...);
+  ok { ... }` — the pre-existing brute-force statements are never edited, only wrapped, so disabled-path bytes
+  are identical by construction, not merely by testing.
+### Design Deviations
+- **Config correction ownership (PR1 → PR2A)**: `VecIndexConfig.Quantization` removed per design's explicit
+  "Config correction ownership" note — not a deviation, but flagged here since it un-checks part of historical
+  task 1.2's original scope (task 2.10–2.12 is the sole owner of this correction, as tasks.md specifies).
+- **`ready` semantics**: design's wording ("first-enable backfill... writes a completion marker") could be read
+  as requiring per-row `Upsert` calls to grant read-routing readiness immediately. Implemented instead so
+  `ready` is granted ONLY by a verified whole-table `VecBackfill`/`VecReindex` pass (count-verified), while
+  individual `Upsert`/`DeleteBySyncID`/`Prune` calls dual-write incrementally without unilaterally granting
+  readiness. `cmdEmbed` calls `VecBackfill` after every reconcile run specifically so a normal `omnia embed`
+  invocation (the natural first-enable workflow) still activates reads without requiring a separate explicit
+  `--reindex`. Rationale: only a full-table pass can supply the row-count verification REQ-467 requires;
+  granting readiness from a single write would let reads route through Vec1 before every existing row is
+  confirmed indexed.
+- **`Graph`/`GraphScoped` Vec1 routing bails to brute force on ANY mixed-dimension row in scope** rather than
+  attempting a partial per-node fallback — simpler and provably correct (the brute-force path already handles
+  mixed dimensions via its own per-pair skip), at the cost of not accelerating a scope that happens to contain
+  even one off-dimension row. Not expected to matter in practice (a store's active dimension is fixed by its
+  configured embedding model).
+- **go.mod transitive bumps**: adding `github.com/ncruces/go-sqlite3@v0.35.2` raised the MVS-selected versions
+  of `golang.org/x/crypto`, `golang.org/x/net`, `golang.org/x/mod`, `golang.org/x/sync`, `golang.org/x/sys`,
+  `golang.org/x/text`, `golang.org/x/tools` (via `go mod tidy`). All are backward-compatible minor bumps; full
+  `go test ./...` passed with no regressions, including `internal/cloud/*` packages that depend on
+  `golang.org/x/crypto`/`golang.org/x/net`.
+### Open Questions / Follow-ups for a Human Reviewer
+- No throughput/benchmark claim was made (matches design: "No throughput claim is part of this design") —
+  `tryVecGraph` issues one Vec1 KNN query per node (O(N) round trips), which is a different cost SHAPE than the
+  brute-force O(N²) in-process scan, not necessarily faster in absolute terms for small stores. Correctness was
+  the priority given the review-workload constraints on this batch; a follow-up could benchmark real-world
+  store sizes if throughput becomes a concern.
+- `cmd/omnia/embed_test.go`'s `--reindex` coverage is scoped to the disabled-capability and missing-config
+  degrade paths (the underlying `VecBackfill`/`VecReindex` report mechanics are exhaustively covered at the
+  `internal/embed` layer). A full CLI-level test with a real seeded embeddings row would additionally require
+  faking the Ollama HTTP embedder inside `embed.Reconcile`'s call path — deferred as an acceptable scope
+  boundary given the mechanism itself is already fully tested.
+
 ## PR 7 — Memory Enforcement Gate A: Matcher + Command Runner
 - Completed tasks: 7.1–7.8.
 - Boundary: `internal/enforce` package only (`matcher.go`, `runner.go`, `gate.go`) — trusted-procedure
@@ -268,6 +360,76 @@ merge. All three are fixed with new RED→GREEN test coverage, on top of the ori
 - `CGO_ENABLED=0 go build ./...` — passed
 - `go vet ./...` — passed
 - `go test ./...` — passed (full repo, all packages)
+### Design Deviations
+None beyond what's described above.
+
+## 2026-07-30 — PR 2A + PR 2B + Phase 3 — sqlite-vec-index: Review Remediation
+An independent adversarial review of the sqlite-vec-index capability found three SHOULD-FIX issues (plus two
+findings explicitly deferred, see "Deliberately not fixed" below). All three fixed findings are addressed with
+new/updated test coverage, on top of the original 5 commits (not amended).
+### Findings fixed
+1. **SHOULD-FIX — `GraphScoped`'s brute-force logic had been extracted into a helper shared with the Vec1
+   path.** `store.go`'s `Graph`/`GraphScoped` used to have their own self-contained edge-dedup/degree/sort
+   logic; a prior pass extracted it into a `finishGraph`/`neighbor` helper called by BOTH the brute-force path
+   (`store.go`) and the Vec1 path (`vec1_search.go`'s `tryVecGraph`). The two paths were behaviorally identical
+   either way (map-accumulation + explicit final sort is order-independent), so there was no live bug — but the
+   coupling meant a future Vec1-only tuning change to the shared helper could silently regress the brute-force
+   fallback, defeating the point of "never edit the brute-force path, only wrap it in a new branch." Fixed:
+   `store.go`'s `GraphScoped` now has its own private, self-contained `neighbor`/`pair`/`edgeScore` logic again
+   — restored verbatim from `origin/main`'s pre-v0.4 version (the only addition is the pre-existing
+   `tryVecGraph` wrapper call at the top, which was already a correctly-shaped new branch). `vec1_search.go`
+   keeps its OWN private copy, renamed `vec1Neighbor`/`vec1FinishGraph` so it can never be confused with or
+   accidentally shared by the brute-force path again. Verification: manually diffed the restored `GraphScoped`
+   function body (everything after the `tryVecGraph` wrapper) against `git show origin/main:internal/embed/
+   store.go` — byte-for-byte identical (`diff` on the extracted function bodies produced zero lines of
+   difference besides the wrapper). `Graph` itself was never touched (already a one-line delegate to
+   `GraphScoped`, unchanged). Existing brute-force/Vec1-parity tests
+   (`TestVecGraph_MatchesBruteForceEdgeSetAndRespectsProjectScope`, `TestStore_Prune*`, and the rest of
+   `store_test.go`) pass unmodified — no test changes were needed for this finding since it was a pure
+   decoupling refactor, not a behavior change. Since some duplication is the intended trade-off here (the
+   design's "never edit the brute-force path" constraint outweighs DRY for this one helper), no shared-helper
+   regression test was added; the manual diff above is the confirmation artifact for this finding.
+2. **SHOULD-FIX — `Prune()` rerouted through `DeleteBySyncID` even when Vec1 is disabled, changing
+   disabled-path behavior.** `Prune`'s per-id delete loop used to issue the original inline `DELETE FROM
+   embeddings WHERE sync_id = ?` statement directly; it had been changed to call `DeleteBySyncID`
+   unconditionally (to reuse the Vec1 dual-write logic when enabled). This silently changed the disabled path
+   in two ways: (a) the error text became double-wrapped (`"embed: Prune delete %s: embed: DeleteBySyncID %s:
+   %w"` instead of the original single `"embed: Prune delete %s: %w"`), and (b) it introduced a new
+   `res.RowsAffected()` failure surface that never existed in `Prune`'s original disabled-path code — a real
+   "byte-for-byte identical when disabled" violation. Fixed with a new `if !s.vec.healthyOK() { ... } else {
+   ... }` branch inside the delete loop: the disabled branch is the untouched original single statement +
+   single error wrap (byte-for-byte restored from `origin/main`); a new branch below it reuses `DeleteBySyncID`
+   only when Vec1 IS healthy, which is new capability behavior, not a disabled-path regression. TDD: wrote
+   `TestStore_Prune_DisabledPathErrorTextIsSingleWrapped` first — it forces the underlying per-id `DELETE` to
+   fail deterministically via a SQL trigger (`RAISE(ABORT, ...)` scoped to one sync_id, so the listing `SELECT`
+   still succeeds) and asserts the resulting error text has the single-wrap prefix and contains neither
+   `"DeleteBySyncID"` nor `"rows affected"`. Confirmed RED against the pre-fix code (`got "embed: Prune delete
+   a: embed: DeleteBySyncID a: constraint failed: forced prune failure (1811)"` — the double-wrap smoking gun,
+   caught exactly as expected), then GREEN after the fix (single wrap, no `DeleteBySyncID`/`rows affected`
+   substrings, and the row survives the failed delete). `TestStore_Prune`/`TestStore_Prune_EmptyLiveSetRemovesAll`
+   (pre-existing, unmodified) and the Vec1 dual-write Prune coverage
+   (`TestVecIndex_UpsertUpdateDeletePrune_MirrorDerivedTable`) still pass, confirming the Vec1-enabled path is
+   unaffected.
+3. **SHOULD-FIX — the crowding-out-under-Vec1 test didn't verify Vec1 was actually engaged.**
+   `TestVecSearch_CrowdingOutFixHoldsUnderVec1` asserted the crowding-out fix holds under Vec1, but — unlike its
+   sibling `TestVecScore_SelfOrthogonalAntipodal` — never confirmed Vec1 was actually used for the query. If
+   Vec1 had silently fallen back to brute force for any reason, the test would have still passed trivially via
+   the brute-force path, without guarding the Vec1-specific pushdown behavior it's named for. Fixed: added `if
+   !store.vec.usable() { t.Fatal(...) }` immediately after the `VecBackfill` call, mirroring the exact pattern
+   already established by `TestVecScore_SelfOrthogonalAntipodal` (and the `build(true)` helpers in the
+   parity/graph tests). Confirmed the test still passes with this assertion in place — Vec1 is genuinely
+   engaged for this scenario, not silently falling back.
+### Deliberately not fixed (explicitly out of scope for this pass)
+- **Finding #4 — dimension-change silently disables backfill until `--reindex`.** Left as a documented known
+  limitation; not addressed in this remediation pass.
+- **Finding #5 — in-memory Vec1 state is set before `tx.Commit()` is confirmed.** Left as a documented known
+  limitation; not addressed in this remediation pass.
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo, all packages)
+- `gofmt -l` on every changed file — clean
+- `git diff --check` — clean
 ### Design Deviations
 None beyond what's described above.
 

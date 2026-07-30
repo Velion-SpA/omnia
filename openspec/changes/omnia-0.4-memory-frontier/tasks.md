@@ -76,37 +76,37 @@ Satisfies: all 7 capabilities' REQ-4x0/REQ-450/REQ-460 "Default-Off Config Gate"
 Satisfies: REQ-460, REQ-461, REQ-463, REQ-464, REQ-466–468. This PR proves only the isolated
 foundation: no production composition and all read surfaces remain brute force.
 
-- [ ] 2.1 [RED] `internal/embed/store_vec1_test.go`: the options-based `OpenStore` seam keeps an absent/false
+- [x] 2.1 [RED] `internal/embed/store_vec1_test.go`: the options-based `OpenStore` seam keeps an absent/false
   flag on modernc with byte-for-byte brute-force behavior; enabled test setup requires a private Vec1 connector,
   not a globally registered driver (REQ-460/464).
-- [ ] 2.2 [GREEN] Pin `github.com/ncruces/go-sqlite3@v0.35.2` in `go.mod`/`go.sum`; add options-based connector
+- [x] 2.2 [GREEN] Pin `github.com/ncruces/go-sqlite3@v0.35.2` in `go.mod`/`go.sum`; add options-based connector
   selection in `internal/embed/store.go` using `driver.Open(dsn, vec1.Register)` on every physical connection.
   Keep the connector private to `internal/embed`; do not route production callers yet.
-- [ ] 2.3 [RED] In `internal/embed/store_vec1_test.go`, assert enabled setup creates same-DB
+- [x] 2.3 [RED] In `internal/embed/store_vec1_test.go`, assert enabled setup creates same-DB
   `vec_embeddings USING vec1(vector, project)`, rebuilds `{index:"flat", distance:"cos"}`, and never creates
   an int8, binary, ANN, or second-database artifact (REQ-461/463).
-- [ ] 2.4 [GREEN] Add derived Vec1 DDL and readiness/state metadata in `internal/embed/store.go`; map only the
+- [x] 2.4 [GREEN] Add derived Vec1 DDL and readiness/state metadata in `internal/embed/store.go`; map only the
   stable `embeddings.rowid` to `vec_embeddings.rowid`, mirror `COALESCE(project,'')`, and preserve
   `embeddings` as authoritative.
-- [ ] 2.5 [RED] Test first valid source vector establishes `active_dim` in rowid order; canonical little-endian
+- [x] 2.5 [RED] Test first valid source vector establishes `active_dim` in rowid order; canonical little-endian
   source blobs are re-encoded into a separate native-endian Vec1 float32 blob on supported little-endian targets.
   A byte-order/state mismatch or unsupported host leaves Vec1 unavailable (REQ-466/468).
-- [ ] 2.6 [GREEN] Implement active-dimension and byte-order state validation plus native-endian derived encoding;
+- [x] 2.6 [GREEN] Implement active-dimension and byte-order state validation plus native-endian derived encoding;
   skip mixed dimensions without changing source rows or resetting a ready index.
-- [ ] 2.7 [RED] Seed 998 matching + 2 mixed-dimension rows; first-enable backfill and the internal reindex API
+- [x] 2.7 [RED] Seed 998 matching + 2 mixed-dimension rows; first-enable backfill and the internal reindex API
   report indexed/skipped counts and reasons while verifying all 1,000 canonical rows survive (REQ-461/466/467).
-- [ ] 2.8 [GREEN] Implement first-enable backfill and a source-preserving `Reindex`/report API that discards only
+- [x] 2.8 [GREEN] Implement first-enable backfill and a source-preserving `Reindex`/report API that discards only
   derived state, writes readiness only after count/dimension verification, and leaves failed/crashed work unready.
-- [ ] 2.9 [REFACTOR] Share DDL/state/backfill helpers; run focused RED→GREEN→REFACTOR tests plus
+- [x] 2.9 [REFACTOR] Share DDL/state/backfill helpers; run focused RED→GREEN→REFACTOR tests plus
   `CGO_ENABLED=0 go build ./...`. Assert disabled-path byte parity and explicitly document that v0.4 has no
   int8/binary format or production/read routing in PR 2A.
-- [ ] 2.10 [RED] In `internal/config/v04_config_test.go`, add a failing contract test that `VecIndexConfig`
+- [x] 2.10 [RED] In `internal/config/v04_config_test.go`, add a failing contract test that `VecIndexConfig`
   exposes only `Enabled` and `vector_index` accepts no quantization/int8/binary knob; name this the correction
   to historical checked task 1.2, whose unreleased PR1 field/default/test expectation is now invalid.
-- [ ] 2.11 [GREEN] Remove `VecIndexConfig.Quantization`, its `applyDefaults` value, and every
+- [x] 2.11 [GREEN] Remove `VecIndexConfig.Quantization`, its `applyDefaults` value, and every
   `vector_index.quantization` config/environment parsing, fixture, and test expectation from
   `internal/config/config.go` and `internal/config/v04_config_test.go`; retain only `enabled` defaulting false.
-- [ ] 2.12 [REFACTOR] Audit config comments and fixtures for the removed knob; run the focused config suite and
+- [x] 2.12 [REFACTOR] Audit config comments and fixtures for the removed knob; run the focused config suite and
   disabled byte-parity assertion. Keep PR1's historical boxes checked, but make this unchecked PR2A amendment
   the sole strict-TDD owner of the correction.
 
@@ -115,28 +115,28 @@ foundation: no production composition and all read surfaces remain brute force.
 Satisfies: REQ-460, REQ-461, REQ-463–468. This PR wires every embed-store opener and maintenance only;
 `Search`, `SearchScoped`, `Graph`, and `GraphScoped` remain brute force until PR 3.
 
-- [ ] 2.13 [RED] `internal/embed/store_vec1_test.go`: upsert, update, delete, and prune mirror their source-rowid
+- [x] 2.13 [RED] `internal/embed/store_vec1_test.go`: upsert, update, delete, and prune mirror their source-rowid
   lifecycle into the derived table transactionally; forced Vec1 failure preserves the source mutation, marks the
   index stale/unhealthy, and does not surface an index-only write failure.
-- [ ] 2.14 [GREEN] Implement derived-row upsert/update/delete/prune lifecycle in `internal/embed/store.go` with
+- [x] 2.14 [GREEN] Implement derived-row upsert/update/delete/prune lifecycle in `internal/embed/store.go` with
   source-first fallback transactions, stale diagnostics, active-dimension skips, and no alternative int8/binary
   write path.
-- [ ] 2.15 [RED] Add enabled/disabled composition tests for direct openers: `cmdEmbed` (`cmd/omnia/embed.go`),
+- [x] 2.15 [RED] Add enabled/disabled composition tests for direct openers: `cmdEmbed` (`cmd/omnia/embed.go`),
   `buildAutoEmbedWorker`/`buildCLIEmbedPurgeStore` (`cmd/omnia/autoembed.go`), `buildRecallService` and
   `buildRecallServiceForCLI` (`cmd/omnia/recall.go`), and eval's `defaultRunEvalHarness` reuse of that recall
   builder (`cmd/omnia/eval.go`). Enabled paths receive Vec1 options; disabled paths keep modernc and no derived writes.
-- [ ] 2.16 [GREEN] Thread the Vec1-aware `OpenStore` options/config through those seams, including MCP, serve,
+- [x] 2.16 [GREEN] Thread the Vec1-aware `OpenStore` options/config through those seams, including MCP, serve,
   CLI search, and eval through their shared recall builder; preserve project metadata and brute-force read methods.
-- [ ] 2.17 [RED] Add `cmd/omnia/dashboard_test.go` and `internal/dashboard/local_datasource_test.go` coverage:
+- [x] 2.17 [RED] Add `cmd/omnia/dashboard_test.go` and `internal/dashboard/local_datasource_test.go` coverage:
   `cmdDashboard` → `dashboard.Config` (`internal/dashboard/handlers.go`) → `newLocalDataSource`
   (`internal/dashboard/local_datasource.go`) forwards enabled Vec1 options, while disabled stays modernc/FTS-safe.
-- [ ] 2.18 [GREEN] Add the dashboard config field and thread it through `cmd/omnia/dashboard.go`,
+- [x] 2.18 [GREEN] Add the dashboard config field and thread it through `cmd/omnia/dashboard.go`,
   `internal/dashboard/handlers.go`, and `newLocalDataSource`; dashboard semantic/graph searches remain their
   existing brute-force store methods until PR 3.
-- [ ] 2.19 [RED] `cmd/omnia/embed_test.go`: `omnia embed --reindex` invokes the maintenance API, reports
+- [x] 2.19 [RED] `cmd/omnia/embed_test.go`: `omnia embed --reindex` invokes the maintenance API, reports
   indexed/skipped reasons and source-row integrity, and remains unavailable/inert when the capability is off.
-- [ ] 2.20 [GREEN] Add `--reindex` CLI plumbing and report rendering through the shared maintenance API.
-- [ ] 2.21 [REFACTOR] Extract one shared options builder for all direct openers; verify focused
+- [x] 2.20 [GREEN] Add `--reindex` CLI plumbing and report rendering through the shared maintenance API.
+- [x] 2.21 [REFACTOR] Extract one shared options builder for all direct openers; verify focused
   lifecycle/composition/CLI tests, disabled byte parity, and `CGO_ENABLED=0 go build ./...` under strict
   RED→GREEN→REFACTOR evidence.
 
@@ -144,25 +144,25 @@ Satisfies: REQ-460, REQ-461, REQ-463–468. This PR wires every embed-store open
 
 Satisfies: REQ-460, REQ-462, REQ-463, REQ-465, REQ-466, REQ-468, REQ-469.
 
-- [ ] 3.1 [RED] `internal/embed/store_vec1_test.go`: pinned v0.35.2 flat/cos distance conversion gives scores
+- [x] 3.1 [RED] `internal/embed/store_vec1_test.go`: pinned v0.35.2 flat/cos distance conversion gives scores
   `1 - distance` for normalized self/orthogonal/antipodal vectors: 1, 0, and -1 (within tolerance), never newer
   trunk or `2 - distance` semantics (REQ-469).
-- [ ] 3.2 [GREEN] Add the private Vec1 score-conversion helper and lock it to the pinned dependency contract.
-- [ ] 3.3 [RED] On a 500-vector/two-project fixture, enabled `Search` and `SearchScoped` return brute-force
+- [x] 3.2 [GREEN] Add the private Vec1 score-conversion helper and lock it to the pinned dependency contract.
+- [x] 3.3 [RED] On a 500-vector/two-project fixture, enabled `Search` and `SearchScoped` return brute-force
   equivalent top-k IDs/scores except ties; scoped KNN cannot return another project's vector (REQ-462).
-- [ ] 3.4 [GREEN] Route ready Vec1 `Search`/`SearchScoped` through metadata-filtered KNN, join canonical rows by
+- [x] 3.4 [GREEN] Route ready Vec1 `Search`/`SearchScoped` through metadata-filtered KNN, join canonical rows by
   rowid only after filtering, convert scores, and retain the existing brute-force search as the fallback body.
-- [ ] 3.5 [RED] Force unavailable/corrupt/open/query/stale-index paths and a mixed-dimension query; assert each
+- [x] 3.5 [RED] Force unavailable/corrupt/open/query/stale-index paths and a mixed-dimension query; assert each
   silently serves the correct brute-force result, while canonical source-table errors still propagate (REQ-465/466/468).
-- [ ] 3.6 [GREEN] Centralize availability, dimension, and error fallback so any unhealthy derived index disables
+- [x] 3.6 [GREEN] Centralize availability, dimension, and error fallback so any unhealthy derived index disables
   Vec1 for that `Store` instance without weakening project scoping or default-OFF byte parity.
-- [ ] 3.7 [RED] `Graph`/`GraphScoped` parity test: per-node Vec1 KNN yields the existing O(N²) edge set (except
+- [x] 3.7 [RED] `Graph`/`GraphScoped` parity test: per-node Vec1 KNN yields the existing O(N²) edge set (except
   ties), respects project filtering, and produces no HNSW, ANN, int8, or binary artifact (REQ-462/463).
-- [ ] 3.8 [GREEN] Route only ready `Graph`/`GraphScoped` through the shared exact Vec1 query helper; keep their
+- [x] 3.8 [GREEN] Route only ready `Graph`/`GraphScoped` through the shared exact Vec1 query helper; keep their
   brute-force branches for disabled, unavailable, corrupt, and mixed-dimension cases.
-- [ ] 3.9 [REFACTOR] Consolidate KNN query/score/fallback helpers without changing the canonical source codec;
+- [x] 3.9 [REFACTOR] Consolidate KNN query/score/fallback helpers without changing the canonical source codec;
   cover default-OFF byte parity, scoped filtering, score anchors, and all fallback branches.
-- [ ] 3.10 Verification: `go test ./internal/embed/... -run VecIndex` and the full embed suite green under both
+- [x] 3.10 Verification: `go test ./internal/embed/... -run VecIndex` and the full embed suite green under both
   paths; `CGO_ENABLED=0 go build ./...` clean; record strict RED→GREEN→REFACTOR evidence and v0.4's explicit
   no-int8/binary, flat/cos-only contract.
 

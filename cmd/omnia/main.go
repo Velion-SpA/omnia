@@ -1007,13 +1007,13 @@ func cmdServe(cfg store.Config) {
 	// their pre-#86/pre-PR4 defaults (no auto-embed, FTS5-only /search).
 	var autoEmbedWorker *embed.Worker
 	if appCfgErr == nil {
-		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s, cfg.DataDir); worker != nil {
+		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s, cfg.DataDir, appCfg.VecIndex.Enabled); worker != nil {
 			worker.Start(ctx)
 			srv.SetAutoEmbed(worker)
 			autoEmbedWorker = worker
 		}
 
-		recallSvc := buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir)
+		recallSvc := buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir, appCfg.VecIndex.Enabled)
 		srv.SetSearch(func(ctx context.Context, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 			return recallOrFTSSearch(ctx, s, recallSvc, query, opts)
 		})
@@ -1309,7 +1309,7 @@ func cmdMCP(cfg store.Config) {
 	// values hoisted above (before storeNew) for ContextTokenBudget wiring.
 	if appCfgErr == nil {
 		mcpCfg.CodeGraph = appCfg.CodeGraph
-		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir)
+		mcpCfg.Recall = buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir, appCfg.VecIndex.Enabled)
 		// memory-recall-ranking (task 5.4): thread recall.ranking.* through to
 		// handleSearch regardless of whether hybrid recall itself is enabled —
 		// RankResults/explain work over the FTS5-only path too.
@@ -1350,7 +1350,7 @@ func cmdMCP(cfg store.Config) {
 		// Auto-embed-on-save (human-like-memory PR4): when embeddings are
 		// enabled, run the worker on the same ctx cancelled at shutdown so
 		// mem_save embeds new memories out-of-band. nil when disabled.
-		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s, cfg.DataDir); worker != nil {
+		if worker := buildAutoEmbedWorker(appCfg.Embeddings, s, cfg.DataDir, appCfg.VecIndex.Enabled); worker != nil {
 			worker.Start(ctx)
 			mcpCfg.AutoEmbed = worker
 			autoEmbedWorker = worker
