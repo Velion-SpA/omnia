@@ -755,6 +755,8 @@ func main() {
 		cmdForgetScan(cfg)
 	case "blame":
 		cmdBlame(cfg)
+	case "enforce":
+		cmdEnforce(cfg)
 	case "review-due":
 		cmdReviewDue(cfg)
 	case "dedupe":
@@ -797,6 +799,8 @@ func main() {
 		cmdEval(os.Args[2:])
 	case "rank-train":
 		cmdRankTrain(cfg)
+	case "cartridge":
+		cmdCartridge(cfg)
 	case "version", "--version", "-v":
 		fmt.Printf("omnia %s\n", version)
 	case "help", "--help", "-h":
@@ -1360,6 +1364,11 @@ func cmdMCP(cfg store.Config) {
 		if appCfg.Procedural.Enabled {
 			mcpCfg.Procedural = &mcp.ProceduralWiring{Inducer: resolveProcedureInducer()}
 		}
+		// memory-enforcement-gate (REQ-410): thread enforcement.* through so
+		// mem_enforce is registered only when enforcement.enabled is true in
+		// config.yaml — mirrors CodeGraph's own registration-gate convention
+		// above (zero value = not registered at all).
+		mcpCfg.Enforcement = appCfg.Enforcement
 	}
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
@@ -3422,6 +3431,10 @@ Commands:
                        Dry-run by default: reports checked/traveled/staled counts, writes nothing.
                        Degrades gracefully with no git or outside a repo (reports 0 checked).
   blame <file>:<line> Query opt-in code-to-decision graph anchors.
+  enforce            Mechanically verify a change against trusted procedure postconditions
+                       [--files PATH]... [--repo PATH] [--project P] [--block] [--override --reason TEXT]
+                       Pass/flag/block/override contract; disabled by default (enforcement.enabled).
+                       --block forces block mode and exits non-zero on a block verdict (hook/CI use).
   review-due         List memories past their spaced-review due date (Play G)
                        [--project P] [--json]. Compact only: count per
                        project/type + id/title, never full content.
@@ -3490,6 +3503,13 @@ Commands:
   rank-train         Train the optional local learned re-ranker from mem_judge/outcome
                      signal and promote it only if the eval harness shows no regression
                        [--config PATH]. Disabled by default (ranker.enabled).
+  cartridge <sub>    Precomputed, versioned per-repo warm-start digest (top memories +
+                     code-decision graph + trusted procedures), keyed to a commit.
+                     Disabled by default (cartridge.enabled).
+                       build [--repo PATH] [--project NAME] [--config PATH]
+                       load  [--repo PATH] [--project NAME] [--config PATH]
+                     Invalidated by commit: a stale or missing cartridge always
+                     degrades to cold-start, never an error.
 
   version            Print version
   help               Show this help

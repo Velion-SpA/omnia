@@ -210,3 +210,155 @@ None.
   `internal/embed` layer). A full CLI-level test with a real seeded embeddings row would additionally require
   faking the Ollama HTTP embedder inside `embed.Reconcile`'s call path — deferred as an acceptable scope
   boundary given the mechanism itself is already fully tested.
+
+## PR 7 — Memory Enforcement Gate A: Matcher + Command Runner
+- Completed tasks: 7.1–7.8.
+- Boundary: `internal/enforce` package only (`matcher.go`, `runner.go`, `gate.go`) — trusted-procedure
+  matching, a sandboxed command runner covering all four `postcondition_kind` values, and the pure
+  pass/flag/block verdict decision. No audit logging, no override handling, and nothing reachable from
+  MCP/CLI yet (both deferred to PR 8 by design, per tasks.md's own phase split).
+### TDD Cycle Evidence
+| Task | Test File | RED | GREEN | REFACTOR |
+|---|---|---|---|---|
+| 7.1–7.2 | `matcher_test.go` | `MatchTrustedProcedures` undefined, package did not compile | `ListProcedures{State:trusted,Project}` candidate set narrowed by a per-file `SearchProcedures` query, intersected by sync_id; only the trusted procedure among matching trusted/candidate/retired fixtures is selected | Per-touched-file FTS query (not one long AND-of-fragments query) so a real match is never spuriously suppressed by FTS5 phrase-adjacency semantics |
+| 7.3–7.4 | `runner_test.go` | `RunCommand` undefined | `exec.CommandContext` via `sh -c`/`cmd /C`, hard timeout, exit code captured; non-zero exit is a FAILURE not an Err, TimedOut and Err are distinct outcomes | `CommandResult.Passed()` helper; output capped via `truncateOutput` |
+| 7.5–7.6 | `gate_test.go` | `Decide`/`DecideOptions`/`Verdict*` undefined | All-pass → `pass`; one failure + `Mode` unset → `flag`; `Mode: "block"` + failure → `block`; verified against all four postcondition kinds independently | `decideVerdict` isolated from `evaluatePostcondition` so the verdict rule is unit-testable without spawning a process |
+| 7.7 | `gate_test.go` (unconfigured-command + custom-gating cases) | A missing command config or `AllowCustomCommands=false` had no dedicated skip path | `resolveCommand` extracted as its own helper returning `(command, note, ok)`; unconfigured/gated kinds produce a `skipped` outcome that never escalates `decideVerdict`, even under `mode: "block"` | N/A — extracted directly during GREEN since the skip-path was designed as its own function from the start |
+| 7.8 | full `internal/enforce` suite | N/A (verification-only) | `CGO_ENABLED=0 go build ./...`, `go vet ./...`, `go test ./...` (full repo, not just this package) all passed | N/A |
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo)
+### Design Deviations
+- Task 7.8 says "unit suite green with injected fake command runner." The runner tests instead exercise the
+  real `exec.CommandContext` path directly (`exit 0`/`exit 1`/`sleep 5` via the real shell, plus a genuine
+  unstartable-process case) rather than injecting a fake/mock runner. This is a deliberate strengthening, not
+  a shortcut: `RunCommand` has no external dependency to fake (no network, no LLM, no filesystem write) — it
+  only shells out — so exercising the real implementation gives equal-or-better coverage with no added
+  flakiness risk, and keeps `Decide`/`evaluatePostcondition` (the parts that DO need isolation from process
+  spawning for fast, deterministic unit tests) fully covered via `gate_test.go`'s configured-command fixtures.
+- The matcher narrows via one `SearchProcedures` call **per touched file** (unioned by sync_id) rather than a
+  single combined query built from all touched paths. `SearchProcedures`'s `sanitizeFTS` quotes every
+  whitespace-separated word and ANDs them; a single query built by concatenating multiple file-path fragments
+  would require ALL fragments to literally co-occur in one procedure's trigger text, which is far more
+  fragile than the design's intent ("narrow via SearchProcedures ... using the touched file paths"). Read
+  literally per-path, this still uses `SearchProcedures` exactly as documented, just once per path instead of
+  once total.
+
+## PR 8 — Memory Enforcement Gate B: MCP/CLI + Override + Audit
+- Completed tasks: 8.1–8.10. Combined with PR 7 (7.1–7.8), all of Phase 7/8 (`memory-enforcement-gate`,
+  the v0.4 flagship) is now complete.
+- Boundary: `mem_enforce` MCP tool (`internal/mcp/mcp.go`, `handleEnforce`) + `omnia enforce` CLI
+  (`cmd/omnia/enforce.go`), both calling the SAME new `enforce.Evaluate` orchestration function
+  (`internal/enforce/evaluate.go`) so the pass/flag/block/override contract and the audit-entry mapping can
+  never drift between surfaces (REQ-418, task 8.9 satisfied by construction rather than a later extraction
+  pass — see Design Deviations). `internal/audit` gains `ActionEnforce` plus five additive `omitempty` Entry
+  fields (`Verdict`, `ProcedureSyncIDs`, `PostconditionKind`, `ExitCode`, `OverrideReason`) per ADR-7.
+### TDD Cycle Evidence
+| Task | Test File | RED | GREEN | REFACTOR |
+|---|---|---|---|---|
+| 8.1–8.2 | `internal/enforce/evaluate_test.go` | `Evaluate`/`EvalOptions` undefined | `DecideOptions.Override` added; `decideVerdict` returns the distinct `VerdictOverride` (never silently `pass`) only when there is an actual violation to override | N/A |
+| 8.3–8.4 | `internal/audit/audit_test.go`, `internal/enforce/evaluate_test.go` | `audit.ActionEnforce` and the five new `Entry` fields did not exist; `Evaluate` did not audit at all | `ActionEnforce` + `Verdict`/`ProcedureSyncIDs`/`PostconditionKind`/`ExitCode`/`OverrideReason` added to `Entry`; `appendAuditEntry` called for every verdict (pass/flag/block/override), including the zero-match `pass` path (REQ-411 fail-safe) | N/A |
+| 8.5–8.6 | `internal/enforce/evaluate_test.go` (`TestEvaluate_NeverWritesToTouchedFiles`) | N/A — this is an invariant check, not a driving requirement; the gate never had a file-write API to begin with | A seeded touched file's content is byte-identical before/after a failing `Evaluate` call | N/A — nothing to extract; `Decide`/`RunCommand` only read/execute by construction |
+| 8.7–8.8 | `internal/mcp/mcp_enforce_test.go`, `cmd/omnia/enforce_test.go` | `mem_enforce` unregistered/`handleEnforce` undefined; `loadEnforcementConfig`/`cmdEnforce` undefined | `mem_enforce` gated behind `cfg.Enforcement.Enabled` in `registerTools` (mirrors `mem_blame`/`CodeGraph`); `omnia enforce` dispatch case added, `loadEnforcementConfig` degrades to disabled on ANY `config.Load` error (fresh-install-safe from the start — see Design Deviations) | N/A |
+| 8.9 | — | — | `enforce.Evaluate` designed as the single shared function from the start: `handleEnforce` and `cmdEnforce` both build an `enforce.EvalOptions` and call it directly, so there was no duplicated per-surface audit-mapping code to consolidate | N/A — see Design Deviations |
+| 8.10 | full repo | N/A (verification-only) | `CGO_ENABLED=0 go build ./...`, `go vet ./...`, `go test ./...` (58 packages) all passed; disabled-path verified byte-for-byte (`mem_enforce` absent from `ListTools()`, `omnia enforce` prints `capability disabled` and never opens the store) | N/A |
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo, 58 packages)
+- `gofmt -l` on every touched/created file — clean
+- Manual check: `omnia enforce --files foo.go` with no `config.yaml` on `$PATH`/`$HOME` prints `capability
+  disabled` and exits 0 (never opens a store, never a fatal exit) — the exact anti-pattern already fixed 3x
+  elsewhere in this codebase (blame/consolidate/rank-train) was avoided from the start here.
+### Design Deviations
+- Task 8.9 ("Consolidate the pass/flag/block/override → audit-entry mapping into one function shared by MCP
+  and CLI entry points") describes a REFACTOR step that implies the mapping existed in duplicated form first.
+  Since PR7 and PR8 were implemented in one continuous session (not as literally separate incremental
+  sub-PRs with intermediate duplication), `enforce.Evaluate` was written as the single shared function from
+  its first GREEN commit — `handleEnforce` (MCP) and `cmdEnforce` (CLI) were never given their own
+  independent audit-mapping code to later merge. The end state matches 8.9's intent exactly (one function,
+  identical contract, REQ-418 satisfied); there was simply no separate extraction commit needed.
+- `omnia enforce --block` is an added CLI convenience (`design.md`'s own CLI shape: "`omnia enforce [--files
+  ...] [--block] [--override --reason ...]`") that forces `Mode: "block"` for that invocation and exits
+  non-zero on a `block` verdict, so a pre-commit hook/CI step can act on the exit code directly — this isn't
+  in the REQ text verbatim but is required for the CLI to actually be usable "for hooks/CI use" per REQ-418's
+  own scenario.
+
+## PR 11 — Repo Cartridge
+- Completed tasks: 11.1–11.12 (all of Phase 11).
+- Boundary: `internal/cartridge` (Build/Save/Load/ResolveRepo) plus `omnia cartridge build`/`omnia cartridge
+  load` CLI, gated behind default-OFF `cartridge.enabled`. No MCP tool (`mem_cartridge`) was added — design.md
+  explicitly marks it "Optional" and tasks.md's Phase 11 checklist only requires the CLI surface; a future
+  increment can add the MCP tool without changing this contract.
+### TDD Cycle Evidence
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|---|---|---|---|---|---|---|---|
+| 11.1–11.2 | `internal/cartridge/build_test.go` | Unit | none (new package) | `cartridge.Build`/`BuildParams`/`Cartridge`/`SchemaVersion` undefined — compile failure | `Build` assembles `{schema_version, repo_root, head_sha, built_at, top_memories[], anchors[], trusted_procedures[], ranker_model_version?}`; `Save` writes the versioned JSON artifact | happy path, trusted-only procedure filter, top-N truncation | shared `rankedTopMemories` helper keeps `Build` itself linear |
+| 11.3–11.4 | `internal/cartridge/load_test.go` | Unit | build_test.go suite | `cartridge.Load`/`ReasonStaleCommit` undefined — compile failure | `Load` globs the repo-id prefix, picks the most-recently-built file, compares `HeadSHA` | stale-commit vs. fresh-commit vs. picks-latest-of-two-builds | `LoadResult{Fresh, Reason}` keeps every degradation path a plain value, never an error |
+| 11.5–11.6 | `internal/cartridge/load_test.go` | Unit | build_test.go suite | missing-file and corrupt-file cases both undefined pre-`Load` | missing directory/file and corrupt JSON both degrade to `LoadResult{Reason: ReasonMissing/ReasonCorrupt}` | missing vs. corrupt distinguished by `Reason`, never by a caller-visible error | single `Load` function, no separate corrupt-handling path to drift |
+| 11.7–11.8 | `internal/cartridge/load_test.go` | Unit | build_test.go suite | old-schema-version case undefined pre-`Load` | `SchemaVersion` mismatch degrades to `ReasonOldSchemaVersion` before the `HeadSHA` comparison even runs | fixture written with `SchemaVersion - 1` | version check precedes commit check so a stale AND old-format file reports the more fundamental reason |
+| 11.9–11.10 | `cmd/omnia/cartridge_test.go` | Unit | cmd/omnia suite | `cmdCartridge` undefined — compile failure | disabled (build/load), missing-config-file, outside-git-repo, full build→load round trip, stale-commit-after-new-commit, and missing-cartridge-inside-a-real-repo all pass | build+load round trip against a real temp git repo with a seeded observation | shared `cartridgeFlags`/`loadCartridgeConfig`/`cartridgeDataDir`/`loadCartridgeRankerModel` helpers keep both subcommands' wiring in lockstep |
+| 11.11 | `internal/cartridge/build_test.go` | Unit | build_test.go suite | N/A (assertion-only, added after GREEN) | `TestBuildContentShapeAssertion` marshals a built `Cartridge` and rejects any JSON key outside the documented allowlist (REQ-455); `TestBuildNeverWritesSyncMutations` confirms `ListPendingSyncMutations` count is unchanged by `Build`+`Save` (REQ-454) | N/A | N/A |
+| 11.12 | full repo | Verification | targeted `internal/cartridge`/`cmd/omnia` suites first, then repo-wide | N/A | full verification passed; `gofmt`/`git diff --check` clean | disabled path (build+load) tested at both the CLI-flag level and the config-file level (explicit `false` and missing file) | N/A |
+### Design Deviations
+- Repo-root resolution shells directly to `git -C <dir> rev-parse --show-toplevel` inside `internal/cartridge`
+  (mirroring `internal/anchor.Probe`'s own unexported `repoRoot` method and `internal/codegraph.Normalize`'s
+  identical probe) rather than exporting `internal/anchor.Probe.repoRoot` or reusing `codegraph.Normalize`
+  (whose file-relative-path contract doesn't fit a bare directory lookup cleanly). `HeadSHA` itself reuses the
+  already-exported `internal/anchor.Probe.HeadSHA` directly, per design's explicit pointer to that method.
+- `top_memories` ranking reuses `internal/mcp.RankResults`/`ApplyLearnedRanker` directly from
+  `internal/cartridge` (not duplicated) — the same reuse pattern `cmd/omnia/recall.go`/`eval.go` already use to
+  pull ranking helpers from `internal/mcp` at the CLI layer. With no live query, relevance is uniform across
+  candidates (nil map), so ranking degrades to recency × importance when enabled, or `AllObservations`' own
+  natural recency-DESC order when ranking is disabled too — never an error, never an empty digest.
+- `internal/cartridge` normalizes the `--project` filter once via `store.NormalizeProject` before calling
+  `AllObservations` (which does not normalize its own project filter internally, unlike
+  `ListActiveAnchors`/`ListProcedures`), so `top_memories` and `anchors`/`trusted_procedures` never
+  silently disagree on project casing. This is a local normalization inside the new package only — no existing
+  store method's behavior was changed.
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo, all packages, all v0.4 flags default-OFF)
+- `gofmt -l` on all new/changed files — clean
+- `git diff --check` — passed
+- Disabled path: `omnia cartridge build`/`omnia cartridge load` both print `capability disabled` and touch
+  neither the store nor the filesystem cartridges directory; a missing `config.yaml` degrades identically
+  (matches the PR6B/PR9B/PR10B anti-pattern fix — never a fatal exit for a missing config file).
+
+## PR 11 — Repo Cartridge: Review Remediation
+An independent adversarial review of PR 11 found one blocker and two should-fix issues before this could
+merge. All three are fixed with new RED→GREEN test coverage, on top of the original 4 commits (not amended).
+### Findings fixed
+1. **BLOCKER — default invocation leaked memories across all projects.** `omnia cartridge build`/`load` with
+   no `--project` flag passed an empty string straight through to `Build`/`Load`, and
+   `store.NormalizeProject("")` is treated by `AllObservations`/`CodeDecisionGraph`/`ListProcedures` as "no
+   filter — every project." The bare, most-likely-to-be-run invocation therefore silently digested every
+   project's memories into one file instead of just the current repo's. Fixed with a new
+   `resolveCartridgeProject` helper (`cmd/omnia/cartridge.go`) that falls back to `detectProject(repoRoot)`
+   when `--project` is empty, and errors loudly with a `--project` hint if detection itself fails — mirroring
+   `resolveConflictsProject`'s existing detect-or-error-loudly convention rather than silently defaulting to
+   "everything." Test: `TestCmdCartridgeBuildDefaultsToDetectedProjectNotEveryProject`.
+2. **SHOULD-FIX — on-disk cartridge key ignored project, and `load`'s `--project` flag was parsed and
+   discarded.** Two different projects sharing one repo+commit (a supported, tested scenario per
+   `internal/project/detect_test.go`'s monorepo-subproject tests) would silently overwrite each other's
+   cartridge file. Fixed: `Cartridge` gained a `Project` field, `FileName` (renamed from unexported `fileName`)
+   now keys the on-disk artifact as `<repo-id>-<project>-<head-sha>.json`, and `Load` takes a `project`
+   parameter, scopes its glob by project, and re-verifies the loaded file's embedded `Project` against the
+   request as a defense-in-depth check (new `ReasonProjectMismatch` degradation reason — never a caller-
+   visible error). Tests: `TestSaveKeysCartridgeByProjectAvoidingCrossProjectCollision`,
+   `TestCmdCartridgeLoadFiltersByProjectAvoidingCrossProjectLeak`,
+   `TestLoadReportsProjectMismatchForTamperedCartridge`.
+3. **SHOULD-FIX — plaintext cartridge bypassed at-rest encryption.** `Save` wrote an unencrypted JSON file
+   regardless of `EncryptionConfig.Enabled`. Since the memory-at-rest-security capability itself (PR4/PR5)
+   hasn't landed yet, there is no encrypt-on-write helper to call — so rather than implement encryption out of
+   scope, `Save` now fails closed: it refuses the write and returns a clear error when
+   `encCfg.Enabled` is true, explaining cartridge export doesn't yet support encrypted output. This is a known
+   limitation to revisit once PR4/PR5 lands. Test: `TestCmdCartridgeBuildRefusesPlaintextWhenEncryptionEnabled`.
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo, all packages)
+### Design Deviations
+None beyond what's described above.

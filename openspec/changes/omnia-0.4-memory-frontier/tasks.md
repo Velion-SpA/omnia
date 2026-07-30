@@ -252,49 +252,49 @@ Satisfies: REQ-400–406.
 Satisfies: REQ-411 (trusted-only feed), REQ-412 (mechanical, no LLM), REQ-413 (verdict contract), REQ-414
 (flag-default).
 
-- [ ] 7.1 [RED] `internal/enforce/matcher_test.go`: one `trusted` procedure matches touched files alongside two
+- [x] 7.1 [RED] `internal/enforce/matcher_test.go`: one `trusted` procedure matches touched files alongside two
   matching `candidate`/`retired` procedures; assert only the trusted one is selected (REQ-411) — fails, package
   doesn't exist.
-- [ ] 7.2 [GREEN] Create `internal/enforce/matcher.go`: candidate set = `ListProcedures{State:trusted,
+- [x] 7.2 [GREEN] Create `internal/enforce/matcher.go`: candidate set = `ListProcedures{State:trusted,
   Project}` narrowed via `SearchProcedures` (FTS5 over trigger+steps_summary, `procedures.go:390`) against
   touched file paths.
-- [ ] 7.3 [RED] Runner test: a `tests_pass` procedure with a configured command that exits non-zero yields a
+- [x] 7.3 [RED] Runner test: a `tests_pass` procedure with a configured command that exits non-zero yields a
   failing postcondition with exit code + output preview, no LLM call anywhere (REQ-412).
-- [ ] 7.4 [GREEN] Create `internal/enforce/runner.go`: `exec.CommandContext` in repo root with a hard timeout
+- [x] 7.4 [GREEN] Create `internal/enforce/runner.go`: `exec.CommandContext` in repo root with a hard timeout
   (`EnforcementConfig.TimeoutSeconds`); exit 0 = pass for `tests_pass`/`lint_clean`/`build_green`; `custom`
   evaluates `postcondition_expr` only when `AllowCustomCommands` is true.
-- [ ] 7.5 [RED] Verdict-contract test: all applicable postconditions pass → verdict exactly `pass`; one fails
+- [x] 7.5 [RED] Verdict-contract test: all applicable postconditions pass → verdict exactly `pass`; one fails
   with `Mode` unset (default "flag") → verdict exactly `flag`, never halts (REQ-413/414).
-- [ ] 7.6 [GREEN] Implement the verdict decision: any failing postcondition ⇒ `flag` (default) or `block`
+- [x] 7.6 [GREEN] Implement the verdict decision: any failing postcondition ⇒ `flag` (default) or `block`
   (`mode: "block"` explicit).
-- [ ] 7.7 [REFACTOR] Extract the "command not configured for this kind" skip-with-note branch (fail-safe, never
+- [x] 7.7 [REFACTOR] Extract the "command not configured for this kind" skip-with-note branch (fail-safe, never
   block) into its own helper.
-- [ ] 7.8 Verification: `internal/enforce` unit suite green with injected fake command runner; `go vet`/
+- [x] 7.8 Verification: `internal/enforce` unit suite green with injected fake command runner; `go vet`/
   `go build` clean; nothing yet reachable from MCP/CLI (wiring deferred to Phase 8).
 
 ## Phase 8: `memory-enforcement-gate` B — MCP/CLI + Audit (PR 8, base: `main` after PR 7)
 
 Satisfies: REQ-410 (gate), REQ-415 (override), REQ-416 (audit), REQ-417 (no auto-fix), REQ-418 (tool/CLI parity).
 
-- [ ] 8.1 [RED] Override test: a failing postcondition re-invoked with `override: true` returns `pass`, audit
+- [x] 8.1 [RED] Override test: a failing postcondition re-invoked with `override: true` returns `pass`, audit
   records a distinct `override` verdict, not `pass` (REQ-415) — fails, no override plumbing yet.
-- [ ] 8.2 [GREEN] Add `override`/`override_reason` params to `mem_enforce`/`omnia enforce`; record
+- [x] 8.2 [GREEN] Add `override`/`override_reason` params to `mem_enforce`/`omnia enforce`; record
   `verdict: override` distinctly in the audit entry.
-- [ ] 8.3 [RED] Audit-taxonomy test: any pass/flag/block/override outcome writes exactly one `internal/audit`
+- [x] 8.3 [RED] Audit-taxonomy test: any pass/flag/block/override outcome writes exactly one `internal/audit`
   entry with verdict, procedure sync_id(s), postcondition kind, exit code (REQ-416).
-- [ ] 8.4 [GREEN] Add `ActionEnforce` to the `Action` enum (`audit.go:17`) + additive `omitempty` `Entry` fields
+- [x] 8.4 [GREEN] Add `ActionEnforce` to the `Action` enum (`audit.go:17`) + additive `omitempty` `Entry` fields
   (`:31`) per ADR-7; call `audit.Append` at every gate decision.
-- [ ] 8.5 [RED] No-auto-fix test: a file touched by a failing postcondition is never written to by the gate
+- [x] 8.5 [RED] No-auto-fix test: a file touched by a failing postcondition is never written to by the gate
   itself (REQ-417).
-- [ ] 8.6 [GREEN] Assert (unit-test-enforced) that the matcher/runner only read/execute — never call any
+- [x] 8.6 [GREEN] Assert (unit-test-enforced) that the matcher/runner only read/execute — never call any
   file-write API.
-- [ ] 8.7 [RED] Disabled-gate test: `enforcement.enabled=false` → `mem_enforce`/`omnia enforce` return disabled
+- [x] 8.7 [RED] Disabled-gate test: `enforcement.enabled=false` → `mem_enforce`/`omnia enforce` return disabled
   response, no command executed, no audit entry (REQ-410).
-- [ ] 8.8 [GREEN] Gate `mem_enforce` registration behind `enforcement.enabled` in `mcp.MCPConfig` (mirrors
+- [x] 8.8 [GREEN] Gate `mem_enforce` registration behind `enforcement.enabled` in `mcp.MCPConfig` (mirrors
   `ProceduralWiring` `main.go:1342`/`:1343`); register `omnia enforce` in CLI dispatch (`:730`).
-- [ ] 8.9 [REFACTOR] Consolidate the pass/flag/block/override → audit-entry mapping into one function shared by
+- [x] 8.9 [REFACTOR] Consolidate the pass/flag/block/override → audit-entry mapping into one function shared by
   MCP and CLI entry points (REQ-418 contract parity).
-- [ ] 8.10 Verification: full `internal/enforce`/`internal/mcp`/`internal/audit` suites green; disabled-path
+- [x] 8.10 Verification: full `internal/enforce`/`internal/mcp`/`internal/audit` suites green; disabled-path
   byte-for-byte; `CGO_ENABLED=0 go build ./...` clean.
 
 ## Phase 9: `sleep-consolidation` A — Cluster + Client Foundation (PR 9A, depends on PR 8)
@@ -374,31 +374,31 @@ Satisfies: REQ-440–446.
 
 Satisfies: REQ-450–456.
 
-- [ ] 11.1 [RED] `internal/cartridge/build_test.go`: building at commit `abc123` produces a JSON artifact tagged
+- [x] 11.1 [RED] `internal/cartridge/build_test.go`: building at commit `abc123` produces a JSON artifact tagged
   commit `abc123` + a format version, containing `top_memories`/`anchors`/`trusted_procedures` (REQ-451/456) —
   fails, package doesn't exist.
-- [ ] 11.2 [GREEN] Create `internal/cartridge/build.go`: `{schema_version, repo_root, head_sha, built_at,
+- [x] 11.2 [GREEN] Create `internal/cartridge/build.go`: `{schema_version, repo_root, head_sha, built_at,
   top_memories[], anchors[], trusted_procedures[], ranker_model_version?}` at
   `<dataDir>/cartridges/<repo-id>-<head-sha>.json`, keyed via `HeadSHA` (`anchor.go:192`); `top_memories` ranked
   by the active ranker (PR 10B) or current fused order if disabled; anchors from PR 6A's `CodeDecisionGraph`;
   `trusted` procedures for the project.
-- [ ] 11.3 [RED] Stale-commit test: a cartridge built at `abc123`, current HEAD `def456` — `cartridge load`
+- [x] 11.3 [RED] Stale-commit test: a cartridge built at `abc123`, current HEAD `def456` — `cartridge load`
   reports stale (commit mismatch), never served as current (REQ-452).
-- [ ] 11.4 [GREEN] Implement `cartridge load`'s `HeadSHA` comparison and stale/cold-start branch.
-- [ ] 11.5 [RED] Missing-cartridge test: no cartridge file exists → session falls back to cold-query, no error
+- [x] 11.4 [GREEN] Implement `cartridge load`'s `HeadSHA` comparison and stale/cold-start branch.
+- [x] 11.5 [RED] Missing-cartridge test: no cartridge file exists → session falls back to cold-query, no error
   (REQ-453).
-- [ ] 11.6 [GREEN] Implement the missing/corrupt-file → cold-start fallback path (never an error to the
+- [x] 11.6 [GREEN] Implement the missing/corrupt-file → cold-start fallback path (never an error to the
   caller).
-- [ ] 11.7 [RED] Version-mismatch test: an older-format cartridge is detected and rejected, falling back to
+- [x] 11.7 [RED] Version-mismatch test: an older-format cartridge is detected and rejected, falling back to
   cold-start rather than misreading (REQ-456).
-- [ ] 11.8 [GREEN] Implement the `schema_version` check on load.
-- [ ] 11.9 [RED] Disabled-gate CLI test: `cartridge.enabled=false` → `cartridge build`/`load` report disabled,
+- [x] 11.8 [GREEN] Implement the `schema_version` check on load.
+- [x] 11.9 [RED] Disabled-gate CLI test: `cartridge.enabled=false` → `cartridge build`/`load` report disabled,
   no file written/read (REQ-450).
-- [ ] 11.10 [GREEN] Wire `omnia cartridge build [--repo]` / `load [--repo]` CLI (nested-subcommand-namespace,
+- [x] 11.10 [GREEN] Wire `omnia cartridge build [--repo]` / `load [--repo]` CLI (nested-subcommand-namespace,
   mirrors `cloud`/`embed`/`migrate`/`eval` `main.go:775-791`); gate both behind `cartridge.enabled`.
-- [ ] 11.11 [REFACTOR] Add an explicit content-shape assertion in the build test confirming no weight-level/
+- [x] 11.11 [REFACTOR] Add an explicit content-shape assertion in the build test confirming no weight-level/
   KV-cache artifact is ever included in the cartridge payload (REQ-455); confirm the artifact never syncs to
   cloud (REQ-454).
-- [ ] 11.12 Verification: `internal/cartridge` suite green; disabled-path confirms build/load are no-ops,
+- [x] 11.12 Verification: `internal/cartridge` suite green; disabled-path confirms build/load are no-ops,
   session startup unchanged (REQ-450); `CGO_ENABLED=0 go build ./...` clean; **release-wide regression**:
   `go test ./...` green with every v0.4 flag off = byte-for-byte v0.3.2 across all 11 PRs.
