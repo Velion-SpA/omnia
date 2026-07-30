@@ -271,33 +271,33 @@ Satisfies: REQ-420–426.
 
 Satisfies: REQ-440–446.
 
-- [ ] 10.1 [RED] `internal/ranker/features_test.go`: every feature (lexical RRF contribution, semantic cosine,
+- [x] 10.1 [RED] `internal/ranker/features_test.go`: every feature (lexical RRF contribution, semantic cosine,
   recency, `DefaultImportanceWeight`, outcome/judgment history) traces to an existing recall/config/store field
   — no invented signal (REQ-443) — fails, package doesn't exist.
-- [ ] 10.2 [GREEN] Create `internal/ranker/features.go`: build the normalized [0,1] feature vector from existing
+- [x] 10.2 [GREEN] Create `internal/ranker/features.go`: build the normalized [0,1] feature vector from existing
   `recall`/`config`/`store` fields.
-- [ ] 10.3 [RED] `internal/ranker/model_test.go`: batch gradient descent on a small labeled fixture separates
+- [x] 10.3 [RED] `internal/ranker/model_test.go`: batch gradient descent on a small labeled fixture separates
   positive (`compatible`/`worked`) from negative (`supersedes`/`conflicts_with`/`did_not_work`) examples — fails,
   package doesn't exist.
-- [ ] 10.4 [GREEN] Create `internal/ranker/model.go`: L2-regularized logistic regression, batch gradient
+- [x] 10.4 [GREEN] Create `internal/ranker/model.go`: L2-regularized logistic regression, batch gradient
   descent, serialize to `<dataDir>/ranker/model-<version>.json` + `current` pointer, versioned by a hash of
   `{feature-schema, train-set size, trained-at}` (REQ-445).
-- [ ] 10.5 [RED] Cold-start test: `enabled=true`, zero judgments/outcomes, ranking byte-for-byte identical to
+- [x] 10.5 [RED] Cold-start test: `enabled=true`, zero judgments/outcomes, ranking byte-for-byte identical to
   `DefaultFuseParams`/`AdaptiveFloor` (`recall.go:74`/`:96`) (REQ-441).
-- [ ] 10.6 [GREEN] Implement the cold-start fallback: below `MinTrainExamples` (default 50), no `current`
+- [x] 10.6 [GREEN] Implement the cold-start fallback: below `MinTrainExamples` (default 50), no `current`
   model, or decode error → use `DefaultFuseParams`/`AdaptiveFloor` unchanged (REQ-446).
-- [ ] 10.7 [RED] `omnia rank-train` test: training runs `eval.RunOnce` (`harness.go:37`) after fitting and
+- [x] 10.7 [RED] `omnia rank-train` test: training runs `eval.RunOnce` (`harness.go:37`) after fitting and
   refuses to write `current` on any regression (REQ-444).
-- [ ] 10.8 [GREEN] Implement `omnia rank-train` CLI (dispatch `:730`): train → `eval.RunOnce` gate → promote
+- [x] 10.8 [GREEN] Implement `omnia rank-train` CLI (dispatch `:730`): train → `eval.RunOnce` gate → promote
   `current` only if no regression.
-- [ ] 10.9 [RED] Model-invalidation test: a model trained against an older feature shape is detected invalid
+- [x] 10.9 [RED] Model-invalidation test: a model trained against an older feature shape is detected invalid
   and not used live (REQ-445); a corrupted model file falls back silently to default floors, no error surfaced
   (REQ-446).
-- [ ] 10.10 [GREEN] Implement the feature-schema-hash check on load; wrap model load in a recover-to-fallback
+- [x] 10.10 [GREEN] Implement the feature-schema-hash check on load; wrap model load in a recover-to-fallback
   path.
-- [ ] 10.11 [REFACTOR] Place the re-rank pass at the `internal/mcp` wiring boundary — the same seam as
+- [x] 10.11 [REFACTOR] Place the re-rank pass at the `internal/mcp` wiring boundary — the same seam as
   `RecallRanking`/`RankResults` (`main.go:1300`/`:1304`) — keeping `internal/recall`/`internal/store` untouched.
-- [ ] 10.12 Verification: `internal/ranker` suite + `internal/eval` gate integration green; disabled-path and
+- [x] 10.12 Verification: `internal/ranker` suite + `internal/eval` gate integration green; disabled-path and
   cold-start byte-for-byte; `CGO_ENABLED=0 go build ./...` clean.
 
 ## Phase 11: `repo-cartridge` (PR 11, base: `main` after PR 10)

@@ -18,3 +18,22 @@
 - The v0.3.2 fixture has no v0.4 keys and its legacy config snapshot is byte-for-byte equal to `v0.3.2-config.golden.yaml`.
 ### Design Deviations
 None. The design, tasks, code, and security specification now consistently use `EncryptionConfig` with the `encryption` key; no `security` alias is provided.
+
+
+## PR 10 — Learned Ranker
+- Completed tasks: 10.1–10.12.
+- Boundary: local pure-Go ranker, candidate model persistence, CLI training/eval promotion gate, and MCP-only final rerank; no repo-cartridge work.
+- Stack status: development branch based on post-PR1 main; MUST rebase onto post-PR9 main before opening a PR. No issue or PR was created.
+### TDD Cycle Evidence
+| Tasks | RED | GREEN | REFACTOR |
+|---|---|---|---|
+| 10.1–10.2 | `go test ./internal/ranker` failed because feature symbols did not exist. | Added normalized existing-signal features and labels. | One schema constant protects model compatibility. |
+| 10.3–10.4 | Package test failed before model APIs existed. | Added deterministic L2 logistic training and versioned persistence. | Centralized shape/schema checks in `LoadCurrent`. |
+| 10.5–10.6 | `TestApplyLearnedRankerDisabledAndColdStartAreNoops` failed before the pass existed. | Disabled/nil-model paths return the original result slice unchanged. | Preserved RankResults sentinel preemption. |
+| 10.7–10.10 | Model corruption/schema rejection tests failed before load validation. | Candidate is persisted, eval is run, then `current` is promoted only on success. | Composition code silently omits invalid models. |
+| 10.11–10.12 | N/A | Full suite, vet, and cgo-free build passed. | Kept ranking out of `internal/recall` and retrieval store behavior. |
+### Verification
+- `go test ./...` — passed
+- `go vet ./...` — passed
+- `CGO_ENABLED=0 go build ./...` — passed
+- `git diff --check` — passed

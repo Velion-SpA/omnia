@@ -42,6 +42,7 @@ import (
 	"github.com/velion/omnia/internal/obsidian"
 	"github.com/velion/omnia/internal/project"
 	"github.com/velion/omnia/internal/purge"
+	"github.com/velion/omnia/internal/ranker"
 	"github.com/velion/omnia/internal/server"
 	"github.com/velion/omnia/internal/setup"
 	"github.com/velion/omnia/internal/store"
@@ -790,6 +791,8 @@ func main() {
 		cmdMigrate(os.Args[2:])
 	case "eval":
 		cmdEval(os.Args[2:])
+	case "rank-train":
+		cmdRankTrain(cfg)
 	case "version", "--version", "-v":
 		fmt.Printf("omnia %s\n", version)
 	case "help", "--help", "-h":
@@ -1302,6 +1305,16 @@ func cmdMCP(cfg store.Config) {
 		// handleSearch regardless of whether hybrid recall itself is enabled —
 		// RankResults/explain work over the FTS5-only path too.
 		mcpCfg.RecallRanking = appCfg.Recall.Ranking
+		mcpCfg.LearnedRanker = appCfg.Ranker
+		if appCfg.Ranker.Enabled {
+			dir := appCfg.Ranker.ModelDir
+			if dir == "" {
+				dir = filepath.Join(cfg.DataDir, "ranker")
+			}
+			if model, loadErr := ranker.LoadCurrent(dir); loadErr == nil {
+				mcpCfg.LearnedRankerModel = &model
+			}
+		}
 		// memory-structural-forgetting (omnia-structural-forgetting PR2,
 		// Requirement 6): thread structural_forgetting.enabled through so
 		// handleSearch's stale-anchor downrank + receipt is opt-in per the
