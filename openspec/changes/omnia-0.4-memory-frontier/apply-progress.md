@@ -514,3 +514,152 @@ None beyond what's described above.
   unchanged for both findings, and the `Note`/`processExists` additions are purely additive (new
   `omitempty` fields, new unexported helper functions) — no existing field, JSON shape, or exported signature
   was removed or changed incompatibly.
+
+## 2026-07-30 — PR 4/5: `memory-at-rest-security` (Phase 4 + Phase 5, final v0.4 capability)
+
+Implements the memory-at-rest-security capability end-to-end on branch `codex/v04-security-impl` in worktree
+`/private/tmp/omnia-v04-security`, based on `main` (all 6 other v0.4 capabilities already merged, including
+sqlite-vec-index which owns the dual-driver seam this capability reuses). Two commits, matching tasks.md's
+PR4/PR5 split: `a8e75c2` (Phase 4: keychain + adiantum VFS wiring) and `6923715` (Phase 5: migration + CLI +
+audit/receipt coverage). Strict TDD throughout — every new behavior has a RED test confirmed failing for the
+stated reason before the GREEN implementation landed.
+
+### Phase 4 (PR4) — `internal/keychain` + driver-selection wiring
+
+- **`internal/keychain` (new package)**: shells to macOS `/usr/bin/security` (`find-generic-password`/
+  `add-generic-password -U`) or Linux `secret-tool` (`lookup`/`store`), mirroring `internal/anchor`'s
+  shell-to-git de-risk pattern exactly — never a linked keychain library (rejected `github.com/keybase/
+  go-keychain`/`99designs/keyring`: both link `Security.framework` via cgo). Injectable `run` func (mirrors
+  `Probe.runGit`) plus an injectable `goos` field so tests exercise BOTH the macOS and Linux argument shapes
+  deterministically regardless of the host actually running the suite. `ErrUnavailable` (CLI missing) vs
+  `ErrNotFound` (CLI works, item absent — classified via macOS exit code 44 / Linux exit code 1 + empty
+  stdout) are distinct sentinels; `GetOrCreateHexKey` generates via `crypto/rand` (32 bytes) only on
+  `ErrNotFound`, never on `ErrUnavailable`. `keychain.Resolve` (task 4.7 REFACTOR) centralizes the
+  keychain-or-fail DECISION (fail-closed by default; `allowPlaintextFallback=true` degrades explicitly) so
+  `internal/store` and `internal/embed` — which must never import each other (existing architecture
+  guardrail) — share ONE implementation via a `Resolver` interface instead of duplicating the logic.
+- **`internal/store/encryption.go`** (omnia.db) and **`internal/embed/encryption.go`** (embeddings.db): both
+  add an `EncryptionConfig`-gated branch in `New`/`newWithoutRepair`/`OpenStore` that opens via
+  `github.com/ncruces/go-sqlite3`'s `adiantum` encrypting VFS (`?vfs=adiantum` + per-connection `PRAGMA
+  hexkey=...` issued in the init callback — NOT the URI, since the adiantum package's own docs warn a
+  URI-embedded key is visible via `vfs.Filename.URIParameters`) instead of `modernc.org/sqlite`. `internal/
+  embed`'s version composes with the existing Vec1 seam (`vec1.Register` in the SAME init callback,
+  encryption key first) when both capabilities are enabled — verified by
+  `TestOpenStore_EncryptionAndVecIndex_BothEnabled_ComposeInOneConnector`. Disabled (the default) never
+  consults the keychain seam at all (pinned by `TestNew_EncryptionDisabled_IsByteForByteUnaffected`/
+  `TestOpenStore_EncryptionDisabled_NeverConsultsKeychain`).
+- **Degradation**: `allow_plaintext_fallback=false` (default) → refuse to open, `ErrEncryptionKeyUnavailable`/
+  `keychain.ErrKeyUnavailable`. `=true` → stderr warning + one `audit.ActionEncryptionFallback` entry (new
+  `Action` constant) + open unencrypted. Never silent either way.
+- **Empirical discovery (this capability's own "Open Questions" flag, now resolved)**: `internal/store`'s
+  schema depends on FTS5 (`observations_fts`), which is NOT compiled into the ncruces driver by default —
+  opening without registering it produced `no such module: fts5` on the very first migration. Fixed by
+  registering `github.com/ncruces/go-sqlite3/ext/fts5` alongside the hexkey PRAGMA in every `internal/store`
+  init callback. `internal/embed`'s schema has no virtual tables outside the optional Vec1 table, so it needed
+  no equivalent registration.
+- **Composition-root wiring** (necessary for the capability to be reachable in production, beyond tasks.md's
+  literal checklist but required for functional correctness): `applyEncryptionConfig` (mirrors
+  `applyTimeTravelConfig`) threads `config.yaml`'s `encryption.*` into the shared `store.Config` ONCE at
+  `run()`'s composition root, covering every CLI subcommand that receives `cfg` by value. `embedStoreOptions`
+  (renamed from `vecIndexStoreOptions`) now also threads `EncryptionConfig` into every direct
+  `embed.OpenStore` production call site (`cmd/omnia/embed.go`, `autoembed.go` ×2, `recall.go`,
+  `consolidate.go`, `internal/dashboard/local_datasource.go` via new `dashboard.Config` fields) — without
+  this, an operator who migrates `embeddings.db` to an encrypted file would find every subsequent `omnia
+  embed`/auto-embed/recall/consolidate/dashboard run failing to reopen it.
+
+### Phase 5 (PR5) — migration, CLI, provenance receipts, threat model
+
+- **`internal/store/migrate_encryption.go`** and **`internal/embed/migrate_encryption.go`**
+  (`MigrateToEncrypted`/`MigrateToPlaintext`/`RotateKey`, independent per-package implementations — not
+  shared code, since the two schemas differ (FTS5 vs Vec1) and the packages must never import each other):
+  `VACUUM INTO` a sibling temp file (encrypted target via `?vfs=adiantum&hexkey=...`, plaintext target via
+  `?vfs=os` — see empirical note below), verify the row count matches via a fresh connection against the
+  temp file, atomically rename the original aside as a timestamped `.bak-<UTC-timestamp>` (kept indefinitely;
+  cleanup is an explicit separate operator action, never automatic), then rename the migrated copy into
+  place. Any failure aborts BEFORE the rename — the original is never touched or left half-migrated. Missing
+  source file and already-in-target-format are both no-ops, not errors (idempotent, safe to call on every
+  `omnia security encrypt`/`decrypt`/`rotate-key` invocation).
+- **Empirical discovery**: `VACUUM INTO` run from a connection whose CURRENT vfs is `adiantum` tries to open
+  a plaintext target under that SAME encrypting VFS unless the target URI explicitly overrides it with
+  `?vfs=os` (`os` is ncruces' reserved default-VFS name, confirmed via `vfs.Find("")`/`vfs.Find("os")` both
+  resolving to it) — without this, decrypt failed with a generic `unable to open database file`. Verified via
+  a throwaway experiment test (deleted before commit) before writing the real implementation, given design.md
+  flagged the combined adiantum-VFS mechanics as needing empirical verification.
+- **`RotateKey`**: re-encrypts directly from an old-key-encrypted source to a new-key-encrypted target
+  (never round-trips through plaintext on disk, unlike a naive decrypt-then-encrypt composition, which would
+  leave the primary file briefly/permanently plaintext if a crash landed between the two steps). A missing
+  file is a no-op (a capability that was never enabled must never block rotating the OTHER file's key); an
+  existing-but-plaintext file is a real error (rotating a key only makes sense on an already-encrypted file).
+- **`omnia security encrypt`/`decrypt`/`rotate-key`** (`cmd/omnia/security.go`, dispatched from `main.go`'s
+  switch): `encrypt` is gated on `encryption.enabled=true` — a correctness guard, not just style, since the
+  normal open path only selects the encrypted driver when that flag is set; encrypting while it's false would
+  produce a file nothing could reopen. `decrypt`/`rotate-key` are deliberately NOT gated on that flag —
+  REQ-435's own scenario is "set `encryption.enabled` back to false, THEN decrypt," so gating decrypt on the
+  same flag would make it refuse to run exactly when needed. All three follow the mandated config.Load
+  anti-pattern fix (`err != nil || !appCfg.Encryption.Enabled` degrades to a printed message, never a bare
+  `fatal()`) — decrypt/rotate-key check only load success, not `.Enabled`, per the reasoning above.
+  `rotate-key` re-encrypts BOTH files with the new key BEFORE ever calling `keychain.Set` — if either file's
+  rotation fails, the keychain is left completely untouched (still the OLD key), so both on-disk files remain
+  readable with it; only after both succeed does the keychain get updated to the new key.
+- **REQ-436 (trust_tag in read receipts)**: found and fixed a real gap — `TrustTag` was already surfaced on
+  `mem_save`'s write-time echo and `mem_delete`'s pre-delete snapshot (prior provenance-foundation work), but
+  NOT on the actual RETRIEVAL paths (`mem_search`'s structured `results[]` entries, `mem_get_observation`'s
+  text output) that spec REQ-436's own scenario describes ("an observation... WHEN retrieved, THEN...
+  trust_tag"). Added `entry["trust_tag"]` to `handleSearch`'s structured envelope (`internal/mcp/mcp.go`) and
+  a `Trust: <tag>` line to `handleGetObservation`'s text output, both nullable/additive (omitted for
+  pre-provenance-foundation rows with a nil `TrustTag`, never a misleading empty string).
+- **REQ-437 (enforcement/consolidation audit coverage) cross-phase check**: `internal/enforce/evaluate_test.go`
+  already had `TestEvaluate_EveryOutcomeWritesExactlyOneAuditEntry` covering all 4 verdicts — reconfirmed
+  passing, no change needed. `internal/consolidate` had NO test asserting its existing `audit.Append(...,
+  audit.ActionConsolidate, ...)` call actually reaches the audit log — added
+  `TestRun_AppendsActionConsolidateAuditEntry` (isolates `$HOME` to exercise the REAL `audit.Append`, not a
+  test seam, mirroring `internal/mcp`'s own isolation convention) to close that gap. Passed immediately
+  (the wiring was already correct from PR9B), confirming REQ-437 end-to-end.
+- **REQ-433 (threat model in `omnia doctor`)**: `cmdDoctor` already receives `cfg.EncryptionEnabled` via the
+  shared `store.Config` composition root, so no second `config.Load` was needed. `writeDoctorJSON`/
+  `renderDoctorText` both take a new `encryptionEnabled bool` param: disabled (default) is byte-for-byte the
+  pre-v0.4 output (same discipline extended to a CLI report, not just a DB format); enabled adds one text
+  line and one additive `encryption_threat_model` JSON field stating what's protected (disk theft/lost
+  laptop, process stopped) and what explicitly is NOT (live-process memory dump, unlocked keychain).
+- **Verification**: `CGO_ENABLED=0 go build ./...`, `go vet ./...`, `go test ./...` (full repo, all ~60
+  packages) all clean after both commits. Added a 10k-row encrypt+decrypt round-trip fixture test (task 5.8),
+  ~15s, passes. `gofmt -l` and `git diff --check` clean on every changed file.
+
+### Deviations from tasks.md / design.md
+- **Production composition-root wiring** (threading `encryption.*`/`EncryptionConfig` through
+  `embedStoreOptions` and every `embed.OpenStore` call site, plus `dashboard.Config`) was not literally itemized
+  in tasks.md's Phase 4/5 checklist the way sqlite-vec-index's PR2B dedicated explicit work-unit scope to the
+  equivalent wiring. Did it anyway: without it, the capability would be only half-reachable (omnia.db fully
+  wired via the shared `store.Config`, embeddings.db not), which would silently break `omnia embed`/
+  auto-embed/recall/consolidate/dashboard the moment an operator ran `omnia security encrypt`.
+- **`RotateKey`'s missing-file semantics changed mid-implementation**: originally returned an error for a
+  missing file (matching the "already plaintext" error case), but the CLI integration test caught that this
+  breaks `omnia security rotate-key` whenever only ONE of the two capabilities (embeddings) was ever enabled —
+  changed to a no-op, mirroring `MigrateToEncrypted`/`MigrateToPlaintext`'s existing convention, before this
+  ever reached a real user.
+- No deviation from the ADR-1 dual-driver strategy, ADR-2 full-database adiantum choice, or ADR-3 shell-to-CLI
+  keychain choice — all three were followed exactly as specified.
+
+### Open questions / known limitations (flagging per the task's own request — highest-data-safety-risk
+capability of the whole v0.4 release)
+1. **`rotate-key`'s two-file-plus-keychain update is not fully atomic.** If `omnia.db`'s rotation succeeds but
+   `embeddings.db`'s fails, `omnia.db` is already re-encrypted with the NEW key while the keychain still holds
+   the OLD one — the CLI prints explicit recovery instructions (restore `omnia.db`'s `.bak-*` or manually
+   complete the rotation) rather than silently leaving an inconsistent state, but this is manual recovery, not
+   automatic. A true two-phase-commit across 3 resources (2 files + 1 keychain entry) would need a
+   write-ahead intent log; out of scope for this pass given the size budget, and not required by tasks.md's
+   literal checklist.
+2. **Linux keychain coverage is exit-code-heuristic, not empirically verified against a real `secret-tool`.**
+   `secret-tool lookup`'s "not found" is classified as exit code 1 + empty stdout (a reasonable interpretation
+   of its documented behavior) but was never run against a real Linux host with libsecret installed — flagged
+   as an open item in design.md itself ("Linux keychain coverage beyond secret-tool... degrade per ADR-3"),
+   unchanged by this pass.
+3. **`omnia security decrypt`/`rotate-key` require a resolvable keychain key even to detect "nothing to
+   decrypt/rotate."** If a user runs `decrypt` on a store that was NEVER encrypted and has no keychain entry
+   at all, they get "no key found" rather than a friendlier "nothing to do" — the underlying migration
+   functions DO short-circuit on "already in target format" before touching the key, but the CLI resolves the
+   key first for a clearer degradation story on the common case (genuinely-encrypted-but-keychain-broken).
+   Minor UX rough edge, not a correctness or safety issue.
+4. **Backup files (`.bak-<timestamp>`) accumulate indefinitely** — by design (never delete data the user might
+   need to recover), but there is no `omnia security` subcommand to list/prune them yet. Left as a documented
+   follow-up, not blocking this capability's REQ-430–437 contract.
