@@ -7,6 +7,7 @@ import (
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/embed"
 	"github.com/velion/omnia/internal/store"
+	"os"
 	"strings"
 )
 
@@ -78,6 +79,15 @@ func Run(ctx context.Context, memories *store.Store, vectors *embed.Store, clien
 		}
 		audit.Append(audit.Entry{Ts: audit.Now(), Actor: "omnia", Action: audit.ActionConsolidate, ObservationID: int(id), Project: projectName, Summary: "memory consolidation digest", Result: "ok", SyncID: digest.SyncID})
 		written++
+		// finding #4: `omnia consolidate` ran for minutes with ZERO stdout on
+		// real data (19-25 sequential Ollama-backed digest writes), giving no
+		// way to tell "working" from "hung." A line per cluster as its
+		// digest is written, to stderr (flushed immediately — os.Stderr
+		// writes are unbuffered) and never interfering with any stdout a
+		// caller relies on, is enough for a real user or an agent watching
+		// command output to tell the process is alive and roughly how far
+		// along it is.
+		fmt.Fprintf(os.Stderr, "consolidate: digest %d/%d written (cluster size %d)\n", written, len(clusters), len(cluster))
 	}
 	return written, nil
 }

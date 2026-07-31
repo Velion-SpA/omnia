@@ -9,12 +9,37 @@ import (
 	"github.com/velion/omnia/internal/embed"
 	"github.com/velion/omnia/internal/store"
 	_ "modernc.org/sqlite"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// captureStderr redirects os.Stderr for the duration of fn, returning
+// everything written to it — mirrors cmd/omnia's own captureOutput helper
+// (same os.Pipe technique), reimplemented here since internal/consolidate
+// has no existing test-output-capture seam of its own.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	os.Stderr = w
+	fn()
+	os.Stderr = old
+	_ = w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	_ = r.Close()
+	return string(out)
+}
 
 func setupRun(t *testing.T, reachable bool) (*store.Store, *embed.Store, *embed.Client, config.ConsolidationConfig, []int64) {
 	t.Helper()
@@ -219,5 +244,32 @@ func TestRun_ReturnedCountMatchesActualDigestRowsWritten(t *testing.T) {
 	}
 	if written != actual {
 		t.Fatalf("MISMATCH (finding #2): Run returned written=%d but the DB has %d actual digest rows", written, actual)
+	}
+}
+
+// TestRun_PrintsProgressPerClusterToStderr is finding #4's progress-output
+// regression test for consolidate: `omnia consolidate` ran for minutes with
+// ZERO stdout on real data (19-25 sequential Ollama-backed digest writes),
+// giving no way to tell "working" from "hung." Run must print a line per
+// cluster as its digest is written, to stderr (so it never interferes with
+// any stdout envelope a future caller might rely on), non-empty and
+// mentioning the actual written count.
+func TestRun_PrintsProgressPerClusterToStderr(t *testing.T) {
+	s, es, c, cfg, _ := setupRun(t, true)
+
+	var stderr string
+	var written int
+	var runErr error
+	stderr = captureStderr(t, func() {
+		written, runErr = Run(context.Background(), s, es, c, cfg, "p")
+	})
+	if runErr != nil || written != 1 {
+		t.Fatalf("written=%d err=%v", written, runErr)
+	}
+	if stderr == "" {
+		t.Fatal("expected non-empty progress on stderr as the digest was written")
+	}
+	if !strings.Contains(stderr, "1") {
+		t.Errorf("expected progress to mention the digest count, got stderr=%q", stderr)
 	}
 }

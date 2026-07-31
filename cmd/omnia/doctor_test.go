@@ -427,3 +427,60 @@ func TestCmdDoctor_EncryptionEnabled_JSONIncludesThreatModel(t *testing.T) {
 		t.Fatalf("expected a non-empty encryption_threat_model field, got %#v", parsed["encryption_threat_model"])
 	}
 }
+
+// TestCmdDoctor_FullScanPrintsProgressToStderr is finding #4's regression
+// test: a full `omnia doctor` scan (no --check — every registered check
+// runs) must print SOME progress to stderr as it goes, so a real user (or
+// an agent watching command output) can tell the process is alive during a
+// long real-data scan instead of seeing zero output for 2+ minutes. Progress
+// goes to stderr specifically so it never interferes with --json's stdout
+// envelope (checked separately below).
+func TestCmdDoctor_FullScanPrintsProgressToStderr(t *testing.T) {
+	cfg := testConfig(t)
+	seedDoctorSession(t, cfg, "manual-save-engram", "engram", "/work/engram")
+
+	withArgs(t, "engram", "doctor", "--project", "engram")
+	stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr == "" {
+		t.Fatalf("expected non-empty progress on stderr for a full scan, got none; stdout=%q", stdout)
+	}
+	for _, code := range []string{"session_project_directory_mismatch", "sqlite_lock_contention"} {
+		if !strings.Contains(stderr, code) {
+			t.Errorf("expected stderr progress to mention check %q, got stderr=%q", code, stderr)
+		}
+	}
+}
+
+// TestCmdDoctor_FullScanJSONProgressStaysOffStdout confirms --json's stdout
+// envelope stays valid, parseable JSON even though the full scan now prints
+// progress lines — progress must go to stderr only, never interleaved into
+// stdout.
+func TestCmdDoctor_FullScanJSONProgressStaysOffStdout(t *testing.T) {
+	cfg := testConfig(t)
+	seedDoctorSession(t, cfg, "manual-save-engram", "engram", "/work/engram")
+
+	withArgs(t, "engram", "doctor", "--json", "--project", "engram")
+	stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr == "" {
+		t.Fatal("expected non-empty progress on stderr for a full --json scan too")
+	}
+	var report map[string]any
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("doctor --json stdout must stay valid JSON even with progress on stderr: %v\n%s", err, stdout)
+	}
+}
+
+// TestCmdDoctor_SingleCheckStaysStderrEmpty pins the existing, pre-fix
+// behavior for a --check-scoped run (RunOne): progress is scoped to full
+// scans (RunAll) only, matching every pre-existing --check-scoped test in
+// this file that already asserts stderr == "".
+func TestCmdDoctor_SingleCheckStaysStderrEmpty(t *testing.T) {
+	cfg := testConfig(t)
+	seedDoctorSession(t, cfg, "manual-save-engram", "engram", "/work/engram")
+
+	withArgs(t, "engram", "doctor", "--project", "engram", "--check", "session_project_directory_mismatch")
+	_, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected stderr empty for a --check-scoped run, got %q", stderr)
+	}
+}

@@ -166,3 +166,52 @@ func TestRunnerRunAllHealthyEvaluatesEveryMVPCheck(t *testing.T) {
 		}
 	}
 }
+
+// TestRunAll_InvokesProgressCallbackPerCheck is finding #4's progress-output
+// contract at the diagnostic-runner level: a Scope.Progress callback (when
+// set) must fire once per check, in registry order, BEFORE that check runs
+// — the seam cmd/omnia's runDiagnostics (doctor) uses to print
+// "checking: <code>..." to stderr as each check starts, so a real user can
+// tell `omnia doctor` is alive during a long real-data scan instead of
+// seeing zero output for 2+ minutes.
+func TestRunAll_InvokesProgressCallbackPerCheck(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if err := s.CreateSession("manual-save-engram", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	var seen []string
+	_, err := NewRunner().RunAll(context.Background(), Scope{
+		Store:   s,
+		Project: "engram",
+		Progress: func(code string) {
+			seen = append(seen, code)
+		},
+		ReadSQLiteLockSnapshot: func(context.Context) (store.SQLiteLockSnapshot, error) {
+			return store.SQLiteLockSnapshot{JournalMode: "wal", BusyTimeoutMS: 5000, CheckpointBusy: 0}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunAll: %v", err)
+	}
+
+	want := RegisteredCodes()
+	if len(seen) != len(want) {
+		t.Fatalf("Progress fired %d times, want %d (one per registered check): %v", len(seen), len(want), seen)
+	}
+	for i, code := range want {
+		if seen[i] != code {
+			t.Errorf("Progress[%d] = %q, want %q (registry order)", i, seen[i], code)
+		}
+	}
+}
+
+// TestRunOne_NilProgressIsSafe pins that a nil Scope.Progress (every
+// existing caller, and RunOne's own doctor --check callers) never panics —
+// Progress is opt-in, not required.
+func TestRunOne_NilProgressIsSafe(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if _, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckManualSessionNameProjectMismatch); err != nil {
+		t.Fatalf("RunOne with nil Progress: %v", err)
+	}
+}

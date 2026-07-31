@@ -119,6 +119,19 @@ var (
 		if strings.TrimSpace(check) != "" {
 			return runner.RunOne(ctx, scope, check)
 		}
+		// finding #4: `omnia doctor` ran 2+ minutes with ZERO stdout on a
+		// real 1835-observation store, giving no way to tell "working" from
+		// "hung." Progress is scoped to a full scan (RunAll, every
+		// registered check) — the slow, multi-check case this finding is
+		// about — not a --check-scoped RunOne, which stays byte-for-byte
+		// unchanged (matching every existing --check-scoped test's stderr==""
+		// assertion). Printed to stderr (never --json's stdout envelope) and
+		// flushed immediately: os.Stderr writes are unbuffered, so each
+		// Fprintf is visible to the caller the moment it's called, no extra
+		// flush needed.
+		scope.Progress = func(code string) {
+			fmt.Fprintf(os.Stderr, "checking: %s...\n", code)
+		}
 		return runner.RunAll(ctx, scope)
 	}
 
