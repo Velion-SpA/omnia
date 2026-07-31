@@ -1,9 +1,12 @@
 package store
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -320,5 +323,194 @@ func TestMigrateToEncrypted_TenThousandRowFixture_PreservesAllRows(t *testing.T)
 	}
 	if decryptResult.RowsBefore != 10000 || decryptResult.RowsAfter != 10000 {
 		t.Fatalf("row count mismatch after decrypt: %+v", decryptResult)
+	}
+}
+
+// ─── WAL-sidecar regression: stale -wal/-shm after a hard-stopped writer ───
+//
+// Real production incident (2026-07): running `omnia security encrypt`
+// against the user's real omnia.db reported SUCCESS (row counts matched)
+// but left the resulting encrypted file permanently unreadable by any
+// subsequent fresh process. Confirmed root cause: MigrateToEncrypted (and
+// MigrateToPlaintext/RotateKey) never checkpointed or cleaned up the
+// SOURCE database's `-wal`/`-shm` sidecar files before renaming a new file
+// into place at the original path. A source with ANY live,
+// un-checkpointed WAL at migration time (completely normal — e.g. a
+// daemon stopped via `launchctl bootout`/SIGKILL without a final
+// checkpoint, exactly what happened in the real incident) leaves stale
+// `dbPath-wal`/`dbPath-shm` files sitting next to the NEW file that takes
+// over dbPath's name after rename. The next fresh WAL-mode open (any
+// subsequent store.New) tries to reconcile that stale, structurally
+// incompatible WAL against the new file and fails with the exact
+// misleading error seen in production: `sqlite3: file is not a database`.
+
+// TestHelperProcess is not a real test: it is the subprocess body invoked
+// by spawnWALWriterAndHardKill below via the standard Go "re-exec the test
+// binary as a helper process" idiom (the same pattern os/exec's own tests
+// use). It no-ops unless GO_WANT_HELPER_PROCESS=1 is set, so a normal
+// `go test` run treats it as an ordinary (instantly-passing) test.
+//
+// It opens dbPath directly via the plain modernc driver (NOT the encrypted
+// path — the source is still plaintext at this point), turns on WAL mode,
+// commits a batch of writes WITHOUT ever checkpointing, then signals
+// readiness and blocks forever so the parent test can SIGKILL it — a real
+// hard stop, never a graceful db.Close() (which risks SQLite's own
+// checkpoint-on-close cleaning up the WAL for us and masking the bug).
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	dataDir := os.Getenv("HELPER_DATA_DIR")
+
+	// Reuse the package's own New/AddObservation path (not raw SQL) so the
+	// resulting WAL matches the real daemon's actual write shape exactly —
+	// including FTS5 shadow-table writes and revision bookkeeping — rather
+	// than a single plain table's pages.
+	cfg, err := DefaultConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "helper: DefaultConfig:", err)
+		os.Exit(1)
+	}
+	cfg.DataDir = dataDir
+	cfg.DedupeWindow = 0
+	s, err := New(cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "helper: New:", err)
+		os.Exit(1)
+	}
+	if err := s.CreateSession("helper-sess", "engram", "/tmp/helper"); err != nil {
+		fmt.Fprintln(os.Stderr, "helper: CreateSession:", err)
+		os.Exit(1)
+	}
+	for i := 0; i < 500; i++ {
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "helper-sess", Type: "manual", Title: fmt.Sprintf("wal probe %d", i),
+			Content: fmt.Sprintf("wal probe content %d", i), Project: "engram", Scope: "project",
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "helper: AddObservation:", i, err)
+			os.Exit(1)
+		}
+	}
+	fmt.Println("ready")
+	select {} // block until SIGKILLed by the parent test — never a graceful close
+}
+
+// spawnWALWriterAndHardKill starts the real OS subprocess described above
+// against a store rooted at dataDir, waits for it to signal readiness (so
+// we know the writes have landed), then SIGKILLs it — leaving a genuine,
+// live, non-empty `dbPath-wal` sidecar on disk with no process holding it
+// open anymore, exactly mirroring the real incident's trigger (`omnia
+// serve` stopped via SIGKILL/`launchctl bootout` mid-session).
+func spawnWALWriterAndHardKill(t *testing.T, dataDir, dbPath string) {
+	t.Helper()
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$")
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1", "HELPER_DATA_DIR="+dataDir)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper writer process: %v", err)
+	}
+
+	ready := make(chan error, 1)
+	go func() {
+		line, rerr := bufio.NewReader(stdout).ReadString('\n')
+		if rerr != nil {
+			ready <- rerr
+			return
+		}
+		if strings.TrimSpace(line) != "ready" {
+			ready <- fmt.Errorf("unexpected helper output: %q", line)
+			return
+		}
+		ready <- nil
+	}()
+
+	select {
+	case rerr := <-ready:
+		if rerr != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			t.Fatalf("helper writer process did not become ready: %v\nstderr: %s", rerr, stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("timed out waiting for helper writer process to become ready\nstderr: %s", stderr.String())
+	}
+
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("SIGKILL helper writer process: %v", err)
+	}
+	_ = cmd.Wait() // expected to report a kill signal — not a real failure
+
+	walPath := dbPath + "-wal"
+	info, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatalf("expected a live WAL sidecar after hard-killing the writer, got: %v\nstderr: %s", err, stderr.String())
+	}
+	if info.Size() == 0 {
+		t.Fatalf("expected a non-empty WAL sidecar after hard-killing the writer, got zero bytes\nstderr: %s", stderr.String())
+	}
+}
+
+// TestMigrateToEncrypted_SourceWithUncheckpointedWAL_FreshReopenSucceeds is
+// the deterministic reproduction of the real incident described above: it
+// must fail against the unfixed migration (a fresh reopen errors with a
+// "file is not a database"-style message) and pass once the source WAL is
+// checkpointed/truncated before the row count is read, and any stale
+// dbPath-wal/dbPath-shm is removed before the final rename.
+func TestMigrateToEncrypted_SourceWithUncheckpointedWAL_FreshReopenSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "omnia.db")
+
+	spawnWALWriterAndHardKill(t, dir, dbPath)
+
+	hexKey := "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+	result, err := MigrateToEncrypted(context.Background(), dbPath, hexKey)
+	if err != nil {
+		t.Fatalf("MigrateToEncrypted: %v", err)
+	}
+	if result.RowsBefore != result.RowsAfter {
+		t.Fatalf("row count mismatch: before=%d after=%d", result.RowsBefore, result.RowsAfter)
+	}
+	if result.RowsBefore != 500 {
+		t.Errorf("RowsBefore = %d, want 500", result.RowsBefore)
+	}
+
+	// Defense-in-depth: immediately after migration (before ANY fresh
+	// open), the migrated dbPath must not have the hard-killed source's
+	// stale WAL sidecars sitting next to it.
+	if _, err := os.Stat(dbPath + "-wal"); err == nil {
+		t.Error("a stale -wal sidecar from the un-checkpointed source must not remain after migration")
+	}
+	if _, err := os.Stat(dbPath + "-shm"); err == nil {
+		t.Error("a stale -shm sidecar from the un-checkpointed source must not remain after migration")
+	}
+
+	// The real-world failure: a completely FRESH store.New with the
+	// correct key must succeed — not fail with "file is not a database"
+	// because of a stale WAL sidecar left over from the hard-killed source.
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = dir
+	cfg.DedupeWindow = 0
+	cfg.EncryptionEnabled = true
+	withFakeKeychain(t, &fakeKeychain{hexKey: hexKey})
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("fresh reopen of the migrated store must succeed, got: %v", err)
+	}
+	defer s.Close()
+
+	obs, err := s.AllObservations("engram", "project", 1000)
+	if err != nil {
+		t.Fatalf("AllObservations: %v", err)
+	}
+	if len(obs) != 500 {
+		t.Fatalf("len(obs) = %d, want 500", len(obs))
 	}
 }
