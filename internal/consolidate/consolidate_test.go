@@ -3,6 +3,7 @@ package consolidate
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"github.com/velion/omnia/internal/audit"
 	"github.com/velion/omnia/internal/config"
@@ -244,6 +245,158 @@ func TestRun_ReturnedCountMatchesActualDigestRowsWritten(t *testing.T) {
 	}
 	if written != actual {
 		t.Fatalf("MISMATCH (finding #2): Run returned written=%d but the DB has %d actual digest rows", written, actual)
+	}
+}
+
+// TestRun_UpdateDecisionIsCountedAndLinked is finding #3's (adversarial
+// review of the finding #2 fix) regression test: Run's post-save guard
+// treated WriteGateDecisionUpdate exactly like WriteGateDecisionNoop
+// ("continue", skip counting/auditing/relation-linking). Unlike Noop, Update
+// performs a REAL `UPDATE ... WHERE id = ?` that overwrites an EXISTING
+// digest row's title/content/normalized_hash in place (store.go's
+// evaluateWriteGate Update branch) — a genuine write that was silently
+// dropped from the count/audit, AND whose pre-existing `consolidates`
+// relations (from whichever cluster last owned that row) were left pointing
+// at content that no longer matched, while the NEW cluster that caused the
+// update was never linked at all.
+//
+// This test forces two clusters through Run in the same call: the first
+// writes a brand-new digest (Save). The second's LLM-mocked content is a
+// near-duplicate of the first (Jaccard strictly between UpdateThreshold=0.9
+// and NoopThreshold=0.98, same technique internal/store's own
+// TestSaveObservation_LadderAutoUpdate uses to force this exact decision
+// deterministically) — write-hygiene's ladder classifies it as Update
+// against the first cluster's just-written row (same literal digest title,
+// matched via evaluateWriteGate's FTS candidate search). Asserts: (1) the
+// Update write IS counted in Run's returned total and audited, and (2) the
+// second cluster's 3 sources ARE linked via a `consolidates` relation to the
+// (now-updated) row — same observation ID/sync_id as the first cluster's
+// digest, confirmed via SaveResult.ID's documented "existing/matched row's
+// ID for update" contract.
+func TestRun_UpdateDecisionIsCountedAndLinked(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Setenv("HOME", t.TempDir())
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	cfg, _ := store.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.WriteHygieneEnabled = true
+	cfg.NoopThreshold = 0.98
+	cfg.UpdateThreshold = 0.9
+	cfg.ShrinkGuard = 0.9
+	cfg.CandidateLimit = 10
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.CreateSession("s", "p", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	es, err := embed.OpenStore(t.TempDir() + "/embeddings.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer es.Close()
+
+	// Two orthogonal (cosine similarity 0), well-separated vector groups —
+	// same technique setupRun already uses for one cluster — guarantee two
+	// disjoint connected components (MinScore=.5 well above 0), each exactly
+	// at MinClusterSize=3. Insertion order (A before B) gives group A's
+	// observation IDs the lower range, so Clusters' out[0].ObsID-ascending
+	// sort processes A first regardless of map iteration order.
+	addGroup := func(label string, vector []float32) {
+		for i := 0; i < 3; i++ {
+			id, err := s.AddObservation(store.AddObservationParams{SessionID: "s", Type: "note", Title: fmt.Sprintf("%s memory %d", label, i), Content: fmt.Sprintf("%s source %d", label, i), Project: "p", Scope: "project"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			o, _ := s.GetObservation(id)
+			if err := es.Upsert(context.Background(), embed.Row{SyncID: o.SyncID, ObsID: int(id), Project: "p", Title: o.Title, Vector: vector, ContentHash: o.SyncID, Model: "m", Dim: 2, EmbeddedAt: "now"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	addGroup("groupA", []float32{1, 0})
+	addGroup("groupB", []float32{0, 1})
+
+	// Jaccard(original, revision) lands strictly between 0.9 and 0.98 — the
+	// exact fixture internal/store's TestSaveObservation_LadderAutoUpdate
+	// uses to pin the same Update decision deterministically. Same length
+	// class (one word swapped near the end) trivially satisfies the
+	// shrink-guard too.
+	original := "Documented the full database migration runbook for the sqlite to postgres cutover including the pre-migration backup step the schema diff review the dry run validation pass the maintenance window announcement and the post-migration smoke test checklist covering every critical query path"
+	revision := "Documented the full database migration runbook for the sqlite to postgres cutover including the pre-migration backup step the schema diff review the dry run validation pass the maintenance window announcement and the post-migration smoke test checklist covering every critical rollback path"
+
+	var callCount int
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		content := original
+		if callCount > 1 {
+			content = revision
+		}
+		body, err := json.Marshal(map[string]any{"message": map[string]string{"content": content}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer h.Close()
+
+	consCfg := config.ConsolidationConfig{Enabled: true, MinScore: .5, K: 8, MinClusterSize: 3, MaxClusterSize: 12, Model: "m"}
+	written, err := Run(context.Background(), s, es, embed.New(h.URL, "m", 0), consCfg, "p")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected exactly 2 LLM calls (one per cluster), got %d", callCount)
+	}
+	if written != 2 {
+		t.Fatalf("MISMATCH (finding #3): expected written=2 (1 save + 1 update, both real writes), got %d", written)
+	}
+
+	// The Update write reused the FIRST cluster's row in place — exactly one
+	// digest row should exist, not two.
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "omnia.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var digestCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM observations WHERE type = 'digest' AND deleted_at IS NULL`).Scan(&digestCount); err != nil {
+		t.Fatal(err)
+	}
+	if digestCount != 1 {
+		t.Fatalf("expected exactly 1 digest row (the update reuses the existing row in place), got %d", digestCount)
+	}
+
+	r, err := s.Search("rollback", store.SearchOptions{Project: "p"})
+	if err != nil || len(r) == 0 {
+		t.Fatalf("expected the updated digest content to be findable via search: %#v %v", r, err)
+	}
+	digestSyncID := r[0].SyncID
+
+	// Both groups' sources (6 total) must be linked via `consolidates` to the
+	// single (now-updated) digest row — the second group's link is the part
+	// finding #3 fixes.
+	rels, err := s.GetRelationsForObservations([]string{digestSyncID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(rels[digestSyncID].AsSource); got != 6 {
+		t.Fatalf("MISMATCH (finding #3): expected 6 consolidates relations (3 from each cluster) to the updated digest, got %d", got)
+	}
+
+	// Both the Save and the Update write must be audited (Run's existing
+	// audit.Append call), correlated to the SAME observation ID since Update
+	// mutates the existing row in place rather than inserting a new one.
+	entries, err := audit.EntriesForObservation(int(r[0].ID))
+	if err != nil {
+		t.Fatalf("EntriesForObservation: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("MISMATCH (finding #3): expected 2 audit entries (save + update) for observation %d, got %d: %+v", r[0].ID, len(entries), entries)
 	}
 }
 
