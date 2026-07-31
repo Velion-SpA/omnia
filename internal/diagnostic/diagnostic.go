@@ -29,6 +29,14 @@ type Scope struct {
 	Now                    time.Time
 	ReadSQLiteLockSnapshot func(context.Context) (store.SQLiteLockSnapshot, error)
 	DetectProject          func(string) (DetectedProject, bool)
+	// Progress is an optional, opt-in hook (finding #4) invoked with a
+	// check's Code() right before that check runs — lightweight progress
+	// visibility for a long-running RunAll scan over real data (`omnia
+	// doctor` ran 2+ minutes with zero stdout on a real 1835-observation
+	// store, with no way to distinguish "working" from "hung"). nil (the
+	// default — every existing caller) is a no-op: this is purely additive
+	// and never changes Report/CheckResult output.
+	Progress func(code string)
 }
 
 type DetectedProject struct {
@@ -114,6 +122,9 @@ func (r Runner) RunOne(ctx context.Context, scope Scope, code string) (Report, e
 }
 
 func runCheck(ctx context.Context, scope Scope, check DiagnosticCheck) (CheckResult, error) {
+	if scope.Progress != nil {
+		scope.Progress(check.Code())
+	}
 	result, err := check.Run(ctx, scope)
 	if err != nil {
 		return CheckResult{}, err

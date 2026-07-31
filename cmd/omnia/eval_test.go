@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/velion/omnia/internal/eval"
@@ -166,3 +170,44 @@ var errBoomEval = &evalTestError{"boom"}
 type evalTestError struct{ msg string }
 
 func (e *evalTestError) Error() string { return e.msg }
+
+// TestLoadEvalCorpus_EmptyPathUsesEmbedded is finding #1's core unit test:
+// an empty --corpus path (the flag's default, evalCorpusPathFlagDefault)
+// must resolve via the binary-embedded corpus, not a cwd-relative
+// filesystem path. It must never fail with a "file not found"-style error
+// — the ONLY acceptable failure is a *eval.CorpusSizeError, if the
+// embedded starter corpus is still below spec EVAL-2's 50-case floor (a
+// separate, already-known, out-of-scope gap; see internal/eval's own
+// TestEmbeddedCorpus_WorksFromAnyCWD for the direct cwd-independence
+// proof).
+func TestLoadEvalCorpus_EmptyPathUsesEmbedded(t *testing.T) {
+	cases, err := loadEvalCorpus("")
+	if err != nil {
+		var sizeErr *eval.CorpusSizeError
+		if !errors.As(err, &sizeErr) {
+			t.Fatalf("loadEvalCorpus(\"\") failed with a non-size error (embedded corpus not wired?): %v", err)
+		}
+		return
+	}
+	if len(cases) == 0 {
+		t.Fatal("loadEvalCorpus(\"\") returned zero cases with no error")
+	}
+}
+
+// TestLoadEvalCorpus_ExplicitPathStillLoadsFromDisk is the backward-
+// compatibility half of finding #1's fix: an explicit --corpus PATH must
+// still load from THAT file (preserving the existing ability to point at
+// a custom/larger corpus), not silently fall back to the embedded one.
+func TestLoadEvalCorpus_ExplicitPathStillLoadsFromDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "custom_cases.json")
+	if err := os.WriteFile(path, []byte(`[]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadEvalCorpus(path)
+	if err == nil {
+		t.Fatal("expected an error for an empty custom corpus file")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("expected the error to reference the explicit custom path %q (proving it loaded from disk, not the embedded corpus), got: %v", path, err)
+	}
+}

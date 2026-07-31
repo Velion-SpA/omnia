@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -9,13 +10,19 @@ import (
 	"time"
 
 	"github.com/velion/omnia/internal/config"
+	"github.com/velion/omnia/internal/eval"
 	"github.com/velion/omnia/internal/ranker"
 	"github.com/velion/omnia/internal/store"
 )
 
-// rankerEval is injectable so the training promotion gate is independently testable.
+// rankerEval is injectable so the training promotion gate is independently
+// testable. CorpusPath is deliberately left unset (empty-string sentinel,
+// see eval.go's evalCorpusPathFlagDefault/loadEvalCorpus): rank-train
+// always uses the corpus embedded in the binary (finding #1), never the
+// old cwd-relative default that broke promotion for any real installed
+// binary run outside a repo checkout.
 var rankerEval = func(ctx context.Context) error {
-	_, err := runEvalHarness(ctx, evalRunOptions{CorpusPath: defaultEvalCorpusPath, ABPairsPath: defaultEvalABPairsPath, ConfigPath: config.DefaultPath(), Runs: 1})
+	_, err := runEvalHarness(ctx, evalRunOptions{ABPairsPath: defaultEvalABPairsPath, ConfigPath: config.DefaultPath(), Runs: 1})
 	return err
 }
 
@@ -75,6 +82,18 @@ func cmdRankTrain(cfg store.Config) {
 	}
 	// Promotion is deliberately after candidate persistence and the full eval pass.
 	if err := rankerEval(context.Background()); err != nil {
+		// finding #1: an undersized eval corpus (spec EVAL-2's 50-case
+		// floor) is a distinct, actionable condition — "the corpus itself
+		// isn't big enough to trust an eval verdict" — not "the model got
+		// worse." Reported specifically via errors.As so it never collapses
+		// into the generic "regressed or failed" phrasing below, which
+		// conflated the two and gave an operator no idea which one actually
+		// happened.
+		var sizeErr *eval.CorpusSizeError
+		if errors.As(err, &sizeErr) {
+			fmt.Fprintf(os.Stderr, "ranker: eval corpus has %d cases, need at least %d (spec EVAL-2) — model trained but not promoted; see 'omnia eval' docs to grow the corpus\n", sizeErr.Count, eval.MinCorpusSize)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "ranker: evaluation regressed or failed; model not promoted: %v\n", err)
 		return
 	}

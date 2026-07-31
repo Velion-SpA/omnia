@@ -18,13 +18,39 @@ import (
 	"github.com/velion/omnia/internal/token"
 )
 
-// defaultEvalCorpusPath and defaultEvalABPairsPath resolve the eval
-// harness's data files relative to a repo checkout — matching how the
-// harness's own package (internal/eval) already references its testdata.
-const (
-	defaultEvalCorpusPath  = "internal/eval/testdata/cases.json"
-	defaultEvalABPairsPath = "internal/embed/testdata/ab_pairs.json"
-)
+// defaultEvalABPairsPath resolves the eval harness's bilingual AB-pairs
+// retrieval-only data file relative to a repo checkout — matching how the
+// harness's own package (internal/embed) already references its testdata.
+// Unlike the eval corpus below, this is best-effort (see
+// defaultRunEvalHarness's retrieval-only section): a load failure just
+// skips that section rather than failing the whole run, so a cwd-relative
+// default here does not carry finding #1's production-breaking risk.
+const defaultEvalABPairsPath = "internal/embed/testdata/ab_pairs.json"
+
+// evalCorpusPathFlagDefault is the --corpus flag's default value: an EMPTY
+// string, which loadEvalCorpus (below) treats as "use the corpus embedded
+// in the binary" (finding #1). The pre-fix default was a cwd-relative path
+// ("internal/eval/testdata/cases.json"), which only resolved when the
+// process's cwd happened to be a repo checkout root — any real installed
+// binary run from a normal location (a user's home directory, /tmp,
+// anywhere) failed to find it, silently making `omnia rank-train`'s
+// promotion gate permanently non-functional in production. An explicit
+// --corpus PATH still loads from that file exactly as before, preserving
+// today's ability to point at a custom/larger corpus for a real eval run.
+const evalCorpusPathFlagDefault = ""
+
+// loadEvalCorpus resolves the eval corpus for a harness run: an explicit
+// non-empty path always loads from that file via eval.LoadCorpus
+// (preserving the existing ability to point at a custom/larger corpus);
+// an empty path (no --corpus override — the default, see
+// evalCorpusPathFlagDefault) loads the corpus embedded in the binary via
+// eval.EmbeddedCorpus, which works identically regardless of cwd.
+func loadEvalCorpus(path string) ([]eval.EvalCase, error) {
+	if strings.TrimSpace(path) == "" {
+		return eval.EmbeddedCorpus()
+	}
+	return eval.LoadCorpus(path)
+}
 
 // evalRunOptions bundles cmdEval's resolved flags for the (injectable)
 // harness-execution seam (runEvalHarness).
@@ -77,7 +103,7 @@ func cmdEval(args []string) {
 	runs := fs.Int("runs", eval.MinRuns, fmt.Sprintf("reproducibility runs, must be in [%d,%d] (spec EVAL-6)", eval.MinRuns, eval.MaxRuns))
 	threshold := fs.Float64("threshold", 0.05, "max allowed accuracy regression vs --baseline before a blocking gate fails")
 	baseline := fs.Float64("baseline", 0, "baseline overall accuracy to compare against; 0 (default) skips the gate decision and only prints the report")
-	corpusPath := fs.String("corpus", defaultEvalCorpusPath, "path to the eval corpus JSON (spec EVAL-2)")
+	corpusPath := fs.String("corpus", evalCorpusPathFlagDefault, "path to the eval corpus JSON (spec EVAL-2); defaults to the corpus embedded in the binary, which works from any cwd — set this to point at a custom/larger corpus file instead")
 	abPairsPath := fs.String("ab-pairs", defaultEvalABPairsPath, "path to the bilingual AB pairs JSON for the retrieval-only section (spec EVAL-7)")
 	configPath := fs.String("config", config.DefaultPath(), "path to config file (embeddings + recall settings)")
 	injection := fs.Bool("injection", false, "opt-in: score against the v0.3 Context Economy injection pipeline (type-lens + MMR + token budget, driven by --config's `injection` block) instead of the raw top-1 FTS5 hit; default false keeps current behavior byte-for-byte unchanged (issue #143)")
@@ -187,7 +213,7 @@ func printGateResult(result eval.GateResult) {
 // error (spec EVAL-5 requires judged causal/state_abstraction verdicts, not
 // silent misses; see scoring.go's Score()).
 func defaultRunEvalHarness(ctx context.Context, opts evalRunOptions) (eval.RunSummary, error) {
-	cases, err := eval.LoadCorpus(opts.CorpusPath)
+	cases, err := loadEvalCorpus(opts.CorpusPath)
 	if err != nil {
 		return eval.RunSummary{}, fmt.Errorf("load corpus: %w", err)
 	}

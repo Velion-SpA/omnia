@@ -1240,6 +1240,65 @@ func TestObsidianExportCallsInjectedExporter(t *testing.T) {
 	}
 }
 
+// TestObsidianExportAcceptsConfigFlag is finding #2's regression test:
+// cmdObsidianExport's arg-parsing loop had no --config case at all, so even
+// though main()'s prologue (globalConfigPath) already resolves and silently
+// applies an alternate --config PATH to cfg BEFORE dispatch, obsidian-export's
+// own parser then rejected the literal "--config" token as an unknown flag
+// via its `default:` case ("omnia: unknown flag: --config"). --config must be
+// silently accepted here (already handled upstream) instead of rejected.
+func TestObsidianExportAcceptsConfigFlag(t *testing.T) {
+	cfg := testConfig(t)
+	vaultDir := t.TempDir()
+	altConfig := filepath.Join(t.TempDir(), "alt.yaml")
+
+	exporterCalled := false
+	oldNew := newObsidianExporter
+	t.Cleanup(func() { newObsidianExporter = oldNew })
+	newObsidianExporter = func(s obsidian.StoreReader, c obsidian.ExportConfig) *obsidian.Exporter {
+		exporterCalled = true
+		return obsidian.NewExporter(s, c)
+	}
+
+	withArgs(t, "engram", "obsidian-export", "--config", altConfig, "--vault", vaultDir)
+
+	_, stderr, code := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+
+	if code != 0 || strings.Contains(stderr, "unknown flag") {
+		t.Fatalf("expected --config to be silently accepted, got exit=%d stderr=%q", code, stderr)
+	}
+	if !exporterCalled {
+		t.Fatalf("expected newObsidianExporter to be called")
+	}
+}
+
+// TestObsidianExportAcceptsConfigEqualsForm is finding #2's regression test
+// for the "--config=PATH" equals form.
+func TestObsidianExportAcceptsConfigEqualsForm(t *testing.T) {
+	cfg := testConfig(t)
+	vaultDir := t.TempDir()
+	altConfig := filepath.Join(t.TempDir(), "alt.yaml")
+
+	exporterCalled := false
+	oldNew := newObsidianExporter
+	t.Cleanup(func() { newObsidianExporter = oldNew })
+	newObsidianExporter = func(s obsidian.StoreReader, c obsidian.ExportConfig) *obsidian.Exporter {
+		exporterCalled = true
+		return obsidian.NewExporter(s, c)
+	}
+
+	withArgs(t, "engram", "obsidian-export", "--config="+altConfig, "--vault", vaultDir)
+
+	_, stderr, code := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+
+	if code != 0 || strings.Contains(stderr, "unknown flag") {
+		t.Fatalf("expected --config=PATH to be silently accepted, got exit=%d stderr=%q", code, stderr)
+	}
+	if !exporterCalled {
+		t.Fatalf("expected newObsidianExporter to be called")
+	}
+}
+
 // TestObsidianExportMinimalFlags verifies that only --vault (the required flag)
 // is sufficient — optional flags default to zero values (triangulation case).
 func TestObsidianExportMinimalFlags(t *testing.T) {

@@ -5,10 +5,25 @@
 package eval
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
 )
+
+// embeddedCorpusJSON bundles testdata/cases.json into the binary via
+// go:embed (finding #1): the pre-fix loader resolved the corpus from a
+// path relative to the CURRENT WORKING DIRECTORY
+// ("internal/eval/testdata/cases.json"), which only ever existed for a
+// process running with cwd set to a repo checkout root. Any real installed
+// binary run from a normal location (a user's home directory, /tmp,
+// anywhere) failed to find it, silently making `omnia rank-train`'s
+// promotion gate permanently non-functional in production. Embedding the
+// bytes at compile time removes the filesystem/cwd dependency entirely —
+// see EmbeddedCorpus.
+//
+//go:embed testdata/cases.json
+var embeddedCorpusJSON []byte
 
 // Capability tags every EvalCase with exactly one memory ability it probes
 // (spec EVAL-2). A case is never untagged or multi-tagged.
@@ -73,6 +88,26 @@ const (
 	MaxCorpusSize = 150
 )
 
+// CorpusSizeError reports that a loaded corpus violates spec EVAL-2's
+// [MinCorpusSize, MaxCorpusSize] case-count floor/ceiling. It is a typed
+// error (not a plain fmt.Errorf string) specifically so callers — like
+// rank-train's promotion gate (finding #1) — can distinguish "the corpus
+// itself is too small/too large" from "the model genuinely regressed" via
+// errors.As, and report each with its own clear, specific message instead
+// of collapsing both into one opaque "evaluation regressed or failed"
+// phrasing.
+type CorpusSizeError struct {
+	// Source identifies where the corpus came from: a filesystem path for
+	// LoadCorpus, or "<embedded>" for EmbeddedCorpus.
+	Source string
+	// Count is the actual number of cases the corpus contained.
+	Count int
+}
+
+func (e *CorpusSizeError) Error() string {
+	return fmt.Sprintf("eval: corpus %s has %d cases, want between %d and %d (spec EVAL-2)", e.Source, e.Count, MinCorpusSize, MaxCorpusSize)
+}
+
 // LoadCorpus reads a JSON array of EvalCase from path and validates it
 // against spec EVAL-2: case count MUST be in [MinCorpusSize, MaxCorpusSize],
 // and every case MUST carry exactly one valid Capability, one valid
@@ -82,12 +117,27 @@ func LoadCorpus(path string) ([]EvalCase, error) {
 	if err != nil {
 		return nil, fmt.Errorf("eval: load corpus: %w", err)
 	}
-	cases, err := parseCorpus(data, path)
+	return parseAndSizeCheckCorpus(data, path)
+}
+
+// EmbeddedCorpus returns the eval corpus bundled into the binary via
+// go:embed (finding #1), applying the exact same per-case validation and
+// [MinCorpusSize, MaxCorpusSize] floor/ceiling check as LoadCorpus — just
+// against the embedded bytes instead of a caller-supplied filesystem path,
+// so it works identically regardless of the current working directory.
+func EmbeddedCorpus() ([]EvalCase, error) {
+	return parseAndSizeCheckCorpus(embeddedCorpusJSON, "<embedded>")
+}
+
+// parseAndSizeCheckCorpus is LoadCorpus/EmbeddedCorpus's shared
+// parse-then-floor/ceiling-check tail.
+func parseAndSizeCheckCorpus(data []byte, source string) ([]EvalCase, error) {
+	cases, err := parseCorpus(data, source)
 	if err != nil {
 		return nil, err
 	}
 	if len(cases) < MinCorpusSize || len(cases) > MaxCorpusSize {
-		return nil, fmt.Errorf("eval: corpus %s has %d cases, want between %d and %d (spec EVAL-2)", path, len(cases), MinCorpusSize, MaxCorpusSize)
+		return nil, &CorpusSizeError{Source: source, Count: len(cases)}
 	}
 	return cases, nil
 }

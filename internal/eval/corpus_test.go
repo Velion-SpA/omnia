@@ -2,6 +2,7 @@ package eval
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -121,6 +122,62 @@ func TestLoadCorpus_MissingFile(t *testing.T) {
 	if _, err := LoadCorpus(filepath.Join(t.TempDir(), "missing.json")); err == nil {
 		t.Error("expected error for a missing corpus file, got nil")
 	}
+}
+
+// TestLoadCorpus_UndersizedReturnsTypedCorpusSizeError is finding #1's
+// clear-messaging requirement: a corpus outside spec EVAL-2's [50,150]
+// floor/ceiling must surface as a typed *CorpusSizeError (so callers like
+// rank-train's promotion gate can distinguish "corpus too small" from "the
+// model genuinely regressed" and report each with its own specific
+// message), not a generic fmt.Errorf string only distinguishable by
+// scraping its text.
+func TestLoadCorpus_UndersizedReturnsTypedCorpusSizeError(t *testing.T) {
+	path := writeCasesFile(t, makeCases(3))
+	_, err := LoadCorpus(path)
+	var sizeErr *CorpusSizeError
+	if !errors.As(err, &sizeErr) {
+		t.Fatalf("LoadCorpus with an undersized corpus should return a *CorpusSizeError, got %T: %v", err, err)
+	}
+	if sizeErr.Count != 3 {
+		t.Errorf("CorpusSizeError.Count = %d, want 3", sizeErr.Count)
+	}
+	if sizeErr.Source != path {
+		t.Errorf("CorpusSizeError.Source = %q, want %q", sizeErr.Source, path)
+	}
+}
+
+// TestEmbeddedCorpus_WorksFromAnyCWD is finding #1's core regression test:
+// the pre-fix defaultEvalCorpusPath ("internal/eval/testdata/cases.json")
+// was resolved relative to the CURRENT WORKING DIRECTORY, so `omnia
+// rank-train` run from any real installed-binary location (not a repo
+// checkout root) always failed with "open internal/eval/testdata/
+// cases.json: no such file or directory" — silently making the
+// learned-ranker's promotion gate permanently non-functional in production.
+// EmbeddedCorpus bundles the corpus into the binary via go:embed, so it
+// must succeed (or fail ONLY with a *CorpusSizeError about the corpus's
+// case count — a separate, already-known, out-of-scope gap) regardless of
+// cwd — never with a filesystem/path-not-found error.
+func TestEmbeddedCorpus_WorksFromAnyCWD(t *testing.T) {
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	// Simulate `cd /tmp && omnia rank-train` — an arbitrary directory with
+	// no relationship whatsoever to the repo checkout.
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = EmbeddedCorpus()
+	if err == nil {
+		return
+	}
+	var sizeErr *CorpusSizeError
+	if !errors.As(err, &sizeErr) {
+		t.Fatalf("EmbeddedCorpus() from an unrelated cwd failed with a non-size error (go:embed not bundling the corpus?): %v", err)
+	}
+	t.Logf("embedded corpus is undersized (%d cases, spec EVAL-2 floor is %d) — a separate, already-known gap tracked independently of this cwd-independence fix", sizeErr.Count, MinCorpusSize)
 }
 
 // TestCase_TracesToObservationID exercises spec EVAL-2's "case traces to a

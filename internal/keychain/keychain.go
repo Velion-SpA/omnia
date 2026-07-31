@@ -25,7 +25,19 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
+
+// keychainCLITimeout bounds every shelled-out security/secret-tool
+// invocation (finding #5). Keychain operations are normally near-instant;
+// anything this slow almost certainly means the CLI is blocked waiting on
+// an unattended interactive system prompt (e.g. a macOS "reset keychain"
+// dialog) rather than doing real work — observed directly during real
+// testing: a `security` subprocess hung 60+ seconds with near-zero CPU.
+// A package-level var (not a const) so tests can override it to something
+// sub-second instead of actually waiting out the real, longer production
+// timeout.
+var keychainCLITimeout = 12 * time.Second
 
 // ErrUnavailable is returned when no supported keychain CLI is reachable on
 // this host (binary not found on PATH).
@@ -121,10 +133,11 @@ func classify(goos string, err error, stdoutEmpty bool) error {
 
 // Get retrieves the secret stored under service/account. Returns ErrNotFound
 // if the CLI is reachable but no item is stored yet, ErrUnavailable if no
-// supported CLI is on PATH.
+// supported CLI is on PATH, or a clear timeout error (finding #5) if the CLI
+// does not respond within keychainCLITimeout.
 func (c *Client) Get(ctx context.Context, service, account string) (string, error) {
 	name, args := c.getCommand(service, account)
-	out, err := c.run(ctx, name, args, "")
+	out, err := c.runBounded(ctx, name, args, "")
 	if err != nil {
 		return "", classify(c.goos, err, len(out) == 0)
 	}
@@ -132,14 +145,31 @@ func (c *Client) Get(ctx context.Context, service, account string) (string, erro
 }
 
 // Set stores value under service/account, creating or updating the item.
-// Returns ErrUnavailable if no supported CLI is on PATH.
+// Returns ErrUnavailable if no supported CLI is on PATH, or a clear timeout
+// error (finding #5) if the CLI does not respond within keychainCLITimeout.
 func (c *Client) Set(ctx context.Context, service, account, value string) error {
 	name, args, stdin := c.setCommand(service, account, value)
-	_, err := c.run(ctx, name, args, stdin)
+	_, err := c.runBounded(ctx, name, args, stdin)
 	if err != nil {
 		return classify(c.goos, err, true)
 	}
 	return nil
+}
+
+// runBounded wraps c.run with keychainCLITimeout (finding #5): a
+// security/secret-tool call that does not return within that window almost
+// certainly means the CLI is stuck waiting on an unattended interactive
+// system prompt rather than doing real work, so it fails with a clear,
+// actionable error instead of hanging the caller (and the whole `omnia
+// security encrypt/decrypt/rotate-key` command) indefinitely.
+func (c *Client) runBounded(ctx context.Context, name string, args []string, stdin string) ([]byte, error) {
+	boundedCtx, cancel := context.WithTimeout(ctx, keychainCLITimeout)
+	defer cancel()
+	out, err := c.run(boundedCtx, name, args, stdin)
+	if err != nil && boundedCtx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("keychain: %s did not respond within %s — it may be waiting on an interactive system prompt (e.g. a Keychain unlock/reset dialog); check your session and HOME environment", name, keychainCLITimeout)
+	}
+	return out, err
 }
 
 func (c *Client) getCommand(service, account string) (name string, args []string) {
