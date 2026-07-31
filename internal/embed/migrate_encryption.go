@@ -33,6 +33,72 @@ type EncryptionMigrationResult struct {
 
 const embeddingsRowCountQuery = `SELECT COUNT(*) FROM embeddings`
 
+// checkpointAndTruncateWAL mirrors internal/store's own helper of the same
+// name (independent copy, not shared — see this file's doc above): runs
+// `PRAGMA wal_checkpoint(TRUNCATE)` on db, merging any live write-ahead log
+// fully into the main database file and truncating away the WAL sidecar.
+// This MUST run before this file's migration functions read a row count
+// off a migration SOURCE and copy it into a brand-new destination file: a
+// source left with a live, un-checkpointed WAL (completely normal — e.g. a
+// daemon stopped via SIGKILL/`launchctl bootout` without a final
+// checkpoint) would otherwise leave a stale `dbPath-wal`/`dbPath-shm`
+// sidecar pair sitting on disk, structurally incompatible with whatever
+// NEW file later takes over dbPath's name via this file's atomic-rename
+// step below — the confirmed root cause of a real production incident
+// (see internal/store/migrate_encryption.go's identical helper for the
+// full rationale). Checkpointing the source is safe here: the migration
+// never writes new application data to the source, it only merges the
+// source's OWN existing WAL into itself.
+//
+// `wal_checkpoint(TRUNCATE)` returns (busy, log, checkpointed); busy != 0
+// means SQLITE_BUSY was hit — some other connection held a lock that
+// prevented a full checkpoint. We abort loudly rather than proceed with a
+// source that still has un-merged WAL data, exactly like every other
+// failure mode in this file already aborts before touching anything.
+func checkpointAndTruncateWAL(ctx context.Context, db *sql.DB) error {
+	var busy, log, checkpointed int
+	if err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &log, &checkpointed); err != nil {
+		return fmt.Errorf("wal_checkpoint(TRUNCATE): %w", err)
+	}
+	if busy != 0 {
+		return fmt.Errorf("wal_checkpoint(TRUNCATE) reported busy=%d (a concurrent connection prevented a full checkpoint); refusing to migrate a source with un-merged WAL data", busy)
+	}
+	return nil
+}
+
+// checkpointAndTruncateWALConn is checkpointAndTruncateWAL's twin for
+// callers holding a raw *sqlite3.Conn (decryptToPlainFile's source
+// connection, opened directly via sqlite3.OpenContext rather than
+// database/sql) — same rationale, same abort-on-busy contract.
+func checkpointAndTruncateWALConn(c *sqlite3.Conn) error {
+	stmt, _, err := c.Prepare("PRAGMA wal_checkpoint(TRUNCATE)")
+	if err != nil {
+		return fmt.Errorf("wal_checkpoint(TRUNCATE): prepare: %w", err)
+	}
+	defer stmt.Close()
+	if !stmt.Step() {
+		if serr := stmt.Err(); serr != nil {
+			return fmt.Errorf("wal_checkpoint(TRUNCATE): %w", serr)
+		}
+		return fmt.Errorf("wal_checkpoint(TRUNCATE): no result row")
+	}
+	if busy := stmt.ColumnInt(0); busy != 0 {
+		return fmt.Errorf("wal_checkpoint(TRUNCATE) reported busy=%d (a concurrent connection prevented a full checkpoint); refusing to migrate a source with un-merged WAL data", busy)
+	}
+	return nil
+}
+
+// removeStaleWALSidecars best-effort removes any dbPath-wal/dbPath-shm
+// files. Called immediately before this file's atomic rename-into-place
+// steps, as defense-in-depth alongside checkpointAndTruncateWAL/
+// checkpointAndTruncateWALConn above — see internal/store's identical
+// helper for the full rationale. Any error (including a missing file) is
+// ignored: this is best-effort cleanup, not verification.
+func removeStaleWALSidecars(dbPath string) {
+	_ = os.Remove(dbPath + "-wal")
+	_ = os.Remove(dbPath + "-shm")
+}
+
 // isPlaintextSQLiteFile mirrors internal/store's own helper of the same
 // name (independent copy, not shared — see file doc above).
 func isPlaintextSQLiteFile(path string) (exists bool, plaintext bool, err error) {
@@ -127,6 +193,9 @@ func decryptToPlainFile(ctx context.Context, srcPath, hexKey, dstPath string, in
 			return fmt.Errorf("register vec1 on source: %w", err)
 		}
 	}
+	if err := checkpointAndTruncateWALConn(src); err != nil {
+		return fmt.Errorf("checkpoint encrypted source WAL before backup: %w", err)
+	}
 	if err := src.Backup("main", "file:"+dstPath+"?vfs=os"); err != nil {
 		return fmt.Errorf("back up source into plaintext target: %w", err)
 	}
@@ -165,6 +234,10 @@ func MigrateToEncrypted(ctx context.Context, dbPath, hexKey string, includeVec1 
 	}
 	defer srcDB.Close()
 
+	if err := checkpointAndTruncateWAL(ctx, srcDB); err != nil {
+		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: checkpoint source WAL: %w", err)
+	}
+
 	var before int
 	if err := srcDB.QueryRowContext(ctx, embeddingsRowCountQuery).Scan(&before); err != nil {
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: count source rows: %w", err)
@@ -193,6 +266,7 @@ func MigrateToEncrypted(ctx context.Context, dbPath, hexKey string, includeVec1 
 		os.Remove(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: back up original: %w", err)
 	}
+	removeStaleWALSidecars(dbPath)
 	if err := os.Rename(tmpPath, dbPath); err != nil {
 		os.Rename(backupPath, dbPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: finalize rename: %w", err)
@@ -221,6 +295,10 @@ func MigrateToPlaintext(ctx context.Context, dbPath, hexKey string, includeVec1 
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to plaintext: open encrypted source: %w", err)
 	}
 	defer srcDB.Close()
+
+	if err := checkpointAndTruncateWAL(ctx, srcDB); err != nil {
+		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to plaintext: checkpoint encrypted source WAL: %w", err)
+	}
 
 	var before int
 	if err := srcDB.QueryRowContext(ctx, embeddingsRowCountQuery).Scan(&before); err != nil {
@@ -255,6 +333,7 @@ func MigrateToPlaintext(ctx context.Context, dbPath, hexKey string, includeVec1 
 		os.Remove(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to plaintext: back up original: %w", err)
 	}
+	removeStaleWALSidecars(dbPath)
 	if err := os.Rename(tmpPath, dbPath); err != nil {
 		os.Rename(backupPath, dbPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to plaintext: finalize rename: %w", err)
@@ -288,6 +367,10 @@ func RotateKey(ctx context.Context, dbPath, oldHexKey, newHexKey string, include
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: open source with old key: %w", err)
 	}
 	defer srcDB.Close()
+
+	if err := checkpointAndTruncateWAL(ctx, srcDB); err != nil {
+		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: checkpoint old-key source WAL: %w", err)
+	}
 
 	var before int
 	if err := srcDB.QueryRowContext(ctx, embeddingsRowCountQuery).Scan(&before); err != nil {
@@ -325,6 +408,7 @@ func RotateKey(ctx context.Context, dbPath, oldHexKey, newHexKey string, include
 		os.Remove(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: back up old-key original: %w", err)
 	}
+	removeStaleWALSidecars(dbPath)
 	if err := os.Rename(tmpPath, dbPath); err != nil {
 		os.Rename(backupPath, dbPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: finalize rename: %w", err)
