@@ -43,10 +43,26 @@ func Run(ctx context.Context, memories *store.Store, vectors *embed.Store, clien
 		if err != nil {
 			return written, err
 		}
-		id, err := memories.AddObservation(store.AddObservationParams{SessionID: firstSource.SessionID, Type: "digest", Title: "Consolidated memory digest", Content: content, Project: projectName, Scope: "project", Source: "agent"})
+		saveResult, err := memories.SaveObservation(store.AddObservationParams{SessionID: firstSource.SessionID, Type: "digest", Title: "Consolidated memory digest", Content: content, Project: projectName, Scope: "project", Source: "agent"})
 		if err != nil {
 			return written, fmt.Errorf("consolidate: write digest: %w", err)
 		}
+		// finding #2: every cluster's digest shares the SAME literal title
+		// ("Consolidated memory digest"), so if two clusters' generated
+		// content happens to normalize to the same hash within the store's
+		// always-on dedupe window (store.SaveObservation's pre-write-hygiene
+		// duplicate check — realistic for short/templated LLM output),
+		// SaveObservation silently reuses an EXISTING row (Decision "noop"
+		// or "update") instead of inserting a new one. Only "save"/"relate"
+		// mean a genuinely NEW digest observation was created this run —
+		// counting/auditing/relating a reused row would both inflate the
+		// printed count past the actual number of digests written AND
+		// misattribute this cluster's sources onto an unrelated earlier
+		// digest, so that cluster is skipped entirely rather than either.
+		if saveResult.Decision != store.WriteGateDecisionSave && saveResult.Decision != store.WriteGateDecisionRelate {
+			continue
+		}
+		id := saveResult.ID
 		digest, err := memories.GetObservation(id)
 		if err != nil {
 			return written, err
