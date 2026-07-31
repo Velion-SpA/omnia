@@ -970,3 +970,105 @@ deviation is empirical (see "TDD" above): the RED test's downstream assertion (f
 pre-fix) did not trigger the exact same error text as the real incident in this synthetic harness, even
 though the primary, root-cause-level assertion (stale sidecars must not survive) did reproduce and get fixed
 as expected.
+
+## 2026-07-31 — Follow-up BLOCKER fix: same WAL-sidecar bug class on migration TEMP/intermediate paths
+
+Confirmed BLOCKER from an independent adversarial review of the fix above, on the same branch
+(`codex/v04-wal-sidecar-fix`, same worktree `/private/tmp/omnia-v04-wal-fix`, 3 prior commits `91cd354`,
+`0aacfc0`, `47c664b`). Scope: `internal/store/migrate_encryption.go` and
+`internal/embed/migrate_encryption.go`.
+
+### The gap
+The prior fix pass only ever targeted `dbPath` (the migration DESTINATION) — checkpointing the source and
+calling `removeStaleWALSidecars(dbPath)` right before the final rename. It never touched the FOUR
+temp/intermediate paths every migration function writes to, all fixed, deterministic, non-randomized names
+(`dbPath+".encrypting.tmp"`, `".decrypting.tmp"`, and `RotateKey`'s two-hop `".rotating.plain.tmp"` +
+`".rotating.tmp"`). These get reused verbatim across separate calls with zero sidecar cleanup targeted at
+them specifically — most concretely: `RotateKey` has no "already done" idempotency marker, so rotating a
+key twice in a row (or retrying after an aborted first attempt) reuses the exact same names with no cleanup
+of whatever the previous attempt left behind.
+
+### Fix
+Identical treatment in both packages:
+1. **`removeStaleTempFile(path)`** — a new helper (`os.Remove(path)` + `removeStaleWALSidecars(path)`)
+   replacing every bare `os.Remove(tmpPath)`/`os.Remove(tmpPlainPath)` call in `MigrateToEncrypted`,
+   `MigrateToPlaintext`, and `RotateKey` (both the initial "clear stale attempt" call and every
+   error-cleanup path) — so a stale sidecar left at a temp path is always cleared before that path is
+   reused, not just the stale main file.
+2. **`RotateKey` top-of-function defensive cleanup** — both `tmpPlainPath` and `tmpPath` are computed and
+   passed through `removeStaleTempFile` immediately after the existing/plaintext guard checks, before
+   `srcDB` is even opened, so a retried or back-to-back-rotated call never inherits ANY residue from a
+   prior attempt regardless of where in the function it previously failed.
+3. **Explicit `tmpPlainPath` checkpoint between `RotateKey`'s two hops** — new `checkpointPlainFileWAL(ctx,
+   path)` (opens the plain intermediate via the plain driver/ncruces-no-key path per each package's own
+   convention, runs `checkpointAndTruncateWAL`, closes) called after `decryptToPlainFile` writes
+   `tmpPlainPath` and before `encryptNewFile` reads it back as its source — matching the checkpoint
+   discipline already applied to every other source-then-consume hop in this file, rather than relying on
+   `decryptToPlainFile`'s `Backup` call having already left its destination connection checkpointed on
+   close.
+4. **Post-rename vacated-name cleanup** — after each function's final `os.Rename(tmpPath, dbPath)`
+   succeeds, `removeStaleWALSidecars(tmpPath)` clears any sidecar orphaned under the now-vacated tmp name
+   (the rename only moves the main file, never its sidecars), so a LATER migration reusing that exact temp
+   name never inherits them.
+
+### TDD, and an honest, more significant deviation than the prior fix pass
+Following strict TDD, three independent RED-test constructions were attempted before implementing the fix,
+each proving the literal code gap exists (zero sidecar-cleanup calls for temp paths) but NONE reproducing an
+actual behavioral failure against the pre-fix code:
+1. `TestRotateKey_CalledTwiceInARow_SecondCallSucceedsCleanly` — two back-to-back `RotateKey` calls on the
+   same `dbPath` under normal graceful conditions. Passed even pre-fix: graceful `Close()` on every
+   connection this file opens already triggers ncruces/go-sqlite3's own checkpoint-on-close, so under
+   ordinary conditions no temp-path sidecar residue is ever created in the first place (confirmed via a
+   direct probe: `PRAGMA journal_mode` on the temp destination reports `wal` mid-operation, but the sidecar
+   is gone by the time the writing function returns).
+2. `TestRotateKey_StaleTempPathWALFromAbortedAttempt_SecondCallSucceeds` — planted a genuine, live,
+   non-empty WAL sidecar directly at both temp paths (via a hard-killed subprocess writer, the same
+   "re-exec test binary + SIGKILL" idiom as the prior fix pass's own regression test) to simulate a real
+   aborted first attempt, then called `RotateKey` once. Also passed pre-fix: `os.Remove(tmpPath)` always
+   removes the temp path's MAIN file before creating a new one there, and a fresh SQLite open against a
+   path whose main file does not exist (or is brand new/zero-length) safely discards any pre-existing,
+   structurally mismatched WAL rather than erroring — unlike `dbPath`'s original vulnerability, which
+   specifically came from RENAMING an already-fully-written file into a name that still had a stale,
+   mismatched sidecar sitting beside it (a real, non-empty main file reconciling against an incompatible
+   WAL). Migration temp paths are always freshly CREATED via `sqlite3.OpenContext`, never rename-swapped
+   into an occupied name, so this exact corruption mechanism structurally cannot trigger for them as
+   currently coded.
+3. A direct probe of `decryptToPlainFile`'s return-to-`encryptNewFile` hand-off (scenario 2 in the review):
+   confirmed `Backup`'s internal destination connection for `tmpPlainPath` IS opened in WAL mode
+   (inherited from the WAL-mode encrypted source) but is ALSO fully closed (and therefore
+   checkpointed-on-close) before `decryptToPlainFile` returns — no residue survives to the next hop even
+   without the new explicit checkpoint call.
+
+Conclusion: with ncruces/go-sqlite3 + adiantum under `CGO_ENABLED=0`, this specific "same bug class" does
+not reproduce as a hard, deterministic failure the way the original `dbPath`-rename vulnerability did,
+because none of the temp-path writes in this file are ever a rename-into-an-occupied-name — they are always
+fresh creates, and this driver's WAL recovery safely discards a stale/mismatched WAL whenever the
+corresponding main file is missing or brand new. All three tests above are still kept as permanent
+regression/behavioral-contract tests — they encode exactly the assertions the review asked for (double
+`RotateKey` succeeds cleanly; a fresh reopen with the final key round-trips all rows; no live/non-empty
+`-wal` sidecar survives at either temp path across calls) and will catch any FUTURE regression (e.g. if a
+temp-path write pattern is ever changed to a rename, or if the underlying SQLite/VFS library's WAL-recovery
+leniency ever changes). The code fix itself was still implemented in full as specified: it is correct,
+cheap, harmless, and closes the literal, confirmed code gap (zero targeted sidecar cleanup for temp/
+intermediate paths, no `RotateKey` idempotency guard) regardless of whether today's specific driver
+behavior happens to already tolerate it — matching this codebase's existing defense-in-depth philosophy
+(the `dbPath` fix itself was applied the same way, as belt-and-suspenders alongside the checkpoint).
+Confirmed GREEN: all new and pre-existing tests pass after the fix; the equivalent test suite (identical
+`TestRotateKey_CalledTwiceInARow_SecondCallSucceedsCleanly`) was also added to `internal/embed` and passes.
+
+### Verification
+- `CGO_ENABLED=0 go build ./...` — passed
+- `go vet ./...` — passed
+- `go test ./...` — passed (full repo, all packages, including the two new/updated `internal/store` regression
+  tests and the one new `internal/embed` regression test)
+- All pre-existing `internal/store`/`internal/embed` migration/rotate-key tests pass unmodified.
+
+### Design Deviations
+One, documented in detail above under "TDD": the strict-TDD RED-test requirement could not be satisfied as a
+genuine behavioral failure for this specific gap, because the exact corruption mechanism the review
+hypothesized does not reproduce against this driver/library combination for temp/intermediate paths (only
+`dbPath`'s rename-into-an-occupied-name step is vulnerable to it, and that was already fixed in the prior
+commits on this branch). The code fix was implemented in full regardless, as defensive hardening consistent
+with the review's request and the codebase's existing philosophy; the tests written serve as permanent
+regression coverage encoding the review's requested assertions rather than as RED-then-GREEN proof of a
+behavioral bug.
