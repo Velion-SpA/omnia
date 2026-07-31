@@ -2728,7 +2728,20 @@ func cmdObsidianExport(cfg store.Config) {
 				interval = os.Args[i+1]
 				i++
 			}
+		case "--config":
+			// finding #2 (adversarial review): --config is already resolved
+			// and applied to cfg upstream by main()'s prologue
+			// (globalConfigPath), BEFORE dispatch reaches this function. This
+			// loop must accept the literal token as a silent no-op — like
+			// doctor's identical --config case — instead of rejecting it via
+			// the default case below.
+			if i+1 < len(os.Args) {
+				i++
+			}
 		default:
+			if strings.HasPrefix(os.Args[i], "--config=") || strings.HasPrefix(os.Args[i], "-config=") {
+				continue
+			}
 			fmt.Fprintf(os.Stderr, "omnia: unknown flag: %s\n", os.Args[i])
 			exitFunc(1)
 		}
