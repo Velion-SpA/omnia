@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -455,6 +456,241 @@ func spawnWALWriterAndHardKill(t *testing.T, dataDir, dbPath string) {
 	}
 	if info.Size() == 0 {
 		t.Fatalf("expected a non-empty WAL sidecar after hard-killing the writer, got zero bytes\nstderr: %s", stderr.String())
+	}
+}
+
+// assertNoLiveWALSidecar fails the test if path+"-wal" exists with non-zero
+// size — a stale, non-empty WAL sidecar sitting next to a fixed-name
+// temp/intermediate migration path that a subsequent call will reuse
+// verbatim (RotateKey's tmpPath/tmpPlainPath never have randomized names).
+func assertNoLiveWALSidecar(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path + "-wal")
+	if err != nil {
+		return // no sidecar at all — the good case
+	}
+	if info.Size() > 0 {
+		t.Errorf("stale non-empty WAL sidecar left at %s-wal (size=%d)", path, info.Size())
+	}
+}
+
+// TestRotateKey_CalledTwiceInARow_SecondCallSucceedsCleanly is the
+// regression test for a confirmed BLOCKER finding from adversarial review:
+// RotateKey's two fixed-name intermediate temp paths (dbPath+".rotating.tmp"
+// and dbPath+".rotating.plain.tmp") are reused verbatim across separate
+// RotateKey invocations. The WAL-sidecar fix in the prior two commits on
+// this branch only ever targets dbPath's OWN sidecars, never the temp
+// paths' — so a live/non-empty -wal sidecar left by one call's verification
+// read (countRowsInEncryptedFile opening tmpPath, or decryptToPlainFile's
+// Backup destination leaving one at tmpPlainPath) sits untouched right next
+// to the exact name the very next call reuses. Rotating a key twice in a
+// row is a normal, supported real-world sequence (e.g. rotating immediately
+// after a first rotation, or retrying after an aborted first attempt) — it
+// must never fail because of this.
+func TestRotateKey_CalledTwiceInARow_SecondCallSucceedsCleanly(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "omnia.db")
+	seedPlaintextObservations(t, dbPath, 12)
+
+	key1 := "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+	key2 := "f0e0d0c0b0a090807060504030201000f0e0d0c0b0a090807060504030201000"[:64]
+	key3 := "1111111111111111111111111111111111111111111111111111111111111111"[:64]
+
+	if _, err := MigrateToEncrypted(context.Background(), dbPath, key1); err != nil {
+		t.Fatalf("MigrateToEncrypted: %v", err)
+	}
+
+	if _, err := RotateKey(context.Background(), dbPath, key1, key2); err != nil {
+		t.Fatalf("first RotateKey: %v", err)
+	}
+
+	// Structural assertion: RotateKey's own fixed-name temp paths must never
+	// leave live/non-empty -wal sidecars sitting around after a completed
+	// call — those exact paths get reused verbatim by the very next call.
+	tmpPath := dbPath + ".rotating.tmp"
+	tmpPlainPath := dbPath + ".rotating.plain.tmp"
+	assertNoLiveWALSidecar(t, tmpPath)
+	assertNoLiveWALSidecar(t, tmpPlainPath)
+
+	result, err := RotateKey(context.Background(), dbPath, key2, key3)
+	if err != nil {
+		t.Fatalf("second RotateKey (immediately after the first, same dbPath): %v", err)
+	}
+	if result.RowsBefore != 12 || result.RowsAfter != 12 {
+		t.Fatalf("row count mismatch on second rotation: %+v", result)
+	}
+
+	assertNoLiveWALSidecar(t, tmpPath)
+	assertNoLiveWALSidecar(t, tmpPlainPath)
+
+	// Behavioral assertion: a completely fresh open with the FINAL key must
+	// succeed and see all rows — not fail due to a stale-sidecar-corrupted
+	// temp path inherited from the first rotation.
+	n, err := countRowsInEncryptedFile(context.Background(), dbPath, key3, observationsRowCountQuery)
+	if err != nil {
+		t.Fatalf("countRowsInEncryptedFile(key3) after double rotation: %v", err)
+	}
+	if n != 12 {
+		t.Fatalf("row count after double rotation = %d, want 12", n)
+	}
+}
+
+// TestHelperArbitraryPathWALWriter is TestHelperProcess's twin for an
+// ARBITRARY path (not necessarily a real omnia.db/embeddings.db rooted in a
+// dataDir) — it writes raw SQL directly via the plain modernc driver,
+// explicitly turns on WAL mode, commits a batch of inserts WITHOUT ever
+// checkpointing, signals readiness, then blocks forever so the parent test
+// can SIGKILL it. Used below to simulate a REAL aborted migration attempt
+// that leaves a live, non-empty `-wal`/`-shm` sidecar sitting at one of
+// RotateKey's fixed-name temp/intermediate paths (dbPath+".rotating.tmp" /
+// dbPath+".rotating.plain.tmp") — exactly what a genuine SIGKILL mid-
+// encryptNewFile/decryptToPlainFile would leave behind, since those
+// destination connections are themselves opened in WAL mode (inherited from
+// the WAL-mode source via Backup/Restore) but never explicitly checkpointed
+// mid-operation.
+func TestHelperArbitraryPathWALWriter(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	path := os.Getenv("HELPER_ARBITRARY_PATH")
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "helper: sql.Open:", err)
+		os.Exit(1)
+	}
+	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
+		fmt.Fprintln(os.Stderr, "helper: journal_mode pragma:", err)
+		os.Exit(1)
+	}
+	if _, err := db.Exec("CREATE TABLE wal_probe (v TEXT)"); err != nil {
+		fmt.Fprintln(os.Stderr, "helper: create table:", err)
+		os.Exit(1)
+	}
+	for i := 0; i < 500; i++ {
+		if _, err := db.Exec("INSERT INTO wal_probe (v) VALUES (?)", fmt.Sprintf("wal probe content %d", i)); err != nil {
+			fmt.Fprintln(os.Stderr, "helper: insert:", i, err)
+			os.Exit(1)
+		}
+	}
+	fmt.Println("ready")
+	select {} // block until SIGKILLed by the parent test — never a graceful close
+}
+
+// spawnArbitraryWALWriterAndHardKill mirrors spawnWALWriterAndHardKill above
+// but targets an arbitrary path directly (rather than a dataDir-rooted
+// omnia.db), used to plant a stale live WAL sidecar at RotateKey's own
+// fixed-name temp paths.
+func spawnArbitraryWALWriterAndHardKill(t *testing.T, path string) {
+	t.Helper()
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperArbitraryPathWALWriter$")
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1", "HELPER_ARBITRARY_PATH="+path)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper writer process: %v", err)
+	}
+
+	ready := make(chan error, 1)
+	go func() {
+		line, rerr := bufio.NewReader(stdout).ReadString('\n')
+		if rerr != nil {
+			ready <- rerr
+			return
+		}
+		if strings.TrimSpace(line) != "ready" {
+			ready <- fmt.Errorf("unexpected helper output: %q", line)
+			return
+		}
+		ready <- nil
+	}()
+
+	select {
+	case rerr := <-ready:
+		if rerr != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			t.Fatalf("helper writer process did not become ready: %v\nstderr: %s", rerr, stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("timed out waiting for helper writer process to become ready\nstderr: %s", stderr.String())
+	}
+
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("SIGKILL helper writer process: %v", err)
+	}
+	_ = cmd.Wait() // expected to report a kill signal — not a real failure
+
+	walPath := path + "-wal"
+	info, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatalf("expected a live WAL sidecar after hard-killing the writer, got: %v\nstderr: %s", err, stderr.String())
+	}
+	if info.Size() == 0 {
+		t.Fatalf("expected a non-empty WAL sidecar after hard-killing the writer, got zero bytes\nstderr: %s", stderr.String())
+	}
+}
+
+// TestRotateKey_StaleTempPathWALFromAbortedAttempt_SecondCallSucceeds is a
+// second regression test for the same confirmed BLOCKER finding as
+// TestRotateKey_CalledTwiceInARow_SecondCallSucceedsCleanly above, this time
+// reproducing the failure DETERMINISTICALLY: it plants a genuine, live,
+// non-empty WAL sidecar directly at RotateKey's fixed-name temp paths (as a
+// real aborted first attempt — a SIGKILL mid-encryptNewFile/
+// decryptToPlainFile — would leave them) and then calls RotateKey ONCE. The
+// unfixed RotateKey only ever removes the temp paths' MAIN file
+// (os.Remove(tmpPath)/os.Remove(tmpPlainPath)) before reusing them, never
+// their `-wal`/`-shm` sidecars — so the freshly-created file that
+// encryptNewFile/decryptToPlainFile writes at that same fixed name inherits
+// a stale, mismatched WAL sidecar, exactly the same corruption shape as the
+// original dbPath incident this branch already fixed.
+func TestRotateKey_StaleTempPathWALFromAbortedAttempt_SecondCallSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "omnia.db")
+	seedPlaintextObservations(t, dbPath, 9)
+
+	key1 := "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+	key2 := "f0e0d0c0b0a090807060504030201000f0e0d0c0b0a090807060504030201000"[:64]
+
+	if _, err := MigrateToEncrypted(context.Background(), dbPath, key1); err != nil {
+		t.Fatalf("MigrateToEncrypted: %v", err)
+	}
+
+	tmpPath := dbPath + ".rotating.tmp"
+	tmpPlainPath := dbPath + ".rotating.plain.tmp"
+
+	// Simulate a prior ABORTED RotateKey attempt: a hard-killed writer left
+	// genuine, live, non-empty WAL sidecars sitting at BOTH of RotateKey's
+	// fixed-name temp paths, with no process holding them open anymore.
+	spawnArbitraryWALWriterAndHardKill(t, tmpPath)
+	spawnArbitraryWALWriterAndHardKill(t, tmpPlainPath)
+
+	result, err := RotateKey(context.Background(), dbPath, key1, key2)
+	if err != nil {
+		t.Fatalf("RotateKey must succeed even after a prior aborted attempt left stale temp-path WAL sidecars, got: %v", err)
+	}
+	if result.RowsBefore != 9 || result.RowsAfter != 9 {
+		t.Fatalf("row count mismatch: %+v", result)
+	}
+
+	assertNoLiveWALSidecar(t, tmpPath)
+	assertNoLiveWALSidecar(t, tmpPlainPath)
+
+	// Behavioral assertion: a completely fresh open with the new key must
+	// succeed and see all rows.
+	n, err := countRowsInEncryptedFile(context.Background(), dbPath, key2, observationsRowCountQuery)
+	if err != nil {
+		t.Fatalf("countRowsInEncryptedFile(key2) after recovering from a stale temp-path WAL: %v", err)
+	}
+	if n != 9 {
+		t.Fatalf("row count after rotation = %d, want 9", n)
 	}
 }
 
