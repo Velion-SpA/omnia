@@ -99,6 +99,43 @@ func removeStaleWALSidecars(dbPath string) {
 	_ = os.Remove(dbPath + "-shm")
 }
 
+// removeStaleTempFile best-effort removes path's own main file together
+// with its `-wal`/`-shm` sidecars. Mirrors internal/store's own helper of
+// the same name (independent copy, not shared — see file doc above): every
+// temp/intermediate path this file re-creates (MigrateToEncrypted's and
+// MigrateToPlaintext's own tmpPath, and BOTH of RotateKey's tmpPlainPath
+// and tmpPath) uses a FIXED, deterministic name — never os.CreateTemp's
+// randomized form — so that exact name gets reused verbatim across
+// separate calls: a RotateKey retried after an aborted first attempt, or
+// simply rotating the key twice in a row (both normal, supported
+// sequences). Clearing only the main file is not enough — any live
+// sidecars left behind by whatever previously wrote to that exact path
+// must go too, before the next write reuses it. Best-effort: any error
+// (including a missing file) is ignored.
+func removeStaleTempFile(path string) {
+	_ = os.Remove(path)
+	removeStaleWALSidecars(path)
+}
+
+// checkpointPlainFileWAL opens a plain (non-adiantum) SQLite file at path
+// via the ncruces driver (mirroring this file's own plaintext-read
+// convention elsewhere — see countRowsWith's callers) and runs
+// checkpointAndTruncateWAL on it, then closes. Used by RotateKey to
+// explicitly checkpoint its plaintext intermediate (tmpPlainPath) between
+// decryptToPlainFile writing it and encryptNewFile reading it back as a
+// source — the same checkpoint discipline already applied to every other
+// source-then-consume hop in this file — rather than relying on
+// decryptToPlainFile's own Backup call having already left its destination
+// connection fully checkpointed on close.
+func checkpointPlainFileWAL(ctx context.Context, path string, includeVec1 bool) error {
+	db, err := ncrucesdriver.Open("file:"+path, migrateInit("", includeVec1))
+	if err != nil {
+		return fmt.Errorf("open %s for checkpoint: %w", path, err)
+	}
+	defer db.Close()
+	return checkpointAndTruncateWAL(ctx, db)
+}
+
 // isPlaintextSQLiteFile mirrors internal/store's own helper of the same
 // name (independent copy, not shared — see file doc above).
 func isPlaintextSQLiteFile(path string) (exists bool, plaintext bool, err error) {
@@ -245,25 +282,25 @@ func MigrateToEncrypted(ctx context.Context, dbPath, hexKey string, includeVec1 
 	srcDB.Close()
 
 	tmpPath := dbPath + ".encrypting.tmp"
-	os.Remove(tmpPath)
+	removeStaleTempFile(tmpPath) // clear any stale temp (and its sidecars) from a previous aborted attempt
 	if err := encryptNewFile(ctx, tmpPath, hexKey, "file:"+dbPath, includeVec1); err != nil {
-		os.Remove(tmpPath)
+		removeStaleTempFile(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: %w", err)
 	}
 
 	after, verr := countRowsWith(ctx, "file:"+tmpPath+"?vfs=adiantum", migrateInit(hexKey, includeVec1), embeddingsRowCountQuery)
 	if verr != nil {
-		os.Remove(tmpPath)
+		removeStaleTempFile(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: verify encrypted target: %w", verr)
 	}
 	if after != before {
-		os.Remove(tmpPath)
+		removeStaleTempFile(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: row count mismatch (before=%d after=%d); aborting, original untouched", before, after)
 	}
 
 	backupPath := fmt.Sprintf("%s.bak-%s", dbPath, time.Now().UTC().Format("20060102T150405Z"))
 	if err := os.Rename(dbPath, backupPath); err != nil {
-		os.Remove(tmpPath)
+		removeStaleTempFile(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: back up original: %w", err)
 	}
 	removeStaleWALSidecars(dbPath)
@@ -271,6 +308,9 @@ func MigrateToEncrypted(ctx context.Context, dbPath, hexKey string, includeVec1 
 		os.Rename(backupPath, dbPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to encrypted: finalize rename: %w", err)
 	}
+	// tmpPath's own name is now vacated — clear any sidecars orphaned under
+	// that vacated name so a LATER migration never inherits them.
+	removeStaleWALSidecars(tmpPath)
 
 	return EncryptionMigrationResult{RowsBefore: before, RowsAfter: after, BackupPath: backupPath}, nil
 }
@@ -306,31 +346,31 @@ func MigrateToPlaintext(ctx context.Context, dbPath, hexKey string, includeVec1 
 	}
 
 	tmpPath := dbPath + ".decrypting.tmp"
-	os.Remove(tmpPath)
+	removeStaleTempFile(tmpPath) // clear any stale temp (and its sidecars) from a previous aborted attempt
 	// vfs=os is REQUIRED (see internal/store/migrate_encryption.go's
 	// identical note): a connection whose current VFS is adiantum otherwise
 	// tries to open the plaintext VACUUM INTO target under that same
 	// encrypting VFS too.
 	vacuumSQL := fmt.Sprintf(`VACUUM INTO 'file:%s?vfs=os'`, tmpPath)
 	if _, err := srcDB.ExecContext(ctx, vacuumSQL); err != nil {
-		os.Remove(tmpPath)
+		removeStaleTempFile(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to plaintext: vacuum into plaintext target: %w", err)
 	}
 
 	after, verr := countRowsWith(ctx, "file:"+tmpPath, migrateInit("", includeVec1), embeddingsRowCountQuery)
 	if verr != nil {
-		os.Remove(tmpPath)
+		removeStaleTempFile(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to plaintext: verify plaintext target: %w", verr)
 	}
 	if after != before {
-		os.Remove(tmpPath)
+		removeStaleTempFile(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to plaintext: row count mismatch (before=%d after=%d); aborting, original untouched", before, after)
 	}
 	srcDB.Close()
 
 	backupPath := fmt.Sprintf("%s.bak-%s", dbPath, time.Now().UTC().Format("20060102T150405Z"))
 	if err := os.Rename(dbPath, backupPath); err != nil {
-		os.Remove(tmpPath)
+		removeStaleTempFile(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to plaintext: back up original: %w", err)
 	}
 	removeStaleWALSidecars(dbPath)
@@ -338,6 +378,9 @@ func MigrateToPlaintext(ctx context.Context, dbPath, hexKey string, includeVec1 
 		os.Rename(backupPath, dbPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: migrate to plaintext: finalize rename: %w", err)
 	}
+	// tmpPath's own name is now vacated — clear any sidecars orphaned under
+	// that vacated name so a LATER migration never inherits them.
+	removeStaleWALSidecars(tmpPath)
 
 	return EncryptionMigrationResult{RowsBefore: before, RowsAfter: after, BackupPath: backupPath}, nil
 }
@@ -362,6 +405,19 @@ func RotateKey(ctx context.Context, dbPath, oldHexKey, newHexKey string, include
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: %s is not encrypted; nothing to rotate", dbPath)
 	}
 
+	// Defensively clear ANY residue — main file AND -wal/-shm sidecars —
+	// left at either of this function's own fixed, non-randomized
+	// temp/intermediate paths by a PRIOR call, right at the top before doing
+	// anything else. RotateKey has no separate "already done" idempotency
+	// marker: a retried call after an aborted first attempt, or simply
+	// rotating the key twice in a row (both normal, supported sequences),
+	// reuses these exact names — a fresh call must never inherit anything
+	// from whatever previously occupied them.
+	tmpPlainPath := dbPath + ".rotating.plain.tmp"
+	tmpPath := dbPath + ".rotating.tmp"
+	removeStaleTempFile(tmpPlainPath)
+	removeStaleTempFile(tmpPath)
+
 	srcDB, err := ncrucesdriver.Open("file:"+dbPath+"?vfs=adiantum", migrateInit(oldHexKey, includeVec1))
 	if err != nil {
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: open source with old key: %w", err)
@@ -378,34 +434,40 @@ func RotateKey(ctx context.Context, dbPath, oldHexKey, newHexKey string, include
 	}
 	srcDB.Close()
 
-	tmpPlainPath := dbPath + ".rotating.plain.tmp"
-	os.Remove(tmpPlainPath)
 	if err := decryptToPlainFile(ctx, dbPath, oldHexKey, tmpPlainPath, includeVec1); err != nil {
-		os.Remove(tmpPlainPath)
+		removeStaleTempFile(tmpPlainPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: %w", err)
 	}
-	defer os.Remove(tmpPlainPath)
+	defer removeStaleTempFile(tmpPlainPath)
 
-	tmpPath := dbPath + ".rotating.tmp"
-	os.Remove(tmpPath)
+	// decryptToPlainFile's Backup destination connection is opened AND
+	// closed entirely inside that call — checkpoint tmpPlainPath explicitly
+	// here anyway, exactly like every other source-then-consume hop in this
+	// file, rather than relying on Backup's own destination connection
+	// having already left itself fully checkpointed on close. The very next
+	// step reads tmpPlainPath back as encryptNewFile's source.
+	if err := checkpointPlainFileWAL(ctx, tmpPlainPath, includeVec1); err != nil {
+		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: checkpoint plaintext intermediate WAL: %w", err)
+	}
+
 	if err := encryptNewFile(ctx, tmpPath, newHexKey, "file:"+tmpPlainPath, includeVec1); err != nil {
-		os.Remove(tmpPath)
+		removeStaleTempFile(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: %w", err)
 	}
 
 	after, verr := countRowsWith(ctx, "file:"+tmpPath+"?vfs=adiantum", migrateInit(newHexKey, includeVec1), embeddingsRowCountQuery)
 	if verr != nil {
-		os.Remove(tmpPath)
+		removeStaleTempFile(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: verify new-key target: %w", verr)
 	}
 	if after != before {
-		os.Remove(tmpPath)
+		removeStaleTempFile(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: row count mismatch (before=%d after=%d); aborting, original untouched", before, after)
 	}
 
 	backupPath := fmt.Sprintf("%s.bak-%s", dbPath, time.Now().UTC().Format("20060102T150405Z"))
 	if err := os.Rename(dbPath, backupPath); err != nil {
-		os.Remove(tmpPath)
+		removeStaleTempFile(tmpPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: back up old-key original: %w", err)
 	}
 	removeStaleWALSidecars(dbPath)
@@ -413,6 +475,9 @@ func RotateKey(ctx context.Context, dbPath, oldHexKey, newHexKey string, include
 		os.Rename(backupPath, dbPath)
 		return EncryptionMigrationResult{}, fmt.Errorf("embed: rotate key: finalize rename: %w", err)
 	}
+	// tmpPath's own name is now vacated — clear any sidecars orphaned under
+	// that vacated name so a LATER rotation never inherits them.
+	removeStaleWALSidecars(tmpPath)
 
 	return EncryptionMigrationResult{RowsBefore: before, RowsAfter: after, BackupPath: backupPath}, nil
 }

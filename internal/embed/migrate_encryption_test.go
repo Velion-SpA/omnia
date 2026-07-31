@@ -336,6 +336,86 @@ func spawnEmbedWALWriterAndHardKill(t *testing.T, path string) {
 	}
 }
 
+// assertNoLiveWALSidecar fails the test if path+"-wal" exists with non-zero
+// size — a stale, non-empty WAL sidecar sitting next to a fixed-name
+// temp/intermediate migration path that a subsequent call will reuse
+// verbatim (RotateKey's tmpPath/tmpPlainPath never have randomized names).
+func assertNoLiveWALSidecar(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path + "-wal")
+	if err != nil {
+		return // no sidecar at all — the good case
+	}
+	if info.Size() > 0 {
+		t.Errorf("stale non-empty WAL sidecar left at %s-wal (size=%d)", path, info.Size())
+	}
+}
+
+// TestRotateKey_CalledTwiceInARow_SecondCallSucceedsCleanly mirrors
+// internal/store's own regression test of the same name — see that file
+// for the full BLOCKER rationale: RotateKey's two fixed-name intermediate
+// temp paths are reused verbatim across separate invocations, and rotating
+// the key twice in a row is a normal, supported real-world sequence.
+func TestRotateKey_CalledTwiceInARow_SecondCallSucceedsCleanly(t *testing.T) {
+	path := t.TempDir() + "/emb.db"
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	ctx := context.Background()
+	for i := 0; i < 6; i++ {
+		syncID := fmt.Sprintf("double-rotate-%d", i)
+		if err := s.Upsert(ctx, unitRow(syncID, i, []float32{1, 0, 0})); err != nil {
+			t.Fatalf("Upsert %d: %v", i, err)
+		}
+	}
+	s.Close()
+
+	key1 := testMigrateHexKey
+	key2 := "f0e0d0c0b0a090807060504030201000f0e0d0c0b0a090807060504030201000"[:64]
+	key3 := "1111111111111111111111111111111111111111111111111111111111111111"[:64]
+
+	if _, err := MigrateToEncrypted(ctx, path, key1, false); err != nil {
+		t.Fatalf("MigrateToEncrypted: %v", err)
+	}
+
+	if _, err := RotateKey(ctx, path, key1, key2, false); err != nil {
+		t.Fatalf("first RotateKey: %v", err)
+	}
+
+	tmpPath := path + ".rotating.tmp"
+	tmpPlainPath := path + ".rotating.plain.tmp"
+	assertNoLiveWALSidecar(t, tmpPath)
+	assertNoLiveWALSidecar(t, tmpPlainPath)
+
+	result, err := RotateKey(ctx, path, key2, key3, false)
+	if err != nil {
+		t.Fatalf("second RotateKey (immediately after the first, same path): %v", err)
+	}
+	if result.RowsBefore != 6 || result.RowsAfter != 6 {
+		t.Fatalf("row count mismatch on second rotation: %+v", result)
+	}
+
+	assertNoLiveWALSidecar(t, tmpPath)
+	assertNoLiveWALSidecar(t, tmpPlainPath)
+
+	// Behavioral assertion: a completely fresh open with the FINAL key must
+	// succeed and see all rows.
+	withFakeEmbedKeychain(t, &fakeEmbedKeychain{hexKey: key3})
+	reopened, err := OpenStore(path, WithEncryption(true, "omnia", false))
+	if err != nil {
+		t.Fatalf("fresh reopen after double rotation: %v", err)
+	}
+	defer reopened.Close()
+	n, err := reopened.Count(ctx)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if n != 6 {
+		t.Fatalf("Count after double rotation = %d, want 6", n)
+	}
+}
+
 // TestMigrateToEncrypted_EmbedSourceWithUncheckpointedWAL_FreshReopenSucceeds
 // is the deterministic reproduction of the real-incident bug pattern for
 // embeddings.db: it must fail against the unfixed migration (stale
