@@ -704,7 +704,14 @@ func main() {
 	if dir := envx.Get(datadir.DataDirEnv); dir != "" {
 		cfg.DataDir = dir
 	}
-	if appCfg, err := config.Load(config.DefaultPath()); err == nil {
+	// finding #3: globalConfigPath makes this shared composition-root config
+	// load respect an operator-supplied --config PATH wherever it appears in
+	// os.Args, so every command built from this cfg — not just the newer
+	// v0.4 commands (security/cartridge/rank-train/consolidate/enforce/
+	// blame) that already parse their own --config flag — consistently
+	// loads config.yaml from the chosen path instead of silently ignoring
+	// it in favor of config.DefaultPath().
+	if appCfg, err := config.Load(globalConfigPath(args)); err == nil {
 		applyTimeTravelConfig(&cfg, appCfg)
 		applyEncryptionConfig(&cfg, appCfg)
 	}
@@ -831,6 +838,46 @@ func applyEncryptionConfig(cfg *store.Config, appCfg *config.Config) {
 	cfg.EncryptionEnabled = appCfg.Encryption.Enabled
 	cfg.EncryptionKeychainService = appCfg.Encryption.KeychainService
 	cfg.EncryptionAllowPlaintextFallback = appCfg.Encryption.AllowPlaintextFallback
+}
+
+// globalConfigPath scans args (os.Args[1:]) for a top-level --config PATH
+// (or --config=PATH) flag, wherever it appears, so main()'s shared
+// composition-root config.Load call (finding #3) respects an
+// operator-supplied config file for EVERY command — not just the newer
+// v0.4 commands (security, cartridge, rank-train, consolidate, enforce,
+// blame) that already parse their own --config flag independently.
+// Returns config.DefaultPath() when no --config flag is present anywhere
+// in args.
+//
+// This is intentionally a raw scan, not a flag.FlagSet parse: it runs
+// BEFORE the command-dispatch switch, before it's known which subcommand
+// (each with its own flag vocabulary) is about to run, so it must not
+// consume or reject flags it doesn't yet recognize.
+//
+// Known trade-off (documented, not a new problem): commands with
+// free-text/positional argument parsing that doesn't distinguish
+// recognized flags from plain values — e.g. `search`'s query-word
+// accumulation, `save <title> <content>` — will still see a LITERAL
+// "--config" (and its following value) land in their own positional/query
+// text if the flag appears in a position that command's own parser
+// doesn't special-case first. This mirrors how those same commands
+// already treat any OTHER unrecognized flag today; it is not a
+// regression introduced by this global flag.
+func globalConfigPath(args []string) string {
+	for i, a := range args {
+		switch {
+		case a == "--config" || a == "-config":
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return config.DefaultPath()
+		case strings.HasPrefix(a, "--config="):
+			return strings.TrimPrefix(a, "--config=")
+		case strings.HasPrefix(a, "-config="):
+			return strings.TrimPrefix(a, "-config=")
+		}
+	}
+	return config.DefaultPath()
 }
 
 func shouldCheckForUpdates(args []string) bool {

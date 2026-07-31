@@ -39,6 +39,18 @@ func cmdDoctor(cfg store.Config) {
 			}
 			check = os.Args[i+1]
 			i++
+		case "--config":
+			// finding #3: already consumed by main()'s prologue (before
+			// dispatch) to build cfg's shared config-derived fields.
+			// doctor's own stricter-than-search allowlist parser must
+			// recognize and skip it — like every other value-taking flag
+			// here — instead of rejecting it as an unknown argument.
+			if i+1 >= len(os.Args) {
+				fmt.Fprintln(os.Stderr, "error: --config requires a value")
+				exitFunc(1)
+				return
+			}
+			i++
 		case "--help", "-h", "help":
 			printDoctorUsage()
 			return
@@ -123,6 +135,15 @@ func cmdDoctorRepair(cfg store.Config) {
 		case "--apply":
 			mode = diagnostic.RepairModeApply
 			modeCount++
+		case "--config":
+			// finding #3: see the identical case in cmdDoctor above — already
+			// consumed by main()'s prologue; skip it here instead of
+			// rejecting it as unknown.
+			if i+1 >= len(os.Args) {
+				failDoctorRepair("--config requires a value")
+				return
+			}
+			i++
 		case "--help", "-h", "help":
 			printDoctorUsage()
 			return

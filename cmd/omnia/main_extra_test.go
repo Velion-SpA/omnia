@@ -819,6 +819,133 @@ func TestMainCloudHelpDoesNotCreateLocalDatabase(t *testing.T) {
 	}
 }
 
+// ─── Finding #3: a global --config PATH flag, respected by every command ───
+//
+// New v0.4 commands (security, cartridge, rank-train, consolidate, enforce,
+// blame) each independently parse their own --config flag. Core/pre-v0.4
+// commands (search, doctor, save, context, ...) did not support --config at
+// all: main()'s top-level prologue always called
+// config.Load(config.DefaultPath()), silently ignoring any --config an
+// operator passed, so `search`/`doctor`/etc. against an alternate config
+// (e.g. isolated test/staging setups, or a config.yaml enabling
+// encryption/time_travel) used the WRONG settings. globalConfigPath scans
+// os.Args for a top-level --config flag BEFORE the command dispatch switch
+// so every command's shared cfg (store.Config) — not just the newer v0.4
+// commands' own separately re-loaded config — is built from the operator's
+// chosen config file.
+
+// TestMainGlobalConfigFlagSearchHonorsAlternateConfig proves `search` (a
+// representative "old" command with no config-flag support before this
+// fix) now honors an alternate config.yaml passed via a global --config
+// flag placed AFTER the query/other flags ("anywhere in the args").
+// Observable signal: time_travel.enabled only in the ALTERNATE config
+// activates the recorded-time --as-of path (printRecordedTimeSearchDisclaimer).
+func TestMainGlobalConfigFlagSearchHonorsAlternateConfig(t *testing.T) {
+	stubExitWithPanic(t)
+	stubCheckForUpdates(t, versioncheck.CheckResult{Status: versioncheck.StatusUpToDate})
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OMNIA_DATA_DIR", filepath.Join(home, ".omnia-data"))
+
+	altConfig := filepath.Join(t.TempDir(), "alt.yaml")
+	if err := os.WriteFile(altConfig, []byte("time_travel:\n  enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// config.DefaultPath() (~/.config/omnia/config.yaml under the isolated
+	// HOME) is deliberately left absent: only a global --config flag can
+	// make this pass.
+
+	// Pre-create the store with TimeTravelEnabled directly (not via main()),
+	// so time_travel_metadata.started_at is set to "now" BEFORE asOf below
+	// is computed. Recorded-time search rejects any asOf earlier than that
+	// boundary ("history unavailable before ..."): main() will reopen this
+	// SAME store file later (same OMNIA_DATA_DIR), and the boundary row is
+	// INSERT OR IGNORE — set once, preserved across reopens.
+	seedCfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedCfg.DataDir = filepath.Join(home, ".omnia-data")
+	seedCfg.TimeTravelEnabled = true
+	seedStore, err := store.New(seedCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedStore.Close()
+
+	asOf := time.Now().UTC().Format(time.RFC3339Nano)
+	withArgs(t, "engram", "search", "fixture-query-zzz", "--as-of", asOf, "--config", altConfig)
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { main() })
+	if recovered != nil {
+		t.Fatalf("search should not exit; recovered=%v stdout=%q stderr=%q", recovered, stdout, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	if !strings.Contains(stdout, "Recorded-time view:") {
+		t.Fatalf("expected the recorded-time disclaimer, proving time_travel.enabled from the global --config PATH was honored by `search`; stdout=%q", stdout)
+	}
+}
+
+// TestMainGlobalConfigFlagSearchWithoutFlagStillDefaultsCleanly is the
+// regression pin: `search` with NO --config flag at all must behave
+// exactly as before this fix (config.DefaultPath(), no recorded-time
+// activation from an unrelated config).
+func TestMainGlobalConfigFlagSearchWithoutFlagStillDefaultsCleanly(t *testing.T) {
+	stubCheckForUpdates(t, versioncheck.CheckResult{Status: versioncheck.StatusUpToDate})
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OMNIA_DATA_DIR", filepath.Join(home, ".omnia-data"))
+
+	asOf := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+	withArgs(t, "engram", "search", "fixture-query-zzz", "--as-of", asOf)
+	stdout, stderr := captureOutput(t, func() { main() })
+	if stderr != "" {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	if strings.Contains(stdout, "Recorded-time view:") {
+		t.Fatalf("expected NO recorded-time disclaimer with no --config flag and no default config.yaml present, got stdout=%q", stdout)
+	}
+}
+
+// TestMainGlobalConfigFlagDoctorHonorsAlternateConfig proves `doctor` (the
+// other representative "old" command named in finding #3, and the one with
+// the STRICTEST per-command arg parser — it rejects any argument it
+// doesn't recognize) now honors an alternate config.yaml passed via a
+// global --config flag placed BEFORE its own --check flag. Observable
+// signal: encryption.enabled only in the ALTERNATE config makes the REQ-433
+// threat-model banner appear in doctor's text output.
+func TestMainGlobalConfigFlagDoctorHonorsAlternateConfig(t *testing.T) {
+	// stubExitWithPanic: doctor's own arg parser is stricter than search's
+	// (it rejects any flag it doesn't recognize, calling exitFunc(1)) — if
+	// this test's RED phase exercises that rejection path with the real
+	// exitFunc (os.Exit), it would kill the whole test binary rather than
+	// failing just this test.
+	stubExitWithPanic(t)
+	stubCheckForUpdates(t, versioncheck.CheckResult{Status: versioncheck.StatusUpToDate})
+	withStoreNewIgnoringEncryption(t) // keep the real OS keychain out of this test
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OMNIA_DATA_DIR", filepath.Join(home, ".omnia-data"))
+
+	altConfig := filepath.Join(t.TempDir(), "alt.yaml")
+	if err := os.WriteFile(altConfig, []byte("encryption:\n  enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	withArgs(t, "engram", "doctor", "--config", altConfig, "--check", "manual_session_name_project_mismatch")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { main() })
+	if recovered != nil {
+		t.Fatalf("doctor should not exit; doctor's own arg parser must tolerate a global --config flag instead of rejecting it as unknown; recovered=%v stderr=%q", recovered, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	if !strings.Contains(stdout, "does NOT protect") {
+		t.Fatalf("expected the encryption threat-model banner, proving encryption.enabled from the global --config PATH was honored by `doctor`; stdout=%q", stdout)
+	}
+}
+
 func TestCmdCloudStatusDistinguishesAuthAndSyncReadiness(t *testing.T) {
 	stubExitWithPanic(t)
 	stubRuntimeHooks(t)
