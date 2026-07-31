@@ -157,6 +157,56 @@ func TestCmdDoctorRepairPlanDryRunApplyJSON(t *testing.T) {
 	assertDoctorRepairProject(t, cfg, "repair-s1", "engram")
 }
 
+// TestCmdDoctorAcceptsConfigEqualsForm is finding #1's regression test:
+// cmdDoctor's arg-parsing switch matched only the exact string "--config"
+// (never "--config=PATH"), even though main()'s globalConfigPath — which
+// already resolves --config for cfg BEFORE doctor's own parser ever runs —
+// supports both forms. Live-reproduced: `omnia doctor --config /path/alt.yaml
+// --check X` worked, `omnia doctor --config=/path/alt.yaml --check X` failed
+// with `error: unknown doctor argument "--config=/path/alt.yaml"`.
+func TestCmdDoctorAcceptsConfigEqualsForm(t *testing.T) {
+	cfg := testConfig(t)
+	oldExit := exitFunc
+	exited := false
+	exitFunc = func(code int) { exited = code != 0 }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	altConfig := filepath.Join(t.TempDir(), "alt.yaml")
+	withArgs(t, "engram", "doctor", "--config="+altConfig, "--check", "manual_session_name_project_mismatch")
+	_, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if exited || strings.Contains(stderr, "unknown doctor argument") {
+		t.Fatalf("expected --config=PATH to be accepted like --config PATH, got exited=%v stderr=%q", exited, stderr)
+	}
+}
+
+// TestCmdDoctorRepairAcceptsConfigEqualsForm is finding #1's regression test
+// for `omnia doctor repair`, the sibling arg-parsing loop with the identical
+// bug (only the exact string "--config" was recognized).
+func TestCmdDoctorRepairAcceptsConfigEqualsForm(t *testing.T) {
+	cfg := testConfig(t)
+	repo := newDoctorGitRepo(t, "engram")
+	seedDoctorRepairRows(t, cfg, "repair-s1", "sias-app", repo)
+
+	oldExit := exitFunc
+	exited := false
+	exitFunc = func(code int) { exited = code != 0 }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	altConfig := filepath.Join(t.TempDir(), "alt.yaml")
+	withArgs(t, "engram", "doctor", "repair", "--config="+altConfig, "--project", "sias-app", "--check", "session_project_directory_mismatch", "--plan")
+	out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if exited || strings.Contains(stderr, "unknown doctor repair argument") {
+		t.Fatalf("expected --config=PATH to be accepted like --config PATH, exited=%v stdout=%q stderr=%q", exited, out, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr=%q", stderr)
+	}
+	plan := decodeRepairPlan(t, out)
+	if plan["status"] != "planned" {
+		t.Fatalf("plan=%v", plan)
+	}
+}
+
 func decodeRepairPlan(t *testing.T, out string) map[string]any {
 	t.Helper()
 	var plan map[string]any

@@ -55,6 +55,18 @@ func cmdDoctor(cfg store.Config) {
 			printDoctorUsage()
 			return
 		default:
+			// finding #1 (adversarial review): globalConfigPath (main.go)
+			// accepts BOTH "--config PATH" and "--config=PATH"/"-config=PATH"
+			// forms, but the exact-match case above only ever caught the
+			// space form — the equals form fell through to this default and
+			// was rejected as an unknown argument, even though it was
+			// already consumed upstream just like the space form. Match
+			// globalConfigPath's own prefix check so both stay consistent:
+			// silently skip it (no value to consume — the value is embedded
+			// in this single token).
+			if strings.HasPrefix(os.Args[i], "--config=") || strings.HasPrefix(os.Args[i], "-config=") {
+				continue
+			}
 			fmt.Fprintf(os.Stderr, "error: unknown doctor argument %q\n", os.Args[i])
 			printDoctorUsage()
 			exitFunc(1)
@@ -148,6 +160,13 @@ func cmdDoctorRepair(cfg store.Config) {
 			printDoctorUsage()
 			return
 		default:
+			// finding #1: see the identical case in cmdDoctor above — the
+			// "--config=PATH"/"-config=PATH" equals form was never
+			// recognized here, only the space form, even though
+			// globalConfigPath (main.go) already consumes both upstream.
+			if strings.HasPrefix(os.Args[i], "--config=") || strings.HasPrefix(os.Args[i], "-config=") {
+				continue
+			}
 			failDoctorRepair(fmt.Sprintf("unknown doctor repair argument %q", os.Args[i]))
 			return
 		}
