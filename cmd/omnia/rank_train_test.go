@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/velion/omnia/internal/eval"
 	"github.com/velion/omnia/internal/store"
 )
 
@@ -131,5 +132,65 @@ func TestCmdRankTrainDoesNotPromoteOnEvalRegression(t *testing.T) {
 	stdout, stderr := captureOutput(t, func() { cmdRankTrain(cfg) })
 	if strings.Contains(stdout, "promoted") || !strings.Contains(stderr, "not promoted") {
 		t.Fatalf("expected refused promotion, got stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+// TestRankerEvalDefaultUsesEmbeddedCorpus is finding #1's core regression
+// test for rank-train's promotion gate: the real (non-injected) rankerEval
+// must resolve its eval corpus via the binary-embedded corpus (empty
+// CorpusPath sentinel — see eval.go/internal/eval.EmbeddedCorpus), NOT the
+// old cwd-relative defaultEvalCorpusPath constant
+// ("internal/eval/testdata/cases.json"), which only ever existed when the
+// process's cwd happened to be a repo checkout root. Reproduced directly
+// pre-fix via `cd /tmp && omnia rank-train`.
+func TestRankerEvalDefaultUsesEmbeddedCorpus(t *testing.T) {
+	oldRunEvalHarness := runEvalHarness
+	var gotCorpusPath string
+	sawCall := false
+	runEvalHarness = func(ctx context.Context, opts evalRunOptions) (eval.RunSummary, error) {
+		gotCorpusPath = opts.CorpusPath
+		sawCall = true
+		return eval.RunSummary{}, nil
+	}
+	t.Cleanup(func() { runEvalHarness = oldRunEvalHarness })
+
+	if err := rankerEval(context.Background()); err != nil {
+		t.Fatalf("rankerEval: %v", err)
+	}
+	if !sawCall {
+		t.Fatal("rankerEval did not call runEvalHarness")
+	}
+	if gotCorpusPath != "" {
+		t.Errorf("rankerEval's default CorpusPath = %q, want \"\" (the embedded-corpus sentinel) — a non-empty repo-relative default breaks for any real installed binary run outside a checkout (finding #1)", gotCorpusPath)
+	}
+}
+
+// TestCmdRankTrainUndersizedCorpusReportsSizeSpecifically is finding #1's
+// clear-messaging requirement: when the promotion-gate eval fails because
+// the corpus itself is undersized (spec EVAL-2's 50-case floor), rank-train
+// must report that specifically and actionably — not the generic,
+// opaque "evaluation regressed or failed" phrasing that conflates "corpus
+// too small" with "the model got worse."
+func TestCmdRankTrainUndersizedCorpusReportsSizeSpecifically(t *testing.T) {
+	cfg := testConfig(t)
+	path := writeRankerConfig(t, true, 4)
+	seedRankerObservations(t, cfg, 6)
+	oldEval := rankerEval
+	rankerEval = func(ctx context.Context) error {
+		return fmt.Errorf("load corpus: %w", &eval.CorpusSizeError{Source: "<embedded>", Count: 11})
+	}
+	t.Cleanup(func() { rankerEval = oldEval })
+	withArgs(t, "omnia", "rank-train", "--config", path)
+	stdout, stderr := captureOutput(t, func() { cmdRankTrain(cfg) })
+	if strings.Contains(stdout, "promoted") {
+		t.Fatalf("must not promote on an undersized corpus, got stdout=%q", stdout)
+	}
+	for _, want := range []string{"eval corpus has 11 cases", "need at least 50", "spec EVAL-2", "model trained but not promoted"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr = %q, want it to contain %q (clear, specific corpus-size message)", stderr, want)
+		}
+	}
+	if strings.Contains(stderr, "regressed or failed") {
+		t.Fatalf("undersized-corpus error must use the clear, specific message — not the opaque 'evaluation regressed or failed' phrasing; got stderr=%q", stderr)
 	}
 }
