@@ -55,7 +55,12 @@ func cmdEmbed(args []string) {
 
 	// Read the memory database read-only ($OMNIA_DATA_DIR or ~/.omnia, with
 	// legacy ~/.engram / engram.db compatibility handled by the resolver).
-	reader, err := engramdb.Open("")
+	//
+	// cfg.Encryption is passed here for the same reason it is passed to
+	// OpenStore below (#228): this command handled encryption where it WRITES
+	// but not where it READS, so against an encrypted store every run died on
+	// "file is not a database (26)" before reconciling a single row.
+	reader, err := engramdb.Open("", engramdbOptions(cfg.Encryption)...)
 	if err != nil {
 		fatal(fmt.Errorf("open memory database (read-only): %w", err))
 	}

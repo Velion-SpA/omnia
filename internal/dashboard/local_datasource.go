@@ -27,7 +27,12 @@ type localDataSource struct {
 func newLocalDataSource(cfg Config, logger *slog.Logger) *localDataSource {
 	l := &localDataSource{client: newEngramClient(cfg.EngramURL)}
 
-	db, err := engramdb.Open(cfg.EngramDataDir)
+	// Encryption config is threaded to the READER for the same reason it is
+	// threaded to the embeddings store below (#228): after `omnia security
+	// encrypt`, an opener that omits it silently loses every structural query
+	// to "file is not a database (26)" and degrades to HTTP/FTS forever.
+	db, err := engramdb.Open(cfg.EngramDataDir,
+		engramdb.WithEncryption(cfg.EncryptionEnabled, cfg.EncryptionKeychainService, cfg.EncryptionAllowPlaintextFallback))
 	if err != nil {
 		logger.Warn("engramdb unavailable; structural queries fall back to HTTP/FTS", "err", err)
 	} else {

@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/embed"
+	"github.com/velion/omnia/internal/engramdb"
 )
 
 // embedStoreOptions returns the shared embed.Option set every direct
@@ -28,5 +29,20 @@ func embedStoreOptions(vecIndexEnabled bool, encCfg config.EncryptionConfig) []e
 	return []embed.Option{
 		embed.WithVecIndex(vecIndexEnabled),
 		embed.WithEncryption(encCfg.Enabled, encCfg.KeychainService, encCfg.AllowPlaintextFallback),
+	}
+}
+
+// engramdbOptions is embedStoreOptions' read-side counterpart: the option set
+// every production opener of the READ-ONLY memory reader must pass through to
+// engramdb.Open. Same rationale, same encCfg, different half of the store —
+// after `omnia security encrypt`, omnia.db can only be reopened by a caller
+// that threads encryption config; without it the reader fails with the opaque
+// "file is not a database (26)" (#228).
+//
+// A zero encCfg reproduces engramdb.Open's pre-#228 behavior exactly
+// (engramdb.WithEncryption(false, ...) is a documented no-op).
+func engramdbOptions(encCfg config.EncryptionConfig) []engramdb.Option {
+	return []engramdb.Option{
+		engramdb.WithEncryption(encCfg.Enabled, encCfg.KeychainService, encCfg.AllowPlaintextFallback),
 	}
 }
