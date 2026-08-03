@@ -116,6 +116,12 @@ var (
 	runDiagnostics     = func(ctx context.Context, s *store.Store, project, check string) (diagnostic.Report, error) {
 		runner := diagnostic.NewRunner()
 		scope := diagnostic.Scope{Store: s, Project: project, Now: time.Now()}
+		// #226: supply EmbeddingLagCheck with both watermarks. Resolved here
+		// rather than inside internal/diagnostic so that package keeps its
+		// single store dependency and never imports internal/embed.
+		scope.ReadEmbeddingSnapshot = func(ctx context.Context) (diagnostic.EmbeddingSnapshot, error) {
+			return readEmbeddingSnapshot(ctx, s)
+		}
 		if strings.TrimSpace(check) != "" {
 			return runner.RunOne(ctx, scope, check)
 		}

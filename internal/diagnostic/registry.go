@@ -40,6 +40,7 @@ func DefaultRegistry() Registry {
 		SyncMutationRequiredFieldsCheck{},
 		SQLiteLockContentionCheck{},
 		StoreExposureCheck{},
+		EmbeddingLagCheck{},
 	)
 }
 

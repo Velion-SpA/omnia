@@ -2764,6 +2764,32 @@ func handleDoctor(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		project, _ = store.NormalizeProject(project)
 		runner := diagnostic.NewRunner()
 		scope := diagnostic.Scope{Store: s, Project: project, Now: time.Now()}
+		// #226: mem_doctor sees embedding lag too, using the auto-embed
+		// worker's own store — the very store that stopped being written when
+		// this failure occurred. Left nil when auto-embed is off, in which
+		// case EmbeddingLagCheck abstains explicitly (checked=false) rather
+		// than claiming health.
+		if cfg.AutoEmbed != nil {
+			embStore := cfg.AutoEmbed.Store()
+			scope.ReadEmbeddingSnapshot = func(ctx context.Context) (diagnostic.EmbeddingSnapshot, error) {
+				maxID, count, err := s.ObservationWatermark()
+				if err != nil {
+					return diagnostic.EmbeddingSnapshot{}, err
+				}
+				lag, err := embStore.Lag(ctx)
+				if err != nil {
+					return diagnostic.EmbeddingSnapshot{}, err
+				}
+				return diagnostic.EmbeddingSnapshot{
+					Enabled:           true,
+					ObservationMaxID:  maxID,
+					ObservationCount:  count,
+					EmbeddingMaxObsID: lag.MaxObsID,
+					EmbeddingCount:    lag.Count,
+					NewestEmbeddedAt:  lag.NewestEmbeddedAt,
+				}, nil
+			}
+		}
 		var report diagnostic.Report
 		if strings.TrimSpace(check) != "" {
 			report, err = runner.RunOne(ctx, scope, check)
