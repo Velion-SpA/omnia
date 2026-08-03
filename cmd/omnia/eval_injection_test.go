@@ -225,7 +225,7 @@ func TestPipelineBackedFetcher_ParityWhenFlagsOff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("storeBackedFetcher: %v", err)
 	}
-	newCase, err := pipelineBackedFetcher(s, nil, config.InjectionConfig{})(context.Background(), c)
+	newCase, err := pipelineBackedFetcher(s, nil, config.InjectionConfig{}, config.RankingConfig{})(context.Background(), c)
 	if err != nil {
 		t.Fatalf("pipelineBackedFetcher: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestPipelineBackedFetcher_TokenAccountingMatchesPreviewBasis(t *testing.T) 
 
 	c := eval.EvalCase{ID: "case-1", Query: "long content case", ExpectedFact: "word"}
 
-	got, err := pipelineBackedFetcher(s, nil, config.InjectionConfig{})(context.Background(), c)
+	got, err := pipelineBackedFetcher(s, nil, config.InjectionConfig{}, config.RankingConfig{})(context.Background(), c)
 	if err != nil {
 		t.Fatalf("pipelineBackedFetcher: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestPipelineBackedFetcher_UsesRecallServiceWhenConfigured(t *testing.T) {
 	// Sanity baseline: plain FTS5 search (recallSvc == nil) must find
 	// NOTHING for this query — proving the fixture has zero lexical overlap
 	// and that any hit below can only come from the recall branch.
-	noRecall, err := pipelineBackedFetcher(s, nil, config.InjectionConfig{})(context.Background(), c)
+	noRecall, err := pipelineBackedFetcher(s, nil, config.InjectionConfig{}, config.RankingConfig{})(context.Background(), c)
 	if err != nil {
 		t.Fatalf("pipelineBackedFetcher(nil recall): %v", err)
 	}
@@ -334,7 +334,7 @@ func TestPipelineBackedFetcher_UsesRecallServiceWhenConfigured(t *testing.T) {
 	semantic := fakeCLIEmbedSearcher{hits: []embed.Hit{{ObsID: int(paraphraseID), Score: 0.9}}}
 	recallSvc := recall.NewService(mcp.NewStoreLexicalSearcher(s), semantic, recall.DefaultFuseParams())
 
-	got, err := pipelineBackedFetcher(s, recallSvc, config.InjectionConfig{})(context.Background(), c)
+	got, err := pipelineBackedFetcher(s, recallSvc, config.InjectionConfig{}, config.RankingConfig{})(context.Background(), c)
 	if err != nil {
 		t.Fatalf("pipelineBackedFetcher(recall configured): %v", err)
 	}

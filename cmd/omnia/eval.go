@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/embed"
@@ -169,6 +170,30 @@ func printEvalSummary(summary eval.RunSummary) {
 	fmt.Printf("Overall: accuracy=%.3f±%.3f  quality/1k=%.3f±%.3f\n",
 		summary.Overall.Accuracy.Mean, summary.Overall.Accuracy.StdDev, summary.Overall.QualityPer1k.Mean, summary.Overall.QualityPer1k.StdDev)
 
+	// Order-sensitive section (#236). Everything printed above is a PRESENCE
+	// measure — it asks whether the retrieved text contains the expected fact,
+	// so re-ranking the candidate pool cannot move it. These figures are the
+	// ones a ranking change shows up in, which is what makes rank-train's
+	// promotion gate able to say more than "did not regress".
+	//
+	// Printed from the last run's Report and never merged into the accuracy
+	// figures above, following the same no-merge rule EVAL-7's retrieval
+	// section already follows. Absent when the run's fetcher supplied no ranked
+	// lists — an unmeasured section stays visibly unmeasured.
+	if n := len(summary.Reports); n > 0 {
+		if rk := summary.Reports[n-1].Ranking; rk != nil {
+			fmt.Println()
+			fmt.Printf("Ranking quality (order-sensitive, last run, %d case(s) scored):\n", rk.Cases)
+			fmt.Printf("  MRR                  %.3f\n", rk.MRR)
+			for _, k := range eval.RankingKs {
+				fmt.Printf("  recall@%-14d %.3f\n", k, rk.RecallAtK[k])
+			}
+			if rk.Unscoreable > 0 {
+				fmt.Printf("  (%d case(s) not scoreable: no ranked list or no observation_id)\n", rk.Unscoreable)
+			}
+		}
+	}
+
 	// Retrieval-only recall@k section (spec EVAL-7) — attached to the LAST
 	// run's Report only when the harness wiring populated one; never merged
 	// into the end-task figures above (EVAL-7's no-merge rule).
@@ -316,15 +341,17 @@ func defaultRunEvalHarness(ctx context.Context, opts evalRunOptions) (eval.RunSu
 		var embCfg config.EmbeddingsConfig
 		var vecIndexEnabled bool
 		var encCfg config.EncryptionConfig
+		var rankingCfg config.RankingConfig
 		if appCfgErr == nil {
 			injectionCfg = appCfg.Injection
 			recallCfg = appCfg.Recall
+			rankingCfg = appCfg.Recall.Ranking
 			embCfg = appCfg.Embeddings
 			vecIndexEnabled = appCfg.VecIndex.Enabled
 			encCfg = appCfg.Encryption
 		}
 		recallSvc := buildRecallService(s, recallCfg, embCfg, cfg.DataDir, vecIndexEnabled, encCfg)
-		fetch = pipelineBackedFetcher(s, recallSvc, injectionCfg)
+		fetch = pipelineBackedFetcher(s, recallSvc, injectionCfg, rankingCfg)
 	}
 
 	runFunc := func(ctx context.Context) (eval.Report, error) {
@@ -349,13 +376,39 @@ func defaultRunEvalHarness(ctx context.Context, opts evalRunOptions) (eval.RunSu
 	return eval.RunHarness(ctx, eval.Config{Run: runFunc}, opts.Runs)
 }
 
+// rankCandidateDepth is how deep the eval fetchers look when building the
+// ranked candidate list for the order-sensitive metrics (#236). It matches the
+// largest cutoff in eval.RankingKs: fetching fewer would make recall@10
+// unmeasurable, fetching more would cost retrieval work no metric reads.
+const rankCandidateDepth = 10
+
+// rankedSyncIDs projects a ranked result set down to the sync IDs the
+// order-sensitive metrics compare against EvalCase.ObservationID, preserving
+// retrieval order. Rows without a sync ID are skipped rather than emitted as
+// empty strings, which would silently occupy a rank position nothing can match.
+func rankedSyncIDs(results []store.SearchResult) []string {
+	out := make([]string, 0, len(results))
+	for _, r := range results {
+		if r.SyncID != "" {
+			out = append(out, r.SyncID)
+		}
+	}
+	return out
+}
+
 // storeBackedFetcher returns an eval.RetrievedFetcher that searches the real
 // store for each case's Query and uses the top hit's content (or sync ID,
 // for contradiction cases) as the retrieved result — the harness's single
 // retrieval seam (see eval.RetrievedFetcher's doc comment).
 func storeBackedFetcher(s *store.Store) eval.RetrievedFetcher {
 	return func(ctx context.Context, c eval.EvalCase) (eval.RetrievedCase, error) {
-		results, err := storeSearch(s, c.Query, store.SearchOptions{Limit: 1})
+		// Limit is rankCandidateDepth, not 1 (#236): scoring stays on the top
+		// hit exactly as before, but a single-result fetch cannot express an
+		// ORDER, so the order-sensitive metrics had nothing to read. The extra
+		// rows are used only to build RankedObservationIDs — Retrieved and the
+		// token accounting still come from results[0], so accuracy and
+		// quality-per-1k are byte-for-byte what they were.
+		results, err := storeSearch(s, c.Query, store.SearchOptions{Limit: rankCandidateDepth})
 		if err != nil {
 			return eval.RetrievedCase{}, fmt.Errorf("search: %w", err)
 		}
@@ -367,6 +420,7 @@ func storeBackedFetcher(s *store.Store) eval.RetrievedFetcher {
 			Retrieved:             top.Content,
 			SurfacedObservationID: top.SyncID,
 			Tokens:                eval.TokenBreakdown{Retrieval: estimateTokenCount(top.Content)},
+			RankedObservationIDs:  rankedSyncIDs(results),
 		}, nil
 	}
 }
@@ -526,7 +580,7 @@ func applyInjectionPipeline(query string, results []store.SearchResult, relevanc
 // with every injection flag off (Retrieved/SurfacedObservationID — the
 // scoring-relevant fields) and what does NOT (Tokens — a deliberately more
 // accurate accounting, not a bug).
-func pipelineBackedFetcher(s *store.Store, recallSvc *recall.Service, cfg config.InjectionConfig) eval.RetrievedFetcher {
+func pipelineBackedFetcher(s *store.Store, recallSvc *recall.Service, cfg config.InjectionConfig, ranking config.RankingConfig) eval.RetrievedFetcher {
 	return func(ctx context.Context, c eval.EvalCase) (eval.RetrievedCase, error) {
 		var (
 			results   []store.SearchResult
@@ -561,6 +615,16 @@ func pipelineBackedFetcher(s *store.Store, recallSvc *recall.Service, cfg config
 			return eval.RetrievedCase{}, nil
 		}
 
+		// #236: RankResults runs BEFORE the injection passes, exactly where
+		// handleSearch runs it (internal/mcp/mcp.go — RankResults at 1486,
+		// then TypeLens/MMR/Budget). It used to be skipped here as "out of
+		// scope", which meant --injection could not reflect a ranking change
+		// at all: with the order-sensitive metric added, relevance weight 0
+		// and recency at 1000x still produced identical MRR and recall@k,
+		// because the pass never ran. A disabled RankingConfig makes
+		// RankResults a documented no-op, so the default path is unchanged.
+		results = mcp.RankResults(results, relevance, ranking, time.Now().UTC())
+
 		results = applyInjectionPipeline(c.Query, results, relevance, cfg)
 		if len(results) == 0 {
 			// A genuine outcome, not an error: e.g. a budget too small to fit
@@ -581,6 +645,10 @@ func pipelineBackedFetcher(s *store.Store, recallSvc *recall.Service, cfg config
 			Retrieved:             top.Content,
 			SurfacedObservationID: top.SyncID,
 			Tokens:                eval.TokenBreakdown{InjectedContext: injectedTokens},
+			// This path already HAD the ranked list — it is the injected
+			// context, in the order the agent would receive it — and was
+			// discarding everything but results[0] (#236).
+			RankedObservationIDs: rankedSyncIDs(results),
 		}, nil
 	}
 }
