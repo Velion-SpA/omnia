@@ -85,17 +85,49 @@ type DB struct {
 // the old filename is present. The DSN uses mode=ro and a 5-second busy-timeout,
 // safe for concurrent reads while Omnia writes in WAL mode. Returns an error if
 // the file does not exist or cannot be pinged.
-func Open(dataDir string) (*DB, error) {
+//
+// Pass WithEncryption to read a store written with at-rest encryption enabled
+// (#228). Without it — the zero-option default — the plain modernc read-only
+// path below is used unchanged, and an encrypted file fails to ping.
+func Open(dataDir string, opts ...Option) (*DB, error) {
 	dir := resolveDataDir(dataDir)
 	path := datadir.DBPath(dir)
 
-	// Read-only SQLite URI. Path values from resolveDataDir are system paths
-	// (no user input), so direct concatenation is safe here.
-	dsn := "file:" + path + "?mode=ro&_pragma=busy_timeout(5000)"
+	var o openOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 
-	db, err := sql.Open("sqlite", dsn)
+	hexKey, encrypted, err := resolveReaderEncryption(o, path)
 	if err != nil {
-		return nil, fmt.Errorf("engramdb: open %s: %w", path, err)
+		return nil, err
+	}
+
+	// An EXISTING, detectably plaintext file with encryption enabled means the
+	// operator flipped encryption.enabled=true without migrating the store.
+	// Reported here rather than letting the adiantum VFS surface its generic
+	// "file is not a database" (which gives no hint the fix is a migration).
+	if encrypted {
+		if existed, plaintext, perr := isPlaintextSQLiteFile(path); perr != nil {
+			return nil, fmt.Errorf("engramdb: inspect %s: %w", path, perr)
+		} else if existed && plaintext {
+			return nil, fmt.Errorf("engramdb: %s is a plaintext SQLite database but encryption.enabled=true — run `omnia security encrypt` first to migrate it", path)
+		}
+	}
+
+	var db *sql.DB
+	if encrypted {
+		db, err = openEncryptedReader(path, hexKey)
+	} else {
+		// Read-only SQLite URI. Path values from resolveDataDir are system
+		// paths (no user input), so direct concatenation is safe here.
+		db, err = sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
+		if err != nil {
+			err = fmt.Errorf("engramdb: open %s: %w", path, err)
+		}
+	}
+	if err != nil {
+		return nil, err
 	}
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(2)
