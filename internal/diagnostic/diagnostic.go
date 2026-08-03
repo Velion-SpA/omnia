@@ -29,6 +29,14 @@ type Scope struct {
 	Now                    time.Time
 	ReadSQLiteLockSnapshot func(context.Context) (store.SQLiteLockSnapshot, error)
 	DetectProject          func(string) (DetectedProject, bool)
+	// ReadEmbeddingSnapshot supplies EmbeddingLagCheck with both watermarks
+	// (#226). It is an injected reader — the same seam shape as
+	// ReadSQLiteLockSnapshot — so this package keeps its single store
+	// dependency and never imports internal/embed. Unlike Progress below, nil
+	// is NOT a silent no-op: the check reports that it could not run, because
+	// a check that passes without having looked is the exact failure it
+	// exists to catch.
+	ReadEmbeddingSnapshot func(context.Context) (EmbeddingSnapshot, error)
 	// Progress is an optional, opt-in hook (finding #4) invoked with a
 	// check's Code() right before that check runs — lightweight progress
 	// visibility for a long-running RunAll scan over real data (`omnia
