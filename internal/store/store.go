@@ -455,6 +455,13 @@ const (
 	UpgradeReasonBlockedLegacyMutationManual     = "upgrade_blocked_legacy_mutation_manual"
 )
 
+// System provenance for rows the system itself created, matching what
+// MarkAnchorStale and JudgeBySemantic already write ('engram'/'system').
+const (
+	systemProvenanceActor = "engram"
+	systemProvenanceKind  = "system"
+)
+
 // EnrolledProject represents a project enrolled for cloud sync.
 type EnrolledProject struct {
 	Project    string `json:"project"`
@@ -1866,6 +1873,10 @@ type cloudUpgradeLegacyMutationEvaluation struct {
 	hasIssue        bool
 	repairedPayload string
 	canRepair       bool
+	// dropMutation marks a repair that is applied by acking the row instead of
+	// rewriting its payload — used when the entity the mutation refers to no
+	// longer exists locally, so there is nothing to rewrite it from.
+	dropMutation bool
 }
 
 func (s *Store) DiagnoseCloudUpgradeLegacyMutations(project string) (CloudUpgradeLegacyMutationReport, error) {
@@ -1910,7 +1921,23 @@ func (s *Store) applyCloudUpgradeLegacyMutationRepairs(project string) error {
 			if err != nil {
 				return err
 			}
-			if !eval.hasIssue || !eval.canRepair || strings.TrimSpace(eval.repairedPayload) == "" {
+			if !eval.hasIssue || !eval.canRepair {
+				continue
+			}
+			// The entity is gone: ack the row rather than rewriting a payload
+			// that has no source to be rebuilt from.
+			if eval.dropMutation {
+				if _, err := s.execHook(tx,
+					`UPDATE sync_mutations SET acked_at = datetime('now') WHERE target_key = ? AND project = ? AND seq = ? AND acked_at IS NULL`,
+					DefaultSyncTargetKey,
+					project,
+					mutation.Seq,
+				); err != nil {
+					return err
+				}
+				continue
+			}
+			if strings.TrimSpace(eval.repairedPayload) == "" {
 				continue
 			}
 			if _, err := s.execHook(tx,
@@ -2003,6 +2030,20 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 		finding.ReasonCode = code
 		finding.Message = msg
 		return cloudUpgradeLegacyMutationEvaluation{finding: finding, hasIssue: true, canRepair: false}
+	}
+	// droppable covers a pending mutation whose entity is gone from the local
+	// store. It cannot be completed (there is nothing left to replicate) and it
+	// cannot be repaired (there is nothing to rebuild the payload from), so the
+	// only outcome that is both deterministic and lossless is to ack it. The
+	// local store is the source of truth: if the row is not here, there is
+	// nothing to send.
+	droppable := func(msg, hint string) cloudUpgradeLegacyMutationEvaluation {
+		finding := base
+		finding.Repairable = true
+		finding.ReasonCode = UpgradeReasonRepairableLegacyMutationPayload
+		finding.Message = msg
+		finding.RepairHint = hint
+		return cloudUpgradeLegacyMutationEvaluation{finding: finding, hasIssue: true, canRepair: true, dropMutation: true}
 	}
 
 	if payload == "" {
@@ -2121,6 +2162,17 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 				missing = append(missing, "scope")
 			}
 			if len(missing) > 0 {
+				// The back-fill above could not complete the payload. If the
+				// observation is also gone from the local store, this upsert can
+				// never be satisfied and is safe to drop; blocking on it would
+				// gate the whole project on a row nobody can act on.
+				if obs == nil {
+					return droppable(
+						fmt.Sprintf("observation %q no longer exists locally and its payload is incomplete (missing: %s); nothing left to replicate",
+							strings.TrimSpace(mutation.EntityKey), strings.Join(missing, ", ")),
+						"run `omnia cloud upgrade repair --apply` to drop this obsolete mutation",
+					), nil
+				}
 				return blocked(UpgradeReasonBlockedLegacyMutationManual, fmt.Sprintf("observation payload missing required upsert fields: %s", strings.Join(missing, ", "))), nil
 			}
 		}
@@ -5037,6 +5089,21 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 			&p.SessionID, &p.Project, &p.CreatedAt, &p.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("export relation mutations: scan: %w", err)
+		}
+		// A relation nobody has judged yet has no marking actor — that is its
+		// correct state, not corruption. The cloud chunk canonicalizer requires
+		// the field on every relation upsert, so without a value one unjudged
+		// row aborts the entire chunk and blocks the project. These rows are
+		// created by the system's own conflict detection, so the documented
+		// system provenance is the accurate stamp. Applied only when the field
+		// is genuinely absent: a real human or model judgment is never touched.
+		if p.MarkedByActor == nil || strings.TrimSpace(*p.MarkedByActor) == "" {
+			actor := systemProvenanceActor
+			p.MarkedByActor = &actor
+		}
+		if p.MarkedByKind == nil || strings.TrimSpace(*p.MarkedByKind) == "" {
+			kind := systemProvenanceKind
+			p.MarkedByKind = &kind
 		}
 		payload, err := json.Marshal(p)
 		if err != nil {
