@@ -36,6 +36,12 @@ type CaseResult struct {
 	Case        EvalCase
 	Hit         bool
 	TotalTokens int
+	// RankedObservationIDs is the ordered candidate list retrieval produced for
+	// this case, best first. It powers the order-sensitive metrics (#236, see
+	// ranking.go) that Hit — a presence test — is blind to by construction.
+	// Empty when the fetcher does not expose a ranked list, in which case the
+	// case is reported as unscoreable rather than as a zero.
+	RankedObservationIDs []string
 }
 
 // Report is the spec EVAL-3 segmented report: accuracy and
@@ -53,6 +59,10 @@ type Report struct {
 	// with no retrieval section is distinguishable from one whose retrieval
 	// figure happens to be zero.
 	Retrieval *RetrievalSection
+	// Ranking is the order-sensitive section (#236). Nil when the run's fetcher
+	// supplied no ranked lists — same "unmeasured is not zero" contract
+	// Retrieval follows above, and the reason this section exists at all.
+	Ranking *RankingSection
 }
 
 // allCapabilities is the closed set BuildReport always seeds into
@@ -98,7 +108,7 @@ func BuildReport(results []CaseResult) Report {
 		byLang[r.Case.Language] = accumulate(byLang[r.Case.Language], r)
 	}
 
-	return Report{ByCapability: byCap, ByLanguage: byLang}
+	return Report{ByCapability: byCap, ByLanguage: byLang, Ranking: BuildRankingSection(results)}
 }
 
 // accumulate folds one CaseResult's hit/token outcome into seg. It never

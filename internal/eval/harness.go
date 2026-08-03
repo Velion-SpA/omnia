@@ -17,6 +17,12 @@ type RetrievedCase struct {
 	Retrieved             string
 	SurfacedObservationID string
 	Tokens                TokenBreakdown
+	// RankedObservationIDs is the ordered candidate list this retrieval
+	// produced, best first, and is what makes the order-sensitive metrics
+	// possible (#236 — see ranking.go). A fetcher that only ever looks at its
+	// top hit leaves this empty, and those cases report as unscoreable rather
+	// than as zeros.
+	RankedObservationIDs []string
 }
 
 // RetrievedFetcher is the harness's single retrieval seam: specs EVAL-1
@@ -62,7 +68,7 @@ func RunOnce(ctx context.Context, cases []EvalCase, fetch RetrievedFetcher, judg
 
 		tokens := rc.Tokens
 		tokens.Judge += judgeTokens
-		results = append(results, CaseResult{Case: c, Hit: hit, TotalTokens: tokens.Total()})
+		results = append(results, CaseResult{Case: c, Hit: hit, TotalTokens: tokens.Total(), RankedObservationIDs: rc.RankedObservationIDs})
 	}
 
 	return BuildReport(results), nil
