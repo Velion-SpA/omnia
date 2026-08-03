@@ -212,6 +212,24 @@ func printGateResult(result eval.GateResult) {
 // judge and has none configured still surfaces as a real per-case scoring
 // error (spec EVAL-5 requires judged causal/state_abstraction verdicts, not
 // silent misses; see scoring.go's Score()).
+// evalStoreConfig threads v0.4 memory-at-rest-security's config.yaml wiring
+// into the store config the eval harness opens with (#234).
+//
+// A nil appCfg — no readable config.yaml, the fresh-install case — returns base
+// byte-for-byte, so encryption is never turned on by accident and eval behaves
+// exactly as it did before this existed. Mirrors applyEncryptionConfig
+// (main.go), kept as a pure function so the wiring is testable without opening
+// a real store or touching a keychain.
+func evalStoreConfig(base store.Config, appCfg *config.Config) store.Config {
+	if appCfg == nil {
+		return base
+	}
+	base.EncryptionEnabled = appCfg.Encryption.Enabled
+	base.EncryptionKeychainService = appCfg.Encryption.KeychainService
+	base.EncryptionAllowPlaintextFallback = appCfg.Encryption.AllowPlaintextFallback
+	return base
+}
+
 func defaultRunEvalHarness(ctx context.Context, opts evalRunOptions) (eval.RunSummary, error) {
 	cases, err := loadEvalCorpus(opts.CorpusPath)
 	if err != nil {
@@ -222,7 +240,21 @@ func defaultRunEvalHarness(ctx context.Context, opts evalRunOptions) (eval.RunSu
 	if err != nil {
 		return eval.RunSummary{}, fmt.Errorf("resolve store config: %w", err)
 	}
-	s, err := storeNew(cfg)
+
+	// #234: config.yaml must be loaded BEFORE the store is opened, not after.
+	// cmdEval is dispatched standalone (not through run()'s shared
+	// store.Config composition root), so v0.4 memory-at-rest-security's
+	// wiring has to be applied here directly — exactly as cmdConsolidate
+	// documents for the same reason. Without it, eval opens an encrypted
+	// omnia.db through the plain modernc path and dies on the first pragma,
+	// which ALSO takes rank-train's promotion gate down: the learned ranker
+	// trains a model and can never promote one, reporting "evaluation
+	// regressed or failed" when the harness simply could not open the store.
+	appCfg, appCfgErr := config.Load(opts.ConfigPath)
+	if appCfgErr != nil {
+		appCfg = nil
+	}
+	s, err := storeNew(evalStoreConfig(cfg, appCfg))
 	if err != nil {
 		return eval.RunSummary{}, fmt.Errorf("open store: %w", err)
 	}
@@ -237,7 +269,7 @@ func defaultRunEvalHarness(ctx context.Context, opts evalRunOptions) (eval.RunSu
 		judge = runner
 	}
 
-	appCfg, appCfgErr := config.Load(opts.ConfigPath)
+	// appCfg/appCfgErr are resolved above, before the store is opened (#234).
 	// EMBM-3/blocking-fix: reject an internally-inconsistent embeddings
 	// config (a truncation/expansion Dim mismatched against the model's MRL
 	// capability, see config.ValidateEmbeddings) right after config.Load,
