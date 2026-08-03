@@ -41,6 +41,7 @@ func DefaultRegistry() Registry {
 		SQLiteLockContentionCheck{},
 		StoreExposureCheck{},
 		EmbeddingLagCheck{},
+		MCPLauncherCheck{},
 	)
 }
 

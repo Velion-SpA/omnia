@@ -122,6 +122,10 @@ var (
 		scope.ReadEmbeddingSnapshot = func(ctx context.Context) (diagnostic.EmbeddingSnapshot, error) {
 			return readEmbeddingSnapshot(ctx, s)
 		}
+		// #243: supply MCPLauncherCheck with the MCP declarations on this
+		// machine. Same reasoning as above — the filesystem walk lives here so
+		// internal/diagnostic stays free of it.
+		scope.ReadMCPLaunchers = readMCPLaunchers
 		if strings.TrimSpace(check) != "" {
 			return runner.RunOne(ctx, scope, check)
 		}
