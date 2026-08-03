@@ -397,18 +397,26 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		}
 	}
 
+	// Whether THIS store has ever delivered anything to THIS target, decided
+	// before the remote manifest is folded in below.
+	//
+	// The manifest is deliberately not consulted: a chunk sitting on the remote
+	// is no evidence that this store put it there — it can predate this machine
+	// or come from another client entirely. Only the local sync_chunks rows
+	// record what this store actually delivered to this target.
+	//
+	// It matters because a target that has received nothing from here cannot be
+	// served by a mutation diff: mutations only fan out to the targets that
+	// existed at write time, so a cloud added to an established install has no
+	// queue describing the backlog. Without this it exports an empty chunk and
+	// reports "all memories already exported" while the cloud stays behind
+	// (issue #242).
+	firstSyncForTarget := len(knownChunks) == 0
+
 	// Also consider chunks in the manifest as known
 	for _, c := range manifest.Chunks {
 		knownChunks[c.ID] = true
 	}
-
-	// A target with no locally recorded chunks AND an empty remote manifest has
-	// never received anything from this store. Its pending-mutation queue cannot
-	// describe the backlog, because mutations only fan out to the targets that
-	// existed at write time — so a cloud added to an established install would
-	// otherwise export an empty chunk and report "all memories already exported"
-	// while the remote stayed empty (issue #242).
-	firstSyncForTarget := len(knownChunks) == 0
 
 	// Export data from DB (project-scoped in cloud mode/project syncs to avoid global dumps)
 	var data *store.ExportData
