@@ -20,6 +20,32 @@ func ParseFileLine(value string) (string, int, error) {
 	return value[:i], line, nil
 }
 
+// ParseBlameTarget reads a blame target where the line is OPTIONAL, returning
+// line 0 for a bare path. That is the shape a caller has when it holds a file
+// but no cursor — an editor integration, or a hook that runs before the file is
+// read (reading it is what would produce a line).
+//
+// A colon only introduces a line when what follows it is a positive integer, so
+// a filename that legitimately contains a colon is read as a filename rather
+// than as a malformed line spec. ParseFileLine keeps its strict contract for
+// callers that genuinely require a line.
+func ParseBlameTarget(value string) (string, int, error) {
+	i := strings.LastIndex(value, ":")
+	if i <= 0 || i == len(value)-1 {
+		return value, 0, nil
+	}
+	suffix := value[i+1:]
+	line, err := strconv.Atoi(suffix)
+	if err != nil {
+		// Not a line at all — the colon belongs to the path.
+		return value, 0, nil
+	}
+	if line < 1 {
+		return "", 0, fmt.Errorf("line must be a positive integer")
+	}
+	return value[:i], line, nil
+}
+
 func Normalize(repoRoot, file string) (string, string, error) {
 	dir := strings.TrimSpace(repoRoot)
 	if dir == "" {
