@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/embed"
@@ -340,15 +341,17 @@ func defaultRunEvalHarness(ctx context.Context, opts evalRunOptions) (eval.RunSu
 		var embCfg config.EmbeddingsConfig
 		var vecIndexEnabled bool
 		var encCfg config.EncryptionConfig
+		var rankingCfg config.RankingConfig
 		if appCfgErr == nil {
 			injectionCfg = appCfg.Injection
 			recallCfg = appCfg.Recall
+			rankingCfg = appCfg.Recall.Ranking
 			embCfg = appCfg.Embeddings
 			vecIndexEnabled = appCfg.VecIndex.Enabled
 			encCfg = appCfg.Encryption
 		}
 		recallSvc := buildRecallService(s, recallCfg, embCfg, cfg.DataDir, vecIndexEnabled, encCfg)
-		fetch = pipelineBackedFetcher(s, recallSvc, injectionCfg)
+		fetch = pipelineBackedFetcher(s, recallSvc, injectionCfg, rankingCfg)
 	}
 
 	runFunc := func(ctx context.Context) (eval.Report, error) {
@@ -372,7 +375,6 @@ func defaultRunEvalHarness(ctx context.Context, opts evalRunOptions) (eval.RunSu
 
 	return eval.RunHarness(ctx, eval.Config{Run: runFunc}, opts.Runs)
 }
-
 
 // rankCandidateDepth is how deep the eval fetchers look when building the
 // ranked candidate list for the order-sensitive metrics (#236). It matches the
@@ -578,7 +580,7 @@ func applyInjectionPipeline(query string, results []store.SearchResult, relevanc
 // with every injection flag off (Retrieved/SurfacedObservationID — the
 // scoring-relevant fields) and what does NOT (Tokens — a deliberately more
 // accurate accounting, not a bug).
-func pipelineBackedFetcher(s *store.Store, recallSvc *recall.Service, cfg config.InjectionConfig) eval.RetrievedFetcher {
+func pipelineBackedFetcher(s *store.Store, recallSvc *recall.Service, cfg config.InjectionConfig, ranking config.RankingConfig) eval.RetrievedFetcher {
 	return func(ctx context.Context, c eval.EvalCase) (eval.RetrievedCase, error) {
 		var (
 			results   []store.SearchResult
@@ -612,6 +614,16 @@ func pipelineBackedFetcher(s *store.Store, recallSvc *recall.Service, cfg config
 		if len(results) == 0 {
 			return eval.RetrievedCase{}, nil
 		}
+
+		// #236: RankResults runs BEFORE the injection passes, exactly where
+		// handleSearch runs it (internal/mcp/mcp.go — RankResults at 1486,
+		// then TypeLens/MMR/Budget). It used to be skipped here as "out of
+		// scope", which meant --injection could not reflect a ranking change
+		// at all: with the order-sensitive metric added, relevance weight 0
+		// and recency at 1000x still produced identical MRR and recall@k,
+		// because the pass never ran. A disabled RankingConfig makes
+		// RankResults a documented no-op, so the default path is unchanged.
+		results = mcp.RankResults(results, relevance, ranking, time.Now().UTC())
 
 		results = applyInjectionPipeline(c.Query, results, relevance, cfg)
 		if len(results) == 0 {
