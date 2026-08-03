@@ -2548,6 +2548,14 @@ func runCloudSyncTarget(cfg store.Config, s *store.Store, project, syncDir, alia
 	if !isDefaultQueue {
 		mutationKey = targetKey
 		chunkKey = targetKey
+		// Register the alias so FUTURE local writes fan out into its own queue.
+		// Without this the fan-out registry stays empty, every named cloud drains
+		// an empty queue, and the cloud silently falls behind again after its
+		// first sync (issue #242). Best-effort: a registry write must never block
+		// the sync itself.
+		if err := s.RegisterCloudSyncTarget(alias); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not register cloud %q for write fan-out: %v\n", alias, err)
+		}
 	}
 
 	cc, err := preflightCloudSyncForAlias(s, cfg, project, alias, applyEnvOverrides, !doStatus)

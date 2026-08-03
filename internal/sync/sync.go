@@ -402,6 +402,14 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		knownChunks[c.ID] = true
 	}
 
+	// A target with no locally recorded chunks AND an empty remote manifest has
+	// never received anything from this store. Its pending-mutation queue cannot
+	// describe the backlog, because mutations only fan out to the targets that
+	// existed at write time — so a cloud added to an established install would
+	// otherwise export an empty chunk and report "all memories already exported"
+	// while the remote stayed empty (issue #242).
+	firstSyncForTarget := len(knownChunks) == 0
+
 	// Export data from DB (project-scoped in cloud mode/project syncs to avoid global dumps)
 	var data *store.ExportData
 	if strings.TrimSpace(project) != "" {
@@ -415,9 +423,19 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	chunk := &ChunkData{}
 	mutationSeqs := []int64{}
 	if sy.cloudMode {
+		// Resolve the pending queue first: its sequences must be acked even on a
+		// first sync, or the next one would re-deliver what this chunk already carries.
 		chunk, mutationSeqs, err = sy.filterByPendingMutations(data, project)
 		if err != nil {
 			return nil, fmt.Errorf("build mutation-backed export: %w", err)
+		}
+		if firstSyncForTarget {
+			relationMutations, relErr := storeExportRelations(sy.store, project)
+			if relErr != nil {
+				return nil, fmt.Errorf("export relations: %w", relErr)
+			}
+			chunk = sy.filterNewData(data, "")
+			chunk.Mutations = filterNewRelationMutations(relationMutations, "")
 		}
 	} else {
 		relationMutations, err := storeExportRelations(sy.store, project)
