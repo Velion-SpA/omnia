@@ -29,10 +29,10 @@ func cmdBlame(cfg store.Config) {
 		return
 	}
 	if len(os.Args) < 3 {
-		fmt.Println("usage: omnia blame <file>:<line> [--repo PATH]")
+		fmt.Println("usage: omnia blame <file>[:<line>] [--repo PATH]")
 		return
 	}
-	file, line, err := codegraph.ParseFileLine(os.Args[2])
+	file, line, err := codegraph.ParseBlameTarget(os.Args[2])
 	if err != nil {
 		fmt.Printf("invalid blame target: %v\n", err)
 		return
@@ -55,12 +55,22 @@ func cmdBlame(cfg store.Config) {
 		return
 	}
 	defer s.Close()
-	hits, err := s.BlameLine(repo, file, line)
+	// line 0 means the caller gave a bare path: answer for the whole file.
+	var hits []store.BlameHit
+	if line == 0 {
+		hits, err = s.BlameFile(repo, file)
+	} else {
+		hits, err = s.BlameLine(repo, file, line)
+	}
 	if err != nil {
 		fatal(err)
 		return
 	}
-	fmt.Printf("line: %d\nhits: %d\n", line, len(hits))
+	if line == 0 {
+		fmt.Printf("file: %s\nhits: %d\n", file, len(hits))
+	} else {
+		fmt.Printf("line: %d\nhits: %d\n", line, len(hits))
+	}
 	for _, hit := range hits {
 		fmt.Printf("- %s %s:%d-%d %s %s\n", hit.AnchorStatus, hit.Anchor.FilePath, hit.Anchor.LineStart, hit.Anchor.LineEnd, hit.Memory.SyncID, hit.Memory.Title)
 	}

@@ -418,16 +418,21 @@ func (s *Store) GetAnchorsForObservations(syncIDs []string) (map[string][]Memory
 	return result, nil
 }
 
-func (s *Store) BlameLine(repoRoot, file string, line int) ([]BlameHit, error) {
-	if strings.TrimSpace(file) == "" || line < 1 {
-		return nil, fmt.Errorf("BlameLine: file and positive line are required")
-	}
-	query := `
+// blameSelect is the projection both blame queries share: the anchor joined to
+// its live memory. Kept in one place so the 25-column scan below stays valid
+// for every caller.
+const blameSelect = `
 		SELECT a.id, a.sync_id, a.obs_sync_id, ifnull(a.repo_root,''), a.file_path, ifnull(a.symbol,''),
 		       a.line_start, a.line_end, ifnull(a.blame_sha,''), ifnull(a.blame_at,''), a.content_hash,
 		       a.anchor_status, a.created_at, a.checked_at, a.staled_at, a.new_blame_sha,
 		       o.id, o.sync_id, o.session_id, o.type, o.title, o.content, o.scope, o.created_at, o.updated_at
-		FROM memory_anchors a JOIN observations o ON o.sync_id = a.obs_sync_id
+		FROM memory_anchors a JOIN observations o ON o.sync_id = a.obs_sync_id`
+
+func (s *Store) BlameLine(repoRoot, file string, line int) ([]BlameHit, error) {
+	if strings.TrimSpace(file) == "" || line < 1 {
+		return nil, fmt.Errorf("BlameLine: file and positive line are required")
+	}
+	query := blameSelect + `
 		WHERE a.file_path = ? AND a.line_start <= ? AND a.line_end >= ? AND o.deleted_at IS NULL`
 	args := []any{file, line, line}
 	if strings.TrimSpace(repoRoot) != "" {
@@ -436,22 +441,53 @@ func (s *Store) BlameLine(repoRoot, file string, line int) ([]BlameHit, error) {
 	}
 	query += ` ORDER BY CASE a.anchor_status WHEN 'active' THEN 0 ELSE 1 END,
 		(a.line_end - a.line_start) ASC, ifnull(a.blame_at,'') DESC, a.id ASC`
+	return s.scanBlameHits("BlameLine", query, args)
+}
+
+// BlameFile answers "what decisions are recorded anywhere in this file?" — the
+// question a caller has when it holds a path but no cursor position (an editor
+// integration, a diff-driven review, a pre-read hook). BlameLine cannot serve
+// it: that caller has no line yet, because reading the file is what would
+// produce one.
+//
+// Ordered by position in the file rather than by anchor specificity, since with
+// no line to be specific about, reading order is the useful order. Stale
+// anchors are listed, not filtered: a stale anchor still says something was
+// decided here.
+func (s *Store) BlameFile(repoRoot, file string) ([]BlameHit, error) {
+	if strings.TrimSpace(file) == "" {
+		return nil, fmt.Errorf("BlameFile: file is required")
+	}
+	query := blameSelect + `
+		WHERE a.file_path = ? AND o.deleted_at IS NULL`
+	args := []any{file}
+	if strings.TrimSpace(repoRoot) != "" {
+		query += " AND ifnull(a.repo_root,'') = ?"
+		args = append(args, repoRoot)
+	}
+	query += ` ORDER BY a.line_start ASC, a.line_end ASC, a.id ASC`
+	return s.scanBlameHits("BlameFile", query, args)
+}
+
+// scanBlameHits runs a blameSelect-shaped query and materializes the rows.
+// Shared so BlameLine and BlameFile cannot drift on the 25-column scan.
+func (s *Store) scanBlameHits(op, query string, args []any) ([]BlameHit, error) {
 	rows, err := s.queryHook(s.db, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("BlameLine: %w", err)
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	defer rows.Close()
 	var out []BlameHit
 	for rows.Next() {
 		var hit BlameHit
 		if err := rows.Scan(&hit.Anchor.ID, &hit.Anchor.SyncID, &hit.Anchor.ObsSyncID, &hit.Anchor.RepoRoot, &hit.Anchor.FilePath, &hit.Anchor.Symbol, &hit.Anchor.LineStart, &hit.Anchor.LineEnd, &hit.Anchor.BlameSHA, &hit.Anchor.BlameAt, &hit.Anchor.ContentHash, &hit.Anchor.AnchorStatus, &hit.Anchor.CreatedAt, &hit.Anchor.CheckedAt, &hit.Anchor.StaledAt, &hit.Anchor.NewBlameSHA, &hit.Memory.ID, &hit.Memory.SyncID, &hit.Memory.SessionID, &hit.Memory.Type, &hit.Memory.Title, &hit.Memory.Content, &hit.Memory.Scope, &hit.Memory.CreatedAt, &hit.Memory.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("BlameLine: scan: %w", err)
+			return nil, fmt.Errorf("%s: scan: %w", op, err)
 		}
 		hit.AnchorStatus = hit.Anchor.AnchorStatus
 		out = append(out, hit)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("BlameLine: %w", err)
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	return out, nil
 }

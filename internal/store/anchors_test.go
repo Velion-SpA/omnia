@@ -405,3 +405,83 @@ func mustObsIntID(t *testing.T, s *Store, syncID string) int64 {
 	}
 	return id
 }
+
+// ─── BlameFile: file-level query (issue #225) ────────────────────────────────
+
+// TestBlameFileReturnsEveryAnchorInTheFile is the case that makes
+// code-decision-graph automatable: a caller that has a file but no line — an
+// editor or pre-read hook — must still learn every decision recorded in it.
+func TestBlameFileReturnsEveryAnchorInTheFile(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, top := addTestObs(t, s, "Top of file", "decision", "testproject", "project")
+	_, mid := addTestObs(t, s, "Middle of file", "bugfix", "testproject", "project")
+	_, bottom := addTestObs(t, s, "Bottom of file", "pattern", "testproject", "project")
+	// Inserted out of order on purpose: the result must be ordered by position,
+	// not by insertion.
+	for _, p := range []UpsertAnchorParams{
+		{ObsSyncID: mid, RepoRoot: "/repo", FilePath: "spread.go", Symbol: "Mid", LineStart: 200, LineEnd: 210, ContentHash: "mid"},
+		{ObsSyncID: bottom, RepoRoot: "/repo", FilePath: "spread.go", Symbol: "Bottom", LineStart: 900, LineEnd: 905, ContentHash: "bottom"},
+		{ObsSyncID: top, RepoRoot: "/repo", FilePath: "spread.go", Symbol: "Top", LineStart: 10, LineEnd: 12, ContentHash: "top"},
+		// A different file must never leak into the result.
+		{ObsSyncID: top, RepoRoot: "/repo", FilePath: "other.go", Symbol: "Other", LineStart: 1, LineEnd: 5, ContentHash: "other"},
+	} {
+		if _, err := s.UpsertAnchor(p); err != nil {
+			t.Fatalf("UpsertAnchor: %v", err)
+		}
+	}
+	hits, err := s.BlameFile("/repo", "spread.go")
+	if err != nil {
+		t.Fatalf("BlameFile: %v", err)
+	}
+	if len(hits) != 3 {
+		t.Fatalf("expected the 3 anchors of spread.go, got %d: %+v", len(hits), hits)
+	}
+	for i, want := range []string{"Top", "Mid", "Bottom"} {
+		if hits[i].Anchor.Symbol != want {
+			t.Fatalf("hit %d: expected %q (ordered by line_start), got %q", i, want, hits[i].Anchor.Symbol)
+		}
+		if hits[i].Anchor.FilePath != "spread.go" {
+			t.Fatalf("hit %d leaked another file: %q", i, hits[i].Anchor.FilePath)
+		}
+	}
+}
+
+// TestBlameFileWithNoAnchorsReturnsEmptyNotError pins the contract the issue
+// called out: a file without anchors is a legitimate answer ("nothing recorded
+// here"), never a failure.
+func TestBlameFileWithNoAnchorsReturnsEmptyNotError(t *testing.T) {
+	s := setupRelationsStore(t)
+	hits, err := s.BlameFile("/repo", "untouched.go")
+	if err != nil {
+		t.Fatalf("BlameFile on a file with no anchors must not error: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("expected no hits, got %+v", hits)
+	}
+}
+
+// TestBlameFileIncludesStaleAnchors mirrors BlameLine: a stale anchor is still
+// a signal worth surfacing, so it is listed rather than filtered out.
+func TestBlameFileIncludesStaleAnchors(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, syncID := addTestObs(t, s, "Stale decision", "decision", "testproject", "project")
+	anchorID := addTestAnchor(t, s, syncID, "fixture.go", "Stale")
+	if err := s.MarkAnchorStale(anchorID, nil); err != nil {
+		t.Fatalf("MarkAnchorStale: %v", err)
+	}
+	hits, err := s.BlameFile("/repo", "fixture.go")
+	if err != nil {
+		t.Fatalf("BlameFile: %v", err)
+	}
+	if len(hits) != 1 || hits[0].AnchorStatus != AnchorStatusStale {
+		t.Fatalf("expected the stale anchor to be listed, got %+v", hits)
+	}
+}
+
+// TestBlameFileRejectsEmptyFile keeps the same defensive contract as BlameLine.
+func TestBlameFileRejectsEmptyFile(t *testing.T) {
+	s := setupRelationsStore(t)
+	if _, err := s.BlameFile("/repo", "   "); err == nil {
+		t.Fatal("expected an error for an empty file argument")
+	}
+}
