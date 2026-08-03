@@ -84,8 +84,8 @@ func TestSQLiteLockContentionBranches(t *testing.T) {
 
 func TestRegistryLookupAndOrdering(t *testing.T) {
 	codes := RegisteredCodes()
-	// Alphabetical: embedding_... < manual_... < session_... < sqlite_... < store_... < sync_...
-	want := []string{CheckEmbeddingLag, CheckManualSessionNameProjectMismatch, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckStoreExposure, CheckSyncMutationRequiredFields}
+	// Alphabetical: embedding_... < manual_... < mcp_... < session_... < sqlite_... < store_... < sync_...
+	want := []string{CheckEmbeddingLag, CheckManualSessionNameProjectMismatch, CheckMCPLauncher, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckStoreExposure, CheckSyncMutationRequiredFields}
 	if strings.Join(codes, ",") != strings.Join(want, ",") {
 		t.Fatalf("RegisteredCodes = %v, want %v", codes, want)
 	}
@@ -154,12 +154,12 @@ func TestRunnerRunAllHealthyEvaluatesEveryMVPCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunAll: %v", err)
 	}
-	// 6 checks since #226 added EmbeddingLagCheck (which abstains explicitly
-	// here: this scope wires no embeddings reader, so it reports OK with
-	// checked=false rather than an unfixable warning);
+	// 7 checks: #226 added EmbeddingLagCheck and #243 added MCPLauncherCheck.
+	// Both abstain explicitly here — this scope wires neither reader, so each
+	// reports OK with checked=false rather than an unfixable warning;
 	// the test store's fresh, owner-only temp dir (outside any cloud-sync
 	// folder) evaluates OK for it, so every check stays OK end-to-end.
-	if report.Status != StatusOK || report.Summary.OK != 6 || len(report.Checks) != 6 {
+	if report.Status != StatusOK || report.Summary.OK != 7 || len(report.Checks) != 7 {
 		t.Fatalf("report=%+v", report)
 	}
 	for _, check := range report.Checks {

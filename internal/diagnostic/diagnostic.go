@@ -37,6 +37,12 @@ type Scope struct {
 	// a check that passes without having looked is the exact failure it
 	// exists to catch.
 	ReadEmbeddingSnapshot func(context.Context) (EmbeddingSnapshot, error)
+	// ReadMCPLaunchers supplies MCPLauncherCheck with the MCP server
+	// declarations found on this machine, already resolved against the
+	// filesystem (#243). Same injected-reader contract as
+	// ReadEmbeddingSnapshot: nil means the check reports that it did not look,
+	// never that everything is fine.
+	ReadMCPLaunchers func(context.Context) ([]MCPLauncher, error)
 	// Progress is an optional, opt-in hook (finding #4) invoked with a
 	// check's Code() right before that check runs — lightweight progress
 	// visibility for a long-running RunAll scan over real data (`omnia
