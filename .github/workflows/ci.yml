@@ -39,3 +39,51 @@ jobs:
 
       - name: Run e2e tests
         run: go test -tags e2e ./internal/server/...
+
+  # internal/cloud/cloudstore's tests are gated on CLOUDSTORE_TEST_DSN and skip
+  # without it. Until this job existed nothing set it, so 76 tests across 6
+  # files were skipped on every run — including the ones that prove the two
+  # critical audit fixes actually hold at the store layer:
+  #
+  #   TestClaimProjectOwnership_ConcurrentClaimsExactlyOneOwner  (C2, #47)
+  #   TestIsAccountDisabledIntegration                           (C1, #45)
+  #
+  # The handler/RBAC tests in the unit job use doubles: they verify a handler
+  # CALLS the check, not that the check works against Postgres or that the
+  # advisory lock actually serializes. A regression in the store layer — a
+  # dropped WHERE, a lock removed in a refactor — passed CI silently.
+  #
+  # -race is deliberate: it is how the audit proved C2's original RED
+  # (20 of 40 concurrent claims all becoming owner without the lock).
+  #
+  # Each test creates its own schema and runs migrations into it, so the
+  # service needs no seeding — only a URL-style DSN whose role may CREATE
+  # SCHEMA. postgres:16-alpine matches docker-compose.cloud.yml.
+  integration-tests:
+    name: Integration Tests (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run cloudstore integration tests
+        run: go test -race -v ./internal/cloud/cloudstore/...
+        env:
+          CLOUDSTORE_TEST_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
