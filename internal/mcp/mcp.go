@@ -1327,6 +1327,10 @@ func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 }
 
 func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+	// #226: built once here, not per call — MCPConfig travels by value, so
+	// memoising on it would defeat the TTL cache. nil when auto-embed is off,
+	// in which case recall health reports "unknown", never "stale".
+	readWatermarks := newWatermarkReader(s, cfg)
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		query, _ := req.GetArguments()["query"].(string)
 		typ, _ := req.GetArguments()["type"].(string)
@@ -1770,6 +1774,17 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		envelope := map[string]any{"results": structuredResults}
 		if budgetTrimmed > 0 {
 			envelope["budget_trimmed"] = budgetTrimmed
+		}
+
+		// #226: declare this response's own recall quality. When embeddings.db
+		// froze, semantic search kept answering — blind to every memory saved
+		// since — and the response was indistinguishable from a healthy one,
+		// so callers trusted it. Adds nothing when recall is healthy
+		// (present-only-when-notable, like fts_relaxed/budget_trimmed above).
+		// The as_of path is excluded: recorded-time queries deliberately do
+		// not run fusion, and recorded_time already says so.
+		if asOf == "" {
+			AnnotateRecallHealth(envelope, EvaluateRecallHealth(ctx, cfg.Recall != nil, readWatermarks))
 		}
 
 		// jd-fix-agent finding B (as_of structured envelope flag): surface a
