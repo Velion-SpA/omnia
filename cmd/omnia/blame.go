@@ -10,13 +10,16 @@ import (
 )
 
 // loadCodeGraphConfig reports whether the code-decision-graph capability is
-// enabled. Matching this codebase's established config-loading convention
-// (main.go's appCfgErr == nil checks), ANY load failure — including the very
-// common "no config.yaml yet" case on a fresh install — degrades to disabled
-// rather than surfacing a configuration error: this is an optional,
-// default-OFF gate, not a required setting.
-var loadCodeGraphConfig = func() bool {
-	cfg, err := config.Load(config.DefaultPath())
+// enabled, reading configPath — the operator's `--config PATH` when they
+// passed one, config.DefaultPath() otherwise (#224: this used to hardcode
+// DefaultPath(), so the flag parsed without error and was then ignored).
+// Matching this codebase's established config-loading convention (main.go's
+// appCfgErr == nil checks), ANY load failure — including the very common
+// "no config.yaml yet" case on a fresh install — degrades to disabled rather
+// than surfacing a configuration error: this is an optional, default-OFF
+// gate, not a required setting.
+var loadCodeGraphConfig = func(configPath string) bool {
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return false
 	}
@@ -24,12 +27,12 @@ var loadCodeGraphConfig = func() bool {
 }
 
 func cmdBlame(cfg store.Config) {
-	if !loadCodeGraphConfig() {
+	if !loadCodeGraphConfig(globalConfigPath(os.Args[1:])) {
 		fmt.Println("capability disabled")
 		return
 	}
 	if len(os.Args) < 3 {
-		fmt.Println("usage: omnia blame <file>[:<line>] [--repo PATH]")
+		fmt.Println("usage: omnia blame <file>[:<line>] [--repo PATH] [--config PATH]")
 		return
 	}
 	file, line, err := codegraph.ParseBlameTarget(os.Args[2])

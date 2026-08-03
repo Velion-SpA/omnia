@@ -3519,9 +3519,10 @@ Commands:
                        [--project P] [--repo PATH] [--apply] [--semantic] [--yes]
                        Dry-run by default: reports checked/traveled/staled counts, writes nothing.
                        Degrades gracefully with no git or outside a repo (reports 0 checked).
-  blame <file>:<line> Query opt-in code-to-decision graph anchors.
+  blame <file>[:<line>] Query opt-in code-to-decision graph anchors.
+                       [--repo PATH] [--config PATH]. A bare <file> answers for the whole file.
   enforce            Mechanically verify a change against trusted procedure postconditions
-                       [--files PATH]... [--repo PATH] [--project P] [--block] [--override --reason TEXT]
+                       [--files PATH]... [--repo PATH] [--project P] [--block] [--override --reason TEXT] [--config PATH]
                        Pass/flag/block/override contract; disabled by default (enforcement.enabled).
                        --block forces block mode and exits non-zero on a block verdict (hook/CI use).
   review-due         List memories past their spaced-review due date (Play G)

@@ -34,7 +34,7 @@ func upsertCLIEnforceTestProcedure(t *testing.T, s *store.Store, project, trigge
 func TestCmdEnforceDisabledDoesNotOpenStore(t *testing.T) {
 	cfg := testConfig(t)
 	old := loadEnforcementConfig
-	loadEnforcementConfig = func() (config.EnforcementConfig, bool) { return config.EnforcementConfig{}, false }
+	loadEnforcementConfig = func(string) (config.EnforcementConfig, bool) { return config.EnforcementConfig{}, false }
 	t.Cleanup(func() { loadEnforcementConfig = old })
 
 	withArgs(t, "omnia", "enforce", "--files", "internal/enforce/matcher.go")
@@ -51,7 +51,7 @@ func TestCmdEnforceDisabledDoesNotOpenStore(t *testing.T) {
 // elsewhere (blame, consolidate, rank-train).
 func TestLoadEnforcementConfigDegradesToDisabledWhenConfigFileIsMissing(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	if _, enabled := loadEnforcementConfig(); enabled {
+	if _, enabled := loadEnforcementConfig(config.DefaultPath()); enabled {
 		t.Fatal("expected disabled when no config.yaml exists (fresh install), got enabled")
 	}
 }
@@ -72,7 +72,7 @@ func TestCmdEnforceEnabledFlagsFailingTrustedProcedure(t *testing.T) {
 	}
 
 	old := loadEnforcementConfig
-	loadEnforcementConfig = func() (config.EnforcementConfig, bool) {
+	loadEnforcementConfig = func(string) (config.EnforcementConfig, bool) {
 		return config.EnforcementConfig{
 			Enabled:  true,
 			Mode:     "flag",
@@ -104,7 +104,7 @@ func TestCmdEnforceBlockModeExitsNonZero(t *testing.T) {
 	}
 
 	old := loadEnforcementConfig
-	loadEnforcementConfig = func() (config.EnforcementConfig, bool) {
+	loadEnforcementConfig = func(string) (config.EnforcementConfig, bool) {
 		return config.EnforcementConfig{
 			Enabled:  true,
 			Mode:     "flag",
