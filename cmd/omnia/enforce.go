@@ -11,15 +11,18 @@ import (
 	"github.com/velion/omnia/internal/store"
 )
 
-// loadEnforcementConfig reports the operator's EnforcementConfig, degrading
-// to a disabled zero value on ANY config.Load failure — including the very
-// common "no config.yaml yet" case on a fresh install. Matching this
-// codebase's established config-loading convention (loadCodeGraphConfig,
+// loadEnforcementConfig reports the operator's EnforcementConfig, read from
+// configPath — the operator's `--config PATH` when they passed one,
+// config.DefaultPath() otherwise (#224: this used to hardcode DefaultPath(),
+// so the flag parsed without error and was then ignored). It degrades to a
+// disabled zero value on ANY config.Load failure — including the very common
+// "no config.yaml yet" case on a fresh install. Matching this codebase's
+// established config-loading convention (loadCodeGraphConfig,
 // cmd/omnia/blame.go; the same fix already applied to consolidate.go and
 // rank_train.go): a missing/unparseable config file is NOT a fatal error
 // for an optional, default-OFF capability.
-var loadEnforcementConfig = func() (config.EnforcementConfig, bool) {
-	cfg, err := config.Load(config.DefaultPath())
+var loadEnforcementConfig = func(configPath string) (config.EnforcementConfig, bool) {
+	cfg, err := config.Load(configPath)
 	if err != nil || !cfg.Enforcement.Enabled {
 		return config.EnforcementConfig{}, false
 	}
@@ -32,7 +35,7 @@ var loadEnforcementConfig = func() (config.EnforcementConfig, bool) {
 // hook/CI use, sharing enforce.Evaluate as the single decision function
 // both surfaces call.
 func cmdEnforce(cfg store.Config) {
-	enfCfg, enabled := loadEnforcementConfig()
+	enfCfg, enabled := loadEnforcementConfig(globalConfigPath(os.Args[1:]))
 	if !enabled {
 		fmt.Println("capability disabled")
 		return

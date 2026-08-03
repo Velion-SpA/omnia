@@ -7,13 +7,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/store"
 )
 
 func TestCmdBlameDisabledDoesNotOpenAnchorStore(t *testing.T) {
 	cfg := testConfig(t)
 	old := loadCodeGraphConfig
-	loadCodeGraphConfig = func() bool { return false }
+	loadCodeGraphConfig = func(string) bool { return false }
 	t.Cleanup(func() { loadCodeGraphConfig = old })
 	withArgs(t, "omnia", "blame", "outside.go:1")
 	stdout, stderr := captureOutput(t, func() { cmdBlame(cfg) })
@@ -24,7 +25,7 @@ func TestCmdBlameDisabledDoesNotOpenAnchorStore(t *testing.T) {
 
 func TestLoadCodeGraphConfigDegradesToDisabledWhenConfigFileIsMissing(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	if loadCodeGraphConfig() {
+	if loadCodeGraphConfig(config.DefaultPath()) {
 		t.Fatal("expected disabled when no config.yaml exists (fresh install), got enabled")
 	}
 }
@@ -32,7 +33,7 @@ func TestLoadCodeGraphConfigDegradesToDisabledWhenConfigFileIsMissing(t *testing
 func TestCmdBlameOutsideGitRepoReturnsEmptyReason(t *testing.T) {
 	cfg := testConfig(t)
 	old := loadCodeGraphConfig
-	loadCodeGraphConfig = func() bool { return true }
+	loadCodeGraphConfig = func(string) bool { return true }
 	t.Cleanup(func() { loadCodeGraphConfig = old })
 	withArgs(t, "omnia", "blame", t.TempDir()+"/outside.go:1")
 	stdout, stderr := captureOutput(t, func() { cmdBlame(cfg) })
@@ -67,7 +68,7 @@ func TestCmdBlameEnabledPrintsMatchingMemory(t *testing.T) {
 	}
 
 	old := loadCodeGraphConfig
-	loadCodeGraphConfig = func() bool { return true }
+	loadCodeGraphConfig = func(string) bool { return true }
 	t.Cleanup(func() { loadCodeGraphConfig = old })
 	withArgs(t, "omnia", "blame", file+":1", "--repo", repo)
 	stdout, stderr := captureOutput(t, func() { cmdBlame(cfg) })
