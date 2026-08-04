@@ -1298,6 +1298,18 @@ func (sy *Syncer) filterByPendingMutations(data *store.ExportData, project strin
 	selectedMutations := make([]store.SyncMutation, 0, len(mutations))
 
 	for _, mutation := range mutations {
+		// Embeddings are derived, local data: `omnia embed` rebuilds them from
+		// the observation's content, and a vector is only usable by a store
+		// running the same model at the same dimension. Shipping them adds a few
+		// KB per memory to every chunk for something the receiver recomputes —
+		// and no cloud server accepts the entity, so a single one made the whole
+		// push fail with `unsupported mutation "embedding"/"upsert"` (#251).
+		// The sequence is still acked below so the row does not sit pending
+		// forever and re-break every subsequent sync.
+		if mutation.Entity == store.SyncEntityEmbedding {
+			seqs = append(seqs, mutation.Seq)
+			continue
+		}
 		mutationProject := resolveMutationProject(mutation, sessionProjectByID)
 		if mutationProject != project {
 			if mutationProject != "" {

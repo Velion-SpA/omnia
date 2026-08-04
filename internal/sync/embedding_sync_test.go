@@ -7,20 +7,28 @@ import (
 	"github.com/velion/omnia/internal/store"
 )
 
-// ─── human-like-memory PR5 slice 2 — SyncEntityEmbedding push/pull round trip ─
+// ─── SyncEntityEmbedding: local queue, no cloud replication ──────────────────
 //
-// Mirrors the relation cloud-mode export tests (see
-// TestCloudExportKnownChunkReconcileFailureDoesNotAckMutations): a locally
-// enqueued embedding mutation must surface, byte-for-byte, in the
-// cloud-mode filterByPendingMutations chunk (the same generic path relation
-// mutations already flow through — no entity-specific code needed there),
-// and applying the resulting mutation on a destination store must be
-// idempotent across repeated pulls.
+// Embeddings were originally replicated through the cloud chunk alongside
+// relations. No cloud server ever accepted the entity — validateSupportedMutation
+// only allows session/observation/prompt/relation — so a single embedding
+// mutation made the whole push fail with
+// `unsupported mutation "embedding"/"upsert"` and gated every incremental sync
+// for the project (#251).
+//
+// The replication was dropped rather than extended: a vector is derived data,
+// rebuilt from the observation's content by `omnia embed`, and only usable by a
+// store running the same model at the same dimension. Consumers already
+// re-embed on their own, so shipping vectors cost a few KB per memory and
+// bought nothing.
+//
+// The PULL side is deliberately kept: chunks produced by older clients still
+// carry embedding mutations, and applying them must remain safe.
 
-// TestEmbeddingSync_SurfacesInCloudModeMutationExport (RED) asserts a locally
-// enqueued embedding mutation appears in the cloud-mode export's
-// chunk.Mutations with its payload intact.
-func TestEmbeddingSync_SurfacesInCloudModeMutationExport(t *testing.T) {
+// A locally enqueued embedding must NOT reach the cloud chunk, and its sequence
+// must still be acked — otherwise the row sits pending forever and re-breaks
+// every subsequent sync.
+func TestEmbeddingSync_ExcludedFromCloudMutationExport(t *testing.T) {
 	resetSyncTestHooks(t)
 	s := newTestStore(t)
 	transport := newFakeCloudTransport()
@@ -33,14 +41,13 @@ func TestEmbeddingSync_SurfacesInCloudModeMutationExport(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	vec := []float32{0.4, -0.2, 0.9}
 	if err := s.EnqueueEmbeddingMutation(store.EmbeddingSyncInput{
 		SyncID:      "obs-sync-emb-1",
 		Project:     "proj-emb-sync",
 		Type:        "decision",
 		Model:       "jina/jina-embeddings-v2-base-es",
 		Dim:         3,
-		Vector:      vec,
+		Vector:      []float32{0.4, -0.2, 0.9},
 		ContentHash: "hash-sync-1",
 		UpdatedAt:   "2026-07-16 12:00:00",
 	}); err != nil {
@@ -55,48 +62,24 @@ func TestEmbeddingSync_SurfacesInCloudModeMutationExport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("filterByPendingMutations: %v", err)
 	}
-	if len(seqs) == 0 {
-		t.Fatal("expected at least 1 pending mutation seq")
-	}
 
-	var found *store.SyncMutation
-	for i := range chunk.Mutations {
-		if chunk.Mutations[i].Entity == store.SyncEntityEmbedding && chunk.Mutations[i].EntityKey == "obs-sync-emb-1" {
-			found = &chunk.Mutations[i]
+	for _, m := range chunk.Mutations {
+		if m.Entity == store.SyncEntityEmbedding {
+			t.Fatalf("embedding mutation reached the cloud chunk; the push would be rejected: %+v", m)
 		}
 	}
-	if found == nil {
-		t.Fatalf("expected chunk.Mutations to contain the embedding mutation; got %+v", chunk.Mutations)
-	}
-	if found.Op != store.SyncOpUpsert {
-		t.Errorf("op: want %q, got %q", store.SyncOpUpsert, found.Op)
-	}
-
-	var p struct {
-		SyncID string `json:"sync_id"`
-		Model  string `json:"model"`
-		Dim    int    `json:"dim"`
-	}
-	if err := json.Unmarshal([]byte(found.Payload), &p); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
-	}
-	if p.SyncID != "obs-sync-emb-1" || p.Model != "jina/jina-embeddings-v2-base-es" || p.Dim != 3 {
-		t.Errorf("payload fields mismatch: %+v", p)
+	if len(seqs) == 0 {
+		t.Fatal("the excluded embedding's seq must still be acked, or it stays pending forever")
 	}
 }
 
-// TestEmbeddingSync_PullApplyIdempotentAcrossRepeatedTransfer (RED,
-// triangulation) asserts the exported embedding mutation, applied to an
-// independent destination store via ApplyPulledMutation, does not error and
-// is safe to apply twice — mirroring the cross-machine round trip relations
-// use (TestRelationSync_PushPull_CrossMachine), adapted to embedding's
-// decode-only pull-apply (see applyEmbeddingUpsertTx doc: idempotency here
-// means "no local state to duplicate", not "one row upserted").
+// The pull side stays supported so chunks from older clients keep applying
+// cleanly, and applying the same seq twice remains a safe no-op. The mutation is
+// read straight from the queue rather than from an export, because export no
+// longer emits it — this asserts the receiving contract, not the sending one.
 func TestEmbeddingSync_PullApplyIdempotentAcrossRepeatedTransfer(t *testing.T) {
 	resetSyncTestHooks(t)
 	src := newTestStore(t)
-	transport := newFakeCloudTransport()
-	sy := NewCloudWithTransport(src, transport, "proj-emb-pull")
 
 	if err := src.EnrollProject("proj-emb-pull"); err != nil {
 		t.Fatalf("EnrollProject: %v", err)
@@ -105,27 +88,39 @@ func TestEmbeddingSync_PullApplyIdempotentAcrossRepeatedTransfer(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	if err := src.EnqueueEmbeddingMutation(store.EmbeddingSyncInput{
-		SyncID: "obs-pull-emb-1", Project: "proj-emb-pull", Model: "m", Dim: 2, Vector: []float32{1, 2}, ContentHash: "h",
+		SyncID: "obs-pull-emb-1", Project: "proj-emb-pull", Model: "m", Dim: 2,
+		Vector: []float32{1, 2}, ContentHash: "h",
 	}); err != nil {
 		t.Fatalf("EnqueueEmbeddingMutation: %v", err)
 	}
 
-	data, err := src.ExportProject("proj-emb-pull")
+	// Read the row an older client would have shipped, straight from the queue.
+	pending, err := src.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
 	if err != nil {
-		t.Fatalf("ExportProject: %v", err)
-	}
-	chunk, _, err := sy.filterByPendingMutations(data, "proj-emb-pull")
-	if err != nil {
-		t.Fatalf("filterByPendingMutations: %v", err)
+		t.Fatalf("ListPendingSyncMutations: %v", err)
 	}
 	var mutation store.SyncMutation
-	for _, m := range chunk.Mutations {
+	for _, m := range pending {
 		if m.Entity == store.SyncEntityEmbedding {
 			mutation = m
 		}
 	}
 	if mutation.Entity == "" {
-		t.Fatal("expected an embedding mutation in the exported chunk")
+		t.Fatal("expected an embedding mutation in the pending queue")
+	}
+
+	// Payload shape is part of the receiving contract: a decoder on the other
+	// side has to find these fields.
+	var p struct {
+		SyncID string `json:"sync_id"`
+		Model  string `json:"model"`
+		Dim    int    `json:"dim"`
+	}
+	if err := json.Unmarshal([]byte(mutation.Payload), &p); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if p.SyncID != "obs-pull-emb-1" || p.Model != "m" || p.Dim != 2 {
+		t.Errorf("payload fields mismatch: %+v", p)
 	}
 
 	dst := newTestStore(t)
