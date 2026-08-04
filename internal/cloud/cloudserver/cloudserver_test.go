@@ -715,7 +715,7 @@ func TestHandlerPushValidationErrorsExposeMachineActionableClasses(t *testing.T)
 
 	t.Run("invalid payload is repairable class", func(t *testing.T) {
 		srv := New(&fakeStore{}, fakeAuth{}, 0)
-		body := bytes.NewBufferString(`{"project":"proj-a","created_by":"tester","data":{"sessions":[{"id":"s-1"}]}}`)
+		body := bytes.NewBufferString(`{"project":"proj-a","created_by":"tester","data":{"sessions":[{"directory":"/tmp/s-1"}]}}`)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sync/push", body))
 		if rec.Code != http.StatusBadRequest {
@@ -728,7 +728,7 @@ func TestHandlerPushValidationErrorsExposeMachineActionableClasses(t *testing.T)
 		if payload.ErrorCode != "upgrade_repairable_payload_invalid" {
 			t.Fatalf("expected upgrade_repairable_payload_invalid, got %q", payload.ErrorCode)
 		}
-		if !strings.Contains(payload.Error, "sessions[0].directory is required") {
+		if !strings.Contains(payload.Error, "sessions[0].id is required") {
 			t.Fatalf("expected detailed validation error, got %q", payload.Error)
 		}
 	})
@@ -1030,9 +1030,9 @@ func TestHandlerPushRejectsMutationUpsertsMissingRequiredFields(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "session upsert missing directory",
-			payload: `{"mutations":[{"entity":"session","entity_key":"s-1","op":"upsert","payload":"{\"id\":\"s-1\"}"}]}`,
-			wantErr: "session payload directory is required for upsert",
+			name:    "session upsert missing id",
+			payload: `{"mutations":[{"entity":"session","entity_key":"s-1","op":"upsert","payload":"{\"directory\":\"/tmp/x\"}"}]}`,
+			wantErr: "session payload id is required",
 		},
 		{
 			name:    "observation upsert missing title",
@@ -1071,9 +1071,9 @@ func TestHandlerPushRejectsDirectChunkArraysMissingRequiredFields(t *testing.T) 
 		wantErr string
 	}{
 		{
-			name:    "session missing directory",
-			payload: `{"sessions":[{"id":"s-1"}]}`,
-			wantErr: "sessions[0].directory is required",
+			name:    "session missing id",
+			payload: `{"sessions":[{"directory":"/tmp/s-1"}]}`,
+			wantErr: "sessions[0].id is required",
 		},
 		{
 			name:    "observation missing sync_id",

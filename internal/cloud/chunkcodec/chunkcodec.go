@@ -361,9 +361,12 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 		if body.ID == "" {
 			return "", "", fmt.Errorf("session payload id is required")
 		}
-		if op == store.SyncOpUpsert && body.Directory == "" {
-			return "", "", fmt.Errorf("session payload directory is required for upsert")
-		}
+		// Directory is deliberately NOT required. A session created by saving a
+		// memory by hand has no working directory — there was no repo involved,
+		// and that is its correct state rather than missing data. Requiring it
+		// made one such session abort the entire chunk and block the project
+		// (`sessions[0].directory is required`). The identity field above stays
+		// required, because an upsert without an id targets nothing.
 		if op == store.SyncOpDelete {
 			body.Directory = ""
 			body.StartedAt = ""
