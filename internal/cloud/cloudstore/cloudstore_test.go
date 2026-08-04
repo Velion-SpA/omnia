@@ -615,7 +615,11 @@ func TestBackfillMutationChunksSkipsInvalidLegacyMutationPayloads(t *testing.T) 
 	project := uniqueCloudstoreTestProject("mutation-backfill-invalid")
 	cleanupCloudstoreProject(t, cs, project)
 
-	insertLegacyCloudMutation(t, cs, project, store.SyncEntitySession, "manual-save-engram", store.SyncOpUpsert, `{"id":"manual-save-engram"}`)
+	// A session with no id: the upsert targets nothing, so it stays invalid.
+	// This fixture used to be `{"id":"manual-save-engram"}` — a manual-save
+	// session with no directory — which is now VALID, because such a session
+	// never had a working directory to record.
+	insertLegacyCloudMutation(t, cs, project, store.SyncEntitySession, "sess-no-id", store.SyncOpUpsert, `{"directory":"/tmp/sess-no-id"}`)
 	insertLegacyCloudMutation(t, cs, project, store.SyncEntityObservation, "obs-valid", store.SyncOpUpsert, `{"sync_id":"obs-valid","session_id":"sess-valid","type":"decision","title":"Valid observation","content":"materialize this one","scope":"project","created_at":"2026-05-04T01:49:52Z"}`)
 
 	report, err := cs.BackfillMutationChunks(ctx, project, true)

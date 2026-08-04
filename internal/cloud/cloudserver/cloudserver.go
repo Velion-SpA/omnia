@@ -1015,9 +1015,9 @@ func validateDirectChunkArrayEntries(chunk engramsync.ChunkData) error {
 		if strings.TrimSpace(session.ID) == "" {
 			return fmt.Errorf("sessions[%d].id is required", i)
 		}
-		if strings.TrimSpace(session.Directory) == "" {
-			return fmt.Errorf("sessions[%d].directory is required", i)
-		}
+		// Directory is deliberately NOT required, mirroring the chunk
+		// canonicalizer: a session created by saving a memory by hand has no
+		// working directory, and rejecting it aborts the whole chunk.
 	}
 
 	for i, observation := range chunk.Observations {
