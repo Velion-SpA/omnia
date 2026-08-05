@@ -30,6 +30,44 @@ func TestApplyLearnedRankerUsesPromotedModel(t *testing.T) {
 	}
 }
 
+// TestApplyLearnedRanker_IgnoresSalienceEvenWhenEnabled (review fix 3, PR
+// #259): the learned ranker's fixed 6-feature schema (ranker.Features:
+// LexicalRRF, SemanticCosine, Recency, Importance, OutcomeHistory,
+// TypeMatch) has no salience slot. Two results tie on every one of those six
+// inputs except OutcomeHistory (id2 has a positive Outcome, id1 does not);
+// id1 additionally carries a much higher Salience. With weights.salience
+// heavily weighted, RankResults (which DOES see salience) ranks id1 first —
+// but ApplyLearnedRanker, run on that same output, must rank purely on
+// OutcomeHistory and put id2 first instead, proving the learned ranker
+// silently discards RankResults' salience-driven order rather than merely
+// underweighting it.
+func TestApplyLearnedRanker_IgnoresSalienceEvenWhenEnabled(t *testing.T) {
+	sameTime := "2026-07-30 00:00:00"
+	hiSalience := 0.95
+	worked := "worked"
+	results := []store.SearchResult{
+		{Observation: store.Observation{ID: 1, Type: "decision", UpdatedAt: sameTime, Salience: &hiSalience}},
+		{Observation: store.Observation{ID: 2, Type: "decision", UpdatedAt: sameTime, Outcome: &worked}},
+	}
+	relevance := map[int64]float64{1: 0.5, 2: 0.5}
+	rankingCfg := config.RankingConfig{Enabled: true, Weights: config.RankingWeights{Relevance: 1, Recency: 1, Importance: 1, Salience: 100}}
+	now, err := time.Parse("2006-01-02 15:04:05", sameTime)
+	if err != nil {
+		t.Fatalf("time.Parse: %v", err)
+	}
+
+	ranked := RankResults(results, relevance, rankingCfg, now)
+	if ranked[0].ID != 1 {
+		t.Fatalf("precondition failed: RankResults did not rank higher-salience id1 first: %v", idsOfResults(ranked))
+	}
+
+	model := &ranker.Model{FeatureSchema: ranker.FeatureSchema(), Weights: []float64{0, 0, 0, 0, 10, 0}}
+	got := ApplyLearnedRanker(ranked, relevance, config.RankerConfig{Enabled: true}, model, rankingCfg, now)
+	if got[0].ID != 2 {
+		t.Fatalf("learned ranker did not override the salience-driven order: %v (salience has no feature slot and must not leak through)", idsOfResults(got))
+	}
+}
+
 func sameIDs(a, b []store.SearchResult) bool {
 	if len(a) != len(b) {
 		return false

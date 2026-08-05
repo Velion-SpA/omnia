@@ -1670,10 +1670,11 @@ func printRecordedTimeSearchDisclaimer() {
 // human-readable line for `omnia search --explain` (task 5.3).
 func printScoreBreakdown(receipt map[string]any) {
 	lexical, _ := receipt["lexical"].(map[string]any)
-	fmt.Printf("    score breakdown: lexical=%s exact_match=%v semantic=%s fusion=%s recency=%s importance=%s final=%s staleness_penalty=%v\n",
+	fmt.Printf("    score breakdown: lexical=%s exact_match=%v semantic=%s fusion=%s recency=%s importance=%s salience=%s final=%s staleness_penalty=%v\n",
 		formatBreakdownValue(lexical["rank"]), lexical["exact_match"],
 		formatBreakdownValue(receipt["semantic"]), formatBreakdownValue(receipt["fusion"]),
 		formatBreakdownValue(receipt["recency"]), formatBreakdownValue(receipt["importance"]),
+		formatBreakdownValue(receipt["salience"]),
 		formatBreakdownValue(receipt["final"]), receipt["staleness_penalty"])
 }
 

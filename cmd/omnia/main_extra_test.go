@@ -4566,8 +4566,8 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 
 // TestCmdSearch_ExplainFlag_PrintsBreakdown (task 5.1): `omnia search
 // --explain` must print a per-result score breakdown (lexical, semantic,
-// fusion, recency, importance, final, staleness_penalty) after the existing
-// result block (Requirement: Per-Hit Score Breakdown).
+// fusion, recency, importance, salience, final, staleness_penalty) after the
+// existing result block (Requirement: Per-Hit Score Breakdown).
 func TestCmdSearch_ExplainFlag_PrintsBreakdown(t *testing.T) {
 	cfg := testConfig(t)
 	stubRuntimeHooks(t)
@@ -4584,7 +4584,7 @@ func TestCmdSearch_ExplainFlag_PrintsBreakdown(t *testing.T) {
 	if !strings.Contains(stdout, "score breakdown:") {
 		t.Fatalf("expected a score breakdown line with --explain, got: %q", stdout)
 	}
-	for _, field := range []string{"lexical=", "semantic=", "fusion=", "recency=", "importance=", "final=", "staleness_penalty="} {
+	for _, field := range []string{"lexical=", "semantic=", "fusion=", "recency=", "importance=", "salience=", "final=", "staleness_penalty="} {
 		if !strings.Contains(stdout, field) {
 			t.Errorf("expected score breakdown to include %q, got: %q", field, stdout)
 		}

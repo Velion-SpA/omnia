@@ -182,12 +182,12 @@ func TestApplyStalenessDownrank_SentinelAndSignatureRowsNeverMoved(t *testing.T)
 // ─── BuildReceipt / BuildResultReceipt now surface a real staleness_penalty ──
 
 func TestBuildReceipt_StalenessPenaltyPassthrough(t *testing.T) {
-	receipt := BuildReceipt(floatPtr(-1), true, floatPtr(0.5), floatPtr(0.02), floatPtr(0.9), floatPtr(1.0), floatPtr(0.95), DefaultStalenessPenalty)
+	receipt := BuildReceipt(floatPtr(-1), true, floatPtr(0.5), floatPtr(0.02), floatPtr(0.9), floatPtr(1.0), floatPtr(0.05), floatPtr(0.95), DefaultStalenessPenalty)
 	if receipt["staleness_penalty"] != DefaultStalenessPenalty {
 		t.Errorf("receipt[staleness_penalty] = %v, want %v (passthrough, no longer hardcoded 0)", receipt["staleness_penalty"], DefaultStalenessPenalty)
 	}
 
-	receiptZero := BuildReceipt(nil, false, nil, nil, nil, nil, nil, 0)
+	receiptZero := BuildReceipt(nil, false, nil, nil, nil, nil, nil, nil, 0)
 	if receiptZero["staleness_penalty"] != float64(0) {
 		t.Errorf("receipt[staleness_penalty] (no stale anchor) = %v, want 0", receiptZero["staleness_penalty"])
 	}

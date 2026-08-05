@@ -147,6 +147,44 @@ func TestSalienceScore_NilIsZeroAndClampsToUnitRange(t *testing.T) {
 	}
 }
 
+// TestSalienceScore_RejectsNaN is a regression test for the bug found in
+// adversarial review of PR #259. math.Max/math.Min both propagate NaN
+// (IEEE-754: any comparison against NaN is false, so neither the max nor the
+// min branch can "win"), so clampUnit(NaN) returned NaN before this fix
+// instead of a genuine [0,1] value — despite SalienceScore/clampUnit's own
+// doc calling this a defensive backstop. normalizeSalience now rejects NaN
+// at write time (see internal/store/salience.go), but this must hold
+// independently for any row that reached the store before that check
+// existed, so it is tested here on its own, not only end-to-end.
+func TestSalienceScore_RejectsNaN(t *testing.T) {
+	nan := math.NaN()
+	if got := SalienceScore(&nan); got != 0 {
+		t.Errorf("SalienceScore(NaN) = %v, want 0 (NaN must not propagate)", got)
+	}
+}
+
+// TestRankScore_ZeroWeightDoesNotNeutralizeNaNSalience demonstrates why
+// SalienceScore/clampUnit must reject NaN rather than merely bound it: a
+// naive "the default weight is 0 so any salience value is harmless" argument
+// is false under IEEE-754, since 0 * NaN is NaN, not 0 — a poisoned salience
+// term would corrupt the entire weighted sum regardless of its weight. This
+// pins that RankScore fed a rejected-then-zeroed salience (the real
+// end-to-end path) stays finite and unaffected, even at the default weight
+// of 0.
+func TestRankScore_ZeroWeightDoesNotNeutralizeNaNSalience(t *testing.T) {
+	w := config.RankingWeights{Recency: 1, Importance: 1, Relevance: 1, Salience: 0}
+	nan := math.NaN()
+	salience := SalienceScore(&nan) // must be 0, not NaN — see TestSalienceScore_RejectsNaN
+	got := RankScore(0.4, 0.6, 0.8, salience, w)
+	want := 0.4 + 0.6 + 0.8
+	if math.IsNaN(got) {
+		t.Fatalf("RankScore poisoned by NaN salience even at weight 0 (this is what the fix prevents)")
+	}
+	if !floatsClose(got, want, 1e-9) {
+		t.Errorf("RankScore = %v, want %v", got, want)
+	}
+}
+
 // ─── Phase 3: RankResults ────────────────────────────────────────────────────
 
 func sr(id int64, typ, updatedAt string, rank float64) store.SearchResult {
@@ -358,9 +396,9 @@ func floatPtr(v float64) *float64 { return &v }
 
 // TestBuildReceipt_FullBreakdown: when every component is available, the
 // receipt must surface lexical, semantic, fusion, recency, importance,
-// final, and staleness_penalty all at once.
+// salience, final, and staleness_penalty all at once.
 func TestBuildReceipt_FullBreakdown(t *testing.T) {
-	receipt := BuildReceipt(floatPtr(-2.5), false, floatPtr(0.87), floatPtr(0.031), floatPtr(0.6), floatPtr(1.0), floatPtr(0.74), 0)
+	receipt := BuildReceipt(floatPtr(-2.5), false, floatPtr(0.87), floatPtr(0.031), floatPtr(0.6), floatPtr(1.0), floatPtr(0.42), floatPtr(0.74), 0)
 
 	lexical, ok := receipt["lexical"].(map[string]any)
 	if !ok {
@@ -384,6 +422,9 @@ func TestBuildReceipt_FullBreakdown(t *testing.T) {
 	if receipt["importance"] != 1.0 {
 		t.Errorf("receipt[importance] = %v, want 1.0", receipt["importance"])
 	}
+	if receipt["salience"] != 0.42 {
+		t.Errorf("receipt[salience] = %v, want 0.42", receipt["salience"])
+	}
 	if receipt["final"] != 0.74 {
 		t.Errorf("receipt[final] = %v, want 0.74", receipt["final"])
 	}
@@ -400,7 +441,7 @@ func TestBuildReceipt_OmittedByDefault(t *testing.T) {
 	// A receipt built with every component nil must still return a map (the
 	// caller decides whether to attach it at all) with every nullable
 	// component actually null.
-	receipt := BuildReceipt(nil, false, nil, nil, nil, nil, nil, 0)
+	receipt := BuildReceipt(nil, false, nil, nil, nil, nil, nil, nil, 0)
 	lexical, ok := receipt["lexical"].(map[string]any)
 	if !ok {
 		t.Fatalf("receipt[lexical] missing or wrong type: %#v", receipt["lexical"])
@@ -408,7 +449,7 @@ func TestBuildReceipt_OmittedByDefault(t *testing.T) {
 	if lexical["rank"] != nil {
 		t.Errorf("lexical.rank = %v, want nil", lexical["rank"])
 	}
-	for _, key := range []string{"semantic", "fusion", "recency", "importance", "final"} {
+	for _, key := range []string{"semantic", "fusion", "recency", "importance", "salience", "final"} {
 		if receipt[key] != nil {
 			t.Errorf("receipt[%s] = %v, want nil", key, receipt[key])
 		}
@@ -419,7 +460,7 @@ func TestBuildReceipt_OmittedByDefault(t *testing.T) {
 // recall disabled entirely) must still populate lexical/recency/importance/
 // final while semantic (and fusion, since no RRF fusion ran) stay null.
 func TestBuildReceipt_SemanticNullWhenDisabled(t *testing.T) {
-	receipt := BuildReceipt(floatPtr(-1.2), false, nil, nil, floatPtr(0.4), floatPtr(0.33), floatPtr(0.6), 0)
+	receipt := BuildReceipt(floatPtr(-1.2), false, nil, nil, floatPtr(0.4), floatPtr(0.33), floatPtr(0.1), floatPtr(0.6), 0)
 	if receipt["semantic"] != nil {
 		t.Errorf("receipt[semantic] = %v, want nil (semantic recall disabled)", receipt["semantic"])
 	}
@@ -436,6 +477,9 @@ func TestBuildReceipt_SemanticNullWhenDisabled(t *testing.T) {
 	if receipt["importance"] != 0.33 {
 		t.Errorf("receipt[importance] = %v, want 0.33 (still populated)", receipt["importance"])
 	}
+	if receipt["salience"] != 0.1 {
+		t.Errorf("receipt[salience] = %v, want 0.1 (still populated)", receipt["salience"])
+	}
 	if receipt["final"] != 0.6 {
 		t.Errorf("receipt[final] = %v, want 0.6 (still populated)", receipt["final"])
 	}
@@ -449,12 +493,12 @@ func TestBuildReceipt_SemanticNullWhenDisabled(t *testing.T) {
 // in anchor_downrank_test.go for the non-zero case); this test now pins the
 // zero-input case only.
 func TestBuildReceipt_StalenessPenaltyReservedZero(t *testing.T) {
-	receipt := BuildReceipt(floatPtr(-1), true, floatPtr(0.5), floatPtr(0.02), floatPtr(0.9), floatPtr(1.0), floatPtr(0.95), 0)
+	receipt := BuildReceipt(floatPtr(-1), true, floatPtr(0.5), floatPtr(0.02), floatPtr(0.9), floatPtr(1.0), floatPtr(0.15), floatPtr(0.95), 0)
 	if receipt["staleness_penalty"] != float64(0) {
 		t.Errorf("receipt[staleness_penalty] = %v, want 0 (no staleness supplied)", receipt["staleness_penalty"])
 	}
 
-	receiptEmpty := BuildReceipt(nil, false, nil, nil, nil, nil, nil, 0)
+	receiptEmpty := BuildReceipt(nil, false, nil, nil, nil, nil, nil, nil, 0)
 	if receiptEmpty["staleness_penalty"] != float64(0) {
 		t.Errorf("receipt[staleness_penalty] (empty inputs) = %v, want 0", receiptEmpty["staleness_penalty"])
 	}

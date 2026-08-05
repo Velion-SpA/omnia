@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // TestAddObservation_PersistsSalience (Umbral bridge, Tanda T3): an explicit
 // Salience persists on a new observation; an omitted one reads back nil, not
@@ -51,7 +54,7 @@ func TestAddObservation_RejectsSalienceOutOfRange(t *testing.T) {
 	if err := s.CreateSession("sal-bad", "sal-proj-bad", "/tmp/sal-bad"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	for _, bad := range []float64{-0.01, 1.01, 83} {
+	for _, bad := range []float64{-0.01, 1.01, 83, 1.0000001} {
 		v := bad
 		if _, err := s.AddObservation(AddObservationParams{
 			SessionID: "sal-bad", Type: "manual", Title: "bad salience",
@@ -59,6 +62,50 @@ func TestAddObservation_RejectsSalienceOutOfRange(t *testing.T) {
 		}); err == nil {
 			t.Errorf("AddObservation with Salience=%v: expected error, got nil", bad)
 		}
+	}
+}
+
+// TestNormalizeSalience_RejectsNaN is a regression test for the bug found in
+// adversarial review of PR #259: IEEE-754 comparisons against NaN are always
+// false, so a naive `raw < min || raw > max` range check lets NaN through as
+// "in range" — normalizeSalience returned (NaN, nil) with no error before
+// this fix. This must fail loudly, not silently: today the write path
+// happens to be saved by sqlite3_bind_double rebinding NaN to NULL in
+// SQLite's C implementation, but a data-integrity guarantee must not rest on
+// an accident of a lower layer.
+func TestNormalizeSalience_RejectsNaN(t *testing.T) {
+	nan := math.NaN()
+	got, err := normalizeSalience(&nan)
+	if err == nil {
+		t.Fatalf("normalizeSalience(NaN) = (%v, nil), want a non-nil error", got)
+	}
+}
+
+// TestNormalizeSalience_RejectsInfinities covers +Inf/-Inf explicitly. Unlike
+// NaN these are already caught by the existing `raw < min || raw > max`
+// comparisons (Inf > salienceMax, -Inf < salienceMin), but the review asked
+// for explicit coverage since they are the other IEEE-754 non-finite values.
+func TestNormalizeSalience_RejectsInfinities(t *testing.T) {
+	for _, bad := range []float64{math.Inf(1), math.Inf(-1)} {
+		v := bad
+		if got, err := normalizeSalience(&v); err == nil {
+			t.Errorf("normalizeSalience(%v) = (%v, nil), want a non-nil error", bad, got)
+		}
+	}
+}
+
+// TestNormalizeSalience_AcceptsNegativeZero: -0.0 == 0.0 under IEEE-754, so
+// it is a legitimate boundary value (the minimum of [0,1]), not a value to
+// reject. This pins that -0.0 is accepted, not silently rejected by some
+// future bitwise-equality change.
+func TestNormalizeSalience_AcceptsNegativeZero(t *testing.T) {
+	negZero := math.Copysign(0, -1)
+	got, err := normalizeSalience(&negZero)
+	if err != nil {
+		t.Fatalf("normalizeSalience(-0.0): unexpected error %v", err)
+	}
+	if got == nil || *got != 0 {
+		t.Fatalf("normalizeSalience(-0.0) = %v, want a pointer to 0", got)
 	}
 }
 

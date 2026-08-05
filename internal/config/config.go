@@ -463,6 +463,13 @@ type RankingConfig struct {
 // Go value IS the shipped default; applyDefaults never fills it like its
 // three siblings, so a machine's guess never influences ranking unless an
 // operator opts in via `weights.salience`.
+//
+// weights.salience (like its three siblings) has NO effect while the learned
+// ranker is active (RankerConfig.Enabled, default false, with a trained
+// model loaded): ApplyLearnedRanker replaces RankResults' weighted-sum order
+// outright with a fixed 6-feature model that has no salience input. See
+// internal/mcp/mcp.go's handleSearch wiring (the RankResults/ApplyLearnedRanker
+// call site) for the full explanation of why this is not integrated.
 type RankingWeights struct {
 	Recency    float32 `yaml:"recency"`
 	Importance float32 `yaml:"importance"`

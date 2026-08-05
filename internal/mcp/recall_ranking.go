@@ -38,7 +38,11 @@ func RankScore(relevance, recency, importance, salience float64, w config.Rankin
 // RankScore. nil (every pre-Tanda-T3 row) normalizes to 0 — the same
 // "no signal" convention ImportanceScore/ComputeRecency use — and real values
 // are defensively clamped even though normalizeSalience already bounds them
-// at write time.
+// at write time. This is a genuine second layer, not a formality: it must
+// hold even for rows normalizeSalience never validated (e.g. written by an
+// older binary before that check existed, or restored from a backup taken
+// before it shipped), so it does not merely repeat the write-time contract
+// under a different name.
 func SalienceScore(salience *float64) float64 {
 	if salience == nil {
 		return 0
@@ -46,7 +50,16 @@ func SalienceScore(salience *float64) float64 {
 	return clampUnit(*salience)
 }
 
+// clampUnit clamps v into [0,1], treating NaN as "no usable signal" (0)
+// rather than propagating it. This matters because math.Max/math.Min both
+// return NaN when either argument is NaN — IEEE-754 propagation, not
+// clamping — so without the explicit IsNaN check below, a NaN input would
+// pass straight through unclamped and poison any weighted sum it is added
+// into (0 * NaN is NaN, not 0 — a zero weight does not neutralize it).
 func clampUnit(v float64) float64 {
+	if math.IsNaN(v) {
+		return 0
+	}
 	return math.Max(0, math.Min(1, v))
 }
 
@@ -276,13 +289,20 @@ func MinMaxNormalizeRelevance(results []store.SearchResult, relevance map[int64]
 // no null state to represent. Callers that have not wired anchor lookups at
 // all (or have structural_forgetting.enabled=false) simply pass 0, which is
 // exactly this slot's pre-PR2 reserved default.
-func BuildReceipt(lexicalRank *float64, exactMatch bool, semanticScore, fusionScore, recency, importance, final *float64, stalenessPenalty float64) map[string]any {
+//
+// salience (Umbral bridge, Tanda T3 review fix) surfaces the same
+// SalienceScore term RankScore's "final" already includes, so an operator
+// who sets weights.salience > 0 can see WHY final moved, not just that it
+// did. Like importance, it is always computable (SalienceScore(nil) is a
+// real 0, not "unavailable"), so callers pass a non-nil pointer.
+func BuildReceipt(lexicalRank *float64, exactMatch bool, semanticScore, fusionScore, recency, importance, salience, final *float64, stalenessPenalty float64) map[string]any {
 	return map[string]any{
 		"lexical":           lexicalComponent(lexicalRank, exactMatch),
 		"semantic":          nullableFloat(semanticScore),
 		"fusion":            nullableFloat(fusionScore),
 		"recency":           nullableFloat(recency),
 		"importance":        nullableFloat(importance),
+		"salience":          nullableFloat(salience),
 		"final":             nullableFloat(final),
 		"staleness_penalty": stalenessPenalty,
 	}
@@ -314,7 +334,7 @@ func BuildReceipt(lexicalRank *float64, exactMatch bool, semanticScore, fusionSc
 // extending recall.Service's public surface, deliberately deferred to keep
 // internal/recall fully untouched this slice (design D6).
 //
-// recency/importance/final are always computed from rankingCfg and
+// recency/importance/salience/final are always computed from rankingCfg and
 // normalizedRelevance regardless of whether ranking is actually enabled, so
 // explain stays useful as a standalone diagnostic even with ranking off —
 // exact sentinel and signature-match rows are both treated as maximally
@@ -371,7 +391,7 @@ func BuildResultReceipt(r store.SearchResult, fusionRan bool, rankingCfg config.
 	}
 	final := RankScore(normRel, recencyForScore, importance, salience, rankingCfg.Weights)
 
-	return BuildReceipt(lexicalRank, exact, nil, fusionScore, recencyPtr, &importance, &final, stalenessPenalty)
+	return BuildReceipt(lexicalRank, exact, nil, fusionScore, recencyPtr, &importance, &salience, &final, stalenessPenalty)
 }
 
 func lexicalComponent(rank *float64, exact bool) map[string]any {
