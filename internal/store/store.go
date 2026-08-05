@@ -5137,16 +5137,23 @@ func (s *Store) exportWithProjectScopeFrom(db queryer, project string) (*ExportD
 	sessionQuery := "SELECT id, project, directory, started_at, ended_at, summary FROM sessions"
 	sessionArgs := []any{}
 	if project != "" {
+		// Compared case-insensitively on purpose. Writes normalize the project
+		// name today, but rows written before that still carry their original
+		// casing, and every cloud caller passes the NORMALIZED name. An exact
+		// match therefore found none of those rows and exported nothing while
+		// reporting "all memories already exported" — silent non-replication.
+		// Case variants of one name are the same cloud project anyway, since
+		// cloud memberships are keyed on the lowercased form.
 		sessionQuery += `
-			WHERE project = ?
+			WHERE lower(project) = lower(?)
 			   OR id IN (
 				SELECT session_id FROM observations
-				 WHERE ifnull(project, '') = ?
-				    OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))
+				 WHERE lower(ifnull(project, '')) = lower(?)
+				    OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE lower(project) = lower(?)))
 				UNION
 				SELECT session_id FROM user_prompts
-				 WHERE ifnull(project, '') = ?
-				    OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))
+				 WHERE lower(ifnull(project, '')) = lower(?)
+				    OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE lower(project) = lower(?)))
 			)`
 		sessionArgs = append(sessionArgs, project, project, project, project, project)
 	}
@@ -5178,8 +5185,8 @@ func (s *Store) exportWithProjectScopeFrom(db queryer, project string) (*ExportD
 	obsArgs := []any{}
 	if project != "" {
 		obsQuery += `
-			WHERE ifnull(project, '') = ?
-			   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))`
+			WHERE lower(ifnull(project, '')) = lower(?)
+			   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE lower(project) = lower(?)))`
 		obsArgs = append(obsArgs, project, project)
 	}
 	obsQuery += " ORDER BY id"
@@ -5204,8 +5211,8 @@ func (s *Store) exportWithProjectScopeFrom(db queryer, project string) (*ExportD
 	promptArgs := []any{}
 	if project != "" {
 		promptQuery += `
-			WHERE ifnull(project, '') = ?
-			   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))`
+			WHERE lower(ifnull(project, '')) = lower(?)
+			   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE lower(project) = lower(?)))`
 		promptArgs = append(promptArgs, project, project)
 	}
 	promptQuery += " ORDER BY id"
