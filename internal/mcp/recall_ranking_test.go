@@ -20,11 +20,24 @@ func floatsClose(a, b, epsilon float64) bool {
 // This resolves the spec's open weighted-sum-vs-multiplicative note in favor
 // of a weighted sum.
 func TestRankScore_WeightedSum(t *testing.T) {
-	w := config.RankingWeights{Recency: 2, Importance: 3, Relevance: 5}
-	got := RankScore(0.4, 0.6, 0.8, w)
-	want := 5*0.4 + 2*0.6 + 3*0.8
+	w := config.RankingWeights{Recency: 2, Importance: 3, Relevance: 5, Salience: 7}
+	got := RankScore(0.4, 0.6, 0.8, 0.1, w)
+	want := 5*0.4 + 2*0.6 + 3*0.8 + 7*0.1
 	if !floatsClose(got, want, 1e-9) {
 		t.Errorf("RankScore = %v, want %v", got, want)
+	}
+}
+
+// TestRankScore_DefaultSalienceWeightIsAlwaysZeroTerm: with the shipped
+// default weight (Salience: 0), the term contributes exactly 0 regardless of
+// the salience value — a machine's guess can't move the score unless an
+// operator explicitly configures a nonzero weight.
+func TestRankScore_DefaultSalienceWeightIsAlwaysZeroTerm(t *testing.T) {
+	w := config.RankingWeights{Recency: 1, Importance: 1, Relevance: 1}
+	withoutSalience := RankScore(0.5, 0.5, 0.5, 0, w)
+	withHighSalience := RankScore(0.5, 0.5, 0.5, 1.0, w)
+	if withoutSalience != withHighSalience {
+		t.Errorf("RankScore with salience=0 (%v) != RankScore with salience=1.0 (%v); default Salience weight must zero out the term", withoutSalience, withHighSalience)
 	}
 }
 
@@ -112,6 +125,25 @@ func TestImportanceScore_NormalizedToUnitRange(t *testing.T) {
 	want = 1.0 / 6.0
 	if !floatsClose(got, want, 1e-9) {
 		t.Errorf("ImportanceScore(tool_use) with a raised ceiling = %v, want %v", got, want)
+	}
+}
+
+// TestSalienceScore_NilIsZeroAndClampsToUnitRange: nil (every pre-Tanda-T3
+// row) normalizes to 0 — "no signal", the same convention ImportanceScore/
+// ComputeRecency use — and real values are defensively clamped to [0,1] in
+// case some write path bypassed normalizeSalience's bounds check.
+func TestSalienceScore_NilIsZeroAndClampsToUnitRange(t *testing.T) {
+	if got := SalienceScore(nil); got != 0 {
+		t.Errorf("SalienceScore(nil) = %v, want 0", got)
+	}
+	if got := SalienceScore(floatPtr(0.7)); !floatsClose(got, 0.7, 1e-9) {
+		t.Errorf("SalienceScore(0.7) = %v, want 0.7", got)
+	}
+	if got := SalienceScore(floatPtr(5)); got != 1 {
+		t.Errorf("SalienceScore(5) = %v, want clamped to 1", got)
+	}
+	if got := SalienceScore(floatPtr(-2)); got != 0 {
+		t.Errorf("SalienceScore(-2) = %v, want clamped to 0", got)
 	}
 }
 
@@ -235,6 +267,29 @@ func TestRankResults_ExactSentinelStaysFirst(t *testing.T) {
 	got := RankResults(results, relevance, cfg, now)
 	if got[0].ID != 1 {
 		t.Fatalf("RankResults: expected exact sentinel (id 1) to stay first, got order %v", idsOfResults(got))
+	}
+}
+
+// TestRankResults_DefaultSalienceWeightDoesNotReorderTiedRows is the Tanda T3
+// proof: "machine-written salience must never override human-curated
+// importance" and, by default, must not even influence ranking. Two rows tie
+// on every OTHER component but differ on Salience by the maximum possible
+// gap (unset vs 1.0). Under the shipped default config, RankResults must
+// leave them in original relative order (sort.SliceStable) — if
+// Weights.Salience contributed anything, id=2 would sort first.
+func TestRankResults_DefaultSalienceWeightDoesNotReorderTiedRows(t *testing.T) {
+	now := time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC)
+	cfg := config.RankingConfig{Enabled: true, Weights: config.RankingWeights{Recency: 1, Importance: 1, Relevance: 1}, RecencyHalfLifeDays: 14}
+	relevance := map[int64]float64{1: 0.5, 2: 0.5}
+	results := []store.SearchResult{
+		sr(1, "tool_use", "2026-07-15 00:00:00", 0), // Salience unset (nil) — every pre-Tanda-T3 row
+		sr(2, "tool_use", "2026-07-15 00:00:00", 0), // Salience maximally "surprising"
+	}
+	results[1].Salience = floatPtr(1.0)
+
+	got := RankResults(results, relevance, cfg, now)
+	if got[0].ID != 1 || got[1].ID != 2 {
+		t.Fatalf("RankResults reordered two otherwise-identical rows on Salience alone (order %v) — Weights.Salience must default to 0", idsOfResults(got))
 	}
 }
 
@@ -436,7 +491,7 @@ func TestBuildResultReceipt_SignatureMatchTreatedAsMaximallyRelevant(t *testing.
 
 	recency, _ := ComputeRecency(r.UpdatedAt, now, cfg.RecencyHalfLifeDays)
 	importance := ImportanceScore(r.Type, cfg)
-	wantFinal := RankScore(1.0, recency, importance, cfg.Weights)
+	wantFinal := RankScore(1.0, recency, importance, 0, cfg.Weights)
 	if got := receipt["final"]; got != wantFinal {
 		t.Errorf("receipt[final] = %v, want %v (signature match must normalize relevance to 1.0, not the missing-key default 0)", got, wantFinal)
 	}

@@ -20,14 +20,34 @@ import (
 // leaves (design D6): internal/recall.Fuse's RRF fusion and
 // internal/store.Store.Search's FTS5 query are unchanged by this slice.
 
-// RankScore combines three normalized [0,1] components — relevance, recency,
-// and importance — into one final ranking score via a weighted sum
-// (Generative Agents' retrieval formula shape: score =
-// w.Relevance*relevance + w.Recency*recency + w.Importance*importance).
-// This is the single arithmetic primitive RankResults and the explain/
-// score-breakdown surface both call, so the two can never drift apart.
-func RankScore(relevance, recency, importance float64, w config.RankingWeights) float64 {
-	return float64(w.Relevance)*relevance + float64(w.Recency)*recency + float64(w.Importance)*importance
+// RankScore combines four normalized [0,1] components — relevance, recency,
+// importance, and salience — into one final ranking score via a weighted sum
+// (score = w.Relevance*relevance + w.Recency*recency + w.Importance*
+// importance + w.Salience*salience). This is the single arithmetic primitive
+// RankResults and the explain/score-breakdown surface both call, so the two
+// can never drift apart.
+//
+// w.Salience defaults to 0 (config.RankingWeights' own doc — Umbral bridge,
+// Tanda T3), so for every caller that hasn't opted in, this term is always
+// exactly 0: RankScore stays bit-for-bit identical to its pre-salience form.
+func RankScore(relevance, recency, importance, salience float64, w config.RankingWeights) float64 {
+	return float64(w.Relevance)*relevance + float64(w.Recency)*recency + float64(w.Importance)*importance + float64(w.Salience)*salience
+}
+
+// SalienceScore normalizes an observation's stored Salience into [0,1] for
+// RankScore. nil (every pre-Tanda-T3 row) normalizes to 0 — the same
+// "no signal" convention ImportanceScore/ComputeRecency use — and real values
+// are defensively clamped even though normalizeSalience already bounds them
+// at write time.
+func SalienceScore(salience *float64) float64 {
+	if salience == nil {
+		return 0
+	}
+	return clampUnit(*salience)
+}
+
+func clampUnit(v float64) float64 {
+	return math.Max(0, math.Min(1, v))
 }
 
 // recencyTimeLayouts mirrors internal/store's own parseObservationTime
@@ -182,7 +202,8 @@ func RankResults(results []store.SearchResult, relevance map[int64]float64, cfg 
 			recency = 0
 		}
 		importance := ImportanceScore(r.Type, cfg)
-		score := RankScore(normalized[r.ID], recency, importance, cfg.Weights)
+		salience := SalienceScore(r.Salience)
+		score := RankScore(normalized[r.ID], recency, importance, salience, cfg.Weights)
 		scored = append(scored, scoredResult{result: r, score: score})
 	}
 
@@ -342,12 +363,13 @@ func BuildResultReceipt(r store.SearchResult, fusionRan bool, rankingCfg config.
 	}
 
 	importance := ImportanceScore(r.Type, rankingCfg)
+	salience := SalienceScore(r.Salience)
 
 	normRel := 1.0
 	if !preempted {
 		normRel = normalizedRelevance[r.ID]
 	}
-	final := RankScore(normRel, recencyForScore, importance, rankingCfg.Weights)
+	final := RankScore(normRel, recencyForScore, importance, salience, rankingCfg.Weights)
 
 	return BuildReceipt(lexicalRank, exact, nil, fusionScore, recencyPtr, &importance, &final, stalenessPenalty)
 }

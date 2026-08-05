@@ -1004,6 +1004,43 @@ func TestMigrate_ProvenanceColumnsAndTombstones_PreservePopulatedData(t *testing
 	}
 }
 
+// TestMigrate_AddsSalienceColumn_PreservesPopulatedData (Umbral bridge, Tanda
+// T3): migrating an already-populated pre-salience database (the same
+// post-Phase-1 snapshot the provenance-foundation test above uses) must not
+// lose any row, and every pre-existing row must read Salience == nil (never
+// a manufactured 0) — "existing rows behave exactly as before".
+func TestMigrate_AddsSalienceColumn_PreservesPopulatedData(t *testing.T) {
+	obsRows, relRows := migrationFixtureRowsPostP1()
+	s := newTestStoreWithLegacySchemaPostP1(t, obsRows, relRows)
+
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE session_id = 'ses-p1-migration-test'`).Scan(&count); err != nil {
+		t.Fatalf("count fixture rows after migrate: %v", err)
+	}
+	if count != len(obsRows) {
+		t.Fatalf("after migrate: expected %d pre-existing rows, got %d", len(obsRows), count)
+	}
+
+	for _, row := range obsRows {
+		obs, err := s.GetObservationBySyncID(row.syncID)
+		if err != nil {
+			t.Fatalf("GetObservationBySyncID(%q): %v", row.syncID, err)
+		}
+		if obs.Content != row.content {
+			t.Errorf("sync_id %q: content = %q, want preserved %q", row.syncID, obs.Content, row.content)
+		}
+		if obs.Salience != nil {
+			t.Errorf("sync_id %q: Salience = %v, want nil for a pre-Tanda-T3 row", row.syncID, obs.Salience)
+		}
+	}
+
+	// Idempotency: a second migrate() run against the now-migrated database
+	// must not error (addColumnIfNotExists guard).
+	if err := s.migrate(); err != nil {
+		t.Fatalf("second migrate() call failed: %v — addColumnIfNotExists not idempotent for salience", err)
+	}
+}
+
 // TestMigrate_AddsSourceTrustTagColumns_Idempotent (omnia-provenance-foundation,
 // phase 2): migrate() must add nullable `source`/`trust_tag` columns to
 // observations, and running migrate() a second time against an

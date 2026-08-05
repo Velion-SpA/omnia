@@ -33,6 +33,13 @@ func TestRankingConfig_DefaultsDisabled(t *testing.T) {
 	if cfg.Recall.Ranking.Weights.Relevance != 1.0 {
 		t.Errorf("Weights.Relevance default: got %v, want 1.0", cfg.Recall.Ranking.Weights.Relevance)
 	}
+	// Unlike its three siblings, Salience must NOT be defaulted to 1.0 — its
+	// zero value is the shipped default (Umbral bridge, Tanda T3): a
+	// machine-written salience must never influence ranking unless an
+	// operator deliberately opts in.
+	if cfg.Recall.Ranking.Weights.Salience != 0 {
+		t.Errorf("Weights.Salience default: got %v, want 0 (opt-in only)", cfg.Recall.Ranking.Weights.Salience)
+	}
 	if cfg.Recall.Ranking.RecencyHalfLifeDays != 14 {
 		t.Errorf("RecencyHalfLifeDays default: got %v, want 14", cfg.Recall.Ranking.RecencyHalfLifeDays)
 	}
@@ -51,6 +58,7 @@ func TestRankingConfig_ParsesOverrides(t *testing.T) {
 		"      recency: 0.5\n"+
 		"      importance: 2\n"+
 		"      relevance: 1.5\n"+
+		"      salience: 0.4\n"+
 		"    importance_overrides:\n"+
 		"      decision: 5\n")
 	cfg, err := config.Load(path)
@@ -71,6 +79,9 @@ func TestRankingConfig_ParsesOverrides(t *testing.T) {
 	}
 	if cfg.Recall.Ranking.Weights.Relevance != 1.5 {
 		t.Errorf("Weights.Relevance: got %v, want 1.5", cfg.Recall.Ranking.Weights.Relevance)
+	}
+	if cfg.Recall.Ranking.Weights.Salience != 0.4 {
+		t.Errorf("Weights.Salience: got %v, want 0.4", cfg.Recall.Ranking.Weights.Salience)
 	}
 	if got := cfg.Recall.Ranking.ImportanceOverrides["decision"]; got != 5 {
 		t.Errorf("ImportanceOverrides[decision]: got %v, want 5", got)
