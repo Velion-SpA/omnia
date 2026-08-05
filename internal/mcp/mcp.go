@@ -1488,22 +1488,12 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		// Behavior).
 		now := store.ReadInstant(asOf)
 		results = RankResults(results, relevance, cfg.RecallRanking, now)
-		// ApplyLearnedRanker, when cfg.LearnedRanker.Enabled (default false)
-		// and a trained model is loaded, REPLACES the ordering RankResults
-		// just produced with its own fixed 6-feature dot product
-		// (ranker.Features: LexicalRRF, SemanticCosine, Recency, Importance,
-		// OutcomeHistory, TypeMatch — see internal/ranker/features.go). That
-		// feature set has no salience slot, so weights.salience (like the
-		// operator's recency/importance/relevance weights, already true
-		// before this slice — see openspec/specs/learned-ranker/spec.md) has
-		// ZERO effect whenever the learned ranker is active: RankResults'
-		// salience-aware order is computed above, then silently discarded.
-		// This is deliberately NOT being fixed here: LoadCurrent/SaveCandidate
-		// reject any model whose FeatureSchema string differs from the
-		// current build's, so adding an 8th feature would invalidate every
-		// already-trained model on disk. Since RankerConfig.Enabled defaults
-		// to false, the default ranking path (RankResults/RankScore, which
-		// DOES see salience) is what most operators actually get.
+		// ApplyLearnedRanker, when enabled with a trained model, REPLACES
+		// this ordering with a fixed 6-feature model (ranker.Features) that
+		// has no salience slot — so weights.salience silently has zero
+		// effect whenever the learned ranker is active. See
+		// config.RankingWeights.Salience's doc for why that's not being
+		// fixed here (FeatureSchema compatibility with trained models).
 		results = ApplyLearnedRanker(results, relevance, cfg.LearnedRanker, cfg.LearnedRankerModel, cfg.RecallRanking, now)
 
 		// Batch-load relations for all results (REQ-002). Avoids N+1.

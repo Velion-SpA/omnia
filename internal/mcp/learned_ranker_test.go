@@ -30,17 +30,12 @@ func TestApplyLearnedRankerUsesPromotedModel(t *testing.T) {
 	}
 }
 
-// TestApplyLearnedRanker_IgnoresSalienceEvenWhenEnabled (review fix 3, PR
-// #259): the learned ranker's fixed 6-feature schema (ranker.Features:
-// LexicalRRF, SemanticCosine, Recency, Importance, OutcomeHistory,
-// TypeMatch) has no salience slot. Two results tie on every one of those six
-// inputs except OutcomeHistory (id2 has a positive Outcome, id1 does not);
-// id1 additionally carries a much higher Salience. With weights.salience
-// heavily weighted, RankResults (which DOES see salience) ranks id1 first —
-// but ApplyLearnedRanker, run on that same output, must rank purely on
-// OutcomeHistory and put id2 first instead, proving the learned ranker
-// silently discards RankResults' salience-driven order rather than merely
-// underweighting it.
+// TestApplyLearnedRanker_IgnoresSalienceEvenWhenEnabled: the learned
+// ranker's fixed 6-feature schema has no salience slot. id1/id2 tie on every
+// feature except OutcomeHistory (id2) and Salience (id1, much higher). With
+// weights.salience heavily weighted, RankResults ranks id1 first — but
+// ApplyLearnedRanker on that same output must rank purely on OutcomeHistory
+// and put id2 first, proving it silently discards the salience-driven order.
 func TestApplyLearnedRanker_IgnoresSalienceEvenWhenEnabled(t *testing.T) {
 	sameTime := "2026-07-30 00:00:00"
 	hiSalience := 0.95
