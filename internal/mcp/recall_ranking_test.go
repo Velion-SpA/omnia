@@ -20,11 +20,24 @@ func floatsClose(a, b, epsilon float64) bool {
 // This resolves the spec's open weighted-sum-vs-multiplicative note in favor
 // of a weighted sum.
 func TestRankScore_WeightedSum(t *testing.T) {
-	w := config.RankingWeights{Recency: 2, Importance: 3, Relevance: 5}
-	got := RankScore(0.4, 0.6, 0.8, w)
-	want := 5*0.4 + 2*0.6 + 3*0.8
+	w := config.RankingWeights{Recency: 2, Importance: 3, Relevance: 5, Salience: 7}
+	got := RankScore(0.4, 0.6, 0.8, 0.1, w)
+	want := 5*0.4 + 2*0.6 + 3*0.8 + 7*0.1
 	if !floatsClose(got, want, 1e-9) {
 		t.Errorf("RankScore = %v, want %v", got, want)
+	}
+}
+
+// TestRankScore_DefaultSalienceWeightIsAlwaysZeroTerm: with the shipped
+// default weight (Salience: 0), the term contributes exactly 0 regardless of
+// the salience value — a machine's guess can't move the score unless an
+// operator explicitly configures a nonzero weight.
+func TestRankScore_DefaultSalienceWeightIsAlwaysZeroTerm(t *testing.T) {
+	w := config.RankingWeights{Recency: 1, Importance: 1, Relevance: 1}
+	withoutSalience := RankScore(0.5, 0.5, 0.5, 0, w)
+	withHighSalience := RankScore(0.5, 0.5, 0.5, 1.0, w)
+	if withoutSalience != withHighSalience {
+		t.Errorf("RankScore with salience=0 (%v) != RankScore with salience=1.0 (%v); default Salience weight must zero out the term", withoutSalience, withHighSalience)
 	}
 }
 
@@ -112,6 +125,37 @@ func TestImportanceScore_NormalizedToUnitRange(t *testing.T) {
 	want = 1.0 / 6.0
 	if !floatsClose(got, want, 1e-9) {
 		t.Errorf("ImportanceScore(tool_use) with a raised ceiling = %v, want %v", got, want)
+	}
+}
+
+// TestSalienceScore_NilIsZeroAndClampsToUnitRange: nil (every pre-Tanda-T3
+// row) normalizes to 0 — "no signal", the same convention ImportanceScore/
+// ComputeRecency use — and real values are defensively clamped to [0,1] in
+// case some write path bypassed normalizeSalience's bounds check.
+func TestSalienceScore_NilIsZeroAndClampsToUnitRange(t *testing.T) {
+	if got := SalienceScore(nil); got != 0 {
+		t.Errorf("SalienceScore(nil) = %v, want 0", got)
+	}
+	if got := SalienceScore(floatPtr(0.7)); !floatsClose(got, 0.7, 1e-9) {
+		t.Errorf("SalienceScore(0.7) = %v, want 0.7", got)
+	}
+	if got := SalienceScore(floatPtr(5)); got != 1 {
+		t.Errorf("SalienceScore(5) = %v, want clamped to 1", got)
+	}
+	if got := SalienceScore(floatPtr(-2)); got != 0 {
+		t.Errorf("SalienceScore(-2) = %v, want clamped to 0", got)
+	}
+}
+
+// TestSalienceScore_RejectsNaN: math.Max/math.Min both propagate NaN
+// (IEEE-754 comparisons against NaN are always false), so clampUnit(NaN)
+// returned NaN before this fix instead of a genuine [0,1] value — which
+// would poison RankScore's weighted sum even at the default weight of 0
+// (0 * NaN is NaN, not 0).
+func TestSalienceScore_RejectsNaN(t *testing.T) {
+	nan := math.NaN()
+	if got := SalienceScore(&nan); got != 0 {
+		t.Errorf("SalienceScore(NaN) = %v, want 0 (NaN must not propagate)", got)
 	}
 }
 
@@ -238,6 +282,29 @@ func TestRankResults_ExactSentinelStaysFirst(t *testing.T) {
 	}
 }
 
+// TestRankResults_DefaultSalienceWeightDoesNotReorderTiedRows is the Tanda T3
+// proof: "machine-written salience must never override human-curated
+// importance" and, by default, must not even influence ranking. Two rows tie
+// on every OTHER component but differ on Salience by the maximum possible
+// gap (unset vs 1.0). Under the shipped default config, RankResults must
+// leave them in original relative order (sort.SliceStable) — if
+// Weights.Salience contributed anything, id=2 would sort first.
+func TestRankResults_DefaultSalienceWeightDoesNotReorderTiedRows(t *testing.T) {
+	now := time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC)
+	cfg := config.RankingConfig{Enabled: true, Weights: config.RankingWeights{Recency: 1, Importance: 1, Relevance: 1}, RecencyHalfLifeDays: 14}
+	relevance := map[int64]float64{1: 0.5, 2: 0.5}
+	results := []store.SearchResult{
+		sr(1, "tool_use", "2026-07-15 00:00:00", 0), // Salience unset (nil) — every pre-Tanda-T3 row
+		sr(2, "tool_use", "2026-07-15 00:00:00", 0), // Salience maximally "surprising"
+	}
+	results[1].Salience = floatPtr(1.0)
+
+	got := RankResults(results, relevance, cfg, now)
+	if got[0].ID != 1 || got[1].ID != 2 {
+		t.Fatalf("RankResults reordered two otherwise-identical rows on Salience alone (order %v) — Weights.Salience must default to 0", idsOfResults(got))
+	}
+}
+
 // srSignature builds a signature-match SearchResult (Rank ==
 // signatureMatchRank, SignatureMatch == true) — the shape internal/store's
 // Search produces for its error-signature lane (design obs #1498, slice 1).
@@ -303,9 +370,9 @@ func floatPtr(v float64) *float64 { return &v }
 
 // TestBuildReceipt_FullBreakdown: when every component is available, the
 // receipt must surface lexical, semantic, fusion, recency, importance,
-// final, and staleness_penalty all at once.
+// salience, final, and staleness_penalty all at once.
 func TestBuildReceipt_FullBreakdown(t *testing.T) {
-	receipt := BuildReceipt(floatPtr(-2.5), false, floatPtr(0.87), floatPtr(0.031), floatPtr(0.6), floatPtr(1.0), floatPtr(0.74), 0)
+	receipt := BuildReceipt(floatPtr(-2.5), false, floatPtr(0.87), floatPtr(0.031), floatPtr(0.6), floatPtr(1.0), floatPtr(0.42), floatPtr(0.74), 0)
 
 	lexical, ok := receipt["lexical"].(map[string]any)
 	if !ok {
@@ -329,6 +396,9 @@ func TestBuildReceipt_FullBreakdown(t *testing.T) {
 	if receipt["importance"] != 1.0 {
 		t.Errorf("receipt[importance] = %v, want 1.0", receipt["importance"])
 	}
+	if receipt["salience"] != 0.42 {
+		t.Errorf("receipt[salience] = %v, want 0.42", receipt["salience"])
+	}
 	if receipt["final"] != 0.74 {
 		t.Errorf("receipt[final] = %v, want 0.74", receipt["final"])
 	}
@@ -345,7 +415,7 @@ func TestBuildReceipt_OmittedByDefault(t *testing.T) {
 	// A receipt built with every component nil must still return a map (the
 	// caller decides whether to attach it at all) with every nullable
 	// component actually null.
-	receipt := BuildReceipt(nil, false, nil, nil, nil, nil, nil, 0)
+	receipt := BuildReceipt(nil, false, nil, nil, nil, nil, nil, nil, 0)
 	lexical, ok := receipt["lexical"].(map[string]any)
 	if !ok {
 		t.Fatalf("receipt[lexical] missing or wrong type: %#v", receipt["lexical"])
@@ -353,7 +423,7 @@ func TestBuildReceipt_OmittedByDefault(t *testing.T) {
 	if lexical["rank"] != nil {
 		t.Errorf("lexical.rank = %v, want nil", lexical["rank"])
 	}
-	for _, key := range []string{"semantic", "fusion", "recency", "importance", "final"} {
+	for _, key := range []string{"semantic", "fusion", "recency", "importance", "salience", "final"} {
 		if receipt[key] != nil {
 			t.Errorf("receipt[%s] = %v, want nil", key, receipt[key])
 		}
@@ -364,7 +434,7 @@ func TestBuildReceipt_OmittedByDefault(t *testing.T) {
 // recall disabled entirely) must still populate lexical/recency/importance/
 // final while semantic (and fusion, since no RRF fusion ran) stay null.
 func TestBuildReceipt_SemanticNullWhenDisabled(t *testing.T) {
-	receipt := BuildReceipt(floatPtr(-1.2), false, nil, nil, floatPtr(0.4), floatPtr(0.33), floatPtr(0.6), 0)
+	receipt := BuildReceipt(floatPtr(-1.2), false, nil, nil, floatPtr(0.4), floatPtr(0.33), floatPtr(0.1), floatPtr(0.6), 0)
 	if receipt["semantic"] != nil {
 		t.Errorf("receipt[semantic] = %v, want nil (semantic recall disabled)", receipt["semantic"])
 	}
@@ -381,6 +451,9 @@ func TestBuildReceipt_SemanticNullWhenDisabled(t *testing.T) {
 	if receipt["importance"] != 0.33 {
 		t.Errorf("receipt[importance] = %v, want 0.33 (still populated)", receipt["importance"])
 	}
+	if receipt["salience"] != 0.1 {
+		t.Errorf("receipt[salience] = %v, want 0.1 (still populated)", receipt["salience"])
+	}
 	if receipt["final"] != 0.6 {
 		t.Errorf("receipt[final] = %v, want 0.6 (still populated)", receipt["final"])
 	}
@@ -394,12 +467,12 @@ func TestBuildReceipt_SemanticNullWhenDisabled(t *testing.T) {
 // in anchor_downrank_test.go for the non-zero case); this test now pins the
 // zero-input case only.
 func TestBuildReceipt_StalenessPenaltyReservedZero(t *testing.T) {
-	receipt := BuildReceipt(floatPtr(-1), true, floatPtr(0.5), floatPtr(0.02), floatPtr(0.9), floatPtr(1.0), floatPtr(0.95), 0)
+	receipt := BuildReceipt(floatPtr(-1), true, floatPtr(0.5), floatPtr(0.02), floatPtr(0.9), floatPtr(1.0), floatPtr(0.15), floatPtr(0.95), 0)
 	if receipt["staleness_penalty"] != float64(0) {
 		t.Errorf("receipt[staleness_penalty] = %v, want 0 (no staleness supplied)", receipt["staleness_penalty"])
 	}
 
-	receiptEmpty := BuildReceipt(nil, false, nil, nil, nil, nil, nil, 0)
+	receiptEmpty := BuildReceipt(nil, false, nil, nil, nil, nil, nil, nil, 0)
 	if receiptEmpty["staleness_penalty"] != float64(0) {
 		t.Errorf("receipt[staleness_penalty] (empty inputs) = %v, want 0", receiptEmpty["staleness_penalty"])
 	}
@@ -436,7 +509,7 @@ func TestBuildResultReceipt_SignatureMatchTreatedAsMaximallyRelevant(t *testing.
 
 	recency, _ := ComputeRecency(r.UpdatedAt, now, cfg.RecencyHalfLifeDays)
 	importance := ImportanceScore(r.Type, cfg)
-	wantFinal := RankScore(1.0, recency, importance, cfg.Weights)
+	wantFinal := RankScore(1.0, recency, importance, 0, cfg.Weights)
 	if got := receipt["final"]; got != wantFinal {
 		t.Errorf("receipt[final] = %v, want %v (signature match must normalize relevance to 1.0, not the missing-key default 0)", got, wantFinal)
 	}

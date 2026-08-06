@@ -124,6 +124,12 @@ type Observation struct {
 	// classifyTrust's default, exactly as before this slice.
 	Source   *string `json:"source,omitempty"`
 	TrustTag *string `json:"trust_tag,omitempty"`
+	// Salience is an optional, machine-written signal (Umbral bridge, Tanda
+	// T3) — SEPARATE from Importance, never made writable. nil means "never
+	// set"; pre-existing rows read back nil and rank exactly as before
+	// (config.RankingWeights.Salience defaults to 0). Bounded to [0,1] at
+	// write time — see normalizeSalience.
+	Salience *float64 `json:"salience,omitempty"`
 }
 
 const (
@@ -276,6 +282,12 @@ type AddObservationParams struct {
 	// PRESERVES the previously stored source/trust_tag rather than clearing
 	// them, mirroring ErrorSignature/Outcome's revision-preserving behavior.
 	Source string `json:"source,omitempty"`
+	// Salience is an optional machine-written signal in [0,1] (Umbral
+	// bridge, Tanda T3): nil means "not provided" and preserves the prior
+	// value on a topic_key revision (real nil pointer, not an empty-string
+	// sentinel, since 0.0 is itself meaningful). Out-of-range values are
+	// rejected — see normalizeSalience.
+	Salience *float64 `json:"salience,omitempty"`
 }
 
 type UpdateObservationParams struct {
@@ -351,7 +363,7 @@ var decayReviewAfterMonths = map[string]int{
 
 const observationSelectColumns = `id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
 	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at,
-	       error_signature, outcome, source, trust_tag`
+	       error_signature, outcome, source, trust_tag, salience`
 
 type SyncState struct {
 	TargetKey           string  `json:"target_key"`
@@ -1402,6 +1414,16 @@ func (s *Store) migrate() error {
 		if err := s.addColumnIfNotExists("observations", c.name, c.definition); err != nil {
 			return err
 		}
+	}
+
+	// ── Umbral bridge — machine-written salience (Tanda T3) ────────────────
+	// Additive nullable REAL column, matching the provenance/recall-
+	// reliability addColumnIfNotExists conventions above. Existing rows get
+	// NULL (Salience == nil) and rank exactly as before: RankingWeights.
+	// Salience defaults to 0. See salience.go (bounds) and
+	// internal/mcp/recall_ranking.go (ranking wiring).
+	if err := s.addColumnIfNotExists("observations", "salience", "REAL"); err != nil {
+		return err
 	}
 
 	// deletion_tombstones is the durable, independent proof of physical
@@ -3231,6 +3253,10 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 	if err != nil {
 		return SaveResult{}, err
 	}
+	salience, err := normalizeSalience(p.Salience)
+	if err != nil {
+		return SaveResult{}, err
+	}
 	var errSig string
 	if strings.TrimSpace(p.ErrorSignature) != "" {
 		errSig = NormalizeErrorSignature(p.ErrorSignature)
@@ -3292,6 +3318,7 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 					     outcome = COALESCE(NULLIF(?, ''), outcome),
 					     source = COALESCE(NULLIF(?, ''), source),
 					     trust_tag = COALESCE(NULLIF(?, ''), trust_tag),
+					     salience = COALESCE(?, salience),
 					     revision_count = revision_count + 1,
 					     last_seen_at = datetime('now'),
 					     updated_at = ?
@@ -3306,6 +3333,7 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 					outcome,
 					p.Source,
 					trustTagForRevision,
+					salience,
 					mutationAt,
 					existingID,
 				); err != nil {
@@ -3421,6 +3449,7 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 						     outcome = COALESCE(NULLIF(?, ''), outcome),
 						     source = COALESCE(NULLIF(?, ''), source),
 						     trust_tag = COALESCE(NULLIF(?, ''), trust_tag),
+						     salience = COALESCE(?, salience),
 						     revision_count = revision_count + 1,
 						     last_seen_at = datetime('now'),
 						     updated_at = ?
@@ -3435,6 +3464,7 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 						outcome,
 						p.Source,
 						trustTagForRevision,
+						salience,
 						mutationAt,
 						verdict.targetID,
 					); err != nil {
@@ -3464,11 +3494,11 @@ func (s *Store) SaveObservation(p AddObservationParams) (SaveResult, error) {
 
 		syncID := newSyncID("obs")
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at, error_signature, outcome, source, trust_tag)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'), ?, ?, ?, ?)`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at, error_signature, outcome, source, trust_tag, salience)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'), ?, ?, ?, ?, ?)`,
 			syncID, p.SessionID, p.Type, title, content,
 			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
-			nullableString(errSig), nullableString(outcome), nullableString(p.Source), nullableString(trustTag),
+			nullableString(errSig), nullableString(outcome), nullableString(p.Source), nullableString(trustTag), salience,
 		)
 		if err != nil {
 			return err
@@ -8184,7 +8214,7 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
 		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
-		&o.ErrorSignature, &o.Outcome, &o.Source, &o.TrustTag,
+		&o.ErrorSignature, &o.Outcome, &o.Source, &o.TrustTag, &o.Salience,
 	); err != nil {
 		return err
 	}

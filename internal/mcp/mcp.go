@@ -595,6 +595,9 @@ Examples:
 				mcp.WithString("source",
 					mcp.Description("Write-time provenance class: user | agent | ingest:tool | ingest:web | ingest:doc. Classified into a trust_tag at save time (attribution, not authentication — never blocks or alters the save). Omitted or unrecognized values default to trust_tag=unverified."),
 				),
+				mcp.WithNumber("salience",
+					mcp.Description("Optional machine-written signal in [0,1] — SEPARATE from and never overriding importance (which stays type-derived and is not writable). Intended for automated writers (e.g. a prediction-error gate) to say 'this mattered more/less than its type alone suggests.' Omit for ordinary human/agent saves. Only influences ranking if an operator explicitly sets recall.ranking.weights.salience above its default of 0."),
+				),
 				mcp.WithArray("code_anchors",
 					mcp.Description(`Optional list of code anchors to link this memory to: [{file, symbol, line_start, line_end}]. Each entry resolves a git-blame line range, blame SHA, and content hash via the local git repo and persists it linked to this memory (living-memory / structural-forgetting). Omitting this field leaves mem_save unchanged. A missing git binary, a non-repo directory, or a malformed entry never fails the save — that entry (or all of them) is silently skipped.`),
 					mcp.Items(map[string]any{
@@ -1478,12 +1481,19 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		}
 
 		// memory-recall-ranking (design D6 wiring boundary): re-sorts by
-		// recency x importance x relevance when cfg.RecallRanking.Enabled.
-		// A pure no-op when it's not (the default), so this call never
-		// changes handleSearch's response when ranking is unconfigured
-		// (Requirement: Backward-Compatible Default Behavior).
+		// recency x importance x relevance x salience when
+		// cfg.RecallRanking.Enabled. A pure no-op when it's not (the
+		// default), so this call never changes handleSearch's response when
+		// ranking is unconfigured (Requirement: Backward-Compatible Default
+		// Behavior).
 		now := store.ReadInstant(asOf)
 		results = RankResults(results, relevance, cfg.RecallRanking, now)
+		// ApplyLearnedRanker, when enabled with a trained model, REPLACES
+		// this ordering with a fixed 6-feature model (ranker.Features) that
+		// has no salience slot — so weights.salience silently has zero
+		// effect whenever the learned ranker is active. See
+		// config.RankingWeights.Salience's doc for why that's not being
+		// fixed here (FeatureSchema compatibility with trained models).
 		results = ApplyLearnedRanker(results, relevance, cfg.LearnedRanker, cfg.LearnedRankerModel, cfg.RecallRanking, now)
 
 		// Batch-load relations for all results (REQ-002). Avoids N+1.
@@ -1966,6 +1976,10 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		errorSignature, _ := req.GetArguments()["error_signature"].(string)
 		outcome, _ := req.GetArguments()["outcome"].(string)
 		source, _ := req.GetArguments()["source"].(string)
+		var salience *float64
+		if v, ok := req.GetArguments()["salience"].(float64); ok {
+			salience = &v
+		}
 		appliedProcedure, _ := req.GetArguments()["applied_procedure"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
 		_, explicitProjectProvided := req.GetArguments()["project"]
@@ -2048,6 +2062,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			ErrorSignature: errorSignature,
 			Outcome:        outcome,
 			Source:         source,
+			Salience:       salience,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil

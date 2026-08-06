@@ -452,13 +452,29 @@ type RankingConfig struct {
 }
 
 // RankingWeights are the per-component multipliers RankScore applies to each
-// normalized [0,1] signal. All three default to 1.0 (Requirement:
-// Configurable Weights With Safe Defaults) — an equal-weight sum, matching
-// the Generative Agents retrieval formula's shape.
+// normalized [0,1] signal. Recency/Importance/Relevance all default to 1.0
+// (Requirement: Configurable Weights With Safe Defaults) — an equal-weight
+// sum, matching the Generative Agents retrieval formula's shape.
+//
+// Salience is deliberately NOT part of that default-1.0 group (Umbral
+// bridge, Tanda T3): it weights Observation.Salience, a machine-written "how
+// surprised was I" signal, kept separate from Importance (a pure type-derived
+// heuristic — see DefaultImportanceWeight — never made writable). Its zero
+// Go value IS the shipped default; applyDefaults never fills it like its
+// three siblings, so a machine's guess never influences ranking unless an
+// operator opts in via `weights.salience`.
+//
+// weights.salience (like its three siblings) has NO effect while the learned
+// ranker is active (RankerConfig.Enabled with a trained model loaded):
+// ApplyLearnedRanker replaces the weighted-sum order outright with a fixed
+// 6-feature model that has no salience input — bumping its feature count
+// would invalidate every already-trained model on disk, so this is deferred
+// rather than integrated.
 type RankingWeights struct {
 	Recency    float32 `yaml:"recency"`
 	Importance float32 `yaml:"importance"`
 	Relevance  float32 `yaml:"relevance"`
+	Salience   float32 `yaml:"salience"`
 }
 
 // DefaultImportanceWeight returns the heuristic-by-type importance weight
@@ -854,6 +870,10 @@ func applyDefaults(cfg *Config, data []byte) {
 	if cfg.Recall.Ranking.Weights.Relevance == 0 {
 		cfg.Recall.Ranking.Weights.Relevance = 1.0
 	}
+	// Weights.Salience intentionally has NO default-fill here, unlike its
+	// three siblings above — see RankingWeights' own doc: its zero value
+	// stays zero, keeping RankScore's sum bit-for-bit identical to
+	// pre-salience behavior until an operator opts in.
 	if cfg.Recall.Ranking.RecencyHalfLifeDays == 0 {
 		cfg.Recall.Ranking.RecencyHalfLifeDays = 14
 	}

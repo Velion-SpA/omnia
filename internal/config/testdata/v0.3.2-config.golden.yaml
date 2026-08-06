@@ -59,6 +59,7 @@ recall:
             recency: 2
             importance: 3
             relevance: 4
+            salience: 0
         importance_overrides:
             decision: 9
     fts_relax_on_zero: false
