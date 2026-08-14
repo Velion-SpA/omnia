@@ -696,6 +696,58 @@ func pipelineBackedFetcher(s *store.Store, recallSvc *recall.Service, cfg config
 // file only builds fetchers (requirement 5's "point the harness at either
 // GET /search over HTTP or the in-process search path") and formats output.
 
+// conversationalGroundingContextSize bounds how many top-ranked results'
+// content the conversational profile assembles into RetrievedCase.Retrieved
+// for grounding/honest-refusal scoring — matching what a real consumer of
+// GET /search actually assembles before answering, not just the single top
+// hit. Grounding is defined, both in the plan
+// (docs/conversational-retrieval-plan.md, "Baseline first" item) and in
+// this package's own doc comments (internal/eval/conversational_scoring.go:
+// "did the retrieved context contain the evidence needed to answer"), over
+// the assembled CONTEXT a consumer sees — and the real consumer, Hermes,
+// assembles the top 4 results, not just results[0]. 4 is that documented
+// number, not an arbitrary choice.
+//
+// Scoring only results[0] under-reports grounding whenever the fact-bearing
+// chunk ranks 2nd-4th instead of 1st. This was measured directly: after
+// fixing the repodoc chunk-title bug (internal/source/repodoc/chunk.go's
+// DocTitle), README chunks holding the plan's paired facts ranked at
+// various depths within the top 4 for several conversational queries, never
+// always at rank 1 — a top-1-only grounding check would still have scored
+// several of those as "not grounded" despite the evidence being squarely in
+// what a real consumer would have received.
+//
+// This constant affects ONLY grounding (identity kind) and honest refusal
+// (absence kind) scoring. accuracy@1 and MRR stay position-based over
+// RankedObservationIDs (eval.BuildConversationalReport), which is always
+// populated from the FULL ranked candidate list — unaffected by this
+// constant.
+const conversationalGroundingContextSize = 4
+
+// conversationalGroundingContextSeparator joins each assembled result's
+// content in assembleGroundingContext. It is distinctive enough that it
+// cannot plausibly appear inside a real observation's Content and blur two
+// adjacent chunks together under a factMatches substring check.
+const conversationalGroundingContextSeparator = "\n\n---\n\n"
+
+// assembleGroundingContext joins the top conversationalGroundingContextSize
+// results' Content into the single string the conversational profile scores
+// grounding and honest refusal against (see conversationalGroundingContextSize's
+// doc comment for the "why top-N, not top-1" rationale). An empty results
+// slice yields "", preserving eval.ScoreAbsence's "the fetcher returned
+// zero results" verdict — concatenating nothing is still nothing.
+func assembleGroundingContext(results []store.SearchResult) string {
+	n := conversationalGroundingContextSize
+	if n > len(results) {
+		n = len(results)
+	}
+	parts := make([]string, 0, n)
+	for _, r := range results[:n] {
+		parts = append(parts, r.Content)
+	}
+	return strings.Join(parts, conversationalGroundingContextSeparator)
+}
+
 // conversationalCorpusPathFlagDefault mirrors evalCorpusPathFlagDefault's
 // convention (an empty string means "use the embedded corpus") for the
 // conversational profile's own embedded corpus
@@ -819,7 +871,10 @@ func conversationalStoreFetcher(s *store.Store) eval.ConversationalFetcher {
 		}
 		top := results[0]
 		return eval.RetrievedCase{
-			Retrieved:             top.Content,
+			// #P1/#bug: grounding must be scored over the assembled top-N
+			// context a real consumer sees, not just the top hit — see
+			// conversationalGroundingContextSize's doc comment.
+			Retrieved:             assembleGroundingContext(results),
 			SurfacedObservationID: top.SyncID,
 			Tokens:                eval.TokenBreakdown{Retrieval: estimateTokenCount(top.Content)},
 			RankedObservationIDs:  rankedSyncIDs(results),
@@ -886,7 +941,9 @@ func conversationalPipelineFetcher(s *store.Store, recallSvc *recall.Service, cf
 
 		top := results[0]
 		return eval.RetrievedCase{
-			Retrieved:             top.Content,
+			// See conversationalGroundingContextSize's doc comment: grounding
+			// must be scored over the assembled top-N context, not top-1.
+			Retrieved:             assembleGroundingContext(results),
 			SurfacedObservationID: top.SyncID,
 			Tokens:                eval.TokenBreakdown{InjectedContext: injectedTokens},
 			RankedObservationIDs:  rankedSyncIDs(results),
@@ -947,7 +1004,12 @@ func conversationalHTTPFetcher(client *http.Client, baseURL string) eval.Convers
 			return eval.RetrievedCase{}, nil
 		}
 		return eval.RetrievedCase{
-			Retrieved:             results[0].Content,
+			// See conversationalGroundingContextSize's doc comment: grounding
+			// must be scored over the assembled top-N context a real
+			// consumer (Hermes) would receive, not just results[0] — this
+			// was the bug: grounding under-reported because only the single
+			// top hit was ever checked for the expected fact.
+			Retrieved:             assembleGroundingContext(results),
 			SurfacedObservationID: results[0].SyncID,
 			Tokens:                eval.TokenBreakdown{Retrieval: estimateTokenCount(results[0].Content)},
 			RankedObservationIDs:  rankedSyncIDs(results),

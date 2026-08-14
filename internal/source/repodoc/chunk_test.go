@@ -236,6 +236,67 @@ func TestDocTitle_FallsBackWhenNoH1(t *testing.T) {
 	}
 }
 
+// TestDocTitle_TableDriven is the regression suite for the bug this change
+// fixes: DocTitle used to scan raw lines for a "#"-prefixed line without any
+// fence tracking, so a shell comment inside a README's first ```sh fence
+// (e.g. "# Homebrew (macOS / Linux)") was picked up as the document title —
+// and because the title is prefixed into every chunk's indexed body
+// ("Document: {title}"), it silently retitled every chunk toward whatever
+// happened to sit in that fence. DocTitle now reuses findHeadings' fence-
+// tracking scan (the same one ChunkMarkdown/the section splitter uses), so
+// every case below must resolve to the fallback or to a REAL, unfenced H1 —
+// never to fenced content.
+func TestDocTitle_TableDriven(t *testing.T) {
+	const fallback = "fallback-name"
+
+	tests := map[string]struct {
+		content string
+		want    string
+	}{
+		"no H1 at all (HTML banner instead, README's real-world convention)": {
+			content: "<div align=\"center\">\n  <img src=\"logo.png\">\n</div>\n\n## Features\n\nStuff.\n",
+			want:    fallback,
+		},
+		"H1-looking line inside a ```sh fence": {
+			content: "## Install\n\n```sh\n# Homebrew (macOS / Linux)\nbrew install example/tap/thing\n```\n",
+			want:    fallback,
+		},
+		"H1-looking line inside a plain ``` fence": {
+			content: "## Notes\n\n```\n# not a title, just a fenced comment\n```\n",
+			want:    fallback,
+		},
+		"H1-looking line inside a ~~~ fence": {
+			content: "## Notes\n\n~~~\n# not a title, tilde fence\n~~~\n",
+			want:    fallback,
+		},
+		"real H1 after a fenced false heading": {
+			content: "```sh\n# fenced, not the title\n```\n\n# Real Title\n\nBody.\n",
+			want:    "Real Title",
+		},
+		"fence that is never closed swallows any '#' line to EOF": {
+			content: "Intro.\n\n```sh\n# inside an unterminated fence\necho hi\n# also inside it\n",
+			want:    fallback,
+		},
+		"indented (4-space) code block is not a fence and not a heading": {
+			content: "Intro paragraph.\n\n    # this is an indented code block, not a heading\n    echo hi\n\nMore text.\n",
+			want:    fallback,
+		},
+		"real H1 after an indented code block": {
+			content: "    # indented, not a heading\n\n# Real Title\n\nBody.\n",
+			want:    "Real Title",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := DocTitle(tc.content, fallback)
+			if got != tc.want {
+				t.Errorf("DocTitle(%q, %q) = %q, want %q", tc.content, fallback, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSlugify(t *testing.T) {
 	tests := map[string]string{
 		"Non-goals":               "non-goals",

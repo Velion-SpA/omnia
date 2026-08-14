@@ -490,6 +490,44 @@ func TestFetch_ExcludedPathSegmentsOverride(t *testing.T) {
 	}
 }
 
+// TestFetch_ReadmeWithoutH1FallsBackToProjectName is the end-to-end
+// regression test for the repodoc chunk-title bug: a README with no real H1
+// (banner-only, this repo's own convention) and a shell comment as the
+// first "#"-looking line inside its first code fence must NOT have every
+// chunk titled after that fenced comment. It must fall back to the project
+// name, not the literal filename "README" and never to fenced content.
+func TestFetch_ReadmeWithoutH1FallsBackToProjectName(t *testing.T) {
+	dir := t.TempDir()
+	readme := "<div align=\"center\">\n  <h1>Ignored HTML heading, not markdown</h1>\n</div>\n\n" +
+		"## Install\n\n```sh\n# Homebrew (macOS / Linux)\nbrew install velion-spa/tap/omnia\n```\n\n" +
+		"## Features\n\nDoes things.\n"
+	writeFile(t, dir, "README.md", readme)
+
+	src := repodoc.New(dir, "omnia", nil, newStubState())
+	items, err := src.Fetch(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("expected items")
+	}
+
+	for _, item := range items {
+		if strings.Contains(item.Title, "Homebrew") {
+			t.Errorf("item Title leaked the fenced shell comment as a title: %q", item.Title)
+		}
+		if strings.Contains(item.Content, "Document: Homebrew") {
+			t.Errorf("item Content leaked the fenced shell comment as the indexed Document title: %q", item.Content)
+		}
+		if !strings.HasPrefix(item.Title, "omnia — ") {
+			t.Errorf("item Title = %q, want prefix %q (project-name fallback, no H1 present)", item.Title, "omnia — ")
+		}
+		if !strings.Contains(item.Content, "Document: omnia\n") {
+			t.Errorf("item Content missing project-name fallback title line: %q", item.Content)
+		}
+	}
+}
+
 func TestFetch_CustomAllowlist(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "README.md", readmeV1)

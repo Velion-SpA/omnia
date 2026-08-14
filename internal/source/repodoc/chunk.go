@@ -49,11 +49,29 @@ type Section struct {
 }
 
 // DocTitle returns the document's title: the text of its first level-1 ATX
-// heading, or fallback (typically the filename) if the document has none.
+// heading OUTSIDE any fenced code block, or fallback (typically the
+// filename or project name — see docTitleFallback in repodoc.go) if the
+// document has none.
+//
+// This shares findHeadings' fence-tracking scan with ChunkMarkdown/the
+// section splitter rather than re-scanning lines with its own, weaker
+// "#"-prefix check. That second path used to be the one place in this
+// package that was NOT fence-aware: a shell comment inside the first
+// ```sh fence in a README (e.g. "# Homebrew (macOS / Linux)") was picked up
+// as the document title, and because the title is prefixed into every
+// chunk's indexed body ("Document: {title}"), it silently retitled and
+// relabeled every chunk in the file toward installation semantics — a
+// document with no real H1 (an HTML banner instead, a very common README
+// convention) always fell through to whatever code-fenced "#" line came
+// first. findHeadings already ignores fenced content when finding section
+// headings; DocTitle now reuses exactly that scan, so a heading-looking line
+// inside a fence can never become the title any more than it can become a
+// section boundary.
 func DocTitle(content, fallback string) string {
-	for _, line := range strings.Split(content, "\n") {
-		if m := headingRE.FindStringSubmatch(line); m != nil && len(m[1]) == 1 {
-			return strings.TrimSpace(strings.TrimRight(m[2], "#"))
+	lines := strings.Split(content, "\n")
+	for _, h := range findHeadings(lines) {
+		if h.level == 1 {
+			return h.text
 		}
 	}
 	return fallback

@@ -360,7 +360,7 @@ func (s *Source) listCandidateFiles() ([]string, error) {
 // Items for each. computeAnchor controls whether git anchor capture runs
 // (Fetch: true: Preview: false — see Preview's doc comment).
 func (s *Source) chunkFile(ctx context.Context, relPath, content string, computeAnchor bool) []core.Item {
-	docTitle := DocTitle(content, docTitleFallback(relPath))
+	docTitle := DocTitle(content, s.docTitleFallback(relPath))
 	sections := FoldSectionsByDepth(ChunkMarkdown(content), s.maxHeadingDepth)
 
 	var items []core.Item
@@ -370,9 +370,27 @@ func (s *Source) chunkFile(ctx context.Context, relPath, content string, compute
 	return items
 }
 
-func docTitleFallback(relPath string) string {
+// docTitleFallback picks a sane title for a document that has no top-level
+// (H1) heading outside a fence — DocTitle's fallback path. A README is
+// singled out because it is exactly the file class most likely to hit that
+// path: the common convention is a centered HTML banner or badge block
+// instead of a real "# Project Name" H1 (this repo's own README.md is one),
+// so the bare filename "README" would be a useless, repeated-165-times
+// title. The project name is the obvious better candidate — it is what a
+// user is actually asking about ("what is Omnia"), so it doubles as a
+// helpful lexical match for identity-intent queries instead of a
+// directionless filename echo. Every other document class (ARCHITECTURE.md,
+// CONTRIBUTING.md, docs/*.md, ...) keeps the plain filename-derived title:
+// those names already describe their own topic well enough, and inventing a
+// project-name substitute for them would just repeat the project name
+// across unrelated chunks instead of README's.
+func (s *Source) docTitleFallback(relPath string) string {
 	base := filepath.Base(relPath)
-	return strings.TrimSuffix(base, filepath.Ext(base))
+	name := strings.TrimSuffix(base, filepath.Ext(base))
+	if strings.EqualFold(name, "README") && s.project != "" {
+		return s.project
+	}
+	return name
 }
 
 // buildItems turns a single heading Section into one or more core.Item
