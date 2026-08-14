@@ -17,12 +17,20 @@ func TestProfileFor_UnknownIsZeroValue(t *testing.T) {
 	}
 }
 
-// TestProfileFor_Identity pins the plan's routing-table row: "identity ->
-// type lens: doc; ranking weight recency: 0".
+// TestProfileFor_Identity pins the identity routing row: recency weight 0,
+// and NO type lens.
+//
+// The plan's original routing table said "type lens: doc" here, and
+// measurement overruled it: forcing that lens cuts identity grounding from
+// 0.625 to 0.375 over the conversational corpus, because ApplyTypeLens
+// partitions rather than boosts and doc chunks are numerous after repodoc
+// ingestion. See ProfileFor's own comment for the full reasoning — this
+// assertion exists so the "doc" lens cannot be restored from the plan text
+// without re-measuring first.
 func TestProfileFor_Identity(t *testing.T) {
 	p := ProfileFor(Identity)
-	if p.TypeLens != "doc" {
-		t.Errorf("ProfileFor(Identity).TypeLens = %q; want %q", p.TypeLens, "doc")
+	if p.TypeLens != "" {
+		t.Errorf("ProfileFor(Identity).TypeLens = %q; want %q (no lens — it measurably hurts grounding)", p.TypeLens, "")
 	}
 	if p.RecencyWeight == nil {
 		t.Fatal("ProfileFor(Identity).RecencyWeight is nil; want an explicit override to 0")

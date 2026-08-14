@@ -85,9 +85,31 @@ func float64ptr(v float64) *float64 { return &v }
 // whole package's safety property (see intent.go's package doc).
 var profiles = map[Intent]RoutingProfile{
 	Identity: {
-		TypeLens:      "doc",
+		// TypeLens is deliberately EMPTY, though the plan's routing table
+		// originally called for "doc" here. Measured: forcing the doc lens on
+		// identity questions cuts grounding from 0.625 to 0.375 over the
+		// conversational corpus, while every other configuration — ranking
+		// alone, InferLensType's own lens alone, intent routing without the
+		// lens — holds 0.625.
+		//
+		// The cause is that ApplyTypeLens is a hard PARTITION, not the soft
+		// boost its name suggests: it places every matching-type row above
+		// every non-matching one. That is a win when the target type is a
+		// small minority of the candidate set (Rationale/`decision` below
+		// gains 0.750 -> 0.875 from exactly this). It backfires once the type
+		// is a large share of what an identity query already retrieves —
+		// after repodoc ingestion, doc chunks are a substantial fraction of
+		// those candidates, so partitioning by type promotes the haystack
+		// rather than the needle and discards the relevance order that was
+		// already surfacing the right chunk.
+		//
+		// Relevance alone finds the right doc; it does not need the shove.
+		// The deeper fix — making ApplyTypeLens a score boost rather than a
+		// partition — is deferred: it is shared with the mem_search path and
+		// carries regression risk that this one-field change does not.
+		TypeLens:      "",
 		RecencyWeight: float32ptr(0),
-		Notes:         "identity wants a definition, not a recent one — recency contributes nothing (plan routing table: 'recency: 0')",
+		Notes:         "identity wants a definition, not a recent one — recency contributes nothing (plan routing table: 'recency: 0'). No type lens: see the comment above, it measurably hurts once doc chunks are numerous.",
 	},
 	Status: {
 		RecencyWeight:       float32ptr(3),
