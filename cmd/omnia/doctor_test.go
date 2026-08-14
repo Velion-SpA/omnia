@@ -52,14 +52,62 @@ func newDoctorGitRepo(t *testing.T, name string) string {
 
 func seedDoctorPendingMutation(t *testing.T, cfg store.Config, project, entity, entityKey, op, payload string) {
 	t.Helper()
+	seedDoctorPendingMutationForTarget(t, cfg, store.DefaultSyncTargetKey, project, entity, entityKey, op, payload)
+}
+
+// seedDoctorPendingMutationForTarget is seedDoctorPendingMutation with an
+// explicit target_key, so tests can reproduce multi-cloud fan-out — the SAME
+// logical mutation queued under two target_keys (e.g. "cloud" and
+// "work:umbral"). sync_mutations.target_key has a foreign key onto
+// sync_state(target_key), so a non-default target_key needs its own
+// sync_state row first, mirroring what Store.enqueueCloudFanoutMutationsTx
+// does for real fan-out writes.
+func seedDoctorPendingMutationForTarget(t *testing.T, cfg store.Config, targetKey, project, entity, entityKey, op, payload string) {
+	t.Helper()
 	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "omnia.db"))
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer db.Close()
-	if _, err := db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, store.DefaultSyncTargetKey, entity, entityKey, op, payload, store.SyncSourceLocal, project); err != nil {
+	if _, err := db.Exec(`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, ?, datetime('now'))`, targetKey, store.SyncLifecycleIdle); err != nil {
+		t.Fatalf("insert sync_state for %q: %v", targetKey, err)
+	}
+	if _, err := db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, targetKey, entity, entityKey, op, payload, store.SyncSourceLocal, project); err != nil {
 		t.Fatalf("insert sync mutation: %v", err)
 	}
+}
+
+// bootstrapDoctorStore opens and closes a store against cfg so its schema
+// (sessions, sync_mutations, sync_state, ...) exists on disk. Tests that seed
+// pending mutations directly via raw SQL — without first going through a
+// store.New-backed helper like seedDoctorSession — need this first, or the
+// bare sql.Open in seedDoctorPendingMutationForTarget hits a database with no
+// tables at all.
+func bootstrapDoctorStore(t *testing.T, cfg store.Config) {
+	t.Helper()
+	s, err := storeNew(cfg)
+	if err != nil {
+		t.Fatalf("bootstrap storeNew: %v", err)
+	}
+	s.Close()
+}
+
+// countPendingSyncMutations returns how many unacked sync_mutations rows
+// remain for entityKey, across every target_key — the assertion primitive
+// for the delete-only repair below: it must go to 0 across BOTH fan-out
+// copies, not just the default target_key's.
+func countPendingSyncMutations(t *testing.T, cfg store.Config, entityKey string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "omnia.db"))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity_key = ? AND acked_at IS NULL`, entityKey).Scan(&n); err != nil {
+		t.Fatalf("count pending mutations: %v", err)
+	}
+	return n
 }
 
 func seedDoctorRepairRows(t *testing.T, cfg store.Config, id, project, directory string) {
@@ -89,7 +137,13 @@ func TestCmdDoctorRepairValidation(t *testing.T) {
 		{name: "missing mode", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "session_project_directory_mismatch"}, want: "exactly one of --plan, --dry-run, or --apply is required"},
 		{name: "multiple modes", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "session_project_directory_mismatch", "--plan", "--apply"}, want: "exactly one of --plan, --dry-run, or --apply is required"},
 		{name: "missing project", args: []string{"engram", "doctor", "repair", "--check", "session_project_directory_mismatch", "--plan"}, want: "--project is required"},
-		{name: "unsupported check", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "sync_mutation_required_fields", "--plan"}, want: "unsupported repair check"},
+		// store_exposure is a real, registered doctor check but has no repair
+		// action defined — unlike sync_mutation_required_fields, which used
+		// to be this test's example before it gained repair support (delete
+		// the offending sync_mutations row(s); see
+		// TestCmdDoctorRepairSyncMutationRequiredFieldsPlanDryRunApplyJSON
+		// below).
+		{name: "unsupported check", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "store_exposure", "--plan"}, want: "unsupported repair check"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,6 +209,163 @@ func TestCmdDoctorRepairPlanDryRunApplyJSON(t *testing.T) {
 		t.Fatalf("backup missing: %v", err)
 	}
 	assertDoctorRepairProject(t, cfg, "repair-s1", "engram")
+}
+
+// TestCmdDoctorRepairSyncMutationRequiredFieldsPlanDryRunApplyJSON is the
+// follow-up to the sync_mutation_required_fields blocker: a bad payload
+// wedging the sync queue used to require hand-editing an encrypted SQLite
+// file (SQLCipher — no sqlite3 path) or extending `omnia cloud upgrade
+// doctor repair`, which explicitly rejects this check (see the
+// "unsupported check" case in TestCmdDoctorRepairValidation, which used to
+// name this exact check before this repair existed). This is now
+// repairable through the standard plan/dry-run/apply contract, same as
+// session_project_directory_mismatch above.
+//
+// Seeds the SAME logical bad prompt under TWO target_keys ("cloud" and
+// "work:umbral") to reproduce multi-cloud fan-out (Bug B,
+// docs/conversational-retrieval-plan.md): the repair must delete BOTH rows
+// independently, and the plan output must show both — sorted so the two
+// fan-out siblings are adjacent, making the "one logical mutation, two queue
+// rows" correspondence visible without cross-referencing anything.
+func TestCmdDoctorRepairSyncMutationRequiredFieldsPlanDryRunApplyJSON(t *testing.T) {
+	cfg := testConfig(t)
+	bootstrapDoctorStore(t, cfg)
+	// entity=prompt, upsert, session_id present but content missing —
+	// triggers store.ValidateSyncMutationPayload's
+	// sync_mutation_payload_missing_required_fields for "content", the same
+	// shape as the real live finding this task's diagnosis surfaced
+	// (prompt-a7cb56e905751772 / project umbral).
+	badPayload := `{"session_id":"s-umbral-1"}`
+	seedDoctorPendingMutationForTarget(t, cfg, "cloud", "umbral", store.SyncEntityPrompt, "prompt-fanout-1", store.SyncOpUpsert, badPayload)
+	seedDoctorPendingMutationForTarget(t, cfg, "work:umbral", "umbral", store.SyncEntityPrompt, "prompt-fanout-1", store.SyncOpUpsert, badPayload)
+	if got := countPendingSyncMutations(t, cfg, "prompt-fanout-1"); got != 2 {
+		t.Fatalf("setup: expected 2 pending rows before any repair, got %d", got)
+	}
+
+	assertBothFanoutActions := func(t *testing.T, plan map[string]any, wantStatus, wantMode string) {
+		t.Helper()
+		if plan["status"] != wantStatus || plan["mode"] != wantMode {
+			t.Fatalf("plan=%v, want status=%q mode=%q", plan, wantStatus, wantMode)
+		}
+		deletions, ok := plan["sync_mutation_deletions"].([]any)
+		if !ok || len(deletions) != 2 {
+			t.Fatalf("expected 2 sync_mutation_deletions, got %v", plan["sync_mutation_deletions"])
+		}
+		first := deletions[0].(map[string]any)
+		second := deletions[1].(map[string]any)
+		if first["entity_key"] != "prompt-fanout-1" || second["entity_key"] != "prompt-fanout-1" {
+			t.Fatalf("both deletions must name the same logical prompt: %v / %v", first, second)
+		}
+		// Sorted by entity_key then target_key: "cloud" < "work:umbral".
+		if first["target_key"] != "cloud" || second["target_key"] != "work:umbral" {
+			t.Fatalf("expected fan-out siblings adjacent and sorted by target_key, got %v / %v", first["target_key"], second["target_key"])
+		}
+		for _, d := range []map[string]any{first, second} {
+			if d["entity"] != store.SyncEntityPrompt || d["op"] != store.SyncOpUpsert {
+				t.Fatalf("unexpected entity/op: %v", d)
+			}
+			if d["occurred_at"] == "" || d["occurred_at"] == nil {
+				t.Fatalf("occurred_at must be present so a human can recognize the row: %v", d)
+			}
+			missing, _ := d["missing_fields"].([]any)
+			if len(missing) != 1 || missing[0] != "content" {
+				t.Fatalf("expected missing_fields=[content], got %v", d["missing_fields"])
+			}
+			if d["reason_code"] != "sync_mutation_payload_missing_required_fields" {
+				t.Fatalf("unexpected reason_code: %v", d["reason_code"])
+			}
+		}
+		counts := plan["counts"].(map[string]any)
+		if counts["sync_mutations_planned"] != float64(2) {
+			t.Fatalf("sync_mutations_planned=%v, want 2", counts["sync_mutations_planned"])
+		}
+	}
+
+	withArgs(t, "engram", "doctor", "repair", "--project", "umbral", "--check", "sync_mutation_required_fields", "--plan")
+	planOut, planErr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if planErr != "" {
+		t.Fatalf("plan stderr=%q", planErr)
+	}
+	plan := decodeRepairPlan(t, planOut)
+	assertBothFanoutActions(t, plan, "planned", "plan")
+	if got := countPendingSyncMutations(t, cfg, "prompt-fanout-1"); got != 2 {
+		t.Fatalf("--plan must not delete anything, got %d rows remaining", got)
+	}
+
+	withArgs(t, "engram", "doctor", "repair", "--project", "umbral", "--check", "sync_mutation_required_fields", "--dry-run")
+	dryOut, dryErr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if dryErr != "" {
+		t.Fatalf("dry-run stderr=%q", dryErr)
+	}
+	dry := decodeRepairPlan(t, dryOut)
+	assertBothFanoutActions(t, dry, "dry_run", "dry_run")
+	if got := countPendingSyncMutations(t, cfg, "prompt-fanout-1"); got != 2 {
+		t.Fatalf("--dry-run must not delete anything, got %d rows remaining", got)
+	}
+
+	withArgs(t, "engram", "doctor", "repair", "--project", "umbral", "--check", "sync_mutation_required_fields", "--apply")
+	applyOut, applyErr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if applyErr != "" {
+		t.Fatalf("apply stderr=%q", applyErr)
+	}
+	applied := decodeRepairPlan(t, applyOut)
+	if applied["status"] != "applied" || applied["backup_path"] == "" {
+		t.Fatalf("applied=%v", applied)
+	}
+	appliedCounts := applied["counts"].(map[string]any)
+	if appliedCounts["sync_mutations_applied"] != float64(2) {
+		t.Fatalf("sync_mutations_applied=%v, want 2", appliedCounts["sync_mutations_applied"])
+	}
+	if _, err := os.Stat(applied["backup_path"].(string)); err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	if got := countPendingSyncMutations(t, cfg, "prompt-fanout-1"); got != 0 {
+		t.Fatalf("--apply must delete both fan-out rows, %d remain", got)
+	}
+
+	// Idempotency: re-running --apply against an already-clean store must be
+	// a no-op that says so, not an error and not a second (empty) delete.
+	withArgs(t, "engram", "doctor", "repair", "--project", "umbral", "--check", "sync_mutation_required_fields", "--apply")
+	againOut, againErr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if againErr != "" {
+		t.Fatalf("second apply stderr=%q", againErr)
+	}
+	again := decodeRepairPlan(t, againOut)
+	if again["status"] != "noop" {
+		t.Fatalf("re-running --apply on a clean store must report noop, got %v", again)
+	}
+	if _, hasDeletions := again["sync_mutation_deletions"]; hasDeletions {
+		t.Fatalf("noop plan must have no deletions, got %v", again["sync_mutation_deletions"])
+	}
+	if again["backup_path"] != nil && again["backup_path"] != "" {
+		t.Fatalf("a no-op apply must not take a backup, got backup_path=%v", again["backup_path"])
+	}
+	if got := countPendingSyncMutations(t, cfg, "prompt-fanout-1"); got != 0 {
+		t.Fatalf("re-running --apply must not resurrect deleted rows, got %d", got)
+	}
+}
+
+// TestCmdDoctorRepairSyncMutationRequiredFieldsScopesToProject confirms the
+// repair plan is project-scoped like every other doctor repair: a bad
+// mutation belonging to a DIFFERENT project must not appear in this
+// project's plan, and --apply must never touch it.
+func TestCmdDoctorRepairSyncMutationRequiredFieldsScopesToProject(t *testing.T) {
+	cfg := testConfig(t)
+	bootstrapDoctorStore(t, cfg)
+	seedDoctorPendingMutationForTarget(t, cfg, "cloud", "other-project", store.SyncEntityPrompt, "prompt-other-1", store.SyncOpUpsert, `{"session_id":"s1"}`)
+
+	withArgs(t, "engram", "doctor", "repair", "--project", "umbral", "--check", "sync_mutation_required_fields", "--plan")
+	out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatalf("stderr=%q", stderr)
+	}
+	plan := decodeRepairPlan(t, out)
+	if plan["status"] != "noop" {
+		t.Fatalf("a different project's bad mutation must not appear in this plan, got %v", plan)
+	}
+	if got := countPendingSyncMutations(t, cfg, "prompt-other-1"); got != 1 {
+		t.Fatalf("the other project's row must survive untouched, got %d", got)
+	}
 }
 
 // TestCmdDoctorAcceptsConfigEqualsForm is finding #1's regression test:

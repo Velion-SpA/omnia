@@ -9,6 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ncruces/go-sqlite3"
+	"github.com/ncruces/go-sqlite3/ext/fts5"
+
+	"github.com/velion/omnia/internal/keychain"
 )
 
 // DiagnosticSessionEvidence is the read-only session projection used by
@@ -322,13 +327,51 @@ func (s *Store) ApplySessionProjectReclassification(actions []SessionProjectRecl
 	return result, nil
 }
 
-// BackupDir returns the directory BackupSQLite writes VACUUM INTO snapshots
-// to — a full copy of the store's content, so its permissions matter exactly
-// as much as the primary data dir and database file (see StoreExposureCheck).
+// BackupDir returns the directory BackupSQLite writes its snapshots to — a
+// full copy of the store's content (encrypted or plaintext, matching the
+// source — see BackupSQLite), so its permissions matter exactly as much as
+// the primary data dir and database file (see StoreExposureCheck).
 func (s *Store) BackupDir() string {
 	return filepath.Join(s.cfg.DataDir, "backups")
 }
 
+// BackupSQLite writes a full snapshot of the live database to a fresh,
+// timestamped file under BackupDir and returns its path.
+//
+// The snapshot's format MATCHES the source's: an encrypted store gets an
+// encrypted backup, a plaintext store gets a plaintext backup (unchanged
+// behavior — VACUUM INTO). This was NOT always true: the original
+// implementation always ran a bare `VACUUM INTO ?` on the live connection.
+// Against an encrypted store that fails outright — reproduced live,
+// `sqlite3: unable to open database file` — for the exact reason
+// MigrateToPlaintext's own vacuumSQL comment already documents: VACUUM INTO
+// run from a connection whose current VFS is adiantum tries to open the
+// brand-new target under that SAME encrypting VFS, with no key ever set for
+// it. Simply adding `?vfs=os` would make the call succeed, but it would
+// silently write a full PLAINTEXT copy of an encrypted store's content to
+// disk — the exact exposure encryption.enabled=true exists to prevent, and
+// worse than the bug it would "fix": a caller who never saw the error would
+// never know their backups directory now held plaintext memory content. An
+// operator who turned encryption on did not consent to that.
+//
+// backupEncryptedSQLite below follows migrate_encryption.go's RotateKey
+// SHAPE — decrypt to a plaintext intermediate (PRAGMA-keyed, our own
+// connection), then re-encrypt that intermediate into the real backup path
+// (PRAGMA-keyed, our own connection) — SAME key in and out, since this is a
+// snapshot, not an actual rotation. That two-hop shape is required, not
+// optional: Conn.Restore/Conn.Backup open their non-local end internally
+// with no callback hook to set a PRAGMA, so an encrypted↔encrypted copy in
+// one hop would need the key embedded in a URI parameter — exactly what
+// encryptNewFile/decryptToPlainFile's own doc comments already reject
+// ("never via a URI parameter... PRAGMA form never appears there").
+//
+// It does NOT reuse decryptToPlainFile itself for the first hop — see
+// backupDecryptToPlainFile's own doc comment for why: that function's
+// exclusive-checkpoint requirement is right for RotateKey/MigrateToPlaintext
+// (which rename into the live dbPath afterward) and wrong here (a backup
+// would then fail every time another Omnia process holds the store open —
+// reproduced live against the real store while an MCP connection was
+// active).
 func (s *Store) BackupSQLite() (string, error) {
 	backupDir := s.BackupDir()
 	// Owner-only on a FRESH create, same rationale and same caveat as New()'s
@@ -338,24 +381,145 @@ func (s *Store) BackupSQLite() (string, error) {
 	// internal/diagnostic's StoreExposureCheck — this call must never
 	// silently re-permission a directory the operator may have intentionally
 	// shared. Previously 0755 (operational item #3,
-	// docs/conversational-retrieval-plan.md): a VACUUM INTO snapshot is a
-	// full plaintext copy of the store, so group/world access here is the
-	// same exposure the primary data dir was already hardened against.
+	// docs/conversational-retrieval-plan.md).
 	if err := os.MkdirAll(backupDir, 0o700); err != nil {
 		return "", fmt.Errorf("create sqlite backup dir: %w", err)
 	}
 	path := filepath.Join(backupDir, "engram-repair-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".db")
-	if _, err := s.execHook(s.db, `VACUUM INTO ?`, path); err != nil {
-		return "", fmt.Errorf("backup sqlite database: %w", err)
+
+	dbPath := s.DBPath()
+	_, plaintext, err := isPlaintextSQLiteFile(dbPath)
+	if err != nil {
+		return "", fmt.Errorf("inspect database format before backup: %w", err)
 	}
+
+	if plaintext {
+		if _, err := s.execHook(s.db, `VACUUM INTO ?`, path); err != nil {
+			return "", fmt.Errorf("backup sqlite database: %w", err)
+		}
+	} else if err := s.backupEncryptedSQLite(context.Background(), dbPath, path); err != nil {
+		return "", err
+	}
+
 	// Lock the backup file itself down to owner-only too, mirroring New()'s
-	// unconditional Chmod on the primary database file: VACUUM INTO creates
-	// the file following the process umask, which on a typical 022 umask
-	// yields group/world-readable (0644) regardless of the directory mode.
+	// unconditional Chmod on the primary database file: both VACUUM INTO and
+	// the encrypted path's own file creation follow the process umask, which
+	// on a typical 022 umask yields group/world-readable (0644) regardless
+	// of the directory mode.
 	if err := os.Chmod(path, 0o600); err != nil {
 		return "", fmt.Errorf("chmod sqlite backup file: %w", err)
 	}
 	return path, nil
+}
+
+// backupEncryptedSQLite writes an ENCRYPTED snapshot of dbPath (already
+// confirmed adiantum-encrypted by the caller) to backupPath, keyed with the
+// SAME key protecting the live store. See BackupSQLite's doc comment for why
+// this needs a plaintext intermediate rather than a single Restore/Backup
+// hop.
+//
+// The key is re-resolved from the keychain rather than cached anywhere on
+// *Store (there is no such field — by design, mirroring every other
+// encryption operation in this package, which always receives/resolves its
+// key fresh rather than persisting it on a long-lived struct). A degraded
+// keychain resolution (allow_plaintext_fallback=true, but the keychain is
+// actually unavailable right now) is a hard failure HERE even though the
+// live store tolerates it for ordinary operation: a backup call must never
+// produce a result the caller cannot tell apart from a real encrypted
+// snapshot, and there is no key to encrypt one with.
+func (s *Store) backupEncryptedSQLite(ctx context.Context, dbPath, backupPath string) error {
+	service := s.cfg.EncryptionKeychainService
+	if service == "" {
+		service = "omnia"
+	}
+	decision, err := keychain.Resolve(ctx, newKeychainClient(), service, encryptionKeyAccount, s.cfg.EncryptionAllowPlaintextFallback)
+	if err != nil {
+		return fmt.Errorf("backup encrypted sqlite database: resolve key: %w", err)
+	}
+	if decision.Degraded {
+		return fmt.Errorf("backup encrypted sqlite database: %w (keychain unavailable; refusing to write a backup with no real key)", ErrEncryptionKeyUnavailable)
+	}
+
+	// Fixed-per-call name (backupPath already carries a fresh timestamp, so
+	// this is unique per BackupSQLite call) — best-effort pre-clear in case a
+	// prior aborted attempt somehow left one behind, then ALWAYS clean it up
+	// on the way out: a plaintext copy of an encrypted store must never sit
+	// on disk longer than this function's own execution.
+	tmpPlainPath := backupPath + ".decrypting.tmp"
+	removeStaleTempFile(tmpPlainPath)
+	defer removeStaleTempFile(tmpPlainPath)
+
+	if err := backupDecryptToPlainFile(ctx, dbPath, decision.HexKey, tmpPlainPath); err != nil {
+		return fmt.Errorf("backup encrypted sqlite database: decrypt to intermediate: %w", err)
+	}
+	// Mirrors RotateKey's own checkpointPlainFileWAL call between writing the
+	// plaintext intermediate and reading it back as encryptNewFile's source.
+	if err := checkpointPlainFileWAL(ctx, tmpPlainPath); err != nil {
+		return fmt.Errorf("backup encrypted sqlite database: checkpoint intermediate: %w", err)
+	}
+
+	if err := encryptNewFile(ctx, backupPath, decision.HexKey, "file:"+tmpPlainPath); err != nil {
+		removeStaleTempFile(backupPath)
+		return fmt.Errorf("backup encrypted sqlite database: re-encrypt backup: %w", err)
+	}
+
+	// Verify before trusting the backup, same discipline as
+	// MigrateToEncrypted/MigrateToPlaintext/RotateKey: compare the row count
+	// read off the plaintext intermediate against the row count read back
+	// off the finished encrypted backup.
+	before, verr := countRowsInPlaintextFile(ctx, tmpPlainPath, observationsRowCountQuery)
+	if verr != nil {
+		removeStaleTempFile(backupPath)
+		return fmt.Errorf("backup encrypted sqlite database: count intermediate rows: %w", verr)
+	}
+	after, verr := countRowsInEncryptedFile(ctx, backupPath, decision.HexKey, observationsRowCountQuery)
+	if verr != nil {
+		removeStaleTempFile(backupPath)
+		return fmt.Errorf("backup encrypted sqlite database: verify backup: %w", verr)
+	}
+	if after != before {
+		removeStaleTempFile(backupPath)
+		return fmt.Errorf("backup encrypted sqlite database: row count mismatch (intermediate=%d backup=%d)", before, after)
+	}
+	return nil
+}
+
+// backupDecryptToPlainFile is backupEncryptedSQLite's own decrypt-to-plaintext
+// step. It is deliberately NOT migrate_encryption.go's decryptToPlainFile,
+// even though the body is otherwise identical: THAT function insists on an
+// exclusive `wal_checkpoint(TRUNCATE)` first, because ITS callers
+// (MigrateToPlaintext, RotateKey) rename their copy into the LIVE dbPath
+// afterward and must avoid orphaned WAL sidecars under a reused path — see
+// checkpointAndTruncateWAL's own doc comment for the production incident
+// that discipline exists to prevent.
+//
+// A backup never renames anything into a live path, and SQLite's online
+// backup API (Conn.Backup, used below exactly as decryptToPlainFile uses it)
+// is already safe against a concurrently-written WAL source by design —
+// producing a consistent snapshot of committed data under concurrent writes
+// is that API's whole purpose, independent of any checkpoint. Requiring an
+// exclusive checkpoint here would make `omnia doctor repair` fail every time
+// another Omnia process (an `omnia serve` daemon, an MCP server) holds the
+// store open — normal, expected, effectively always-on usage. Reproduced
+// live: the first --apply attempt against the real store failed with
+// `wal_checkpoint(TRUNCATE) reported busy=1` while an unrelated mem_search/
+// mem_save MCP connection was live against the exact same database.
+func backupDecryptToPlainFile(ctx context.Context, srcPath, hexKey, dstPath string) error {
+	src, err := sqlite3.OpenContext(ctx, "file:"+srcPath+"?vfs=adiantum")
+	if err != nil {
+		return fmt.Errorf("open encrypted source: %w", err)
+	}
+	defer src.Close()
+	if err := src.Exec("PRAGMA hexkey='" + hexKey + "'"); err != nil {
+		return fmt.Errorf("set encryption key on source: %w", err)
+	}
+	if err := fts5.Register(src); err != nil {
+		return fmt.Errorf("register fts5 on source: %w", err)
+	}
+	if err := src.Backup("main", "file:"+dstPath+"?vfs=os"); err != nil {
+		return fmt.Errorf("back up source into plaintext target: %w", err)
+	}
+	return nil
 }
 
 // DeleteSyncMutationsResult reports what DeletePendingSyncMutations actually
