@@ -92,6 +92,17 @@ func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvide
 // ListPendingProjectMutations returns pending cloud mutations for one project,
 // or all projects when project is empty, without enrollment filtering. Doctor
 // needs to diagnose blocked metadata even when a project is not enrolled.
+//
+// Scans every target_key, not just DefaultSyncTargetKey ("cloud"). Multi-cloud
+// fan-out (enqueueCloudFanoutMutationsTx / OBL-06) writes one additional row
+// per registered non-default cloud alias, keyed by
+// aliasTargetKeyForProject(alias, project) — e.g. "work:umbral" alongside the
+// default "cloud" row. A target_key-scoped query here previously saw only the
+// default cloud's queue and reported every non-default cloud's stuck
+// mutations as a clean bill of health, which is precisely the "doctor
+// validates the mutation queue... a green doctor proves nothing" gap #255
+// already documented for the OTHER validators on the push path. Same failure
+// shape, found in doctor's own read.
 func (s *Store) ListPendingProjectMutations(project string) ([]SyncMutation, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
@@ -106,8 +117,8 @@ func (s *Store) listPendingProjectMutationsTxLike(q rowQuerier, project string) 
 	query := `
 		SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at
 		FROM sync_mutations
-		WHERE target_key = ? AND acked_at IS NULL`
-	args := []any{DefaultSyncTargetKey}
+		WHERE acked_at IS NULL`
+	args := []any{}
 	if project != "" {
 		query += ` AND project = ?`
 		args = append(args, project)
@@ -174,9 +185,17 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 		if field("id") == "" && entityKey == "" {
 			missing = append(missing, "id")
 		}
-		if op == SyncOpUpsert {
-			require("directory")
-		}
+		// Directory is deliberately NOT required (#254). A session created by
+		// saving a memory by hand has no working directory — there was no repo
+		// involved, and an absent directory there is that session's correct
+		// state, not missing data. `chunkcodec.normalizeMutationPayload` and
+		// `cloudserver.validateDirectChunkArrayEntries` were relaxed for this
+		// same reason in #254, but this validator — a THIRD, independent copy
+		// of the same rule, reached only through `omnia doctor` — was missed.
+		// That gap is exactly what #255 warned about: three validators with no
+		// shared rules mean a green doctor proves nothing about whether the
+		// push will be accepted. id stays required: an upsert without one
+		// targets nothing.
 	case SyncEntityObservation:
 		if field("sync_id") == "" && entityKey == "" {
 			missing = append(missing, "sync_id")
@@ -303,16 +322,96 @@ func (s *Store) ApplySessionProjectReclassification(actions []SessionProjectRecl
 	return result, nil
 }
 
+// BackupDir returns the directory BackupSQLite writes VACUUM INTO snapshots
+// to — a full copy of the store's content, so its permissions matter exactly
+// as much as the primary data dir and database file (see StoreExposureCheck).
+func (s *Store) BackupDir() string {
+	return filepath.Join(s.cfg.DataDir, "backups")
+}
+
 func (s *Store) BackupSQLite() (string, error) {
-	backupDir := filepath.Join(s.cfg.DataDir, "backups")
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
+	backupDir := s.BackupDir()
+	// Owner-only on a FRESH create, same rationale and same caveat as New()'s
+	// MkdirAll(cfg.DataDir, 0o700): a directory this call actually creates is
+	// locked down, but an already-existing (looser) backups dir from before
+	// this fix is left as-is here and flagged instead by
+	// internal/diagnostic's StoreExposureCheck — this call must never
+	// silently re-permission a directory the operator may have intentionally
+	// shared. Previously 0755 (operational item #3,
+	// docs/conversational-retrieval-plan.md): a VACUUM INTO snapshot is a
+	// full plaintext copy of the store, so group/world access here is the
+	// same exposure the primary data dir was already hardened against.
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
 		return "", fmt.Errorf("create sqlite backup dir: %w", err)
 	}
 	path := filepath.Join(backupDir, "engram-repair-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".db")
 	if _, err := s.execHook(s.db, `VACUUM INTO ?`, path); err != nil {
 		return "", fmt.Errorf("backup sqlite database: %w", err)
 	}
+	// Lock the backup file itself down to owner-only too, mirroring New()'s
+	// unconditional Chmod on the primary database file: VACUUM INTO creates
+	// the file following the process umask, which on a typical 022 umask
+	// yields group/world-readable (0644) regardless of the directory mode.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return "", fmt.Errorf("chmod sqlite backup file: %w", err)
+	}
 	return path, nil
+}
+
+// DeleteSyncMutationsResult reports what DeletePendingSyncMutations actually
+// did, mirroring SessionProjectReclassificationResult's shape (counts +
+// backup path) so both repairable checks return the same kind of evidence.
+type DeleteSyncMutationsResult struct {
+	Deleted    int64
+	BackupPath string
+}
+
+// DeletePendingSyncMutations deletes specific pending (unacked) sync_mutations
+// rows by seq — the repair action for CheckSyncMutationRequiredFields
+// (docs/conversational-retrieval-plan.md operational item #1 follow-up:
+// making a bad payload wedging the queue repairable through `omnia doctor
+// repair` instead of by hand against an encrypted SQLite file with no
+// sqlite3 path).
+//
+// Delete only: this never touches payload content, so it can never invent
+// data the store doesn't have — the caller already decided (via
+// ValidateSyncMutationPayload) that the payload cannot be trusted.
+//
+// Idempotent by construction: `WHERE seq IN (...) AND acked_at IS NULL` means
+// a seq that no longer exists (already deleted by a prior --apply, or
+// acknowledged by a sync run in the meantime) simply contributes nothing to
+// RowsAffected — re-running --apply against an already-clean set of seqs is a
+// safe no-op, not an error.
+//
+// A full VACUUM INTO backup is taken first, same as
+// ApplySessionProjectReclassification, so a deletion can be undone by
+// restoring the backup file even though the delete itself is irreversible.
+func (s *Store) DeletePendingSyncMutations(seqs []int64) (DeleteSyncMutationsResult, error) {
+	if len(seqs) == 0 {
+		return DeleteSyncMutationsResult{}, nil
+	}
+	backupPath, err := s.BackupSQLite()
+	if err != nil {
+		return DeleteSyncMutationsResult{}, err
+	}
+	placeholders := make([]string, len(seqs))
+	args := make([]any, len(seqs))
+	for i, seq := range seqs {
+		placeholders[i] = "?"
+		args[i] = seq
+	}
+	res, err := s.execHook(s.db,
+		`DELETE FROM sync_mutations WHERE acked_at IS NULL AND seq IN (`+strings.Join(placeholders, ",")+`)`,
+		args...,
+	)
+	if err != nil {
+		return DeleteSyncMutationsResult{}, fmt.Errorf("delete pending sync mutations: %w", err)
+	}
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return DeleteSyncMutationsResult{}, fmt.Errorf("delete pending sync mutations: rows affected: %w", err)
+	}
+	return DeleteSyncMutationsResult{Deleted: deleted, BackupPath: backupPath}, nil
 }
 
 func normalizeSessionProjectReclassificationActions(actions []SessionProjectReclassification) []SessionProjectReclassification {

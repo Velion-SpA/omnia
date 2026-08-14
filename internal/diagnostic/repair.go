@@ -31,24 +31,52 @@ type RepairSkip struct {
 	Message    string `json:"message"`
 }
 
+// SyncMutationDeleteAction is one pending sync_mutations row planned for
+// deletion because its payload fails store.ValidateSyncMutationPayload —
+// the repair action for CheckSyncMutationRequiredFields. Delete only: there
+// is no PayloadFix field, deliberately — repairing this check never mutates
+// payload content, only removes the row that cannot be trusted.
+//
+// Carries enough for a human to recognize the exact row before it disappears
+// (seq/target_key/entity/entity_key/op/occurred_at), plus the validation
+// failure that earned it a spot on this list. Two actions sharing the same
+// EntityKey under different TargetKey are the SAME logical mutation,
+// duplicated by multi-cloud fan-out (see ListPendingProjectMutations) — the
+// plan is sorted by EntityKey then TargetKey so that correspondence is
+// visible directly in the printed output, not just inferable from raw seqs.
+type SyncMutationDeleteAction struct {
+	Seq           int64    `json:"seq"`
+	TargetKey     string   `json:"target_key"`
+	Entity        string   `json:"entity"`
+	EntityKey     string   `json:"entity_key,omitempty"`
+	Op            string   `json:"op"`
+	OccurredAt    string   `json:"occurred_at"`
+	ReasonCode    string   `json:"reason_code"`
+	Message       string   `json:"message"`
+	MissingFields []string `json:"missing_fields,omitempty"`
+}
+
 type RepairCounts struct {
-	SessionsPlanned     int64 `json:"sessions_planned"`
-	ObservationsPlanned int64 `json:"observations_planned"`
-	PromptsPlanned      int64 `json:"prompts_planned"`
-	SessionsApplied     int64 `json:"sessions_applied"`
-	ObservationsApplied int64 `json:"observations_applied"`
-	PromptsApplied      int64 `json:"prompts_applied"`
+	SessionsPlanned      int64 `json:"sessions_planned"`
+	ObservationsPlanned  int64 `json:"observations_planned"`
+	PromptsPlanned       int64 `json:"prompts_planned"`
+	SessionsApplied      int64 `json:"sessions_applied"`
+	ObservationsApplied  int64 `json:"observations_applied"`
+	PromptsApplied       int64 `json:"prompts_applied"`
+	SyncMutationsPlanned int64 `json:"sync_mutations_planned,omitempty"`
+	SyncMutationsApplied int64 `json:"sync_mutations_applied,omitempty"`
 }
 
 type RepairPlan struct {
-	Project    string                    `json:"project"`
-	Check      string                    `json:"check"`
-	Mode       RepairMode                `json:"mode"`
-	Status     string                    `json:"status"`
-	Actions    []ProjectReclassifyAction `json:"actions"`
-	Skipped    []RepairSkip              `json:"skipped,omitempty"`
-	Counts     RepairCounts              `json:"counts"`
-	BackupPath string                    `json:"backup_path,omitempty"`
+	Project               string                     `json:"project"`
+	Check                 string                     `json:"check"`
+	Mode                  RepairMode                 `json:"mode"`
+	Status                string                     `json:"status"`
+	Actions               []ProjectReclassifyAction  `json:"actions"`
+	SyncMutationDeletions []SyncMutationDeleteAction `json:"sync_mutation_deletions,omitempty"`
+	Skipped               []RepairSkip               `json:"skipped,omitempty"`
+	Counts                RepairCounts               `json:"counts"`
+	BackupPath            string                     `json:"backup_path,omitempty"`
 }
 
 func BuildRepairPlan(ctx context.Context, scope Scope, report Report, check string, mode RepairMode) (RepairPlan, error) {
@@ -74,15 +102,63 @@ func BuildRepairPlan(ctx context.Context, scope Scope, report Report, check stri
 		if err := planManualSessionRepair(&plan, scope); err != nil {
 			return RepairPlan{}, err
 		}
+	case CheckSyncMutationRequiredFields:
+		planSyncMutationRequiredFieldsRepair(&plan, report)
 	default:
 		return RepairPlan{}, fmt.Errorf("unsupported repair check %q", check)
 	}
 
 	dedupeAndSortRepairPlan(&plan)
-	if len(plan.Actions) == 0 {
+	if len(plan.Actions) == 0 && len(plan.SyncMutationDeletions) == 0 {
 		plan.Status = "noop"
 	}
 	return plan, nil
+}
+
+// planSyncMutationRequiredFieldsRepair reads the already-computed findings
+// from report (built by SyncMutationRequiredFieldsCheck.Run, which itself
+// calls the fan-out-aware Store.ListPendingProjectMutations — see that
+// check's doc comment) rather than re-querying the store, the same pattern
+// planDirectoryMismatchRepair already uses for CheckSessionProjectDirectoryMismatch.
+// One finding maps to exactly one queue row: multi-cloud fan-out means the
+// SAME logical mutation can appear here twice under different TargetKey
+// values (e.g. "cloud" and "work:umbral"), and both must be planned for
+// deletion independently — each is its own row in sync_mutations with its
+// own seq.
+func planSyncMutationRequiredFieldsRepair(plan *RepairPlan, report Report) {
+	for _, check := range report.Checks {
+		for _, finding := range check.Findings {
+			var ev struct {
+				Seq           int64    `json:"seq"`
+				TargetKey     string   `json:"target_key"`
+				Project       string   `json:"project"`
+				Entity        string   `json:"entity"`
+				Op            string   `json:"op"`
+				EntityKey     string   `json:"entity_key"`
+				OccurredAt    string   `json:"occurred_at"`
+				MissingFields []string `json:"missing_fields"`
+			}
+			if err := json.Unmarshal(finding.Evidence, &ev); err != nil {
+				plan.Skipped = append(plan.Skipped, RepairSkip{ReasonCode: "invalid_doctor_evidence", Message: err.Error()})
+				continue
+			}
+			if ev.Seq == 0 || strings.TrimSpace(ev.TargetKey) == "" {
+				plan.Skipped = append(plan.Skipped, RepairSkip{ReasonCode: "invalid_sync_mutation_evidence", Message: "doctor evidence does not describe a deletable sync_mutations row"})
+				continue
+			}
+			plan.SyncMutationDeletions = append(plan.SyncMutationDeletions, SyncMutationDeleteAction{
+				Seq:           ev.Seq,
+				TargetKey:     ev.TargetKey,
+				Entity:        ev.Entity,
+				EntityKey:     ev.EntityKey,
+				Op:            ev.Op,
+				OccurredAt:    ev.OccurredAt,
+				ReasonCode:    finding.ReasonCode,
+				Message:       finding.Message,
+				MissingFields: ev.MissingFields,
+			})
+		}
+	}
 }
 
 func planDirectoryMismatchRepair(plan *RepairPlan, report Report) {
@@ -175,6 +251,33 @@ func dedupeAndSortRepairPlan(plan *RepairPlan) {
 		plan.Actions = append(plan.Actions, action)
 	}
 	sort.Slice(plan.Actions, func(i, j int) bool { return plan.Actions[i].SessionID < plan.Actions[j].SessionID })
+
+	// Dedupe by seq (the unique identifier for a sync_mutations row) rather
+	// than by entity_key: two rows with the SAME entity_key are exactly the
+	// fan-out case (docs/conversational-retrieval-plan.md Bug B) and both
+	// must survive deduping as independent deletions. Sorted by entity_key
+	// then target_key, not seq, so fan-out siblings land next to each other
+	// in the printed plan — that adjacency is what makes "one logical
+	// mutation, N queue rows" visible to a human reviewing --plan output.
+	seenSeqs := map[int64]SyncMutationDeleteAction{}
+	for _, action := range plan.SyncMutationDeletions {
+		seenSeqs[action.Seq] = action
+	}
+	plan.SyncMutationDeletions = plan.SyncMutationDeletions[:0]
+	for _, action := range seenSeqs {
+		plan.SyncMutationDeletions = append(plan.SyncMutationDeletions, action)
+	}
+	sort.Slice(plan.SyncMutationDeletions, func(i, j int) bool {
+		a, b := plan.SyncMutationDeletions[i], plan.SyncMutationDeletions[j]
+		if a.EntityKey != b.EntityKey {
+			return a.EntityKey < b.EntityKey
+		}
+		if a.TargetKey != b.TargetKey {
+			return a.TargetKey < b.TargetKey
+		}
+		return a.Seq < b.Seq
+	})
+
 	sort.Slice(plan.Skipped, func(i, j int) bool {
 		if plan.Skipped[i].SessionID == plan.Skipped[j].SessionID {
 			return plan.Skipped[i].ReasonCode < plan.Skipped[j].ReasonCode

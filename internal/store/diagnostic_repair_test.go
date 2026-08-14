@@ -63,6 +63,39 @@ func TestApplySessionProjectReclassificationBacksUpAndUpdatesAllowedTables(t *te
 	}
 }
 
+// TestBackupSQLiteLocksDownPermissions (operational item #3,
+// docs/conversational-retrieval-plan.md): a VACUUM INTO snapshot is a full
+// plaintext copy of the store, so the backups directory and the backup file
+// itself must be owner-only — the same posture New() already applies to the
+// primary data dir (0700) and database file (0600). Previously the directory
+// was created at 0755 and the file inherited whatever the process umask gave
+// it (typically 0644 on a default 022 umask), which internal/diagnostic's
+// StoreExposureCheck never inspected.
+func TestBackupSQLiteLocksDownPermissions(t *testing.T) {
+	s := newTestStore(t)
+
+	backupPath, err := s.BackupSQLite()
+	if err != nil {
+		t.Fatalf("BackupSQLite: %v", err)
+	}
+
+	dirInfo, err := os.Stat(s.BackupDir())
+	if err != nil {
+		t.Fatalf("stat backup dir: %v", err)
+	}
+	if dirInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("backup dir mode = %s, want 0700", dirInfo.Mode().Perm())
+	}
+
+	fileInfo, err := os.Stat(backupPath)
+	if err != nil {
+		t.Fatalf("stat backup file: %v", err)
+	}
+	if fileInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("backup file mode = %s, want 0600", fileInfo.Mode().Perm())
+	}
+}
+
 func seedRepairRows(t *testing.T, s *Store, sessionID, project string) {
 	t.Helper()
 	if err := s.CreateSession(sessionID, project, "/work/engram"); err != nil {

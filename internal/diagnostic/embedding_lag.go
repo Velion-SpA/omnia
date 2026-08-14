@@ -8,6 +8,20 @@ import (
 // CheckEmbeddingLag is the code for the embeddings-behind-observations check.
 const CheckEmbeddingLag = "embedding_lag"
 
+// embeddingLagErrorThreshold is the hard cutoff (operational item #2 in
+// docs/conversational-retrieval-plan.md) above which lag stops being a
+// warning and becomes an error. The check's own wording is the argument:
+// semantic search "still returns results, so the degradation is invisible
+// from the answers alone — recall silently narrows". A warning that never
+// escalates trains operators to ignore it exactly while it matters most, so
+// past this many live, un-embedded observations the report must block eyes
+// on it rather than let it sit indefinitely at the same severity as a cosmetic
+// finding. 100 is a round, deliberately conservative number: a healthy
+// `omnia embed` cadence keeps lag in the single digits (see
+// TestEmbeddingLagCheck_OKWhenCaughtUp), so triple digits means the embed job
+// has been stalled, not merely running a beat behind.
+const embeddingLagErrorThreshold = 100
+
 // EmbeddingSnapshot pairs the two watermarks the lag check compares:
 // store.ObservationWatermark on one side, embed.Store.Lag on the other.
 //
@@ -102,13 +116,28 @@ func (c EmbeddingLagCheck) Run(ctx context.Context, scope Scope) (CheckResult, e
 	}
 	evidence["behind_by"] = behind
 
+	// Past embeddingLagErrorThreshold, this stops being a warning: the embed
+	// job is not merely a beat behind, it has stalled, and a warning that
+	// never escalates is exactly the "invisible from the answers alone"
+	// failure this check exists to surface (docs/conversational-retrieval-plan.md,
+	// operational item #2).
+	severity := SeverityWarning
+	message := fmt.Sprintf("Embeddings are behind the store: %d live observation(s) have no vector (newest embedded id %d, newest observation id %d).",
+		behind, snap.EmbeddingMaxObsID, snap.ObservationMaxID)
+	why := "Semantic search cannot reach an observation that was never embedded. It still returns results, so the degradation is invisible from the answers alone — recall silently narrows to whatever was embedded before the job stopped."
+	if behind > embeddingLagErrorThreshold {
+		severity = SeverityError
+		message = fmt.Sprintf("Embeddings are severely behind the store (>%d): %d live observation(s) have no vector (newest embedded id %d, newest observation id %d). The embed job looks stalled, not merely delayed.",
+			embeddingLagErrorThreshold, behind, snap.EmbeddingMaxObsID, snap.ObservationMaxID)
+		why = "Past this many un-embedded observations the embed job is not running a beat behind, it has stopped. " + why
+	}
+
 	return resultFromFindings(c.Code(), nil, []Finding{{
-		CheckID:    c.Code(),
-		Severity:   SeverityWarning,
-		ReasonCode: "embeddings_behind_observations",
-		Message: fmt.Sprintf("Embeddings are behind the store: %d live observation(s) have no vector (newest embedded id %d, newest observation id %d).",
-			behind, snap.EmbeddingMaxObsID, snap.ObservationMaxID),
-		Why:          "Semantic search cannot reach an observation that was never embedded. It still returns results, so the degradation is invisible from the answers alone — recall silently narrows to whatever was embedded before the job stopped.",
+		CheckID:      c.Code(),
+		Severity:     severity,
+		ReasonCode:   "embeddings_behind_observations",
+		Message:      message,
+		Why:          why,
 		Evidence:     mustJSON(evidence),
 		SafeNextStep: "Run `omnia embed` to reconcile, and read its error if it fails.",
 	}}), nil
