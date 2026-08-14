@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -85,8 +86,9 @@ func ollamaReachable(baseURL string, timeout time.Duration) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
-// loadAppConfigWithRecallAutodetect loads config.yaml (config.DefaultPath())
-// and runs the Ollama auto-detect (issue #83, maybeAutoDetectRecall) so the
+// loadAppConfigWithRecallAutodetect loads config.yaml (the path named by a
+// global --config/-config argument, else config.DefaultPath()) and runs the
+// Ollama auto-detect (issue #83, maybeAutoDetectRecall) so the
 // returned Config already reflects any auto-enabled recall.enabled. It is a
 // var (not a plain func), matching this file's storeNew/newHTTPServer
 // injection convention, so tests can stub it instead of touching the real
@@ -100,8 +102,16 @@ func ollamaReachable(baseURL string, timeout time.Duration) bool {
 // enabled. Returns (nil, err) when the config file is missing/unparseable —
 // callers degrade to FTS5-only search / no auto-embed, exactly like every
 // other `omnia` subcommand's config.Load graceful-degradation convention.
+// globalConfigPath(os.Args) rather than config.DefaultPath(): every surface
+// that reads config through this seam (cmdMCP, cmdServe, cmdSearch) accepts a
+// global `--config PATH` argument, and hardcoding the default path here made
+// that argument silently do nothing — `omnia serve 7801 --config other.yaml`
+// loaded $HOME/.config/omnia/config.yaml anyway, so an operator (or a
+// measurement run) could not point a server at an alternate config at all.
+// globalConfigPath already falls back to config.DefaultPath() when no such
+// argument is present, so the no-argument behavior is unchanged.
 var loadAppConfigWithRecallAutodetect = func() (*config.Config, error) {
-	appCfg, err := config.Load(config.DefaultPath())
+	appCfg, err := config.Load(globalConfigPath(os.Args))
 	if err != nil {
 		return nil, err
 	}

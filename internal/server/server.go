@@ -588,11 +588,21 @@ func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request
 // stays minimal, mirroring mem_search's own present-only-when-notable
 // envelope keys (fts_relaxed/budget_trimmed/recall_degraded).
 type searchEnvelopeJSON struct {
-	Results              []store.SearchResult      `json:"results"`
-	RecallDegraded       bool                      `json:"recall_degraded,omitempty"`
-	RecallDegradedReason string                    `json:"recall_degraded_reason,omitempty"`
-	EmbeddingsStale      bool                      `json:"embeddings_stale,omitempty"`
-	EmbeddingsBehindBy   int                       `json:"embeddings_behind_by,omitempty"`
+	Results []store.SearchResult `json:"results"`
+	// RecallDegraded/EmbeddingsStale/EmbeddingsBehindBy are deliberately NOT
+	// omitempty, unlike their siblings below. The entire point of the
+	// envelope (issue #226, plan P3's calibrated "I don't have this") is that
+	// a consumer can tell degraded recall apart from healthy recall — and
+	// omitting `recall_degraded` when it is false makes healthy recall
+	// indistinguishable from an older server that does not emit the field at
+	// all, which is exactly the ambiguity the envelope exists to remove. A
+	// consumer must be able to read `"recall_degraded": false` and believe
+	// it. The string/map fields below stay omitempty because their empty
+	// value carries no such claim.
+	RecallDegraded       bool   `json:"recall_degraded"`
+	RecallDegradedReason string `json:"recall_degraded_reason,omitempty"`
+	EmbeddingsStale      bool   `json:"embeddings_stale"`
+	EmbeddingsBehindBy   int    `json:"embeddings_behind_by"`
 	NewestEmbeddedAt     string                    `json:"newest_embedded_at,omitempty"`
 	ScoreBreakdown       map[string]map[string]any `json:"score_breakdown,omitempty"`
 	// Intent mirrors SearchEnvelope.Intent — see that field's own doc.
