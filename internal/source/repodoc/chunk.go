@@ -131,6 +131,91 @@ func ChunkMarkdown(content string) []Section {
 	return sections
 }
 
+// DefaultMaxHeadingDepth is the default ceiling FoldSectionsByDepth enforces
+// (bugfix, this change: repodoc's default allowlist + unlimited depth
+// measured 56 files / 937 chunks against this repo, ~66% of its ~479 delta
+// memories — see allowlist.go's DefaultAllowlist doc comment for the full
+// number). An identity question ("what IS this project") is answered by a
+// document's top-level structure — an H1 title and its H2 sections — never
+// by the sub-sub-section of a requirement several headings deep. Capping at
+// H1/H2 keeps repodoc's corpus scoped to the identity-level content P1
+// exists to serve (repodoc.go's package doc comment), while leaving
+// everything deeper still SEARCHABLE, not deleted — see
+// FoldSectionsByDepth's doc comment for why folding, not discarding, was
+// chosen.
+const DefaultMaxHeadingDepth = 2
+
+// FoldSectionsByDepth collapses every Section deeper than maxDepth into its
+// nearest ancestor Section that is within maxDepth, instead of dropping it.
+//
+// # Why fold instead of discard
+//
+// A naive depth cutoff ("only emit Sections with Level <= maxDepth") would
+// silently delete every H3+ subsection's text. That is a strictly worse
+// failure than not having a depth limit at all: a retrieved H2 chunk that
+// promises a subsection ("see Non-goals below") would no longer contain it,
+// and the missing text is not visible as missing — it just silently isn't
+// there. Every rune ChunkMarkdown ever produced for a document is preserved
+// somewhere in FoldSectionsByDepth's output; only its owning chunk/TopicKey
+// changes for headings deeper than maxDepth.
+//
+// # Algorithm
+//
+// Sections arrive in ChunkMarkdown's document order. Walking left to right,
+// the most recently emitted Section with Level <= maxDepth is the current
+// "keeper" — the nearest ancestor chunk. Each subsequent Section deeper than
+// maxDepth has its own heading re-rendered as literal ATX markdown (e.g.
+// "### Non-goals") and appended to the keeper's Body, and the keeper's
+// LineEnd is extended to cover the folded Section's line range, so the
+// keeper's git staleness anchor (anchor.go) still spans exactly the text it
+// now contains. The Level-0 preamble section, when present, is always its
+// own keeper candidate (0 <= any maxDepth >= 1 this function actually acts
+// on).
+//
+// maxDepth <= 0 means "no limit": sections are returned unchanged. This is
+// the config override path the plan asks for on the allowlist
+// (allowlist.go's DefaultAllowlist doc comment) mirrored for depth.
+//
+// # Edge case: no eligible ancestor yet
+//
+// A Section deeper than maxDepth that precedes any Section with Level <=
+// maxDepth (e.g. a document that opens directly with "### Detail" and no
+// preamble, H1, or H2 before it) has nothing to fold into. It is kept as
+// its own standalone Section rather than dropped, and — because it is
+// itself over-depth — it is NOT treated as a valid fold target for any
+// Section that follows it either; only a true Level <= maxDepth Section can
+// become a keeper. This favors "never silently discard" over strict depth
+// enforcement in a corner case that should not occur in this package's
+// actual scope (README/VISION/ARCHITECTURE/CONTRIBUTING/docs/adr all open
+// with an H1 in practice).
+func FoldSectionsByDepth(sections []Section, maxDepth int) []Section {
+	if maxDepth <= 0 {
+		return sections
+	}
+
+	out := make([]Section, 0, len(sections))
+	keeper := -1 // index into out of the nearest ancestor within maxDepth; -1 = none yet
+
+	for _, sec := range sections {
+		if sec.Level <= maxDepth {
+			out = append(out, sec)
+			keeper = len(out) - 1
+			continue
+		}
+		if keeper == -1 {
+			out = append(out, sec) // no ancestor chunk to fold into — keep standalone
+			continue
+		}
+
+		heading := sec.HeadingPath[len(sec.HeadingPath)-1]
+		out[keeper].Body = strings.TrimRight(out[keeper].Body, "\n") + "\n\n" +
+			strings.Repeat("#", sec.Level) + " " + heading + "\n\n" + strings.TrimRight(sec.Body, "\n")
+		out[keeper].LineEnd = sec.LineEnd
+	}
+
+	return out
+}
+
 // rawHeading is a single parsed ATX heading occurrence.
 type rawHeading struct {
 	level int

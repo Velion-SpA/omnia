@@ -135,6 +135,93 @@ func TestChunkMarkdown_PreambleBeforeFirstHeading(t *testing.T) {
 	}
 }
 
+// TestFoldSectionsByDepth_DefaultCollapsesH3IntoH2 uses sampleDoc's real
+// H1/H2/H3 structure (the same fixture TestChunkMarkdown_HeadingPathAndBody
+// uses) to verify the default depth (2) folds both H3 "Non-goals" sections
+// into their parent H2, without losing any text and without merging the two
+// unrelated H2 sections into each other.
+func TestFoldSectionsByDepth_DefaultCollapsesH3IntoH2(t *testing.T) {
+	sections := FoldSectionsByDepth(ChunkMarkdown(sampleDoc), DefaultMaxHeadingDepth)
+
+	if len(sections) != 3 {
+		t.Fatalf("got %d sections, want 3 (Omnia H1, Vision H2 w/ folded Non-goals, Architecture H2 w/ folded Non-goals): %+v", len(sections), sections)
+	}
+	if sections[0].Level != 1 || sections[1].Level != 2 || sections[2].Level != 2 {
+		t.Fatalf("levels = [%d,%d,%d], want [1,2,2]", sections[0].Level, sections[1].Level, sections[2].Level)
+	}
+
+	vision := sections[1]
+	if !strings.Contains(vision.Body, "survives sessions") {
+		t.Errorf("Vision section lost its own body: %q", vision.Body)
+	}
+	if !strings.Contains(vision.Body, "### Non-goals") || !strings.Contains(vision.Body, "general-purpose database") {
+		t.Errorf("Vision section did not fold in its child Non-goals section: %q", vision.Body)
+	}
+
+	arch := sections[2]
+	if !strings.Contains(arch.Body, "Source -> Item -> Sink") {
+		t.Errorf("Architecture section lost its own body: %q", arch.Body)
+	}
+	if !strings.Contains(arch.Body, "### Non-goals") || !strings.Contains(arch.Body, "duplicate heading text") {
+		t.Errorf("Architecture section did not fold in its child Non-goals section: %q", arch.Body)
+	}
+
+	// The two folded "Non-goals" sections must land in DIFFERENT parents —
+	// folding must not cross-contaminate sibling H2 branches.
+	if strings.Contains(vision.Body, "duplicate heading text") {
+		t.Error("Architecture's Non-goals content leaked into Vision's folded body")
+	}
+	if strings.Contains(arch.Body, "general-purpose database") {
+		t.Error("Vision's Non-goals content leaked into Architecture's folded body")
+	}
+
+	// LineEnd must extend to cover the folded child's range so the git
+	// staleness anchor (anchor.go) still spans exactly the retained text.
+	unfolded := ChunkMarkdown(sampleDoc)
+	visionChildEnd := unfolded[2].LineEnd // the standalone "Non-goals" under Vision
+	if vision.LineEnd != visionChildEnd {
+		t.Errorf("Vision LineEnd = %d, want extended to folded child's LineEnd %d", vision.LineEnd, visionChildEnd)
+	}
+}
+
+// TestFoldSectionsByDepth_ZeroOrNegativeMeansUnlimited covers the config
+// override path (allowlist.go's DefaultAllowlist doc comment describes the
+// same "opt out via override" contract for the allowlist; this mirrors it
+// for depth): maxDepth <= 0 must return sections completely unchanged.
+func TestFoldSectionsByDepth_ZeroOrNegativeMeansUnlimited(t *testing.T) {
+	unfolded := ChunkMarkdown(sampleDoc)
+	for _, maxDepth := range []int{0, -1, -6} {
+		got := FoldSectionsByDepth(ChunkMarkdown(sampleDoc), maxDepth)
+		if len(got) != len(unfolded) {
+			t.Fatalf("maxDepth=%d: got %d sections, want %d (unchanged)", maxDepth, len(got), len(unfolded))
+		}
+		for i := range got {
+			if got[i].Level != unfolded[i].Level || got[i].Body != unfolded[i].Body {
+				t.Errorf("maxDepth=%d: section %d changed, want unchanged: got %+v, want %+v", maxDepth, i, got[i], unfolded[i])
+			}
+		}
+	}
+}
+
+// TestFoldSectionsByDepth_NoAncestorKeepsStandalone covers the corner case
+// documented on FoldSectionsByDepth: a document whose very first heading is
+// already deeper than maxDepth has no ancestor chunk to fold into, so it
+// must be kept as its own Section (never silently discarded) rather than
+// erroring or being dropped.
+func TestFoldSectionsByDepth_NoAncestorKeepsStandalone(t *testing.T) {
+	doc := "### Detail\n\nNo H1 or H2 precedes this heading at all.\n"
+	sections := FoldSectionsByDepth(ChunkMarkdown(doc), DefaultMaxHeadingDepth)
+	if len(sections) != 1 {
+		t.Fatalf("got %d sections, want 1 (kept standalone, not dropped): %+v", len(sections), sections)
+	}
+	if sections[0].Level != 3 {
+		t.Errorf("Level = %d, want 3 (unfolded — no eligible ancestor existed)", sections[0].Level)
+	}
+	if !strings.Contains(sections[0].Body, "No H1 or H2 precedes") {
+		t.Errorf("standalone section lost its text: %q", sections[0].Body)
+	}
+}
+
 func TestDocTitle_FirstH1(t *testing.T) {
 	got := DocTitle(sampleDoc, "fallback")
 	if got != "Omnia" {

@@ -20,7 +20,7 @@ func TestMatches_DefaultAllowlist(t *testing.T) {
 		{"docs non-md file excluded", "docs/notes.txt", false},
 		{"adr md", "adr/0001-use-repodoc.md", true},
 		{"adr nested md", "adr/2024/0001-decision.md", true},
-		{"openspec specs md", "openspec/specs/repodoc/spec.md", true},
+		{"openspec specs md no longer in default (bugfix, corpus-growth)", "openspec/specs/repodoc/spec.md", false},
 		{"openspec changes not matched", "openspec/changes/foo/proposal.md", false},
 		{"source code excluded", "internal/source/repodoc/repodoc.go", false},
 		{"go.mod excluded", "go.mod", false},
@@ -67,5 +67,16 @@ func TestMatches_CustomAllowlist(t *testing.T) {
 	}
 	if matches(custom, "README.md") {
 		t.Error("expected custom allowlist to NOT match README.md (not in custom list)")
+	}
+}
+
+// TestMatches_OpenspecSpecsStillAvailableAsOptIn covers the "not gone
+// forever" half of the DefaultAllowlist bugfix: openspec/specs/** is
+// removed from the DEFAULT but must still work when a caller explicitly
+// opts back in via New's allowlist parameter.
+func TestMatches_OpenspecSpecsStillAvailableAsOptIn(t *testing.T) {
+	custom := []string{"openspec/specs/**/*.md"}
+	if !matches(custom, "openspec/specs/repodoc/spec.md") {
+		t.Error("expected an explicit opt-in allowlist to still match openspec/specs/**")
 	}
 }

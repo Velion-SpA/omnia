@@ -14,6 +14,21 @@ import (
 // code change here — the config wiring that exposes that knob belongs to
 // whatever calls New (not this package; see the package doc comment in
 // repodoc.go for the ownership boundary).
+//
+// "openspec/specs/**/*.md" was REMOVED from this default (bugfix, this
+// change). Measured against this repo, Preview() with the plan's original
+// seven-pattern list returned 56 files / 937 chunks — root docs (55 files)
+// + docs/** (427 chunks) + openspec/specs/** alone contributing 455 chunks,
+// pushing the combined total to ~66% of the project's ~479 delta memories.
+// That is more than double the plan's own "30% means the allowlist is too
+// wide" ceiling (repodoc.go's Stats doc comment) and would swamp the delta
+// log the plan explicitly forbids regressing. openspec/specs/** is internal
+// change-proposal bookkeeping — it answers "what did we decide to build for
+// change X", never "what IS this project" (P1's only job, see repodoc.go's
+// package doc comment) — so it is the wrong content for this source even
+// before the budget problem. It is not gone forever: a caller can still opt
+// it back in via New's allowlist parameter, same as any other custom scope;
+// it is only removed from the un-configured default.
 var DefaultAllowlist = []string{
 	"README*",
 	"VISION*",
@@ -21,7 +36,6 @@ var DefaultAllowlist = []string{
 	"CONTRIBUTING*",
 	"docs/**/*.md",
 	"adr/**/*.md",
-	"openspec/specs/**/*.md",
 }
 
 // matches reports whether relPath (repo-root-relative, forward-slash

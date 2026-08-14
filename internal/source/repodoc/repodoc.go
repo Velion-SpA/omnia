@@ -1,7 +1,14 @@
 // Package repodoc ingests a git repository's OWN documentation —
-// README/VISION/ARCHITECTURE/CONTRIBUTING, docs/**, adr/**,
-// openspec/specs/** — as Engram memories, satisfying core.Source
-// (internal/core/ports.go).
+// README/VISION/ARCHITECTURE/CONTRIBUTING, docs/**, adr/** — as Engram
+// memories, satisfying core.Source (internal/core/ports.go).
+//
+// openspec/specs/** was in the plan's original scope list but was measured
+// out of the DEFAULT allowlist (see allowlist.go's DefaultAllowlist doc
+// comment for the corpus-growth numbers that forced this) — it remains
+// available as a New(...) allowlist override, just not on by default. The
+// default is also capped to H1/H2 headings (DefaultMaxHeadingDepth,
+// chunk.go); deeper sections are folded into their nearest kept ancestor
+// rather than becoming their own chunk, for the same corpus-growth reason.
 //
 // # Motivating decision (plan P1)
 //
@@ -104,11 +111,12 @@ const (
 // Source implements core.Source over a local git working tree's own
 // documentation. See the package doc comment for the design rationale.
 type Source struct {
-	repoRoot  string // absolute path to the git working tree root
-	project   string // Engram project name every emitted Item carries
-	allowlist []string
-	state     core.StateStore
-	probe     anchorProbe // git-backed staleness anchor capture; nil disables it gracefully
+	repoRoot        string // absolute path to the git working tree root
+	project         string // Engram project name every emitted Item carries
+	allowlist       []string
+	state           core.StateStore
+	probe           anchorProbe // git-backed staleness anchor capture; nil disables it gracefully
+	maxHeadingDepth int         // see FoldSectionsByDepth (chunk.go); defaults to DefaultMaxHeadingDepth
 }
 
 // anchorProbe is the subset of *internal/anchor.Probe this package depends
@@ -143,17 +151,26 @@ func New(repoRoot, project string, allowlist []string, state core.StateStore) *S
 		allowlist = DefaultAllowlist
 	}
 	return &Source{
-		repoRoot:  repoRoot,
-		project:   project,
-		allowlist: allowlist,
-		state:     state,
-		probe:     anchor.NewProbe(),
+		repoRoot:        repoRoot,
+		project:         project,
+		allowlist:       allowlist,
+		state:           state,
+		probe:           anchor.NewProbe(),
+		maxHeadingDepth: DefaultMaxHeadingDepth,
 	}
 }
 
 // SetProbe overrides the anchor probe (test injection point), or disables
 // anchor capture entirely when p is nil.
 func (s *Source) SetProbe(p anchorProbe) { s.probe = p }
+
+// SetMaxHeadingDepth overrides the heading-depth ceiling chunkFile folds
+// deeper sections into (see FoldSectionsByDepth, chunk.go). n <= 0 disables
+// the limit entirely — the config override path DefaultMaxHeadingDepth's
+// doc comment describes, mirroring SetProbe's own "call the setter to
+// deviate from New's default" convention rather than growing New's
+// parameter list.
+func (s *Source) SetMaxHeadingDepth(n int) { s.maxHeadingDepth = n }
 
 func (s *Source) Name() string { return "repodoc" }
 
@@ -305,7 +322,7 @@ func (s *Source) listCandidateFiles() ([]string, error) {
 // (Fetch: true: Preview: false — see Preview's doc comment).
 func (s *Source) chunkFile(ctx context.Context, relPath, content string, computeAnchor bool) []core.Item {
 	docTitle := DocTitle(content, docTitleFallback(relPath))
-	sections := ChunkMarkdown(content)
+	sections := FoldSectionsByDepth(ChunkMarkdown(content), s.maxHeadingDepth)
 
 	var items []core.Item
 	for _, sec := range sections {
