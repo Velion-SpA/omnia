@@ -58,6 +58,34 @@ var (
 	ErrObservationNotFound    = errors.New("observation not found")
 	ErrPromptNotFound         = errors.New("prompt not found")
 	ErrProjectNotFound        = errors.New("project not found")
+
+	// ErrPromptContentRequired is returned by AddPrompt/AddPromptIfMissing when
+	// the prompt content is empty (or reduces to empty after stripPrivateTags'
+	// TrimSpace). This is a hard, store-layer rejection, not a soft warning.
+	//
+	// Why this exists (live incident, 2026-08-14, project "umbral",
+	// entity_key prompt-a7cb56e905751772): before this guard, an empty-content
+	// prompt written through mem_save_prompt (internal/mcp handleSavePrompt,
+	// which — unlike POST /prompts' handleAddPrompt — never checked content
+	// for emptiness) sailed straight into user_prompts AND into a queued
+	// sync_mutations upsert. store.ValidateSyncMutationPayload requires
+	// `content` for every SyncEntityPrompt upsert (matching what the push
+	// path — chunkcodec/cloudserver — also enforces), so that mutation could
+	// never validate. Because a rejected chunk acks nothing
+	// (internal/sync/sync.go's storeAckMutationSeq only runs after a
+	// successful WriteChunk), the single poison-pill row blocked 100% of the
+	// project's pending replication, indefinitely, across every target_key —
+	// not just itself. `omnia doctor repair` can delete the stuck mutation
+	// row, but backfillPromptSyncMutationsTx (run on every Store.New(), see
+	// repairEnrolledProjectSyncMutations) would immediately notice the
+	// now-mutation-less prompt still sitting in user_prompts and re-enqueue
+	// the exact same broken payload under the exact same entity_key on the
+	// very next process start — confirmed live: seq 17759/17760 deleted,
+	// seq 20031/20032 reappeared minutes later for the same entity_key.
+	// Rejecting the write here closes the entry point; the matching skip in
+	// backfillPromptSyncMutationsTx (search "poison-pill" in this file)
+	// closes the re-enqueue loop for any row that predates this guard.
+	ErrPromptContentRequired = errors.New("prompt content is required")
 )
 
 // Sentinel errors for relation sync apply path (Phase 2).
@@ -3758,6 +3786,17 @@ func (s *Store) AddPrompt(p AddPromptParams) (int64, error) {
 	p.Project, _ = NormalizeProject(p.Project)
 
 	content := s.preparePromptContent(p.Content)
+	// Reject empty content before opening a transaction: an empty-content
+	// prompt has nothing worth persisting locally AND can never validate as
+	// a sync mutation (ValidateSyncMutationPayload requires `content` for
+	// every SyncEntityPrompt upsert). Writing it anyway would create a row
+	// with no informational value that also permanently poisons the sync
+	// queue for its project — see ErrPromptContentRequired's doc comment for
+	// the live incident this closes. Fail loudly instead of silently
+	// swallowing a caller's failed capture.
+	if strings.TrimSpace(content) == "" {
+		return 0, ErrPromptContentRequired
+	}
 
 	var promptID int64
 	err := s.withTx(func(tx *sql.Tx) error {
@@ -3797,6 +3836,14 @@ func (s *Store) AddPrompt(p AddPromptParams) (int64, error) {
 func (s *Store) AddPromptIfMissing(p AddPromptParams) (int64, bool, error) {
 	p.Project, _ = NormalizeProject(p.Project)
 	content := s.preparePromptContent(p.Content)
+	// Same rejection as AddPrompt, and for the same reason — see
+	// ErrPromptContentRequired's doc comment. This path is currently only
+	// reached with an already-validated non-empty prompt (activity.CurrentPrompt
+	// refuses to hand back an empty prompt), but the guard belongs at the
+	// store layer so it protects every caller, not just the ones we've audited.
+	if strings.TrimSpace(content) == "" {
+		return 0, false, ErrPromptContentRequired
+	}
 
 	var promptID int64
 	inserted := false
@@ -7242,7 +7289,32 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 	}
 
 	// Phase 2: insert live prompt mutations.
+	//
+	// Skip (do not enqueue) any prompt whose content is empty rather than
+	// failing the whole backfill transaction. This is the deepest layer of
+	// the poison-pill fix (see ErrPromptContentRequired's doc comment):
+	// AddPrompt/AddPromptIfMissing now refuse to CREATE an empty-content
+	// row, but this backfill runs on every Store.New() (via
+	// repairEnrolledProjectSyncMutations) against whatever already exists in
+	// user_prompts — including rows written before this guard shipped, or by
+	// any future caller we haven't audited. Such a row can never pass
+	// ValidateSyncMutationPayload's SyncEntityPrompt/upsert content
+	// requirement, so enqueueing it would only recreate the exact bug this
+	// fix closes: omnia doctor repair deletes the stuck mutation, the next
+	// process start re-derives the same broken payload from user_prompts and
+	// re-enqueues it under the same entity_key, forever. Returning an error
+	// here instead of skipping would be worse — Phase 2 runs inside the same
+	// transaction as every other pending session/observation/prompt backfill
+	// for the project, and repairEnrolledProjectSyncMutations propagates any
+	// error straight out of Store.New(): one legacy corrupt row would brick
+	// the store open for the entire project, not just its own sync. The
+	// local user_prompts row is left untouched either way — nothing is
+	// deleted, it simply never becomes syncable, which matches reality:
+	// there is no valid payload to ever send for it.
 	for _, payload := range pending {
+		if strings.TrimSpace(payload.Content) == "" {
+			continue
+		}
 		if err := s.enqueueSyncMutationTx(tx, SyncEntityPrompt, payload.SyncID, SyncOpUpsert, payload); err != nil {
 			return err
 		}

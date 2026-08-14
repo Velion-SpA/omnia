@@ -8615,6 +8615,169 @@ func TestRepairBackfillsMissingMutations(t *testing.T) {
 	}
 }
 
+// TestAddPromptRejectsEmptyContent is the entry-point half of the
+// prompt-poison-pill fix (see ErrPromptContentRequired's doc comment in
+// store.go for the live incident: project "umbral",
+// entity_key prompt-a7cb56e905751772, sync_mutation_required_fields blocked
+// on "prompt payload missing required fields: content"). Before this guard,
+// AddPrompt happily inserted a user_prompts row with empty content AND
+// enqueued a sync mutation for it that could never pass
+// ValidateSyncMutationPayload. Table-driven over the ways content can end up
+// empty: genuinely empty, whitespace-only (TrimSpace inside
+// preparePromptContent), and — for completeness — confirms non-empty
+// content is unaffected.
+func TestAddPromptRejectsEmptyContent(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		wantErr     bool
+		wantMutated bool
+	}{
+		{name: "empty content", content: "", wantErr: true},
+		{name: "whitespace-only content", content: "   \n\t  ", wantErr: true},
+		{name: "genuine content is accepted", content: "what should I do next?", wantErr: false, wantMutated: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("s-content", "engram", "/tmp/engram"); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+
+			id, err := s.AddPrompt(AddPromptParams{SessionID: "s-content", Content: tt.content, Project: "engram"})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for content %q, got prompt id %d", tt.content, id)
+				}
+				if !errors.Is(err, ErrPromptContentRequired) {
+					t.Fatalf("expected ErrPromptContentRequired, got %v", err)
+				}
+				// Fail loudly, don't half-write: no user_prompts row and no
+				// sync_mutations row for this session — nothing was silently
+				// dropped because nothing valid was ever offered to persist.
+				var promptCount int
+				if err := s.db.QueryRow(`SELECT COUNT(*) FROM user_prompts WHERE session_id = ?`, "s-content").Scan(&promptCount); err != nil {
+					t.Fatalf("count user_prompts: %v", err)
+				}
+				if promptCount != 0 {
+					t.Fatalf("expected no user_prompts row on rejected content, got %d", promptCount)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if id == 0 {
+				t.Fatalf("expected a non-zero prompt id")
+			}
+		})
+	}
+}
+
+// TestAddPromptIfMissingRejectsEmptyContent mirrors
+// TestAddPromptRejectsEmptyContent for the mem_save auto-capture path
+// (internal/mcp's addPromptIfMissing wraps this). That caller is currently
+// guarded upstream (activity.CurrentPrompt refuses to hand back an empty
+// prompt), but the store-layer rejection must hold regardless — it is the
+// only choke point common to every current AND future caller.
+func TestAddPromptIfMissingRejectsEmptyContent(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-ifmissing", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, inserted, err := s.AddPromptIfMissing(AddPromptParams{SessionID: "s-ifmissing", Content: "", Project: "engram"})
+	if !errors.Is(err, ErrPromptContentRequired) {
+		t.Fatalf("expected ErrPromptContentRequired, got %v", err)
+	}
+	if inserted {
+		t.Fatalf("expected inserted=false on rejected content")
+	}
+	if id != 0 {
+		t.Fatalf("expected id=0 on rejected content, got %d", id)
+	}
+}
+
+// TestBackfillPromptSyncMutationsSkipsEmptyContentPrompt is the deepest-layer
+// half of the poison-pill fix, and the regression the live incident actually
+// demands: prove an empty-content prompt cannot wedge the sync queue, even
+// when it enters user_prompts through a path that bypasses AddPrompt
+// entirely (legacy data written before this fix shipped, or any future
+// unaudited caller — reproduced here with a direct INSERT, the same
+// technique TestRepairBackfillsMissingMutations already uses to simulate
+// "existing row, no mutation yet").
+//
+// This is what actually breaks the live incident's reproduction loop: it was
+// never "the writer keeps firing" — the writer fires once. What we traced to
+// obs #2393 was Store.New() (via repairEnrolledProjectSyncMutations, called
+// on every process start) noticing the mutation-less poison-pill row and
+// re-enqueueing it fresh under the same entity_key. `omnia doctor repair`
+// deletes the stuck sync_mutations row; the very next command re-derives the
+// same broken payload from user_prompts and re-blocks the project. This test
+// asserts the backfill now leaves that row alone instead of resurrecting it.
+func TestBackfillPromptSyncMutationsSkipsEmptyContentPrompt(t *testing.T) {
+	s := newTestStoreRaw(t)
+
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO sync_enrolled_projects (project) VALUES (?)`, "umbral"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory, started_at) VALUES (?, ?, ?, datetime('now'))`,
+		"s-poison", "umbral", "/tmp/umbral",
+	); err != nil {
+		t.Fatalf("insert session: %v", err)
+	}
+
+	// Simulate the exact live shape: a user_prompts row whose content is
+	// empty, with no corresponding sync_mutations row — as it would look
+	// immediately after `omnia doctor repair --apply` deletes the stuck
+	// mutation but leaves the (still broken) local row in place.
+	poisonSyncID := "prompt-a7cb56e905751772"
+	if _, err := s.db.Exec(`
+		INSERT INTO user_prompts (session_id, content, project, created_at, sync_id)
+		VALUES (?, ?, ?, datetime('now'), ?)`,
+		"s-poison", "", "umbral", poisonSyncID,
+	); err != nil {
+		t.Fatalf("insert poison-pill prompt: %v", err)
+	}
+
+	if before := countSyncMutations(t, s, "umbral"); before != 0 {
+		t.Fatalf("expected 0 mutations before repair, got %d", before)
+	}
+
+	// Store.New() calls this on every startup — reproduce that exactly,
+	// including running it twice to prove it stays a no-op rather than
+	// re-enqueueing on some later pass.
+	if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+		t.Fatalf("repair (1st pass): %v", err)
+	}
+	if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+		t.Fatalf("repair (2nd pass): %v", err)
+	}
+
+	var mutCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND source = ?`,
+		SyncEntityPrompt, poisonSyncID, SyncSourceLocal,
+	).Scan(&mutCount); err != nil {
+		t.Fatalf("count prompt mutations: %v", err)
+	}
+	if mutCount != 0 {
+		t.Fatalf("expected the empty-content prompt to never be enqueued as a sync mutation, got %d pending mutation(s) — the poison pill would wedge the sync queue again", mutCount)
+	}
+
+	// The local row itself must be untouched — this is a refusal to
+	// *sync* invalid data, not a deletion of local data.
+	var localContent string
+	if err := s.db.QueryRow(`SELECT content FROM user_prompts WHERE sync_id = ?`, poisonSyncID).Scan(&localContent); err != nil {
+		t.Fatalf("expected local user_prompts row to remain: %v", err)
+	}
+	if localContent != "" {
+		t.Fatalf("expected local content to remain empty/untouched, got %q", localContent)
+	}
+}
+
 // TestRepairDoesNotDeadlockWithCursorAndInsert verifies that repair handles
 // 100 sessions without mutations correctly — no deadlock, cursor-insert interference,
 // or busy loop.
