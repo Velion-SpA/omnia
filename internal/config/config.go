@@ -952,16 +952,38 @@ func applyDefaults(cfg *Config, data []byte) {
 	// (false) IS the default, mirroring Recall.Enabled's own convention
 	// above. Only the ranking params get defaults, so an operator who opts
 	// in by setting only `recall: { ranking: { enabled: true } }` still gets
-	// an equal-weight sum and a sane 14-day recency half-life instead of
+	// a sane weighting and a 14-day recency half-life instead of
 	// zero-valued weights that would silently zero out every RankScore.
+	//
+	// These defaults were 1.0/1.0/1.0 — an equal-weight sum — until the
+	// conversational eval harness measured what that actually does. Under
+	// equal weights relevance is only ONE THIRD of RankScore, so
+	// type-derived importance and recency together outvote whether a memory
+	// answers the question at all: a delta question wants a `bugfix`
+	// (DefaultImportanceWeight 2) but an `architecture` row (weight 3)
+	// outranks it on type alone. Measured against
+	// internal/eval/testdata/conversational_cases.json over GET /search,
+	// 3 runs each, equal weights vs. these:
+	//
+	//	kind           equal 1/1/1   relevance-heavy 3/.5/.5   ranking off
+	//	delta              0.300              0.600               0.600
+	//	open_items         0.000              0.125               0.125
+	//	cross_project      0.125              0.250               0.250
+	//	rationale          0.875              0.875               0.625
+	//
+	// Equal weights are WORSE than leaving ranking off entirely on three of
+	// four kinds; relevance-heavy matches ranking-off everywhere and keeps
+	// the rationale gain. Relevance stays dominant, with recency and
+	// importance as tie-breakers rather than as co-equal votes. See
+	// engram/omnia memory obs #2399 for the full ablation.
 	if cfg.Recall.Ranking.Weights.Recency == 0 {
-		cfg.Recall.Ranking.Weights.Recency = 1.0
+		cfg.Recall.Ranking.Weights.Recency = 0.5
 	}
 	if cfg.Recall.Ranking.Weights.Importance == 0 {
-		cfg.Recall.Ranking.Weights.Importance = 1.0
+		cfg.Recall.Ranking.Weights.Importance = 0.5
 	}
 	if cfg.Recall.Ranking.Weights.Relevance == 0 {
-		cfg.Recall.Ranking.Weights.Relevance = 1.0
+		cfg.Recall.Ranking.Weights.Relevance = 3.0
 	}
 	// Weights.Salience intentionally has NO default-fill here, unlike its
 	// three siblings above — see RankingWeights' own doc: its zero value
