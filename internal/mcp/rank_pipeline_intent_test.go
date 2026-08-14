@@ -184,27 +184,60 @@ func TestRankPipeline_IntentRoutingIdentity_ExplicitTypeStillWins(t *testing.T) 
 	}
 }
 
-// TestRankPipeline_IntentRoutingIdentity_TypeLensLiftsDocRow is TypeLens'
-// positive counterpart to the ExplicitType test above: with no
-// ExplicitType, Identity's TypeLens:"doc" profile hint must actually lift a
-// "doc"-typed row above non-matching rows, exactly like an InferLensType
-// signal would — proving the overlay reaches ApplyTypeLens, not just
-// RankResults.
-func TestRankPipeline_IntentRoutingIdentity_TypeLensLiftsDocRow(t *testing.T) {
+// TestRankPipeline_IntentRoutingRationale_TypeLensLiftsDecisionRow is
+// TypeLens' positive counterpart to the ExplicitType test above: with no
+// ExplicitType, Rationale's TypeLens:"decision" profile hint must actually
+// lift a "decision"-typed row above non-matching rows — proving the overlay
+// reaches ApplyTypeLens, not just RankResults.
+//
+// This used to assert the same thing through Identity's TypeLens:"doc".
+// Identity no longer carries a lens: measured over the conversational
+// corpus, forcing it cut identity grounding from 0.625 to 0.375, because
+// ApplyTypeLens partitions rather than boosts and doc chunks stopped being
+// a minority once repodoc ingestion landed. Rationale -> "decision" is the
+// case where the mechanism still earns its place (0.750 -> 0.875), so the
+// wiring assertion moved here. See intent.ProfileFor's own comment.
+func TestRankPipeline_IntentRoutingRationale_TypeLensLiftsDecisionRow(t *testing.T) {
 	results := []store.SearchResult{
-		rpSR(1, "a", "note", "alpha"), // originally ranked first
-		rpSR(2, "b", "doc", "beta"),   // originally ranked second, but doc-lens-eligible
+		rpSR(1, "a", "note", "alpha"),    // originally ranked first
+		rpSR(2, "b", "decision", "beta"), // originally ranked second, but decision-lens-eligible
 	}
 	relevance := map[int64]float64{1: 2, 2: 1}
 
 	out := RankPipeline(results, relevance, RankPipelineOptions{
-		Query:         "what is Omnia", // classifies Identity -> TypeLens "doc"; InferLensType itself would infer "" for this query (no bugfix/decision/architecture/pattern signal)
+		Query:         "why did we choose SQLite", // classifies Rationale -> TypeLens "decision"
 		TypeLens:      config.TypeLensConfig{Enabled: true},
 		IntentRouting: config.IntentRoutingConfig{Enabled: true},
 	}, time.Now())
 
 	if !rpEqualIDs(rpIDs(out.Results), []int64{2, 1}) {
-		t.Fatalf("expected the intent-derived \"doc\" lens to lift row 2 above row 1, got %v", rpIDs(out.Results))
+		t.Fatalf("expected the intent-derived \"decision\" lens to lift row 2 above row 1, got %v", rpIDs(out.Results))
+	}
+}
+
+// TestRankPipeline_IntentRoutingIdentity_AppliesNoTypeLens pins the negative
+// case at the pipeline level, not just in intent's profile table: an
+// identity query must leave ordering to relevance even with TypeLens
+// enabled. A doc row that relevance ranked second must STAY second.
+//
+// This is the regression guard for the measured 0.625 -> 0.375 grounding
+// drop; without it, restoring TypeLens:"doc" in the profile table would go
+// unnoticed here.
+func TestRankPipeline_IntentRoutingIdentity_AppliesNoTypeLens(t *testing.T) {
+	results := []store.SearchResult{
+		rpSR(1, "a", "note", "alpha"),
+		rpSR(2, "b", "doc", "beta"),
+	}
+	relevance := map[int64]float64{1: 2, 2: 1}
+
+	out := RankPipeline(results, relevance, RankPipelineOptions{
+		Query:         "what is Omnia", // classifies Identity -> no lens
+		TypeLens:      config.TypeLensConfig{Enabled: true},
+		IntentRouting: config.IntentRoutingConfig{Enabled: true},
+	}, time.Now())
+
+	if !rpEqualIDs(rpIDs(out.Results), []int64{1, 2}) {
+		t.Fatalf("identity must apply no type lens — relevance order should stand, got %v", rpIDs(out.Results))
 	}
 }
 
