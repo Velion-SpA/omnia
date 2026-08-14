@@ -397,6 +397,99 @@ func TestFetch_WorksWithoutGitRepo(t *testing.T) {
 	}
 }
 
+func TestFetch_DocsDefaultIsNonRecursive(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "README.md", readmeV1)
+	writeFile(t, dir, "docs/top-level.md", "# Top Level\n\nAt docs/ root.\n")
+	writeFile(t, dir, "docs/nested/deep.md", "# Deep\n\nNested under docs/.\n")
+
+	src := repodoc.New(dir, "testproj", nil, newStubState())
+	items, err := src.Fetch(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+
+	var sawTopLevel, sawNested bool
+	for _, item := range items {
+		if strings.Contains(item.TopicKey, "docs/top-level.md") {
+			sawTopLevel = true
+		}
+		if strings.Contains(item.TopicKey, "docs/nested/deep.md") {
+			sawNested = true
+		}
+	}
+	if !sawTopLevel {
+		t.Error("expected docs/top-level.md (docs/*.md) to be ingested by default")
+	}
+	if sawNested {
+		t.Error("expected docs/nested/deep.md to be EXCLUDED by default (docs/** narrowed to docs/*.md)")
+	}
+}
+
+func TestFetch_ExcludesLegacyArchiveDeprecatedBetaBySegment(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "README.md", readmeV1)
+	writeFile(t, dir, "docs/legacy/old-architecture.md", "# Old Architecture\n\nStale.\n")
+	writeFile(t, dir, "docs/archive/2020-plan.md", "# 2020 Plan\n\nStale.\n")
+	writeFile(t, dir, "docs/deprecated/removed-api.md", "# Removed API\n\nStale.\n")
+	writeFile(t, dir, "docs/beta/experimental.md", "# Experimental\n\nStale.\n")
+	writeFile(t, dir, "docs/current.md", "# Current\n\nStill accurate.\n")
+
+	// Use an explicit recursive allowlist override (docs/**/*.md) to prove
+	// the exclusion is independent of the allowlist, not merely a side
+	// effect of the non-recursive default (allowlist.go's
+	// DefaultExcludedPathSegments doc comment: "applied to EVERY allowlist,
+	// including a caller-supplied override, and including an explicit
+	// opt-in into recursive scope").
+	src := repodoc.New(dir, "testproj", []string{"README*", "docs/**/*.md"}, newStubState())
+	items, err := src.Fetch(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+
+	for _, item := range items {
+		for _, stale := range []string{"legacy", "archive", "deprecated", "beta"} {
+			if strings.Contains(strings.ToLower(item.TopicKey), "docs/"+stale+"/") {
+				t.Errorf("item %q leaked from an excluded %q path segment despite a recursive allowlist override", item.TopicKey, stale)
+			}
+		}
+	}
+
+	var sawCurrent bool
+	for _, item := range items {
+		if strings.Contains(item.TopicKey, "docs/current.md") {
+			sawCurrent = true
+		}
+	}
+	if !sawCurrent {
+		t.Error("expected docs/current.md (not excluded) to still be ingested under the recursive override")
+	}
+}
+
+func TestFetch_ExcludedPathSegmentsOverride(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "README.md", readmeV1)
+	writeFile(t, dir, "docs/legacy/old.md", "# Old\n\nExplicitly re-enabled by the caller.\n")
+
+	src := repodoc.New(dir, "testproj", []string{"README*", "docs/**/*.md"}, newStubState())
+	src.SetExcludedPathSegments(nil) // explicit opt-out, see SetExcludedPathSegments' doc comment
+
+	items, err := src.Fetch(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+
+	var sawLegacy bool
+	for _, item := range items {
+		if strings.Contains(item.TopicKey, "docs/legacy/old.md") {
+			sawLegacy = true
+		}
+	}
+	if !sawLegacy {
+		t.Error("expected SetExcludedPathSegments(nil) to re-enable docs/legacy/old.md")
+	}
+}
+
 func TestFetch_CustomAllowlist(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "README.md", readmeV1)

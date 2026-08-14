@@ -9,6 +9,26 @@
 // default is also capped to H1/H2 headings (DefaultMaxHeadingDepth,
 // chunk.go); deeper sections are folded into their nearest kept ancestor
 // rather than becoming their own chunk, for the same corpus-growth reason.
+// docs/** was further narrowed from recursive to top-level-only
+// (docs/*.md) after the openspec removal alone still measured at 60.96% of
+// this repo's ~479 delta memories — see allowlist.go's DefaultAllowlist doc
+// comment for that number and the "deep docs is reference material, not
+// identity" reasoning. Separately, and for a correctness reason rather than
+// a size reason, DefaultExcludedPathSegments (allowlist.go) hard-excludes
+// any file under a legacy/archive/deprecated/beta path segment from EVERY
+// allowlist, including an explicit recursive override — read that doc
+// comment before touching it; it protects against ranking a
+// self-declared-obsolete document as identity evidence, which plan P1
+// exists specifically to prevent.
+//
+// Measured after all four narrowings (openspec removal, H1/H2 depth cap,
+// non-recursive docs, path-segment exclusion), Preview() against this repo
+// still returns a corpus above the plan's 30% guidance — see this change's
+// final report for the exact number and a breakdown of the heaviest
+// remaining files; getting further under 30% specifically for this repo
+// was deliberately NOT pursued beyond these four changes, since this
+// default has to be reasonable for arbitrary repos, not tuned until one
+// specific repo's number looks good.
 //
 // # Motivating decision (plan P1)
 //
@@ -111,12 +131,13 @@ const (
 // Source implements core.Source over a local git working tree's own
 // documentation. See the package doc comment for the design rationale.
 type Source struct {
-	repoRoot        string // absolute path to the git working tree root
-	project         string // Engram project name every emitted Item carries
-	allowlist       []string
-	state           core.StateStore
-	probe           anchorProbe // git-backed staleness anchor capture; nil disables it gracefully
-	maxHeadingDepth int         // see FoldSectionsByDepth (chunk.go); defaults to DefaultMaxHeadingDepth
+	repoRoot             string // absolute path to the git working tree root
+	project              string // Engram project name every emitted Item carries
+	allowlist            []string
+	state                core.StateStore
+	probe                anchorProbe // git-backed staleness anchor capture; nil disables it gracefully
+	maxHeadingDepth      int         // see FoldSectionsByDepth (chunk.go); defaults to DefaultMaxHeadingDepth
+	excludedPathSegments []string    // see DefaultExcludedPathSegments (allowlist.go); defaults to it, independent of allowlist
 }
 
 // anchorProbe is the subset of *internal/anchor.Probe this package depends
@@ -151,12 +172,13 @@ func New(repoRoot, project string, allowlist []string, state core.StateStore) *S
 		allowlist = DefaultAllowlist
 	}
 	return &Source{
-		repoRoot:        repoRoot,
-		project:         project,
-		allowlist:       allowlist,
-		state:           state,
-		probe:           anchor.NewProbe(),
-		maxHeadingDepth: DefaultMaxHeadingDepth,
+		repoRoot:             repoRoot,
+		project:              project,
+		allowlist:            allowlist,
+		state:                state,
+		probe:                anchor.NewProbe(),
+		maxHeadingDepth:      DefaultMaxHeadingDepth,
+		excludedPathSegments: DefaultExcludedPathSegments,
 	}
 }
 
@@ -171,6 +193,19 @@ func (s *Source) SetProbe(p anchorProbe) { s.probe = p }
 // deviate from New's default" convention rather than growing New's
 // parameter list.
 func (s *Source) SetMaxHeadingDepth(n int) { s.maxHeadingDepth = n }
+
+// SetExcludedPathSegments overrides the hard path-segment exclusion filter
+// (see DefaultExcludedPathSegments, allowlist.go) — pass nil to disable it
+// entirely, or a different word list to protect additional/different
+// conventions (e.g. a repo that uses "obsolete" or "old" instead of
+// "legacy"). Read DefaultExcludedPathSegments' doc comment before calling
+// this with nil: unlike the allowlist and heading-depth overrides, which
+// exist purely to manage corpus SIZE, this filter exists to protect
+// CORRECTNESS — it stops repodoc from ranking a document that has already
+// declared itself obsolete as evidence for "what is this project".
+// Disabling it does not just risk a bigger corpus, it risks a confidently
+// wrong one.
+func (s *Source) SetExcludedPathSegments(segments []string) { s.excludedPathSegments = segments }
 
 func (s *Source) Name() string { return "repodoc" }
 
@@ -281,10 +316,14 @@ func (s *Source) Preview(ctx context.Context) (Stats, error) {
 }
 
 // listCandidateFiles walks repoRoot and returns every regular file whose
-// repo-root-relative path matches the allowlist, sorted for deterministic
-// output — both the tests and the corpus-growth report depend on stable
-// ordering across runs. ".git" is always skipped: never a documentation
-// source, and can be enormous.
+// repo-root-relative path matches the allowlist AND is not hard-excluded by
+// excludedPathSegments (see DefaultExcludedPathSegments, allowlist.go —
+// this second check runs independently of and in addition to the
+// allowlist, deliberately: it must keep excluding legacy/archive/
+// deprecated/beta content even when the allowlist itself is widened),
+// sorted for deterministic output — both the tests and the corpus-growth
+// report depend on stable ordering across runs. ".git" is always skipped:
+// never a documentation source, and can be enormous.
 func (s *Source) listCandidateFiles() ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(s.repoRoot, func(path string, d fs.DirEntry, err error) error {
@@ -305,7 +344,7 @@ func (s *Source) listCandidateFiles() ([]string, error) {
 			return nil
 		}
 		relSlash := filepath.ToSlash(rel)
-		if matches(s.allowlist, relSlash) {
+		if matches(s.allowlist, relSlash) && !isExcludedPath(relSlash, s.excludedPathSegments) {
 			out = append(out, relSlash)
 		}
 		return nil
