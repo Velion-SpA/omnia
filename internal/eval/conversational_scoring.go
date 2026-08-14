@@ -42,8 +42,26 @@ type ConversationalCaseResult struct {
 	// when it confidently returned something for a question with no
 	// evidence (FAIL). nil for every kind except absence. See ScoreAbsence
 	// for why "the fetcher returned zero results" is what "nothing above
-	// the relevance floor" means in this harness.
+	// the relevance floor" means in this harness — UNLESS the fetcher
+	// reported an explicit RetrievedCase.Confidence (P3's --target answer),
+	// in which case "none" IS the honest-refusal signal directly (see
+	// scoreAbsenceRefusal).
 	HonestRefusal *bool
+
+	// FalseRefusal is P3's OTHER failure mode, the mirror image of
+	// HonestRefusal: for identity/status cases, true when the fetcher
+	// reported Confidence "none" despite the corpus guaranteeing real
+	// evidence exists for that case (every non-absence ConversationalCase
+	// requires a non-empty ExpectedFact by construction — see
+	// validateConversationalCases). "A memory system that says 'no sé' when
+	// it does know is a worse product than one that guesses" (P3's own
+	// wording) — false_confidence (HonestRefusal's mirror) and
+	// false_refusal are the two directions that single sentence asks this
+	// harness to measure. nil for every kind except identity/status, AND
+	// nil for those two kinds whenever the fetcher supplied no Confidence
+	// signal at all (RetrievedCase.Confidence == "" — --target
+	// inprocess/http have no such signal to score).
+	FalseRefusal *bool
 }
 
 // ScoreConversationalCase scores one ConversationalCase against what
@@ -58,7 +76,7 @@ func ScoreConversationalCase(c ConversationalCase, rc RetrievedCase) (Conversati
 	}
 
 	if c.Kind == KindAbsence {
-		refusal := ScoreAbsence(rc)
+		refusal := scoreAbsenceRefusal(rc)
 		return ConversationalCaseResult{Case: c, HonestRefusal: &refusal}, nil
 	}
 
@@ -67,8 +85,43 @@ func ScoreConversationalCase(c ConversationalCase, rc RetrievedCase) (Conversati
 		grounded := factMatches(c.ExpectedFact, rc.Retrieved)
 		result.Grounded = &grounded
 	}
+	// P3's false-refusal check (requirement: "identity/status: a
+	// confidence: 'none' on a question we DO have evidence for is a false
+	// refusal. Target ≤0.05"). Only computed when the fetcher actually
+	// reported a Confidence — --target inprocess/http have no such signal,
+	// and an unset field must read as "unmeasured," not "scored zero" (see
+	// FalseRefusal's own doc).
+	if (c.Kind == KindIdentity || c.Kind == KindStatus) && rc.Confidence != "" {
+		falseRefusal := rc.Confidence == "none"
+		result.FalseRefusal = &falseRefusal
+	}
 	return result, nil
 }
+
+// scoreAbsenceRefusal decides an absence case's honest-refusal verdict.
+// When the fetcher reported an explicit Confidence (P3's --target answer,
+// via GET /answer's own calibrated signal), "none" is used DIRECTLY — that
+// is the exact contract P3 promises ("confidence: 'none' counts as an
+// honest refusal"), and re-deriving it from presence/absence of retrieved
+// text would silently re-introduce a second, uncalibrated floor exactly
+// like the one ScoreAbsence's own doc warns against. Fetchers with no
+// confidence signal (--target inprocess/http, which predate P3 and measure
+// the retrieval PATHS' raw honesty rather than the endpoint's calibrated
+// one) fall back to ScoreAbsence's presence-based check, unchanged.
+func scoreAbsenceRefusal(rc RetrievedCase) bool {
+	if rc.Confidence != "" {
+		return rc.Confidence == confidenceNone
+	}
+	return ScoreAbsence(rc)
+}
+
+// confidenceNone mirrors internal/mcp.AnswerConfidenceNone's string value
+// ("none") without this package importing internal/mcp — the SAME
+// cross-package "duplicate the tiny constant, document why" convention this
+// file's own conversationalGroundingContextSeparator precedent (cmd/omnia/
+// eval.go) already uses, applied here because internal/eval must stay free
+// of a dependency on the mcp package it is busy evaluating.
+const confidenceNone = "none"
 
 // ScoreAbsence implements requirement 3's inverted scoring: an absence case
 // PASSES (returns true) when retrieval returned NOTHING, and FAILS (returns
@@ -143,6 +196,17 @@ type KindSegment struct {
 	// HonestRefusals (requirement 3). Populated only when Kind ==
 	// KindAbsence; Total above is this segment's own denominator for it.
 	HonestRefusals int
+
+	// FalseRefusalTotal/FalseRefusalHits (P3's false-refusal requirement).
+	// Populated only for KindIdentity/KindStatus, and only among THOSE
+	// cases whose fetcher reported an explicit Confidence (see
+	// ConversationalCaseResult.FalseRefusal's own doc) — FalseRefusalTotal
+	// is this narrower denominator, NOT the same as Total, so a kind with
+	// no confidence-reporting fetcher wired reports FalseRefusalRate() as 0
+	// via the "0 total" branch rather than silently mixing scored and
+	// unscored cases.
+	FalseRefusalTotal int
+	FalseRefusalHits  int
 }
 
 // AccuracyAt1 returns the fraction of rankable cases whose top-ranked result
@@ -197,6 +261,21 @@ func (s KindSegment) FalseConfidenceRate() float64 {
 	return 1 - s.HonestRefusalRate()
 }
 
+// FalseRefusalRate returns P3's other failure-mode rate (requirement:
+// "identity/status ... Target ≤0.05") — the fraction of confidence-scored
+// identity/status cases where GET /answer refused (confidence "none")
+// despite the corpus guaranteeing real evidence exists. 0 when
+// FalseRefusalTotal is 0 (no confidence-reporting fetcher was used, or this
+// kind is neither identity nor status) — "unmeasured" and "scored zero"
+// stay distinguishable by checking FalseRefusalTotal directly, same
+// convention as GroundingRate/HonestRefusalRate above.
+func (s KindSegment) FalseRefusalRate() float64 {
+	if s.FalseRefusalTotal == 0 {
+		return 0
+	}
+	return float64(s.FalseRefusalHits) / float64(s.FalseRefusalTotal)
+}
+
 // ConversationalReport is the "never just one aggregate" report requirement
 // 2 asks for: one KindSegment per QuestionKind, every kind always present
 // (see BuildConversationalReport) so a missing kind and a kind that scored
@@ -240,6 +319,13 @@ func BuildConversationalReport(results []ConversationalCaseResult) Conversationa
 
 		if r.HonestRefusal != nil && *r.HonestRefusal {
 			seg.HonestRefusals++
+		}
+
+		if r.FalseRefusal != nil {
+			seg.FalseRefusalTotal++
+			if *r.FalseRefusal {
+				seg.FalseRefusalHits++
+			}
 		}
 
 		byKind[r.Case.Kind] = seg

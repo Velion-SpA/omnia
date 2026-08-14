@@ -20,6 +20,11 @@ type KindStats struct {
 	MRR               MetricStats
 	GroundingRate     MetricStats
 	HonestRefusalRate MetricStats
+	// FalseRefusalRate is P3's other failure-mode rate (KindSegment.
+	// FalseRefusalRate's own doc) — only meaningfully non-zero for
+	// identity/status kinds scored against a fetcher that reports
+	// RetrievedCase.Confidence (--target answer).
+	FalseRefusalRate MetricStats
 }
 
 // ConversationalRunSummary is the reproducibility report for the
@@ -61,12 +66,14 @@ func RunConversationalHarness(ctx context.Context, run ConversationalRunFunc, ru
 		mrr := make([]float64, 0, runs)
 		grounding := make([]float64, 0, runs)
 		refusal := make([]float64, 0, runs)
+		falseRefusal := make([]float64, 0, runs)
 		for _, r := range reports {
 			seg := r.ByKind[k]
 			acc = append(acc, seg.AccuracyAt1())
 			mrr = append(mrr, seg.MRR())
 			grounding = append(grounding, seg.GroundingRate())
 			refusal = append(refusal, seg.HonestRefusalRate())
+			falseRefusal = append(falseRefusal, seg.FalseRefusalRate())
 		}
 		byKind[k] = KindStats{
 			Kind:              k,
@@ -74,6 +81,7 @@ func RunConversationalHarness(ctx context.Context, run ConversationalRunFunc, ru
 			MRR:               computeMetricStats(mrr),
 			GroundingRate:     computeMetricStats(grounding),
 			HonestRefusalRate: computeMetricStats(refusal),
+			FalseRefusalRate:  computeMetricStats(falseRefusal),
 		}
 	}
 

@@ -102,7 +102,7 @@ var (
 //	omnia eval [--mode advisory|blocking] [--runs N] [--threshold F]
 //	           [--baseline F] [--corpus PATH] [--ab-pairs PATH] [--config PATH]
 //	           [--injection]
-//	omnia eval --profile conversational [--target inprocess|http]
+//	omnia eval --profile conversational [--target inprocess|http|answer]
 //	           [--http-base-url URL] [--corpus PATH] [--config PATH]
 //	           [--runs N] [--injection]
 func cmdEval(args []string) {
@@ -116,8 +116,8 @@ func cmdEval(args []string) {
 	configPath := fs.String("config", config.DefaultPath(), "path to config file (embeddings + recall settings)")
 	injection := fs.Bool("injection", false, "opt-in: score against the v0.3 Context Economy injection pipeline (type-lens + MMR + token budget, driven by --config's `injection` block) instead of the raw top-1 FTS5 hit; default false keeps current behavior byte-for-byte unchanged (issue #143). --profile conversational --target inprocess only — no effect with --target http")
 	profile := fs.String("profile", "coding", "eval corpus profile: coding (default, spec sdd/omnia-eval-harness) or conversational (docs/conversational-retrieval-plan.md's \"Baseline first\" item — identity/status/delta/open_items/rationale/cross_project/absence question kinds)")
-	target := fs.String("target", "inprocess", "--profile conversational only: inprocess (searches the local store directly, honoring --injection) or http (calls GET /search on a running server via --http-base-url) — the comparison this quantifies the P0 gap between GET /search and mem_search's full pipeline")
-	httpBaseURL := fs.String("http-base-url", "", "--profile conversational --target http only: base URL of a running omnia server, e.g. http://localhost:7799 (no trailing slash)")
+	target := fs.String("target", "inprocess", "--profile conversational only: inprocess (searches the local store directly, honoring --injection), http (calls GET /search on a running server via --http-base-url — quantifies the P0 gap between GET /search and mem_search's full pipeline), or answer (calls GET /answer on a running server via --http-base-url — scores P3's calibrated confidence: false_confidence on absence cases, false_refusal on identity/status cases)")
+	httpBaseURL := fs.String("http-base-url", "", "--profile conversational --target http|answer only: base URL of a running omnia server, e.g. http://localhost:7799 (no trailing slash)")
 	if err := fs.Parse(args); err != nil {
 		fatal(err)
 		return
@@ -812,6 +812,18 @@ func defaultRunConversationalEval(ctx context.Context, opts conversationalRunOpt
 		fetch := conversationalHTTPFetcher(&http.Client{Timeout: 30 * time.Second}, opts.HTTPBaseURL)
 		return runConversationalCases(ctx, cases, fetch, opts.Runs)
 
+	case "answer":
+		// P3 (docs/conversational-retrieval-plan.md "Answer-shaped context
+		// endpoint"): the ONLY target that can score false_confidence/
+		// false_refusal against GET /answer's own calibrated confidence
+		// signal — inprocess/http both predate P3 and have no such signal
+		// to read (see RetrievedCase.Confidence's own doc).
+		if strings.TrimSpace(opts.HTTPBaseURL) == "" {
+			return eval.ConversationalRunSummary{}, fmt.Errorf("conversational eval: --http-base-url is required when --target=answer")
+		}
+		fetch := conversationalAnswerFetcher(&http.Client{Timeout: 30 * time.Second}, opts.HTTPBaseURL)
+		return runConversationalCases(ctx, cases, fetch, opts.Runs)
+
 	case "inprocess", "":
 		cfg, err := store.DefaultConfig()
 		if err != nil {
@@ -837,7 +849,7 @@ func defaultRunConversationalEval(ctx context.Context, opts conversationalRunOpt
 		return runConversationalCases(ctx, cases, fetch, opts.Runs)
 
 	default:
-		return eval.ConversationalRunSummary{}, fmt.Errorf("conversational eval: --target must be %q or %q, got %q", "inprocess", "http", opts.Target)
+		return eval.ConversationalRunSummary{}, fmt.Errorf("conversational eval: --target must be %q, %q or %q, got %q", "inprocess", "http", "answer", opts.Target)
 	}
 }
 
@@ -1017,6 +1029,89 @@ func conversationalHTTPFetcher(client *http.Client, baseURL string) eval.Convers
 	}
 }
 
+// answerHTTPResponse mirrors server.AnswerResponse's JSON shape (P3) — a
+// local shadow struct, not the real type, because cmd/omnia's eval fetchers
+// decode over HTTP the same way conversationalHTTPFetcher already does for
+// GET /search's response, never by importing internal/server's Go type
+// directly into a JSON-shaped local decode.
+type answerHTTPResponse struct {
+	Context    string `json:"context"`
+	Confidence string `json:"confidence"`
+	Intent     string `json:"intent"`
+	Sources    []struct {
+		SyncID    string `json:"sync_id"`
+		Title     string `json:"title"`
+		Type      string `json:"type"`
+		UpdatedAt string `json:"updated_at"`
+	} `json:"sources"`
+	Degraded bool `json:"degraded"`
+}
+
+// conversationalAnswerFetcher returns an eval.ConversationalFetcher that
+// queries a running Omnia server's GET /answer endpoint (P3) — the ONLY
+// fetcher that can measure P3's own two target metrics: false_confidence on
+// absence cases (a "none" confidence counts as an honest refusal) and
+// false_refusal on identity/status cases (a "none" confidence on a
+// question the corpus guarantees has evidence counts as a false refusal).
+// See RetrievedCase.Confidence's own doc for why this is the one fetcher
+// that populates that field.
+//
+// Unlike conversationalHTTPFetcher, RankedObservationIDs here comes from
+// AnswerResponse.Sources — the citations GET /answer ACTUALLY assembled
+// into Context, in the same order — not from a broader raw candidate list,
+// because P3's own anti-goal is exactly a response that cites more than it
+// assembled (or cites the wrong identifier — sync_id here, never an
+// integer id, matching AnswerSource's own contract).
+func conversationalAnswerFetcher(client *http.Client, baseURL string) eval.ConversationalFetcher {
+	return func(ctx context.Context, c eval.ConversationalCase) (eval.RetrievedCase, error) {
+		u, err := url.Parse(strings.TrimRight(baseURL, "/") + "/answer")
+		if err != nil {
+			return eval.RetrievedCase{}, fmt.Errorf("conversationalAnswerFetcher: parse base url %q: %w", baseURL, err)
+		}
+		q := u.Query()
+		q.Set("q", c.Query)
+		q.Set("limit", strconv.Itoa(rankCandidateDepth))
+		u.RawQuery = q.Encode()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		if err != nil {
+			return eval.RetrievedCase{}, fmt.Errorf("conversationalAnswerFetcher: build request: %w", err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return eval.RetrievedCase{}, fmt.Errorf("conversationalAnswerFetcher: GET %s: %w", u.String(), err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return eval.RetrievedCase{}, fmt.Errorf("conversationalAnswerFetcher: GET %s: status %d", u.String(), resp.StatusCode)
+		}
+
+		var body answerHTTPResponse
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			return eval.RetrievedCase{}, fmt.Errorf("conversationalAnswerFetcher: decode response: %w", err)
+		}
+
+		ranked := make([]string, 0, len(body.Sources))
+		for _, src := range body.Sources {
+			if src.SyncID != "" {
+				ranked = append(ranked, src.SyncID)
+			}
+		}
+		var surfaced string
+		if len(ranked) > 0 {
+			surfaced = ranked[0]
+		}
+
+		return eval.RetrievedCase{
+			Retrieved:             body.Context,
+			SurfacedObservationID: surfaced,
+			Confidence:            body.Confidence,
+			Tokens:                eval.TokenBreakdown{Retrieval: estimateTokenCount(body.Context)},
+			RankedObservationIDs:  ranked,
+		}, nil
+	}
+}
+
 // printConversationalSummary is printEvalSummary's conversational sibling:
 // requirement 2's "never just one aggregate" per-kind report, plus
 // requirement 3's honest-refusal/false-confidence pair for the absence
@@ -1034,6 +1129,11 @@ func printConversationalSummary(summary eval.ConversationalRunSummary) {
 		case eval.KindIdentity:
 			fmt.Printf("  %-14s grounding=%.3f±%.3f (requirement 2: did retrieved context contain the evidence needed to answer)\n",
 				"", s.GroundingRate.Mean, s.GroundingRate.StdDev)
+			fmt.Printf("  %-14s false_refusal=%.3f±%.3f (plan P3 target: ≤0.05 — --target answer only, see RetrievedCase.Confidence)\n",
+				"", s.FalseRefusalRate.Mean, s.FalseRefusalRate.StdDev)
+		case eval.KindStatus:
+			fmt.Printf("  %-14s false_refusal=%.3f±%.3f (plan P3 target: ≤0.05 — --target answer only, see RetrievedCase.Confidence)\n",
+				"", s.FalseRefusalRate.Mean, s.FalseRefusalRate.StdDev)
 		case eval.KindAbsence:
 			fmt.Printf("  %-14s honest_refusal=%.3f±%.3f  false_confidence=%.3f (requirement 3 / plan P3 target: ≤0.1)\n",
 				"", s.HonestRefusalRate.Mean, s.HonestRefusalRate.StdDev, 1-s.HonestRefusalRate.Mean)

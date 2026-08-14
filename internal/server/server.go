@@ -146,6 +146,65 @@ type SearchEnvelope struct {
 // fallback path.
 type SearchFunc func(ctx context.Context, query string, req SearchRequest) (SearchEnvelope, error)
 
+// AnswerRequest carries GET /answer's query params (P3,
+// docs/conversational-retrieval-plan.md "Answer-shaped context endpoint"):
+// the same project/scope/limit routing filters SearchRequest embeds, plus
+// MaxChars — the char budget AssembleAnswerContext (internal/mcp/answer.go)
+// trims its assembled text to. Unlike SearchRequest.MaxTokens (an optional
+// per-request override), MaxChars has a real default (config.AnswerConfig.
+// MaxChars, 1400 — Hermes' own documented budget) that the AnswerFunc
+// implementation applies when a request omits `?max_chars=` (MaxChars <= 0).
+//
+// `type` is deliberately NOT exposed here (unlike SearchRequest): P3's
+// endpoint is a question-answering surface, not a filtered browse — a
+// caller wanting a type-scoped result should use GET /search instead.
+type AnswerRequest struct {
+	store.SearchOptions
+	MaxChars int
+}
+
+// AnswerSource cites one piece of evidence AnswerResponse.Context was
+// assembled from, by sync ID ONLY — never Observation.ID (P3's explicit
+// anti-goal: an integer id was verified to name different observations
+// across different replicas, e.g. id 1918 naming a session summary in one
+// store and an unrelated cloud-sync investigation in another; sync_id is
+// generated once and stays stable across every sync fan-out). Mirrors
+// mcp.AnswerSource field-for-field but is this package's own copy so
+// internal/server never has to import internal/mcp (see SearchFunc's own
+// doc comment for why that boundary exists) — cmd/omnia's buildHTTPAnswerFunc
+// is the one place that converts between the two.
+type AnswerSource struct {
+	SyncID    string `json:"sync_id"`
+	Title     string `json:"title"`
+	Type      string `json:"type"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// AnswerResponse is GET /answer's JSON response body (P3), returned exactly
+// as-is by handleAnswer — unlike GET /search there is no back-compat bare
+// shape to preserve (this is a brand-new endpoint), so this struct's JSON
+// tags ARE the wire contract.
+type AnswerResponse struct {
+	Context    string         `json:"context"`
+	Confidence string         `json:"confidence"`
+	Intent     string         `json:"intent,omitempty"`
+	Sources    []AnswerSource `json:"sources"`
+	Degraded   bool           `json:"degraded"`
+}
+
+// AnswerFunc computes an answer-shaped, budgeted context for GET /answer.
+// Injected from cmd/omnia (SetAnswer) so internal/server never has to
+// import internal/mcp directly, mirroring SearchFunc's own precedent
+// (issue #86) — cmd/omnia is the one place that knows how to run
+// mcp.RankPipeline, extract structured text via mcp.ExtractAnswerText, and
+// classify confidence via mcp.ClassifyAnswerConfidence.
+//
+// Unlike SearchFunc, there is no legacy fallback when unset: GET /answer is
+// a brand-new endpoint with no pre-existing behavior to preserve, so
+// handleAnswer returns 503 when SetAnswer was never called (see
+// handleAnswer's own doc).
+type AnswerFunc func(ctx context.Context, query string, req AnswerRequest) (AnswerResponse, error)
+
 type Server struct {
 	store      *store.Store
 	mux        *http.ServeMux
@@ -173,6 +232,12 @@ type Server struct {
 	// SetSearch was never called — handleSearch then calls s.store.Search
 	// directly, byte-for-byte today's FTS5-only behavior.
 	search SearchFunc
+
+	// answer, when non-nil, backs GET /answer (P3,
+	// docs/conversational-retrieval-plan.md). nil means SetAnswer was never
+	// called — handleAnswer returns 503 (see that handler's own doc; unlike
+	// search there is no legacy behavior to fall back to).
+	answer AnswerFunc
 
 	// queryCache, when non-nil, is the P6 (docs/conversational-retrieval-plan.md
 	// "Query embedding cache") CachedSearcher wrapping recall's semantic
@@ -223,6 +288,11 @@ func (s *Server) SetAutoEmbed(w *embed.Worker) { s.autoEmbed = w }
 // Pass nil (or never call this) to keep GET /search on the legacy
 // s.store.Search-only path.
 func (s *Server) SetSearch(fn SearchFunc) { s.search = fn }
+
+// SetAnswer configures the function backing GET /answer (P3,
+// docs/conversational-retrieval-plan.md). Pass nil (or never call this) to
+// leave GET /answer returning 503 (see handleAnswer's own doc).
+func (s *Server) SetAnswer(fn AnswerFunc) { s.answer = fn }
 
 // SetQueryCache configures the P6 query-embedding cache instance GET /health
 // reports stats for (recall.query_cache.enabled in config.yaml). Pass nil
@@ -360,6 +430,9 @@ func (s *Server) routes() {
 
 	// Search
 	s.mux.HandleFunc("GET /search", s.handleSearch)
+
+	// P3 (docs/conversational-retrieval-plan.md "Answer-shaped context endpoint")
+	s.mux.HandleFunc("GET /answer", s.handleAnswer)
 
 	// Timeline
 	s.mux.HandleFunc("GET /timeline", s.handleTimeline)
@@ -690,6 +763,54 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		ScoreBreakdown:       envelope.ScoreBreakdown,
 		Intent:               envelope.Intent,
 	})
+}
+
+// handleAnswer serves GET /answer (P3, docs/conversational-retrieval-plan.md
+// "Answer-shaped context endpoint") — the endpoint this plan item exists to
+// ship: a deterministic, server-side-assembled, budgeted answer context plus
+// a calibrated confidence signal, so a consumer (Hermes, via Vel) no longer
+// has to reimplement structured-field extraction itself (and, per the
+// plan's own diagnosis, reimplement the raw-character-slice bug that caused
+// a markdown heading to reach an LLM as if it were prose).
+//
+// No back-compat bare-array shape exists for this endpoint (unlike GET
+// /search) — it is new, so AnswerResponse's JSON tags are simply the wire
+// contract from day one.
+//
+// A nil AnswerFunc (SetAnswer was never called, e.g. in tests that only
+// wire SetSearch) returns 503: there is no meaningful FTS5-only fallback
+// for an endpoint whose entire contract is calibrated confidence — silently
+// downgrading to "always none" or "always high" would be actively
+// misleading, unlike GET /search's fallback (which still returns real
+// results, just without the ranking pipeline).
+func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		jsonError(w, http.StatusBadRequest, "q parameter is required")
+		return
+	}
+
+	if s.answer == nil {
+		jsonError(w, http.StatusServiceUnavailable, "GET /answer is not configured (SetAnswer was never called)")
+		return
+	}
+
+	req := AnswerRequest{
+		SearchOptions: store.SearchOptions{
+			Project: r.URL.Query().Get("project"),
+			Scope:   r.URL.Query().Get("scope"),
+			Limit:   queryInt(r, "limit", 10),
+		},
+		MaxChars: queryInt(r, "max_chars", 0),
+	}
+
+	resp, err := s.answer(r.Context(), query, req)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleGetObservation(w http.ResponseWriter, r *http.Request) {

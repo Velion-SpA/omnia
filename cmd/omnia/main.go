@@ -1109,6 +1109,13 @@ func cmdServe(cfg store.Config) {
 		recallSvc := buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir, appCfg.VecIndex.Enabled, appCfg.Encryption)
 		srv.SetSearch(buildHTTPSearchFunc(s, recallSvc, appCfg, cfg.DataDir, autoEmbedWorker))
 
+		// P3 (docs/conversational-retrieval-plan.md "Answer-shaped context
+		// endpoint"): GET /answer shares recallSvc/appCfg/autoEmbedWorker
+		// with GET /search above — same retrieval leg, same ranking
+		// pipeline, different final shaping (structured-field extraction +
+		// calibrated confidence instead of a raw result list).
+		srv.SetAnswer(buildHTTPAnswerFunc(s, recallSvc, appCfg, cfg.DataDir, autoEmbedWorker))
+
 		// P6 (docs/conversational-retrieval-plan.md "Query embedding cache"):
 		// GET /health's query_cache debug field (server.go's handleHealth)
 		// reads stats directly off the SAME *embed.CachedSearcher instance

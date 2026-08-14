@@ -406,8 +406,15 @@ func TestConversationalHTTPFetcher_DecodesResults(t *testing.T) {
 		t.Errorf("expected a limit= query param bounding the candidate pool, got %q", gotQuery)
 	}
 
-	if got.Retrieved != "Omnia is a memory system" {
-		t.Errorf("Retrieved = %q, want the top hit's content", got.Retrieved)
+	// Retrieved must be the assembled top-N context (bugfix: grounding used
+	// to be scored against only the top hit's content, under-reporting
+	// whenever the fact-bearing chunk ranked 2nd-4th — see
+	// conversationalGroundingContextSize's doc comment). Both fixture
+	// results fit within conversationalGroundingContextSize (4), so both
+	// are joined.
+	wantRetrieved := "Omnia is a memory system" + conversationalGroundingContextSeparator + "second hit"
+	if got.Retrieved != wantRetrieved {
+		t.Errorf("Retrieved = %q, want %q (assembled top-N context, not just the top hit)", got.Retrieved, wantRetrieved)
 	}
 	if got.SurfacedObservationID != "obs-abc" {
 		t.Errorf("SurfacedObservationID = %q, want the top hit's sync_id", got.SurfacedObservationID)
@@ -417,6 +424,93 @@ func TestConversationalHTTPFetcher_DecodesResults(t *testing.T) {
 	}
 	if got.Tokens.Total() == 0 {
 		t.Error("expected non-zero token accounting for a non-empty top hit")
+	}
+}
+
+// TestAssembleGroundingContext is the table-driven unit test for the
+// grounding-fix primitive itself: it must join up to
+// conversationalGroundingContextSize results' Content, in order, dropping
+// anything past that cutoff, and degrade to "" for zero results (preserving
+// eval.ScoreAbsence's "nothing above the floor" check).
+func TestAssembleGroundingContext(t *testing.T) {
+	sep := conversationalGroundingContextSeparator
+	mk := func(contents ...string) []store.SearchResult {
+		out := make([]store.SearchResult, len(contents))
+		for i, c := range contents {
+			out[i] = store.SearchResult{Observation: store.Observation{Content: c}}
+		}
+		return out
+	}
+
+	tests := map[string]struct {
+		results []store.SearchResult
+		want    string
+	}{
+		"no results": {
+			results: nil,
+			want:    "",
+		},
+		"fewer than N": {
+			results: mk("a", "b"),
+			want:    "a" + sep + "b",
+		},
+		"exactly N": {
+			results: mk("a", "b", "c", "d"),
+			want:    "a" + sep + "b" + sep + "c" + sep + "d",
+		},
+		"more than N, extras dropped": {
+			results: mk("a", "b", "c", "d", "e (rank 5, must not appear)"),
+			want:    "a" + sep + "b" + sep + "c" + sep + "d",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := assembleGroundingContext(tc.results)
+			if got != tc.want {
+				t.Errorf("assembleGroundingContext = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConversationalGrounding_CatchesFactAtRank2Through4 is the regression
+// test for the bug this change fixes (docs/conversational-retrieval-plan.md,
+// bug 2): grounding used to be scored against ONLY results[0].Content, so an
+// expected fact ranking 2nd-4th — a chunk a real consumer like Hermes would
+// still receive, since it assembles the top 4 — was scored as "not
+// grounded". This reproduces exactly that shape: the top hit does NOT
+// contain the expected fact, a lower-ranked hit does, and grounding must
+// still come back true once scored over the assembled top-N context.
+func TestConversationalGrounding_CatchesFactAtRank2Through4(t *testing.T) {
+	results := []store.SearchResult{
+		{Observation: store.Observation{SyncID: "obs-1", Content: "top hit — installation instructions, no identity fact here"}},
+		{Observation: store.Observation{SyncID: "obs-2", Content: "Persistent memory for AI coding agents — the actual identity fact"}},
+		{Observation: store.Observation{SyncID: "obs-3", Content: "unrelated third hit"}},
+	}
+	c := eval.ConversationalCase{
+		ID:           "identity-1",
+		Kind:         eval.KindIdentity,
+		ExpectedFact: "Persistent memory for AI coding agents",
+	}
+
+	// Sanity check: the fact must NOT be in the top-1 result, or this test
+	// would not actually exercise the fix (the old top-1-only code would
+	// have passed too).
+	if strings.Contains(strings.ToLower(results[0].Content), strings.ToLower(c.ExpectedFact)) {
+		t.Fatal("test setup invalid: expected fact must not be in the top-1 result")
+	}
+
+	rc := eval.RetrievedCase{
+		Retrieved:            assembleGroundingContext(results),
+		RankedObservationIDs: rankedSyncIDs(results),
+	}
+	result, err := eval.ScoreConversationalCase(c, rc)
+	if err != nil {
+		t.Fatalf("ScoreConversationalCase: %v", err)
+	}
+	if result.Grounded == nil || !*result.Grounded {
+		t.Errorf("Grounded = %v, want true (fact present at rank 2 of the assembled top-%d context)", result.Grounded, conversationalGroundingContextSize)
 	}
 }
 

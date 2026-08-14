@@ -132,6 +132,53 @@ type Config struct {
 	// inputs RankPipeline already accepts — it introduces no new ranking
 	// primitive of its own (plan P2: "mostly a lookup table plus wiring").
 	IntentRouting IntentRoutingConfig `yaml:"intent_routing"`
+
+	// Answer configures P3's GET /answer endpoint
+	// (docs/conversational-retrieval-plan.md "Answer-shaped context
+	// endpoint"): the char budget its assembled context is trimmed to, and
+	// the calibrated fused-score threshold ClassifyAnswerConfidence
+	// (internal/mcp/answer.go) uses for its `low` vs `high` split. Unlike
+	// every other gate in this file, GET /answer has no "off = pre-existing
+	// behavior" fallback to preserve (it is a brand-new endpoint, not a
+	// widened existing one) — Answer's fields are always read by
+	// buildHTTPAnswerFunc (cmd/omnia/recall.go), with applyDefaults filling
+	// both to a sane value when config.yaml never mentions `answer` at all.
+	Answer AnswerConfig `yaml:"answer"`
+}
+
+// AnswerConfig tunes P3's GET /answer endpoint.
+type AnswerConfig struct {
+	// MaxChars is the default answer-context char budget
+	// (AssembleAnswerContext's maxChars, internal/mcp/answer.go) when a
+	// request omits `?max_chars=`. Defaults to 1400 — Hermes' own documented
+	// response budget (plan P3: "GET /answer?q=…&max_chars=1400"), so an
+	// operator who never touches this config key gets exactly the size the
+	// motivating consumer needs.
+	MaxChars int `yaml:"max_chars"`
+	// ConfidenceThreshold is the fused-relevance floor
+	// ClassifyAnswerConfidence compares the top result's un-normalized
+	// relevance against for the `low` vs `high` split (P3: "The threshold
+	// must be calibrated against the eval corpus, not picked"). It is NOT
+	// the same quantity as Recall.StrongFloor/BaseFloor (those are semantic
+	// cosine-similarity floors gating what even ENTERS the fused result
+	// set; this is a threshold over the post-fusion RRF/FTS relevance score
+	// of whatever already got through).
+	//
+	// KNOWN GAP, stated plainly rather than hidden behind a confident-looking
+	// number: this field's default (see applyDefaults) was NOT calibrated
+	// against `omnia eval --profile conversational --target answer` run
+	// against a live store — that run requires starting a real server
+	// against the ~800MB production omnia.db, and the environment this
+	// change was built in ran out of disk mid-build (`no space left on
+	// device`) before that could happen safely. The default below is a
+	// reasoned placeholder derived from RRF's own score arithmetic (see
+	// applyDefaults' comment), not a measured one. Re-run the calibration
+	// and replace this value — and this comment — before relying on the
+	// `low` vs `high` split in production; until then, `none` (the two
+	// structural triggers in ClassifyAnswerConfidence) is the only leg of
+	// this endpoint's confidence signal that has been measured against
+	// anything.
+	ConfidenceThreshold float64 `yaml:"confidence_threshold"`
 }
 
 // IntentRoutingConfig is P2's single gate. Unlike TokenBudgetConfig/
@@ -1127,6 +1174,44 @@ func applyDefaults(cfg *Config, data []byte) {
 	}
 	if cfg.WriteHygiene.MinContentLength == 0 {
 		cfg.WriteHygiene.MinContentLength = 10
+	}
+
+	// P3 (docs/conversational-retrieval-plan.md "Answer-shaped context
+	// endpoint"): MaxChars defaults to Hermes' own documented response
+	// budget (1400 chars, the plan's own example query string) so an
+	// operator who never touches `answer:` in config.yaml still gets the
+	// size the motivating consumer needs.
+	if cfg.Answer.MaxChars == 0 {
+		cfg.Answer.MaxChars = 1400
+	}
+	// ConfidenceThreshold: P3 requires this to be "calibrated against the
+	// eval corpus, not picked" (the existing Recall.StrongFloor/BaseFloor
+	// 0.35/0.25 pair is this project's own cautionary tale for exactly that
+	// mistake — inherited from a different embedding model, and only caught
+	// by issue #83). That calibration run (`omnia eval --profile
+	// conversational --target answer` against a live server) could NOT be
+	// completed for this change: the build environment ran out of disk
+	// (`no space left on device`, linking the omnia binary) before the
+	// server could even start. 0.05 below is NOT a calibrated value — see
+	// AnswerConfig.ConfidenceThreshold's own doc for the honest "known gap"
+	// note and the reasoning behind picking THIS placeholder rather than
+	// leaving it at 0:
+	//
+	// recall.Fuse's RRF score for a document ranked rank r on a list is
+	// 1/(RRFK+r) (design D1); at the default recall.rrf_k=60, a document
+	// that ranks #1 on BOTH the lexical and semantic legs scores
+	// 2/(60+1) ≈ 0.033 — i.e. the plausible ceiling for "found by both legs,
+	// clearly" is well under 0.05. Setting the threshold much ABOVE that
+	// ceiling would make `low` unreachable-as-anything-but-default (every
+	// real hit reads as `low`); 0.05 sits just above the two-leg-agreement
+	// ceiling so a single-leg-only or low-ranked match (the weaker case
+	// `low` exists to flag) scores under it, while leaving the FTS-ladder
+	// and hit-count structural triggers (ClassifyAnswerConfidence's `none`
+	// checks) as the actually-measured legs of this endpoint's confidence
+	// contract. Replace this with a real calibrated value once the eval run
+	// above can complete.
+	if cfg.Answer.ConfidenceThreshold == 0 {
+		cfg.Answer.ConfidenceThreshold = 0.05
 	}
 }
 

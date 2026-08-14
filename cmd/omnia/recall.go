@@ -526,3 +526,142 @@ func buildHTTPSearchFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 		return envelope, nil
 	}
 }
+
+// ─── P3: GET /answer (docs/conversational-retrieval-plan.md "Answer-shaped
+// context endpoint") ───────────────────────────────────────────────────────
+
+// answerFTSDiag runs a dedicated, Limit-1, lexical-only diagnostic query
+// purely to read Store.Search's zero-hit relaxation-ladder outcome
+// (store.SearchDiag) — the signal ClassifyAnswerConfidence's "the FTS
+// relaxation ladder had to reach step 2 to return anything" `none` trigger
+// needs.
+//
+// This is a SEPARATE query from the one that produced the real answer
+// results, not a reuse of recallOrFTSSearchWithRelevance's own internal
+// call, for one reason: when hybrid recall is active (recallSvc != nil),
+// the real results come from recall.Service.Search, whose lexical leg
+// (internal/mcp's StoreLexicalSearcher) does not forward a Diag pointer
+// through recall.LexicalSearchOptions today (that struct lives in
+// internal/recall, out of this change's file-ownership scope — see the
+// plan's own note that SearchDiag "is currently thrown away by every
+// caller," which this endpoint fixes by reading it independently rather
+// than by widening recall's own interface). Store.Search's ladder only
+// activates when the strict AND-of-terms pass returns zero rows (see
+// SearchDiag's own doc), so this second query is cheap even on the common
+// path where it never fires — Limit:1 keeps it to the smallest useful
+// probe regardless.
+func answerFTSDiag(s *store.Store, query string, opts store.SearchOptions) store.SearchDiag {
+	var diag store.SearchDiag
+	diagOpts := opts
+	diagOpts.Limit = 1
+	diagOpts.Diag = &diag
+	_, _ = s.Search(query, diagOpts)
+	return diag
+}
+
+// buildHTTPAnswerFunc wires GET /answer (P3) onto the SAME retrieval leg
+// GET /search uses (recallOrFTSSearchWithRelevance, shared per issue #86)
+// and the SAME mcp.RankPipeline post-fusion ranking (P0) — this endpoint is
+// deliberately NOT a separate retrieval path, only a different SHAPING of
+// the same ranked results: mcp.AssembleAnswerContext replaces
+// ApplyTokenBudget's char-preview trim with structured-field extraction
+// (mcp.ExtractAnswerText) plus a char (not token) budget, and
+// mcp.ClassifyAnswerConfidence adds the P3 confidence signal GET /search
+// has no equivalent of.
+//
+// No LLM call anywhere in this function (P3's hard constraint): every step
+// is deterministic string/arithmetic work over what retrieval already
+// computed.
+func buildHTTPAnswerFunc(s *store.Store, recallSvc *recall.Service, appCfg *config.Config, dataDir string, autoEmbed *embed.Worker) server.AnswerFunc {
+	learnedRankerCfg, learnedRankerModel := loadLearnedRankerForCLI(appCfg, dataDir)
+	readWatermarks := mcp.NewWatermarkReader(s, autoEmbed)
+
+	return func(ctx context.Context, query string, req server.AnswerRequest) (server.AnswerResponse, error) {
+		results, relevance, _, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
+		if err != nil {
+			return server.AnswerResponse{}, err
+		}
+		now := time.Now()
+
+		var anchorsByObs map[string][]store.MemoryAnchor
+		if appCfg.StructuralForgetting.Enabled && len(results) > 0 {
+			syncIDs := make([]string, 0, len(results))
+			for _, r := range results {
+				if r.SyncID != "" {
+					syncIDs = append(syncIDs, r.SyncID)
+				}
+			}
+			if len(syncIDs) > 0 {
+				if am, aerr := s.GetAnchorsForObservations(syncIDs); aerr == nil {
+					anchorsByObs = am
+				}
+			}
+		}
+
+		pipelineOut := mcp.RankPipeline(results, relevance, mcp.RankPipelineOptions{
+			Ranking:            appCfg.Recall.Ranking,
+			LearnedRanker:      learnedRankerCfg,
+			LearnedRankerModel: learnedRankerModel,
+			AnchorsByObs:       anchorsByObs,
+			Query:              query,
+			TypeLens:           appCfg.Injection.TypeLens,
+			Diversity:          appCfg.Injection.Diversity,
+			// Budget is deliberately the zero value here, not
+			// appCfg.Injection.Budget: P3's char-budget trim
+			// (mcp.AssembleAnswerContext) REPLACES ApplyTokenBudget's
+			// token-estimated preview trim for this endpoint rather than
+			// stacking on top of it — running both would trim twice against
+			// two different units (tokens vs. chars) for no benefit.
+			IntentRouting: appCfg.IntentRouting,
+		}, now)
+
+		maxChars := req.MaxChars
+		if maxChars <= 0 {
+			maxChars = appCfg.Answer.MaxChars
+		}
+		assembled := mcp.AssembleAnswerContext(pipelineOut.Results, maxChars)
+
+		diag := answerFTSDiag(s, query, req.SearchOptions)
+		health := mcp.EvaluateRecallHealth(ctx, recallSvc != nil, readWatermarks)
+
+		var topScore float64
+		var hasTopScore bool
+		for _, r := range pipelineOut.Results {
+			if r.Rank == cliExactSentinelRank || r.SignatureMatch {
+				continue // pre-empted rows carry no relevance score (see relevance map's own doc)
+			}
+			if sc, ok := relevance[r.ID]; ok {
+				topScore, hasTopScore = sc, true
+			}
+			break
+		}
+
+		confidence := mcp.ClassifyAnswerConfidence(mcp.AnswerConfidenceSignals{
+			HitCount:         len(results),
+			TopScore:         topScore,
+			HasTopScore:      hasTopScore,
+			FTSRelaxed:       diag.Relaxed,
+			FTSRelaxStep:     diag.Step,
+			RecallDegraded:   health.Degraded,
+			SourcesAssembled: len(assembled.Sources),
+		}, appCfg.Answer.ConfidenceThreshold)
+
+		sources := make([]server.AnswerSource, 0, len(assembled.Sources))
+		for _, src := range assembled.Sources {
+			sources = append(sources, server.AnswerSource{
+				SyncID:    src.SyncID,
+				Title:     src.Title,
+				Type:      src.Type,
+				UpdatedAt: src.UpdatedAt,
+			})
+		}
+
+		return server.AnswerResponse{
+			Context:    assembled.Context,
+			Confidence: string(confidence),
+			Intent:     pipelineOut.Intent,
+			Sources:    sources,
+			Degraded:   health.Degraded,
+		}, nil
+	}
+}
