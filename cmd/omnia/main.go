@@ -42,7 +42,6 @@ import (
 	"github.com/velion/omnia/internal/obsidian"
 	"github.com/velion/omnia/internal/project"
 	"github.com/velion/omnia/internal/purge"
-	"github.com/velion/omnia/internal/ranker"
 	"github.com/velion/omnia/internal/server"
 	"github.com/velion/omnia/internal/setup"
 	"github.com/velion/omnia/internal/store"
@@ -1099,10 +1098,16 @@ func cmdServe(cfg store.Config) {
 			autoEmbedWorker = worker
 		}
 
+		// P0 (docs/conversational-retrieval-plan.md): GET /search now runs
+		// the SAME post-fusion RankPipeline mem_search does, not just the
+		// fuse-then-hydrate leg — buildHTTPSearchFunc (cmd/omnia/recall.go)
+		// is the shared seam that makes the two consumers impossible to
+		// drift apart, extending issue #86's recallOrFTSSearch precedent
+		// past hydration into ranking itself. autoEmbedWorker is nil when
+		// embeddings are disabled, matching NewWatermarkReader's own
+		// nil-means-unknown contract.
 		recallSvc := buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir, appCfg.VecIndex.Enabled, appCfg.Encryption)
-		srv.SetSearch(func(ctx context.Context, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
-			return recallOrFTSSearch(ctx, s, recallSvc, query, opts)
-		})
+		srv.SetSearch(buildHTTPSearchFunc(s, recallSvc, appCfg, cfg.DataDir, autoEmbedWorker))
 	}
 
 	// Try to start autosync (opt-in via ENGRAM_CLOUD_AUTOSYNC=1).
@@ -1400,16 +1405,12 @@ func cmdMCP(cfg store.Config) {
 		// handleSearch regardless of whether hybrid recall itself is enabled —
 		// RankResults/explain work over the FTS5-only path too.
 		mcpCfg.RecallRanking = appCfg.Recall.Ranking
-		mcpCfg.LearnedRanker = appCfg.Ranker
-		if appCfg.Ranker.Enabled {
-			dir := appCfg.Ranker.ModelDir
-			if dir == "" {
-				dir = filepath.Join(cfg.DataDir, "ranker")
-			}
-			if model, loadErr := ranker.LoadCurrent(dir); loadErr == nil {
-				mcpCfg.LearnedRankerModel = &model
-			}
-		}
+		// P0 (docs/conversational-retrieval-plan.md): loadLearnedRankerForCLI
+		// (cmd/omnia/recall.go) is now the single place this load logic
+		// lives — GET /search's buildHTTPSearchFunc calls the exact same
+		// helper, so the two consumers can't silently diverge on which
+		// trained model they score against.
+		mcpCfg.LearnedRanker, mcpCfg.LearnedRankerModel = loadLearnedRankerForCLI(appCfg, cfg.DataDir)
 		// memory-structural-forgetting (omnia-structural-forgetting PR2,
 		// Requirement 6): thread structural_forgetting.enabled through so
 		// handleSearch's stale-anchor downrank + receipt is opt-in per the

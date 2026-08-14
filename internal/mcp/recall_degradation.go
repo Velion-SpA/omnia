@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/velion/omnia/internal/embed"
 	"github.com/velion/omnia/internal/store"
 )
 
@@ -123,21 +124,45 @@ func AnnotateRecallHealth(envelope map[string]any, h RecallHealth) {
 // is no embeddings store to inspect (auto-embed off) — in which case
 // EvaluateRecallHealth reports "unknown", never "stale".
 //
-// It reads the auto-embed worker's OWN store — the very store that stopped
-// being written in #226 — so the signal comes from the file that actually
-// backs semantic recall, not from a separately resolved path that could drift
-// from it.
-//
 // Call this ONCE, at handler-registration time (handleSearch's body, outside
 // the returned closure): MCPConfig is passed by value, so memoising on the
-// config would both defeat the cache and trip copylocks. The returned reader
-// is already TTL-cached, so a long-lived server pays one read per window
-// rather than one per search.
+// config would both defeat the cache and trip copylocks.
+//
+// A thin adapter over the exported NewWatermarkReader (P0,
+// docs/conversational-retrieval-plan.md): mem_search's own MCPConfig carries
+// AutoEmbed as one field among many, so this keeps handleSearch's call site
+// unchanged (newWatermarkReader(s, cfg)) while GET /search's cmd/omnia
+// wiring — which has no MCPConfig — calls NewWatermarkReader(s, autoEmbed)
+// directly with just the *embed.Worker it already built for POST
+// /observations auto-embed. Both paths end up reading the SAME watermark
+// signal the SAME way, which is the entire point (#226's "is the semantic
+// index behind the store" question must not have two independently
+// maintained answers).
 func newWatermarkReader(s *store.Store, cfg MCPConfig) WatermarkReader {
-	if s == nil || cfg.AutoEmbed == nil {
+	return NewWatermarkReader(s, cfg.AutoEmbed)
+}
+
+// NewWatermarkReader builds a WatermarkReader over autoEmbed's embeddings
+// store, or nil when there is no store to inspect (s is nil, autoEmbed is
+// nil, or autoEmbed has no store) — in which case EvaluateRecallHealth
+// reports "unknown", never "stale".
+//
+// It reads the auto-embed worker's OWN store — the very store that stopped
+// being written in #226 — so the signal comes from the file that actually
+// backs semantic recall, not from a separately resolved path that could
+// drift from it.
+//
+// Exported (P0, docs/conversational-retrieval-plan.md) so GET /search's
+// cmd/omnia wiring can surface the exact same recall_degraded/
+// embeddings_stale signal mem_search does, instead of re-deriving or
+// duplicating the watermark-reading logic. The returned reader is already
+// TTL-cached (watermarkCacheTTL below), so a long-lived server pays one read
+// per window rather than one per search, on either surface.
+func NewWatermarkReader(s *store.Store, autoEmbed *embed.Worker) WatermarkReader {
+	if s == nil || autoEmbed == nil {
 		return nil
 	}
-	embStore := cfg.AutoEmbed.Store()
+	embStore := autoEmbed.Store()
 	if embStore == nil {
 		return nil
 	}

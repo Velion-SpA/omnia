@@ -881,24 +881,27 @@ func TestHandleSearchFallsBackToStoreSearchWhenSetSearchNotCalled(t *testing.T) 
 // TestHandleSearchUsesInjectedSearchFunc proves GET /search routes through
 // whatever SearchFunc cmd/omnia wired via SetSearch (issue #86) — the seam
 // cmdServe uses to hand handleSearch the hybrid lexical+semantic
-// recall.Service path, without internal/server importing internal/recall or
-// internal/mcp directly (mirrors SetRunnerFactory/SetPromptBuilder's
-// existing precedent for internal/llm).
+// recall.Service path (and, since P0, mcp.RankPipeline), without
+// internal/server importing internal/recall or internal/mcp directly
+// (mirrors SetRunnerFactory/SetPromptBuilder's existing precedent for
+// internal/llm). Also pins the back-compat default: no `envelope=1` means
+// the response stays a bare JSON array even though SearchFunc itself
+// returns the widened SearchEnvelope now.
 func TestHandleSearchUsesInjectedSearchFunc(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)
 	h := srv.Handler()
 
 	var gotQuery string
-	var gotOpts store.SearchOptions
+	var gotReq SearchRequest
 	sentinel := []store.SearchResult{{Observation: store.Observation{ID: 4242, Title: "from injected SearchFunc"}}}
-	srv.SetSearch(func(ctx context.Context, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+	srv.SetSearch(func(ctx context.Context, query string, req SearchRequest) (SearchEnvelope, error) {
 		gotQuery = query
-		gotOpts = opts
-		return sentinel, nil
+		gotReq = req
+		return SearchEnvelope{Results: sentinel}, nil
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/search?q=hello&project=engram&type=bugfix&scope=project&limit=3", nil)
+	req := httptest.NewRequest(http.MethodGet, "/search?q=hello&project=engram&type=bugfix&scope=project&limit=3&max_tokens=350", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -908,8 +911,14 @@ func TestHandleSearchUsesInjectedSearchFunc(t *testing.T) {
 	if gotQuery != "hello" {
 		t.Fatalf("expected injected SearchFunc to receive query %q, got %q", "hello", gotQuery)
 	}
-	if gotOpts.Project != "engram" || gotOpts.Type != "bugfix" || gotOpts.Scope != "project" || gotOpts.Limit != 3 {
-		t.Fatalf("expected query params forwarded into SearchOptions, got %+v", gotOpts)
+	if gotReq.Project != "engram" || gotReq.Type != "bugfix" || gotReq.Scope != "project" || gotReq.Limit != 3 {
+		t.Fatalf("expected query params forwarded into SearchRequest.SearchOptions, got %+v", gotReq)
+	}
+	if gotReq.MaxTokens != 350 {
+		t.Fatalf("expected max_tokens=350 forwarded into SearchRequest.MaxTokens, got %d", gotReq.MaxTokens)
+	}
+	if gotReq.Explain {
+		t.Fatalf("expected Explain to default false when explain= is absent")
 	}
 
 	var results []store.SearchResult
@@ -930,8 +939,8 @@ func TestHandleSearchSurfacesInjectedSearchFuncError(t *testing.T) {
 	srv := New(st, 0)
 	h := srv.Handler()
 
-	srv.SetSearch(func(ctx context.Context, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
-		return nil, errors.New("forced search func error")
+	srv.SetSearch(func(ctx context.Context, query string, req SearchRequest) (SearchEnvelope, error) {
+		return SearchEnvelope{}, errors.New("forced search func error")
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/search?q=hello", nil)
@@ -940,6 +949,151 @@ func TestHandleSearchSurfacesInjectedSearchFuncError(t *testing.T) {
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleSearchEnvelopeOptIn proves `?envelope=1` widens the response to
+// the P0 item 2 shape (results + recall_degraded/...), and that the
+// degradation fields round-trip verbatim from whatever the injected
+// SearchFunc returned.
+func TestHandleSearchEnvelopeOptIn(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	sentinel := []store.SearchResult{{Observation: store.Observation{ID: 7, Title: "stale hit"}}}
+	srv.SetSearch(func(ctx context.Context, query string, req SearchRequest) (SearchEnvelope, error) {
+		return SearchEnvelope{
+			Results:              sentinel,
+			RecallDegraded:       true,
+			RecallDegradedReason: "the embeddings index is behind the store",
+			EmbeddingsStale:      true,
+			EmbeddingsBehindBy:   12,
+			NewestEmbeddedAt:     "2026-08-01T00:00:00Z",
+		}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=hello&envelope=1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var body searchEnvelopeJSON
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode envelope response: %v", err)
+	}
+	if len(body.Results) != 1 || body.Results[0].Title != "stale hit" {
+		t.Fatalf("expected results to round-trip, got %+v", body.Results)
+	}
+	if !body.RecallDegraded || body.RecallDegradedReason == "" || !body.EmbeddingsStale || body.EmbeddingsBehindBy != 12 || body.NewestEmbeddedAt == "" {
+		t.Fatalf("expected degradation fields to round-trip verbatim, got %+v", body)
+	}
+}
+
+// TestHandleSearchWithoutEnvelopeStaysBareArray is the back-compat pin (P0
+// item 2 CRITICAL BACK-COMPAT): Hermes parses this response as a bare JSON
+// array today, so the default response (no `envelope=1`) must never become
+// a JSON object, even when the injected SearchFunc reports degradation.
+func TestHandleSearchWithoutEnvelopeStaysBareArray(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	sentinel := []store.SearchResult{{Observation: store.Observation{ID: 7, Title: "stale hit"}}}
+	srv.SetSearch(func(ctx context.Context, query string, req SearchRequest) (SearchEnvelope, error) {
+		return SearchEnvelope{Results: sentinel, RecallDegraded: true, RecallDegradedReason: "stale"}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=hello", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := strings.TrimSpace(rec.Body.String())
+	if !strings.HasPrefix(body, "[") {
+		t.Fatalf("expected a bare JSON array by default, got: %s", body)
+	}
+	var results []store.SearchResult
+	if err := json.Unmarshal([]byte(body), &results); err != nil {
+		t.Fatalf("decode bare array response: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "stale hit" {
+		t.Fatalf("expected results verbatim, got %+v", results)
+	}
+}
+
+// TestHandleSearchExplainImpliesEnvelope proves `explain=1` alone (without
+// `envelope=1`) still widens the response, since a per-row score_breakdown
+// has no field to attach to in the bare-array shape.
+func TestHandleSearchExplainImpliesEnvelope(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	sentinel := []store.SearchResult{{Observation: store.Observation{ID: 99, Title: "explained hit"}}}
+	var gotExplain bool
+	srv.SetSearch(func(ctx context.Context, query string, req SearchRequest) (SearchEnvelope, error) {
+		gotExplain = req.Explain
+		return SearchEnvelope{
+			Results:        sentinel,
+			ScoreBreakdown: map[string]map[string]any{"99": {"final": 0.5}},
+		}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=hello&explain=1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if !gotExplain {
+		t.Fatalf("expected explain=1 to forward SearchRequest.Explain=true")
+	}
+	var body searchEnvelopeJSON
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode envelope response: %v", err)
+	}
+	if body.ScoreBreakdown == nil || body.ScoreBreakdown["99"]["final"] != 0.5 {
+		t.Fatalf("expected score_breakdown to round-trip, got %+v", body.ScoreBreakdown)
+	}
+}
+
+// TestHandleSearchNilSearchFuncEnvelopeReportsDegraded proves the nil-
+// SearchFunc fallback (SetSearch never called) still reports an honest
+// RecallDegraded=true when envelope=1 is requested — this path is
+// definitionally FTS5-only with no ranking/health signal available, so
+// envelope=1 must not silently claim "healthy".
+func TestHandleSearchNilSearchFuncEnvelopeReportsDegraded(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	if err := st.CreateSession("s-search-nil-envelope", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "s-search-nil-envelope", Type: "bugfix", Title: "Fix panic", Content: "Fix panic in parser",
+		Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=panic&project=engram&scope=project&envelope=1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body searchEnvelopeJSON
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode envelope response: %v", err)
+	}
+	if len(body.Results) != 1 || body.Results[0].Title != "Fix panic" {
+		t.Fatalf("expected legacy store.Search result in envelope, got %+v", body.Results)
+	}
+	if !body.RecallDegraded || body.RecallDegradedReason == "" {
+		t.Fatalf("expected RecallDegraded=true with a reason on the nil-SearchFunc fallback, got %+v", body)
 	}
 }
 

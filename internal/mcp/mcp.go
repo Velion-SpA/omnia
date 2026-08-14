@@ -1480,23 +1480,18 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			return respondWithProject(detRes, message, nil), nil
 		}
 
-		// memory-recall-ranking (design D6 wiring boundary): re-sorts by
-		// recency x importance x relevance x salience when
-		// cfg.RecallRanking.Enabled. A pure no-op when it's not (the
-		// default), so this call never changes handleSearch's response when
-		// ranking is unconfigured (Requirement: Backward-Compatible Default
-		// Behavior).
 		now := store.ReadInstant(asOf)
-		results = RankResults(results, relevance, cfg.RecallRanking, now)
-		// ApplyLearnedRanker, when enabled with a trained model, REPLACES
-		// this ordering with a fixed 6-feature model (ranker.Features) that
-		// has no salience slot — so weights.salience silently has zero
-		// effect whenever the learned ranker is active. See
-		// config.RankingWeights.Salience's doc for why that's not being
-		// fixed here (FeatureSchema compatibility with trained models).
-		results = ApplyLearnedRanker(results, relevance, cfg.LearnedRanker, cfg.LearnedRankerModel, cfg.RecallRanking, now)
 
 		// Batch-load relations for all results (REQ-002). Avoids N+1.
+		// Computed from the fused/searched `results` BEFORE the ranking
+		// pipeline below reorders them: RankResults/ApplyLearnedRanker never
+		// drop rows (they only reorder preempted+rest — see each function's
+		// own doc), so the syncID SET here is identical to whatever those
+		// two stages hand to ApplyStalenessDownrank. ApplyTypeLens/ApplyMMR/
+		// ApplyTokenBudget CAN drop rows further downstream, but that only
+		// leaves relationsMap/anchorsByObs with a few unused entries for
+		// rows that got trimmed — never a missing entry for a row that
+		// survives into the final response.
 		syncIDs := make([]string, 0, len(results))
 		for _, r := range results {
 			if r.SyncID != "" {
@@ -1512,20 +1507,24 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		}
 
 		// memory-structural-forgetting (design D6 wiring boundary, PR2
-		// Requirement 6): downranks memories carrying at least one stale code
-		// anchor and attaches an anchor_receipt line. Gated behind
+		// Requirement 6): batch-load anchors that feed the pipeline's
+		// ApplyStalenessDownrank stage below (downranks memories carrying at
+		// least one stale code anchor; the anchor_receipt line is attached
+		// per-row further down using this same map). Gated behind
 		// cfg.StructuralForgetting.Enabled (default false) so the ENTIRE
 		// block — including the anchor batch-load itself — is skipped when
-		// the flag is off, keeping handleSearch's response byte-for-byte
-		// identical to before this slice existed (Regression: memory with no
-		// anchor unaffected, extended to "flag off" too).
+		// the flag is off; anchorsByObs then stays the empty map declared
+		// here, which makes ApplyStalenessDownrank a pure no-op inside the
+		// pipeline (its own len(anchorsByObs)==0 short-circuit), keeping
+		// handleSearch's response byte-for-byte identical to before this
+		// slice existed (Regression: memory with no anchor unaffected,
+		// extended to "flag off" too).
 		anchorsByObs := map[string][]store.MemoryAnchor{}
 		if asOf == "" && cfg.StructuralForgetting.Enabled && len(syncIDs) > 0 {
 			if am, aerr := s.GetAnchorsForObservations(syncIDs); aerr == nil {
 				anchorsByObs = am
 			}
 			// Errors from anchor loading are swallowed — search must not fail.
-			results = ApplyStalenessDownrank(results, anchorsByObs)
 		}
 
 		// explain (Requirement: Per-Hit Score Breakdown) needs the SAME
@@ -1539,89 +1538,50 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		// check) — otherwise a signature row's outlier relevance (FTS5-only
 		// path's relevance[id] = -rank, ~500 for signatureMatchRank) would
 		// pin the batch's max and crush every other row's normalized
-		// relevance toward 0.
+		// relevance toward 0. Wired through RankPipelineOptions.
+		// PreLensSnapshot (rank_pipeline.go) so it captures the result set
+		// AFTER RankResults/ApplyLearnedRanker/ApplyStalenessDownrank but
+		// BEFORE ApplyTypeLens/ApplyMMR/ApplyTokenBudget narrow it further —
+		// see that field's own doc for why the ordering matters.
 		var normalizedRelevance map[int64]float64
+		var preLensSnapshot func([]store.SearchResult)
 		if explain {
-			nonSentinel := make([]store.SearchResult, 0, len(results))
-			for _, r := range results {
-				if r.Rank != exactSentinelRank && !r.SignatureMatch {
-					nonSentinel = append(nonSentinel, r)
+			preLensSnapshot = func(snapshot []store.SearchResult) {
+				nonSentinel := make([]store.SearchResult, 0, len(snapshot))
+				for _, r := range snapshot {
+					if r.Rank != exactSentinelRank && !r.SignatureMatch {
+						nonSentinel = append(nonSentinel, r)
+					}
 				}
+				normalizedRelevance = MinMaxNormalizeRelevance(nonSentinel, relevance)
 			}
-			normalizedRelevance = MinMaxNormalizeRelevance(nonSentinel, relevance)
 		}
 
-		// Omnia v0.3 Context Economy — situational type-as-lens boost
-		// (design obs #1643 section 3.5, spec obs #1642 type-as-lens
-		// domain, PR5): infers a situational type from the query text
-		// (InferLensType) and lifts matching-Type rows above non-matching
-		// ones (ApplyTypeLens), on top of the existing importance-tier
-		// ordering. explicitType (typ, the caller's own opts.Type filter)
-		// always wins — InferLensType returns "" whenever typ != "" (spec:
-		// Explicit User Filter Always Wins), so the lens is a true no-op for
-		// any type-scoped search. Runs BEFORE ApplyMMR/ApplyTokenBudget
-		// (design section 2's final order: RankResults ->
+		// P0 (docs/conversational-retrieval-plan.md section 0.1/P0): the six
+		// post-fusion stages — RankResults -> ApplyLearnedRanker ->
 		// ApplyStalenessDownrank -> ApplyTypeLens -> ApplyMMR ->
-		// ApplyTokenBudget) because it changes which rows are "top" — MMR's
-		// dedup and the budget's trim must see the lens-boosted order, not
-		// the pre-lens one.
-		//
-		// A pure no-op when cfg.Injection.TypeLens.Enabled is false (the
-		// default) or lensType is "" (explicit filter stood down, or no
-		// situational signal detected), keeping handleSearch's response
-		// byte-for-byte identical to pre-v0.3 output (spec: Disabled by
-		// Default, No-Op When Off).
-		// The gate guards the CLASSIFIER call too, not just the re-rank:
-		// when type_lens is off, no regex scan of the (uncapped) query
-		// string runs on the hot path at all — matching the "near-zero work
-		// when disabled" idiom of the sibling ApplyMMR/ApplyTokenBudget
-		// passes (adversarial-review finding, v0.3).
-		if cfg.Injection.TypeLens.Enabled {
-			lensType := InferLensType(query, typ)
-			results = ApplyTypeLens(results, lensType, cfg.Injection.TypeLens)
-		}
-
-		// Omnia v0.3 Context Economy — MMR diversity (design obs #1643
-		// section 3.3, spec obs #1642 injection-diversity domain, PR4): a
-		// read-time token-set-Jaccard MMR re-rank that demotes/hard-drops
-		// rows near-duplicating an already-selected higher-ranked row. Runs
-		// AFTER RankResults/ApplyStalenessDownrank/ApplyTypeLens (priority,
-		// including the situational boost, is already decided) and AFTER
-		// explain's normalizedRelevance above (same "score_breakdown
-		// reflects the full pre-trim batch" rationale ApplyTokenBudget's own
-		// comment below documents), but BEFORE ApplyTokenBudget (dedup
-		// before trim — MMR removes redundancy so the budget is never spent
-		// on near-duplicates).
-		//
-		// A pure no-op when cfg.Injection.Diversity.Enabled is false (the
-		// default) or fewer than 2 results, keeping handleSearch's response
-		// byte-for-byte identical to pre-v0.3 output (spec: Disabled by
-		// Default, No-Op When Off).
-		results = ApplyMMR(results, relevance, cfg.Injection.Diversity)
-
-		// Omnia v0.3 Context Economy (design obs #1643, spec obs #1642
-		// injection-budget domain): ApplyTokenBudget is the LAST pass in the
-		// pipeline, after RankResults/ApplyStalenessDownrank/ApplyTypeLens/
-		// ApplyMMR above and before the display/preview loop below, so
-		// trimming reflects the FINAL ranked/downranked/lens-boosted/
-		// diversified order. A pure no-op when cfg.Injection.Budget.Enabled
-		// is false (the default), keeping handleSearch's response
-		// byte-for-byte identical to pre-v0.3 output (Requirement: Disabled
-		// by Default, No-Op When Off). Runs AFTER explain's
-		// normalizedRelevance above so a score_breakdown reflects what
-		// RankResults computed over the full (pre-trim) batch, not a batch
-		// already narrowed by the lens, MMR, or the budget itself.
-		//
-		// PR2 review fix (WARNING): capture the pre-trim count so a genuine
-		// budget-driven cut can be surfaced below — "Found 0 memories" after
-		// ApplyTokenBudget silently drops every real hit is otherwise
-		// indistinguishable from a true no-match response.
-		preTrimCount := len(results)
-		results = ApplyTokenBudget(results, cfg.Injection.Budget)
-		budgetTrimmed := 0
-		if cfg.Injection.Budget.Enabled {
-			budgetTrimmed = preTrimCount - len(results)
-		}
+		// ApplyTokenBudget — now live in the shared RankPipeline
+		// (rank_pipeline.go) instead of being inlined here, so mem_search
+		// and GET /search (cmd/omnia's SetSearch wiring) run the exact same
+		// pipeline in the exact same order and cannot drift apart. This
+		// call is behaviorally identical to the six inline calls it
+		// replaces — every stage is still independently gated by its own
+		// config and is still a pure no-op when disabled — see
+		// RankPipeline's own doc for the full argument.
+		pipelineOut := RankPipeline(results, relevance, RankPipelineOptions{
+			Ranking:            cfg.RecallRanking,
+			LearnedRanker:      cfg.LearnedRanker,
+			LearnedRankerModel: cfg.LearnedRankerModel,
+			AnchorsByObs:       anchorsByObs,
+			Query:              query,
+			ExplicitType:       typ,
+			TypeLens:           cfg.Injection.TypeLens,
+			Diversity:          cfg.Injection.Diversity,
+			Budget:             cfg.Injection.Budget,
+			PreLensSnapshot:    preLensSnapshot,
+		}, now)
+		results = pipelineOut.Results
+		budgetTrimmed := pipelineOut.BudgetTrimmed
 
 		var b strings.Builder
 		fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))

@@ -5,12 +5,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/embed"
 	"github.com/velion/omnia/internal/mcp"
+	"github.com/velion/omnia/internal/ranker"
 	"github.com/velion/omnia/internal/recall"
+	"github.com/velion/omnia/internal/server"
 	"github.com/velion/omnia/internal/store"
 )
 
@@ -516,4 +519,338 @@ func TestBuildRecallServiceForCLI_UsesSharedLoader(t *testing.T) {
 			t.Fatal("expected a wired recall.Service when the loader reports recall.enabled=true")
 		}
 	})
+}
+
+// ─── P0 (docs/conversational-retrieval-plan.md): loadLearnedRankerForCLI /
+// buildHTTPSearchFunc — GET /search's RankPipeline wiring ───────────────────
+
+// TestLoadLearnedRankerForCLI_DisabledReturnsNilModel pins the common case:
+// learned_ranker.enabled=false (the default) must never attempt to load a
+// model from disk, and returns a nil model either way.
+func TestLoadLearnedRankerForCLI_DisabledReturnsNilModel(t *testing.T) {
+	appCfg := &config.Config{Ranker: config.RankerConfig{Enabled: false}}
+	cfg, model := loadLearnedRankerForCLI(appCfg, t.TempDir())
+	if cfg.Enabled {
+		t.Fatal("expected the returned RankerConfig to still report Enabled=false")
+	}
+	if model != nil {
+		t.Fatal("expected a nil model when learned_ranker.enabled is false")
+	}
+}
+
+// TestLoadLearnedRankerForCLI_EnabledButNoModelOnDiskReturnsNilModel covers
+// the graceful-degradation branch: enabled=true but nothing has ever been
+// promoted at the model dir — ranker.LoadCurrent errors, and this helper
+// must degrade to a nil model (RankPipeline's ApplyLearnedRanker is then a
+// pure no-op) rather than propagating the error.
+func TestLoadLearnedRankerForCLI_EnabledButNoModelOnDiskReturnsNilModel(t *testing.T) {
+	appCfg := &config.Config{Ranker: config.RankerConfig{Enabled: true, ModelDir: t.TempDir()}}
+	cfg, model := loadLearnedRankerForCLI(appCfg, t.TempDir())
+	if !cfg.Enabled {
+		t.Fatal("expected the returned RankerConfig to still report Enabled=true")
+	}
+	if model != nil {
+		t.Fatal("expected a nil model when no model has been promoted at ModelDir")
+	}
+}
+
+// TestLoadLearnedRankerForCLI_EnabledWithPromotedModelLoads is the flag-ON
+// happy path: a model trained and promoted at ModelDir must load
+// successfully, so GET /search can score against the SAME trained model
+// mem_search does.
+func TestLoadLearnedRankerForCLI_EnabledWithPromotedModelLoads(t *testing.T) {
+	examples := []ranker.Example{
+		{Features: ranker.Features{LexicalRRF: .9, SemanticCosine: .9, Recency: .9, Importance: 1, OutcomeHistory: 1}, Label: 1},
+		{Features: ranker.Features{LexicalRRF: .1, SemanticCosine: .1, Recency: .1, Importance: .3, OutcomeHistory: 0}, Label: 0},
+	}
+	trained, err := ranker.Train(examples, ranker.TrainOptions{Iterations: 100, LearningRate: .4, L2: .01, TrainedAt: "2026-08-14T00:00:00Z"})
+	if err != nil {
+		t.Fatalf("ranker.Train: %v", err)
+	}
+	dir := t.TempDir()
+	if err := ranker.Promote(dir, trained); err != nil {
+		t.Fatalf("ranker.Promote: %v", err)
+	}
+
+	appCfg := &config.Config{Ranker: config.RankerConfig{Enabled: true, ModelDir: dir}}
+	cfg, model := loadLearnedRankerForCLI(appCfg, t.TempDir())
+	if !cfg.Enabled {
+		t.Fatal("expected the returned RankerConfig to report Enabled=true")
+	}
+	if model == nil {
+		t.Fatal("expected a loaded model when a promoted model exists at ModelDir")
+	}
+	if model.Version != trained.Version {
+		t.Fatalf("Version = %q, want %q", model.Version, trained.Version)
+	}
+}
+
+// TestLoadLearnedRankerForCLI_EmptyModelDirDefaultsToDataDirRankerSubdir
+// proves an unset ModelDir falls back to <dataDir>/ranker, mirroring
+// cmdMCP's own pre-extraction inline default exactly.
+func TestLoadLearnedRankerForCLI_EmptyModelDirDefaultsToDataDirRankerSubdir(t *testing.T) {
+	examples := []ranker.Example{
+		{Features: ranker.Features{LexicalRRF: .9, SemanticCosine: .9, Recency: .9, Importance: 1, OutcomeHistory: 1}, Label: 1},
+		{Features: ranker.Features{LexicalRRF: .1, SemanticCosine: .1, Recency: .1, Importance: .3, OutcomeHistory: 0}, Label: 0},
+	}
+	trained, err := ranker.Train(examples, ranker.TrainOptions{Iterations: 100, LearningRate: .4, L2: .01, TrainedAt: "2026-08-14T00:00:00Z"})
+	if err != nil {
+		t.Fatalf("ranker.Train: %v", err)
+	}
+	dataDir := t.TempDir()
+	if err := ranker.Promote(filepath.Join(dataDir, "ranker"), trained); err != nil {
+		t.Fatalf("ranker.Promote: %v", err)
+	}
+
+	appCfg := &config.Config{Ranker: config.RankerConfig{Enabled: true}} // ModelDir left empty
+	_, model := loadLearnedRankerForCLI(appCfg, dataDir)
+	if model == nil {
+		t.Fatal("expected loadLearnedRankerForCLI to default ModelDir to <dataDir>/ranker and find the promoted model there")
+	}
+}
+
+// TestBuildHTTPSearchFunc_NilRecallSurfacesResultsAndReportsLexicalDegraded
+// is the flag-OFF baseline: recallSvc == nil (recall disabled) still returns
+// the FTS5 results, and the envelope reports RecallDegraded=true with
+// Mode-lexical semantics (mirroring mem_search's own
+// EvaluateRecallHealth(semanticActive: false, ...) contract) since P0 item 2
+// asks for GET /search to surface the SAME #226 signal mem_search does.
+func TestBuildHTTPSearchFunc_NilRecallSurfacesResultsAndReportsLexicalDegraded(t *testing.T) {
+	s, err := storeNew(testConfig(t))
+	if err != nil {
+		t.Fatalf("storeNew: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CreateSession("s-http-nilrecall", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	wantID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-http-nilrecall", Type: "bugfix", Title: "Fix panic in parser",
+		Content: "Fix panic in parser when args are missing", Project: "engram", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	appCfg := &config.Config{}
+	searchFn := buildHTTPSearchFunc(s, nil, appCfg, t.TempDir(), nil)
+
+	envelope, err := searchFn(context.Background(), "panic", server.SearchRequest{
+		SearchOptions: store.SearchOptions{Project: "engram", Scope: "project", Limit: 5},
+	})
+	if err != nil {
+		t.Fatalf("buildHTTPSearchFunc: %v", err)
+	}
+	if len(envelope.Results) != 1 || envelope.Results[0].ID != wantID {
+		t.Fatalf("expected the FTS5 result [%d], got %+v", wantID, envelope.Results)
+	}
+	if !envelope.RecallDegraded || envelope.RecallDegradedReason == "" {
+		t.Fatalf("expected RecallDegraded=true with a reason when recallSvc is nil, got %+v", envelope)
+	}
+}
+
+// TestBuildHTTPSearchFunc_MaxTokensOverridesDisabledBudget is P0 item 3's
+// core promise: a caller-supplied max_tokens must cap the response even
+// when injection.budget.enabled is false (the operator's default), so Vel
+// can always bound response size on demand.
+func TestBuildHTTPSearchFunc_MaxTokensOverridesDisabledBudget(t *testing.T) {
+	s, err := storeNew(testConfig(t))
+	if err != nil {
+		t.Fatalf("storeNew: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CreateSession("s-http-maxtok", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := s.AddObservation(store.AddObservationParams{
+			SessionID: "s-http-maxtok", Type: "manual", Title: "Budget fixture " + strconv.Itoa(i),
+			Content: "token budget wiring fixture content " + strconv.Itoa(i), Project: "engram", Scope: "project",
+		}); err != nil {
+			t.Fatalf("add observation %d: %v", i, err)
+		}
+	}
+
+	appCfg := &config.Config{} // Injection.Budget.Enabled left false (the default)
+	searchFn := buildHTTPSearchFunc(s, nil, appCfg, t.TempDir(), nil)
+
+	envelope, err := searchFn(context.Background(), "budget wiring fixture", server.SearchRequest{
+		SearchOptions: store.SearchOptions{Project: "engram", Scope: "project", Limit: 10},
+		MaxTokens:     1, // tiny — must trim well below the 5 seeded rows
+	})
+	if err != nil {
+		t.Fatalf("buildHTTPSearchFunc: %v", err)
+	}
+	if len(envelope.Results) >= 5 {
+		t.Fatalf("expected max_tokens=1 to trim below all 5 seeded rows even with injection.budget.enabled=false, got %d", len(envelope.Results))
+	}
+}
+
+// TestBuildHTTPSearchFunc_ExplainPopulatesScoreBreakdown proves req.Explain
+// routes into mcp.BuildResultReceipt, keyed by decimal Observation.ID.
+func TestBuildHTTPSearchFunc_ExplainPopulatesScoreBreakdown(t *testing.T) {
+	s, err := storeNew(testConfig(t))
+	if err != nil {
+		t.Fatalf("storeNew: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CreateSession("s-http-explain", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	wantID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-http-explain", Type: "bugfix", Title: "Fix panic in parser",
+		Content: "Fix panic in parser when args are missing", Project: "engram", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	appCfg := &config.Config{}
+	searchFn := buildHTTPSearchFunc(s, nil, appCfg, t.TempDir(), nil)
+
+	envelope, err := searchFn(context.Background(), "panic", server.SearchRequest{
+		SearchOptions: store.SearchOptions{Project: "engram", Scope: "project", Limit: 5},
+		Explain:       true,
+	})
+	if err != nil {
+		t.Fatalf("buildHTTPSearchFunc: %v", err)
+	}
+	key := strconv.FormatInt(wantID, 10)
+	receipt, ok := envelope.ScoreBreakdown[key]
+	if !ok {
+		t.Fatalf("expected ScoreBreakdown[%q], got keys %v", key, envelope.ScoreBreakdown)
+	}
+	if _, ok := receipt["final"]; !ok {
+		t.Fatalf("expected the receipt to carry a 'final' key, got %+v", receipt)
+	}
+}
+
+// TestBuildHTTPSearchFunc_ExplicitTypeStandsDownTypeLens proves GET
+// /search's own `type` query param still reaches the store-level type
+// filter through this new pipeline wiring (SearchRequest.SearchOptions.Type
+// threads straight through to recallOrFTSSearchWithRelevance, exactly as it
+// did before P0) — and, since the SAME field also becomes
+// RankPipelineOptions.ExplicitType, the situational type lens correctly
+// receives a non-empty explicitType and would stand down for it (see
+// internal/mcp's TestRankPipeline_ExplicitTypeStandsDownTypeLens for the
+// pipeline-level proof of that specific "explicit filter always wins" rule
+// in isolation, with a controlled result set FTS ranking can't perturb).
+func TestBuildHTTPSearchFunc_ExplicitTypeStandsDownTypeLens(t *testing.T) {
+	s, err := storeNew(testConfig(t))
+	if err != nil {
+		t.Fatalf("storeNew: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CreateSession("s-http-typelens", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	// "decision" type row, ranked SECOND by relevance (lower rank than the
+	// "note" row) — if the lens fired, it would lift this row to first.
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-http-typelens", Type: "decision", Title: "Chose Postgres",
+		Content: "why did we choose postgres for storage", Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatalf("add decision observation: %v", err)
+	}
+	noteID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-http-typelens", Type: "note", Title: "Postgres note",
+		Content: "why did we choose postgres for storage, a plain note", Project: "engram", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("add note observation: %v", err)
+	}
+
+	appCfg := &config.Config{Injection: config.InjectionConfig{TypeLens: config.TypeLensConfig{Enabled: true}}}
+	searchFn := buildHTTPSearchFunc(s, nil, appCfg, t.TempDir(), nil)
+
+	envelope, err := searchFn(context.Background(), "why did we choose postgres", server.SearchRequest{
+		SearchOptions: store.SearchOptions{Type: "note", Project: "engram", Scope: "project", Limit: 10},
+	})
+	if err != nil {
+		t.Fatalf("buildHTTPSearchFunc: %v", err)
+	}
+	// An explicit type filter already narrows the store query itself, so
+	// only the note row is even in the result set — this is really pinning
+	// that Type flowed through to SearchOptions.Type at all (a type-scoped
+	// store query), which is the precondition for ExplicitType reaching
+	// RankPipelineOptions correctly.
+	if len(envelope.Results) != 1 || envelope.Results[0].ID != noteID {
+		t.Fatalf("expected only the type=note result (%d), got %+v", noteID, envelope.Results)
+	}
+}
+
+// TestBuildHTTPSearchFunc_StructuralForgettingDownranksStaleAnchor mirrors
+// internal/mcp's TestHandleSearch_StructuralForgettingEnabled_
+// StaleMemoryDownrankedWithReceipt at the HTTP wiring seam: with
+// structural_forgetting.enabled=true, a memory carrying a stale code anchor
+// ranks below an equally-relevant fresh one, proving GET /search now runs
+// ApplyStalenessDownrank too — not just RankResults/ApplyTypeLens/ApplyMMR/
+// ApplyTokenBudget.
+func TestBuildHTTPSearchFunc_StructuralForgettingDownranksStaleAnchor(t *testing.T) {
+	s, err := storeNew(testConfig(t))
+	if err != nil {
+		t.Fatalf("storeNew: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CreateSession("s-http-sf", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	staleID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-http-sf", Type: "bugfix", Title: "JWT auth token check",
+		Content: "JWT auth token check implementation", Project: "engram", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation stale: %v", err)
+	}
+	freshID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-http-sf", Type: "bugfix", Title: "JWT auth token validate",
+		Content: "JWT auth token validate implementation", Project: "engram", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation fresh: %v", err)
+	}
+
+	staleObs, err := s.GetObservation(staleID)
+	if err != nil {
+		t.Fatalf("GetObservation(stale): %v", err)
+	}
+	anchorSyncID, err := s.UpsertAnchor(store.UpsertAnchorParams{
+		ObsSyncID: staleObs.SyncID, FilePath: "jwt.go", Symbol: "CheckJWT",
+		LineStart: 1, LineEnd: 5, ContentHash: "h1",
+	})
+	if err != nil {
+		t.Fatalf("UpsertAnchor: %v", err)
+	}
+	if err := s.MarkAnchorStale(anchorSyncID, nil); err != nil {
+		t.Fatalf("MarkAnchorStale: %v", err)
+	}
+
+	appCfg := &config.Config{StructuralForgetting: config.StructuralForgettingConfig{Enabled: true}}
+	searchFn := buildHTTPSearchFunc(s, nil, appCfg, t.TempDir(), nil)
+
+	envelope, err := searchFn(context.Background(), "JWT auth token", server.SearchRequest{
+		SearchOptions: store.SearchOptions{Project: "engram", Scope: "project", Limit: 5},
+		Explain:       true,
+	})
+	if err != nil {
+		t.Fatalf("buildHTTPSearchFunc: %v", err)
+	}
+	if len(envelope.Results) != 2 {
+		t.Fatalf("expected 2 results, got %+v", envelope.Results)
+	}
+	if envelope.Results[0].ID != freshID {
+		t.Errorf("expected fresh memory (id %d) ranked first, got id=%d", freshID, envelope.Results[0].ID)
+	}
+	if envelope.Results[1].ID != staleID {
+		t.Fatalf("expected stale memory (id %d) ranked second, got id=%d", staleID, envelope.Results[1].ID)
+	}
+	staleReceipt := envelope.ScoreBreakdown[strconv.FormatInt(staleID, 10)]
+	if staleReceipt == nil || staleReceipt["staleness_penalty"] == nil || staleReceipt["staleness_penalty"] == 0.0 {
+		t.Fatalf("expected a non-zero staleness_penalty in the stale row's receipt, got %+v", staleReceipt)
+	}
 }

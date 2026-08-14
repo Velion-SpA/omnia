@@ -4,13 +4,17 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/embed"
 	"github.com/velion/omnia/internal/mcp"
+	"github.com/velion/omnia/internal/ranker"
 	"github.com/velion/omnia/internal/recall"
+	"github.com/velion/omnia/internal/server"
 	"github.com/velion/omnia/internal/store"
 )
 
@@ -335,4 +339,164 @@ func buildRecallService(s *store.Store, recallCfg config.RecallConfig, embCfg co
 		BaseFloor:   recallCfg.BaseFloor,
 		MaxResults:  recallCfg.MaxResults,
 	})
+}
+
+// loadLearnedRankerForCLI mirrors cmdMCP's own learned_ranker.enabled wiring
+// (main.go's MCPConfig construction) so GET /search's RankPipeline call (P0,
+// docs/conversational-retrieval-plan.md) can score against the SAME trained
+// local model mem_search does, instead of re-deriving or diverging from that
+// load logic. A disabled ranker, or an enabled one with no loadable model on
+// disk, both return a nil model — RankPipeline's ApplyLearnedRanker stage is
+// then a pure no-op either way (its own cfg.Enabled/model==nil guard).
+func loadLearnedRankerForCLI(appCfg *config.Config, dataDir string) (config.RankerConfig, *ranker.Model) {
+	if !appCfg.Ranker.Enabled {
+		return appCfg.Ranker, nil
+	}
+	dir := appCfg.Ranker.ModelDir
+	if dir == "" {
+		dir = filepath.Join(dataDir, "ranker")
+	}
+	model, err := ranker.LoadCurrent(dir)
+	if err != nil {
+		return appCfg.Ranker, nil
+	}
+	return appCfg.Ranker, &model
+}
+
+// buildHTTPSearchFunc wires GET /search onto the SAME post-fusion pipeline
+// mem_search runs (P0, docs/conversational-retrieval-plan.md section
+// 0.1/P0): recallOrFTSSearchWithRelevance for the fuse-then-hydrate leg
+// (shared with `omnia search`, issue #86), then mcp.RankPipeline for
+// RankResults -> ApplyLearnedRanker -> ApplyStalenessDownrank ->
+// ApplyTypeLens -> ApplyMMR -> ApplyTokenBudget, then
+// mcp.EvaluateRecallHealth for the #226 degradation envelope (P0 item 2).
+// Before this existed, GET /search ran only the fuse-then-hydrate leg — a
+// voice agent (Vel, via Hermes) on a strictly weaker retrieval path than a
+// coding agent, over the exact same store (section 0.1's diagnosis).
+//
+// Every pipeline stage stays gated by the SAME appCfg.* keys mem_search
+// itself reads (recall.ranking, injection.*, structural_forgetting,
+// learned_ranker) — turning on the "voice profile" P0 item 5 asks for is a
+// config.yaml edit (config.example.yaml documents a recommended profile),
+// never a code change, matching this codebase's off-by-default/
+// rollback-is-a-config-edit convention for every other Context Economy gate.
+// This function is called UNCONDITIONALLY whenever appCfgErr == nil in
+// cmdServe — behavior is controlled purely by appCfg's zero-value-is-off
+// gates, mirroring RankPipeline's own "always call it, let config decide"
+// convention.
+//
+// autoEmbed is the SAME *embed.Worker cmdServe already built for POST
+// /observations' auto-embed (nil when embeddings are disabled) — reused
+// here (via mcp.NewWatermarkReader) so the recall_degraded/embeddings_stale
+// signal reads the exact file that actually backs semantic recall, not a
+// separately resolved path that could drift from it.
+func buildHTTPSearchFunc(s *store.Store, recallSvc *recall.Service, appCfg *config.Config, dataDir string, autoEmbed *embed.Worker) server.SearchFunc {
+	learnedRankerCfg, learnedRankerModel := loadLearnedRankerForCLI(appCfg, dataDir)
+	readWatermarks := mcp.NewWatermarkReader(s, autoEmbed)
+
+	return func(ctx context.Context, query string, req server.SearchRequest) (server.SearchEnvelope, error) {
+		results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
+		if err != nil {
+			return server.SearchEnvelope{}, err
+		}
+		now := time.Now()
+
+		// memory-structural-forgetting: batch-load anchors for
+		// ApplyStalenessDownrank, gated the SAME way handleSearch gates it
+		// (structural_forgetting.enabled) — see mcp.go's own comment for
+		// why a nil/empty map is a safe, pure no-op default when this is
+		// off or there is nothing to look up.
+		var anchorsByObs map[string][]store.MemoryAnchor
+		if appCfg.StructuralForgetting.Enabled && len(results) > 0 {
+			syncIDs := make([]string, 0, len(results))
+			for _, r := range results {
+				if r.SyncID != "" {
+					syncIDs = append(syncIDs, r.SyncID)
+				}
+			}
+			if len(syncIDs) > 0 {
+				if am, aerr := s.GetAnchorsForObservations(syncIDs); aerr == nil {
+					anchorsByObs = am
+				}
+				// Errors from anchor loading are swallowed — search must not fail.
+			}
+		}
+
+		// P0 item 3: max_tokens is a per-request override for the injection
+		// budget — applied regardless of injection.budget.enabled, so a
+		// caller can always cap response size on demand (Hermes' own
+		// ~1400-character budget) even when the operator left budgeting off
+		// by default in config.yaml.
+		budget := appCfg.Injection.Budget
+		if req.MaxTokens > 0 {
+			budget.Enabled = true
+			budget.MaxTokens = req.MaxTokens
+		}
+
+		// explain=1 (P0 item 3) needs the SAME batch-normalized relevance
+		// RankResults scores against, captured via RankPipelineOptions.
+		// PreLensSnapshot at the same pipeline point mem_search's
+		// handleSearch captures it (after RankResults/ApplyLearnedRanker/
+		// ApplyStalenessDownrank, before ApplyTypeLens/ApplyMMR/
+		// ApplyTokenBudget narrow the batch further) — see that field's own
+		// doc in internal/mcp/rank_pipeline.go for why the ordering matters.
+		var normalizedRelevance map[int64]float64
+		var preLensSnapshot func([]store.SearchResult)
+		if req.Explain {
+			preLensSnapshot = func(snapshot []store.SearchResult) {
+				nonSentinel := make([]store.SearchResult, 0, len(snapshot))
+				for _, r := range snapshot {
+					if r.Rank != cliExactSentinelRank && !r.SignatureMatch {
+						nonSentinel = append(nonSentinel, r)
+					}
+				}
+				normalizedRelevance = mcp.MinMaxNormalizeRelevance(nonSentinel, relevance)
+			}
+		}
+
+		pipelineOut := mcp.RankPipeline(results, relevance, mcp.RankPipelineOptions{
+			Ranking:            appCfg.Recall.Ranking,
+			LearnedRanker:      learnedRankerCfg,
+			LearnedRankerModel: learnedRankerModel,
+			AnchorsByObs:       anchorsByObs,
+			Query:              query,
+			ExplicitType:       req.Type,
+			TypeLens:           appCfg.Injection.TypeLens,
+			Diversity:          appCfg.Injection.Diversity,
+			Budget:             budget,
+			PreLensSnapshot:    preLensSnapshot,
+		}, now)
+
+		envelope := server.SearchEnvelope{Results: pipelineOut.Results}
+
+		// #226 degradation envelope (P0 item 2): semanticActive mirrors
+		// mem_search's own cfg.Recall != nil check — "was semantic recall
+		// CONFIGURED at all", not "did fusion succeed for this one query"
+		// (that distinction is fusionRan, used for BuildResultReceipt's
+		// lexical-vs-fusion labeling below instead — see
+		// recallOrFTSSearchWithRelevance's own doc for why the two must not
+		// be conflated).
+		health := mcp.EvaluateRecallHealth(ctx, recallSvc != nil, readWatermarks)
+		if health.Degraded {
+			envelope.RecallDegraded = true
+			envelope.RecallDegradedReason = health.Reason
+			if health.EmbeddingsStale {
+				envelope.EmbeddingsStale = true
+				envelope.EmbeddingsBehindBy = health.BehindBy
+				envelope.NewestEmbeddedAt = health.NewestEmbeddedAt
+			}
+		}
+
+		if req.Explain {
+			envelope.ScoreBreakdown = make(map[string]map[string]any, len(pipelineOut.Results))
+			for _, r := range pipelineOut.Results {
+				stalenessPenalty := mcp.StalenessPenaltyFor(anchorsByObs[r.SyncID])
+				envelope.ScoreBreakdown[strconv.FormatInt(r.ID, 10)] = mcp.BuildResultReceipt(
+					r, fusionRan, appCfg.Recall.Ranking, relevance, normalizedRelevance, now, stalenessPenalty,
+				)
+			}
+		}
+
+		return envelope, nil
+	}
 }

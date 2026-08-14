@@ -43,9 +43,20 @@ backfill_days: 30
 #   dim: 768  # embeddinggemma:300m also accepts 256 or 128 (Matryoshka truncation)
 #   db_path: ~/.local/share/omnia/embeddings.db
 
-# Hybrid (lexical+semantic) recall fusion for mem_search. Disabled by
-# default: off calls store.Search directly, byte-for-byte today's FTS5-only
-# path — zero engram.db migration. Requires `embeddings.enabled: true` above.
+# Hybrid (lexical+semantic) recall fusion for mem_search AND (P0,
+# docs/conversational-retrieval-plan.md) GET /search. Disabled by default:
+# off calls store.Search directly, byte-for-byte today's FTS5-only path —
+# zero engram.db migration. Requires `embeddings.enabled: true` above.
+#
+# ranking is an optional recency x importance x relevance x salience re-sort
+# pass over the fused/searched results, run by mcp.RankPipeline for BOTH
+# mem_search and GET /search (P0: the two consumers share one pipeline, so
+# this key now affects the voice agent too, not just the coding agent).
+# Disabled by default: off keeps relevance-only ordering, byte-for-byte
+# today's. recency_half_life_days controls how fast the recency component
+# decays (1.0 at zero elapsed days, 0.5 at this many days). weights.salience
+# is the one weight with NO auto-default (stays 0 until set explicitly) —
+# see RankingWeights' own doc in internal/config/config.go for why.
 # recall:
 #   enabled: true
 #   rrf_k: 60
@@ -53,6 +64,23 @@ backfill_days: 30
 #   strong_floor: 0.65
 #   base_floor: 0.55
 #   max_results: 50
+#   ranking:
+#     enabled: true
+#     recency_half_life_days: 14
+#     weights:
+#       recency: 1.0
+#       importance: 1.0
+#       relevance: 1.0
+#       salience: 0.0
+
+# memory-structural-forgetting: downranks (never excludes) a memory that
+# carries at least one code anchor whose file changed since it was saved —
+# run by mcp.RankPipeline for both mem_search and GET /search (P0). Disabled
+# by default: off keeps handleSearch/GET /search byte-for-byte identical to
+# today, with no anchor_receipt line and no staleness_penalty in any
+# explain/score_breakdown output.
+# structural_forgetting:
+#   enabled: true
 
 # Omnia v0.3 "Context Economy": token-based injection budget for mem_search.
 # Disabled by default: off keeps handleSearch's output byte-for-byte
@@ -114,3 +142,44 @@ backfill_days: 30
 #   update_threshold: 0.9   # >  : same fact, more info -> auto-update (never at exactly 0.9)
 #   shrink_guard: 0.9       # auto-update never shrinks content below this fraction
 #   candidate_limit: 10     # FTS-prefiltered candidates scored per save
+
+# ─── P0: GET /search "voice profile" (docs/conversational-retrieval-plan.md) ──
+#
+# Before P0, GET /search (used by the Vel voice assistant via Hermes) ran
+# ONLY recall.Fuse + hydrate + a bare JSON array — none of the
+# ranking/diversity/budget/degradation machinery mem_search already had.
+# cmd/omnia's buildHTTPSearchFunc now runs the exact same mcp.RankPipeline
+# mem_search does, gated by the SAME keys documented above (recall.ranking,
+# structural_forgetting, injection.diversity, injection.type_lens,
+# injection.budget) — every stage is still off by default and independently
+# gated, so turning the voice profile on/off is always a config.yaml edit,
+# never a code change (rollback: comment these back out).
+#
+# A reasonable profile for a voice consumer with a small context budget
+# (Hermes' own ~1400-character response budget, roughly 350 estimated
+# tokens via internal/token.EstimateTokens' char/4 heuristic):
+# recall:
+#   ranking:
+#     enabled: true
+# injection:
+#   diversity:
+#     enabled: true   # MMR near-duplicate removal — a voice reply has no
+#                      # room for two near-identical hits
+#   budget:
+#     enabled: true
+#     max_tokens: 350  # ≈ Hermes' ~1400-character response budget
+#
+# GET /search's own per-request query params (no config needed for these):
+#   ?envelope=1     opts into the widened response ({results, recall_degraded,
+#                   recall_degraded_reason, embeddings_stale,
+#                   embeddings_behind_by, newest_embedded_at} instead of the
+#                   legacy bare array — Hermes migrates to this on its own
+#                   schedule, per P0's back-compat requirement).
+#   ?max_tokens=N   per-request override for injection.budget.max_tokens —
+#                   applies even when injection.budget.enabled is false.
+#   ?explain=1      per-row score_breakdown (implies envelope=1 — a bare
+#                   array result has no field to attach it to).
+#   ?type=bugfix    unchanged from before P0; now ALSO routes into the
+#                   situational type lens (stands the lens down for that
+#                   query, same "explicit filter always wins" rule
+#                   mem_search's own `type` arg has always followed).

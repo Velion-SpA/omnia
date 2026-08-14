@@ -67,19 +67,75 @@ type SemanticRunnerFactory func(name string) (store.SemanticRunner, error)
 // snippets. Injected from cmd/omnia/main.go alongside SemanticRunnerFactory.
 type SemanticPromptBuilder func(a, b store.ObservationSnippet) string
 
-// SearchFunc performs a memory search and returns results in the same shape
-// GET /search has always returned ([]store.SearchResult). Injected from
-// cmd/omnia (SetSearch) so internal/server never has to import
+// SearchRequest carries GET /search's routing filters (the pre-existing
+// store.SearchOptions — type/project/scope/limit, unchanged) plus P0's two
+// post-fusion pipeline knobs (docs/conversational-retrieval-plan.md P0 item
+// 3): MaxTokens routes into mcp.ApplyTokenBudget, Explain routes into
+// mcp.BuildResultReceipt. `type` needs no separate field — it already lives
+// on the embedded SearchOptions and threads straight into
+// mcp.RankPipelineOptions.ExplicitType at the SearchFunc implementation.
+//
+// all_projects is deliberately NOT here: P0 explicitly defers cross-project
+// HTTP wiring to a separate item (P5, docs/conversational-retrieval-plan.md)
+// so this seam doesn't have to be re-widened twice.
+type SearchRequest struct {
+	store.SearchOptions
+	// MaxTokens, when > 0, is the caller's per-request override for the
+	// injection token budget (ApplyTokenBudget) — set regardless of the
+	// server's own injection.budget.enabled config, so a caller can always
+	// cap response size on demand even when the operator left budgeting off
+	// by default. Zero (absent `max_tokens` query param) leaves whatever
+	// config.TokenBudgetConfig the SearchFunc implementation was built with
+	// untouched.
+	MaxTokens int
+	// Explain, when true, asks the SearchFunc implementation to also
+	// populate SearchEnvelope.ScoreBreakdown for every returned result
+	// (mirrors mem_search's own `explain` arg).
+	Explain bool
+}
+
+// SearchEnvelope is SearchFunc's return value: the results plus mem_search's
+// own recall-degradation signal (#226, internal/mcp/recall_degradation.go)
+// ported to HTTP (P0 item 2, docs/conversational-retrieval-plan.md) — Vel
+// (via Hermes) previously had no way to tell a full-quality semantic result
+// set from a blind/lexical-only one, because GET /search never emitted this
+// signal at all.
+//
+// Every degradation field follows this codebase's established
+// present-only-when-notable convention (mem_search's fts_relaxed/
+// budget_trimmed/recall_degraded): a healthy response leaves them at their
+// zero value, and handleSearch's envelope=1 JSON encoding (searchEnvelopeJSON)
+// omits them entirely via `omitempty` rather than emitting `false`/`""`/`0`
+// noise on every call.
+type SearchEnvelope struct {
+	Results              []store.SearchResult
+	RecallDegraded       bool
+	RecallDegradedReason string
+	EmbeddingsStale      bool
+	EmbeddingsBehindBy   int
+	NewestEmbeddedAt     string
+	// ScoreBreakdown holds one mcp.BuildResultReceipt-shaped entry per
+	// result, keyed by its decimal Observation.ID (matching mem_search's
+	// own explain surface), present only when SearchRequest.Explain was
+	// true. nil otherwise.
+	ScoreBreakdown map[string]map[string]any
+}
+
+// SearchFunc performs a memory search and returns a SearchEnvelope. Injected
+// from cmd/omnia (SetSearch) so internal/server never has to import
 // internal/recall or internal/mcp directly — mirroring the
 // SemanticRunnerFactory/SemanticPromptBuilder precedent above for
 // internal/llm (issue #86: cmd/omnia is the one place that knows how to
-// build the optional hybrid lexical+semantic recall.Service; this package
-// only needs to call whatever search function it was handed).
+// build the optional hybrid lexical+semantic recall.Service, and now also
+// the one place that runs mcp.RankPipeline; this package only needs to call
+// whatever search function it was handed and shape the response).
 //
 // When unset (s.search == nil, e.g. in tests that don't call SetSearch),
 // handleSearch falls back to calling s.store.Search directly — today's exact
-// FTS5-only behavior, unchanged.
-type SearchFunc func(ctx context.Context, query string, opts store.SearchOptions) ([]store.SearchResult, error)
+// FTS5-only behavior for the `results` payload, unchanged; see
+// handleSearch's own doc for what the degradation fields report on that
+// fallback path.
+type SearchFunc func(ctx context.Context, query string, req SearchRequest) (SearchEnvelope, error)
 
 type Server struct {
 	store      *store.Store
@@ -476,6 +532,45 @@ func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request
 	jsonResponse(w, http.StatusOK, obs)
 }
 
+// searchEnvelopeJSON is the wire shape for GET /search?envelope=1 (P0 item
+// 2). Every degradation field is `omitempty` so a healthy response's JSON
+// stays minimal, mirroring mem_search's own present-only-when-notable
+// envelope keys (fts_relaxed/budget_trimmed/recall_degraded).
+type searchEnvelopeJSON struct {
+	Results              []store.SearchResult      `json:"results"`
+	RecallDegraded       bool                      `json:"recall_degraded,omitempty"`
+	RecallDegradedReason string                    `json:"recall_degraded_reason,omitempty"`
+	EmbeddingsStale      bool                      `json:"embeddings_stale,omitempty"`
+	EmbeddingsBehindBy   int                       `json:"embeddings_behind_by,omitempty"`
+	NewestEmbeddedAt     string                    `json:"newest_embedded_at,omitempty"`
+	ScoreBreakdown       map[string]map[string]any `json:"score_breakdown,omitempty"`
+}
+
+// handleSearch serves GET /search.
+//
+// CRITICAL BACK-COMPAT (P0, docs/conversational-retrieval-plan.md item 2):
+// Hermes (Vel's voice pipeline) parses this endpoint's response as a bare
+// JSON array today. The DEFAULT response stays exactly that — a bare
+// []store.SearchResult, byte-for-byte what it has always been — regardless
+// of whether a SearchFunc is wired, whether ranking/MMR/budget are enabled,
+// or whether recall is degraded. The widened SearchEnvelope (recall_degraded,
+// embeddings_stale, etc. — the P0 item 2 payload) is opt-in ONLY, via
+// `?envelope=1`, so Hermes can migrate to it on its own schedule instead of
+// being forced to parse a new shape on this deploy. `explain=1` implies
+// envelope=1: a per-row score_breakdown has no field to attach to in the
+// bare-array shape (store.SearchResult carries no such field), so
+// requesting it always widens the response even without an explicit
+// `envelope=1`.
+//
+// A nil SearchFunc (s.search == nil — SetSearch was never called, e.g. in
+// tests) degrades the `results` payload to s.store.Search exactly as it
+// always has. On that fallback path, requesting envelope=1 still gets a
+// results-only-shaped envelope with RecallDegraded=true: this endpoint is
+// definitionally running FTS5-only with no ranking/health signal available,
+// so envelope=1 reports that honestly rather than silently claiming
+// "healthy" (mirrors mem_search's own EvaluateRecallHealth(semanticActive:
+// false, ...) contract in internal/mcp/recall_degradation.go, without this
+// package importing internal/mcp — see SearchFunc's own doc for why).
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -483,33 +578,54 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opts := store.SearchOptions{
-		Type:    r.URL.Query().Get("type"),
-		Project: r.URL.Query().Get("project"),
-		Scope:   r.URL.Query().Get("scope"),
-		Limit:   queryInt(r, "limit", 10),
+	explain := queryBool(r, "explain", false)
+	wantEnvelope := queryBool(r, "envelope", false) || explain
+
+	req := SearchRequest{
+		SearchOptions: store.SearchOptions{
+			Type:    r.URL.Query().Get("type"),
+			Project: r.URL.Query().Get("project"),
+			Scope:   r.URL.Query().Get("scope"),
+			Limit:   queryInt(r, "limit", 10),
+		},
+		MaxTokens: queryInt(r, "max_tokens", 0),
+		Explain:   explain,
 	}
 
-	// Issue #86: when cmd/omnia wired a SearchFunc via SetSearch, it routes
-	// through the same hybrid lexical+semantic recall.Service mem_search
-	// uses (with its own graceful fallback to FTS5 baked in). Unset (s.search
-	// == nil, e.g. tests that never call SetSearch) keeps this byte-for-byte
-	// the legacy s.store.Search-only path — the JSON response shape
-	// ([]store.SearchResult) is identical either way.
-	search := s.store.Search
+	// Issue #86 / P0: when cmd/omnia wired a SearchFunc via SetSearch, it
+	// routes through the same hybrid lexical+semantic recall.Service AND
+	// the same mcp.RankPipeline mem_search uses (with its own graceful
+	// fallback to FTS5 baked in). Unset (s.search == nil) keeps the
+	// `results` payload byte-for-byte the legacy s.store.Search-only path —
+	// see this function's own doc for what envelope=1 reports in that case.
+	var envelope SearchEnvelope
+	var err error
 	if s.search != nil {
-		search = func(query string, opts store.SearchOptions) ([]store.SearchResult, error) {
-			return s.search(r.Context(), query, opts)
-		}
+		envelope, err = s.search(r.Context(), query, req)
+	} else {
+		envelope.Results, err = s.store.Search(query, req.SearchOptions)
+		envelope.RecallDegraded = true
+		envelope.RecallDegradedReason = "no SearchFunc configured (SetSearch was never called); results come from direct FTS5 keyword search with no ranking pipeline"
 	}
-
-	results, err := search(query, opts)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	jsonResponse(w, http.StatusOK, results)
+	if !wantEnvelope {
+		jsonResponse(w, http.StatusOK, envelope.Results)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, searchEnvelopeJSON{
+		Results:              envelope.Results,
+		RecallDegraded:       envelope.RecallDegraded,
+		RecallDegradedReason: envelope.RecallDegradedReason,
+		EmbeddingsStale:      envelope.EmbeddingsStale,
+		EmbeddingsBehindBy:   envelope.EmbeddingsBehindBy,
+		NewestEmbeddedAt:     envelope.NewestEmbeddedAt,
+		ScoreBreakdown:       envelope.ScoreBreakdown,
+	})
 }
 
 func (s *Server) handleGetObservation(w http.ResponseWriter, r *http.Request) {

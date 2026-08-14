@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/velion/omnia/internal/embed"
+	"github.com/velion/omnia/internal/store"
 )
 
 // ─── #226 [RED]: mem_search must declare its own degradation ───
@@ -130,5 +133,113 @@ func TestRecallHealth_EnvelopeCarriesTheDegradation(t *testing.T) {
 	}
 	if env["recall_degraded_reason"] == nil {
 		t.Fatalf("the caller must be told why: %v", env)
+	}
+}
+
+// ─── P0 (docs/conversational-retrieval-plan.md): NewWatermarkReader is the
+// exported seam GET /search's cmd/omnia wiring (buildHTTPSearchFunc) reuses,
+// so both consumers read the #226 watermark signal the exact same way ───
+
+// noopWatermarkEmbedder is a minimal embed.Embedder stub — these tests only
+// need a *embed.Worker with a real store attached, never an actual embed
+// call.
+type noopWatermarkEmbedder struct{}
+
+func (noopWatermarkEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	return []float32{1, 0, 0}, nil
+}
+
+// TestNewWatermarkReader_NilStoreOrNilAutoEmbedReturnsNil pins the
+// nil-means-unknown contract: with either argument nil, the reader itself
+// must be nil (not a reader that errors), so EvaluateRecallHealth treats it
+// as "we did not look," never "we looked and it is bad."
+func TestNewWatermarkReader_NilStoreOrNilAutoEmbedReturnsNil(t *testing.T) {
+	if got := NewWatermarkReader(nil, nil); got != nil {
+		t.Fatal("expected nil reader when both store and autoEmbed are nil")
+	}
+
+	s := newMCPTestStore(t)
+	if got := NewWatermarkReader(s, nil); got != nil {
+		t.Fatal("expected nil reader when autoEmbed is nil (embeddings disabled)")
+	}
+}
+
+// TestNewWatermarkReader_WiredWorkerReadsRealWatermarks proves the exported
+// constructor produces a working reader over a real store + embeddings
+// store pair — the same watermark data newWatermarkReader's MCPConfig-based
+// wrapper has always produced, now reachable without an MCPConfig at all
+// (cmd/omnia has none).
+func TestNewWatermarkReader_WiredWorkerReadsRealWatermarks(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-wm", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-wm", Type: "manual", Title: "t", Content: "c",
+		Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	embStore, err := embed.OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("open embed store: %v", err)
+	}
+	defer embStore.Close()
+	worker := embed.NewWorker(embStore, noopWatermarkEmbedder{}, "m", 3, 8, nil)
+
+	reader := NewWatermarkReader(s, worker)
+	if reader == nil {
+		t.Fatal("expected a non-nil reader when both a store and a worker-with-store are provided")
+	}
+
+	wm, err := reader(context.Background())
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	if wm.ObservationMaxID <= 0 || wm.ObservationCount <= 0 {
+		t.Fatalf("expected real watermark data reflecting the seeded observation, got %+v", wm)
+	}
+}
+
+// TestNewWatermarkReader_IsTTLCached proves the exported constructor still
+// wraps its reader in cachedWatermarkReader (watermarkCacheTTL) — a second
+// call within the TTL window must not re-read the store, mirroring
+// newWatermarkReader's own existing cache contract.
+func TestNewWatermarkReader_IsTTLCached(t *testing.T) {
+	s := newMCPTestStore(t)
+	embStore, err := embed.OpenStore(t.TempDir() + "/emb.db")
+	if err != nil {
+		t.Fatalf("open embed store: %v", err)
+	}
+	defer embStore.Close()
+	worker := embed.NewWorker(embStore, noopWatermarkEmbedder{}, "m", 3, 8, nil)
+
+	reader := NewWatermarkReader(s, worker)
+	if reader == nil {
+		t.Fatal("expected a non-nil reader")
+	}
+
+	first, err := reader(context.Background())
+	if err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+
+	if err := s.CreateSession("s-wm-cache", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-wm-cache", Type: "manual", Title: "t2", Content: "c2",
+		Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	second, err := reader(context.Background())
+	if err != nil {
+		t.Fatalf("second read: %v", err)
+	}
+	if second.ObservationMaxID != first.ObservationMaxID || second.ObservationCount != first.ObservationCount {
+		t.Fatalf("expected the cached value within the TTL window, got first=%+v second=%+v", first, second)
 	}
 }
