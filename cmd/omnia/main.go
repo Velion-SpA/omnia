@@ -1108,6 +1108,23 @@ func cmdServe(cfg store.Config) {
 		// nil-means-unknown contract.
 		recallSvc := buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir, appCfg.VecIndex.Enabled, appCfg.Encryption)
 		srv.SetSearch(buildHTTPSearchFunc(s, recallSvc, appCfg, cfg.DataDir, autoEmbedWorker))
+
+		// P6 (docs/conversational-retrieval-plan.md "Query embedding cache"):
+		// GET /health's query_cache debug field (server.go's handleHealth)
+		// reads stats directly off the SAME *embed.CachedSearcher instance
+		// buildRecallService just wrapped recallSvc.Semantic in (when
+		// recall.query_cache.enabled is true) — recall.Service.Semantic is
+		// typed as the embed.Searcher interface, so a type assertion is the
+		// only way to reach the concrete CachedSearcher's Stats() without
+		// widening that interface. recallSvc is nil when recall itself is
+		// disabled, and the assertion is a no-op false when the cache flag is
+		// off — either way srv.queryCache simply stays nil (the field's own
+		// documented "cache disabled/unconfigured" default).
+		if recallSvc != nil {
+			if cs, ok := recallSvc.Semantic.(*embed.CachedSearcher); ok {
+				srv.SetQueryCache(cs)
+			}
+		}
 	}
 
 	// Try to start autosync (opt-in via ENGRAM_CLOUD_AUTOSYNC=1).
@@ -1456,6 +1473,13 @@ func cmdMCP(cfg store.Config) {
 		// config.yaml — mirrors CodeGraph's own registration-gate convention
 		// above (zero value = not registered at all).
 		mcpCfg.Enforcement = appCfg.Enforcement
+		// P2 (docs/conversational-retrieval-plan.md): thread intent_routing.*
+		// through so handleSearch's RankPipeline call classifies the query
+		// and overlays a routing profile only when intent_routing.enabled is
+		// true in config.yaml — zero value (false) keeps mem_search
+		// byte-for-byte identical to today, mirroring RecallRanking/
+		// StructuralForgetting's own off-by-default convention above.
+		mcpCfg.IntentRouting = appCfg.IntentRouting
 	}
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)

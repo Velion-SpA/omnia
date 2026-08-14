@@ -119,6 +119,15 @@ type SearchEnvelope struct {
 	// own explain surface), present only when SearchRequest.Explain was
 	// true. nil otherwise.
 	ScoreBreakdown map[string]map[string]any
+	// Intent is P2's classified query intent (docs/conversational-retrieval-
+	// plan.md), ported from mem_search's own "intent" envelope key
+	// (internal/mcp's mcp.RankPipelineOutput.Intent) so GET /search?envelope=1
+	// callers get the same informational signal. Empty string when intent
+	// routing is disabled (the default) or the SearchFunc implementation
+	// never sets it — omitted from JSON either way (see searchEnvelopeJSON's
+	// own `omitempty`), matching this struct's existing present-only-when-
+	// notable convention for every other degradation/explain field above.
+	Intent string
 }
 
 // SearchFunc performs a memory search and returns a SearchEnvelope. Injected
@@ -165,6 +174,16 @@ type Server struct {
 	// directly, byte-for-byte today's FTS5-only behavior.
 	search SearchFunc
 
+	// queryCache, when non-nil, is the P6 (docs/conversational-retrieval-plan.md
+	// "Query embedding cache") CachedSearcher wrapping recall's semantic
+	// Searcher — set only when recall.query_cache.enabled is true in
+	// config.yaml (mirrors autoEmbed's own nil-means-disabled convention
+	// above). nil means the cache is disabled/unconfigured, in which case GET
+	// /health omits the query_cache debug field entirely (see handleHealth)
+	// rather than reporting a zeroed-out stats block that would misleadingly
+	// look like "cache is on but empty".
+	queryCache *embed.CachedSearcher
+
 	// version is reported by GET /health. Defaults to "dev" (matching
 	// cmd/omnia's own build-info fallback); SetVersion wires in the real
 	// build version from main.
@@ -204,6 +223,12 @@ func (s *Server) SetAutoEmbed(w *embed.Worker) { s.autoEmbed = w }
 // Pass nil (or never call this) to keep GET /search on the legacy
 // s.store.Search-only path.
 func (s *Server) SetSearch(fn SearchFunc) { s.search = fn }
+
+// SetQueryCache configures the P6 query-embedding cache instance GET /health
+// reports stats for (recall.query_cache.enabled in config.yaml). Pass nil
+// (or never call this) to omit the query_cache debug field entirely — see
+// the queryCache field's own doc comment.
+func (s *Server) SetQueryCache(c *embed.CachedSearcher) { s.queryCache = c }
 
 // SetVersion configures the build version reported by GET /health.
 // Pass the real build version (e.g. cmd/omnia's ldflags-injected `version`);
@@ -382,11 +407,37 @@ func (s *Server) routes() {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"status":  "ok",
 		"service": "omnia",
 		"version": s.version,
-	})
+	}
+
+	// P6 (docs/conversational-retrieval-plan.md "Query embedding cache"):
+	// operator-visible hit-rate instrumentation. Deliberately NOT added to
+	// `omnia doctor` (another agent owns those files) and deliberately NOT on
+	// GET /stats: that endpoint returns *store.Stats directly
+	// (loadServerStats), a type this package does not own, so folding an
+	// unrelated cache-stats block in there would mean either widening
+	// store.Stats itself (out of scope) or shadowing it behind a hand-rolled
+	// response type — GET /health already returns a plain map[string]any,
+	// making an additive debug field here a one-line change with no shape
+	// migration for existing callers. Present only when the cache is
+	// actually wired (see queryCache's own doc) — omitted otherwise, so a
+	// deployment with the cache off/unconfigured sees byte-for-byte the
+	// pre-P6 /health response.
+	if s.queryCache != nil {
+		stats := s.queryCache.Stats()
+		resp["query_cache"] = map[string]any{
+			"hits":     stats.Hits,
+			"misses":   stats.Misses,
+			"entries":  stats.Entries,
+			"capacity": stats.Capacity,
+			"hit_rate": stats.HitRate(),
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -544,6 +595,8 @@ type searchEnvelopeJSON struct {
 	EmbeddingsBehindBy   int                       `json:"embeddings_behind_by,omitempty"`
 	NewestEmbeddedAt     string                    `json:"newest_embedded_at,omitempty"`
 	ScoreBreakdown       map[string]map[string]any `json:"score_breakdown,omitempty"`
+	// Intent mirrors SearchEnvelope.Intent — see that field's own doc.
+	Intent string `json:"intent,omitempty"`
 }
 
 // handleSearch serves GET /search.
@@ -625,6 +678,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		EmbeddingsBehindBy:   envelope.EmbeddingsBehindBy,
 		NewestEmbeddedAt:     envelope.NewestEmbeddedAt,
 		ScoreBreakdown:       envelope.ScoreBreakdown,
+		Intent:               envelope.Intent,
 	})
 }
 

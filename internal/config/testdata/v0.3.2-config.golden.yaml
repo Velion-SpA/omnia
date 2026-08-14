@@ -26,6 +26,11 @@ sources:
             enabled: false
             space_keys: []
             project: legacy
+    repodoc:
+        enabled: false
+        repo_root: ""
+        project: ""
+        allowlist: []
 backfill_days: 17
 routes:
     github/velion/omnia: omnia
@@ -63,6 +68,9 @@ recall:
         importance_overrides:
             decision: 9
     fts_relax_on_zero: false
+    query_cache:
+        enabled: false
+        max_entries: 0
 structural_forgetting:
     enabled: true
 procedural:

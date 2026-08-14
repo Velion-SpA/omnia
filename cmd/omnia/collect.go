@@ -17,6 +17,7 @@ import (
 	discord "github.com/velion/omnia/internal/source/discord"
 	github "github.com/velion/omnia/internal/source/github"
 	jira "github.com/velion/omnia/internal/source/jira"
+	repodoc "github.com/velion/omnia/internal/source/repodoc"
 	"github.com/velion/omnia/internal/state"
 )
 
@@ -26,7 +27,7 @@ import (
 //
 // Usage:
 //
-//	omnia collect [--config PATH] [--dry-run] [--source github|discord|jira|confluence] [--since RFC3339]
+//	omnia collect [--config PATH] [--dry-run] [--source github|discord|jira|confluence|repodoc] [--since RFC3339]
 //	omnia collect status [--config PATH]
 func cmdCollect(args []string) {
 	// A bare "status" sub-argument switches to the status report.
@@ -40,7 +41,7 @@ func cmdCollect(args []string) {
 	fs := flag.NewFlagSet("collect", flag.ExitOnError)
 	configPath := fs.String("config", config.DefaultPath(), "path to collectors config file")
 	dryRun := fs.Bool("dry-run", false, "print what would be saved without writing")
-	sourceFlag := fs.String("source", "", "run only this source (github|discord|jira|confluence)")
+	sourceFlag := fs.String("source", "", "run only this source (github|discord|jira|confluence|repodoc)")
 	sinceFlag := fs.String("since", "", "override since time (RFC3339)")
 	if err := fs.Parse(args); err != nil {
 		fatal(err)
@@ -163,6 +164,37 @@ func runCollect(configPath string, dryRun bool, sourceFilter, sinceStr string) e
 		}
 	}
 
+	// P1 (docs/conversational-retrieval-plan.md "Ingest repository
+	// documentation as memories"): internal/source/repodoc is a local,
+	// no-network core.Source over a git working tree's own docs — unlike
+	// every source above, it has no remote credential to validate and no
+	// per-item routing table (RepoDocConfig.Project is a single, explicit
+	// project, not a Router lookup), so its wiring block is deliberately
+	// shorter than github/discord/jira/confluence's.
+	if (sourceFilter == "" || sourceFilter == "repodoc") && cfg.Sources.RepoDoc.Enabled {
+		repoRoot := cfg.Sources.RepoDoc.RepoRoot
+		if repoRoot == "" {
+			wd, wderr := os.Getwd()
+			if wderr != nil {
+				return fmt.Errorf("repodoc source: resolve cwd (sources.repodoc.repo_root not set): %w", wderr)
+			}
+			repoRoot = wd
+		}
+		project := cfg.Sources.RepoDoc.Project
+		if project == "" {
+			project = cfg.Engram.DefaultProject
+		}
+
+		src := repodoc.New(repoRoot, project, cfg.Sources.RepoDoc.Allowlist, st)
+		sources = append(sources, src)
+
+		if !dryRun {
+			if err := sink.EnsureSession(ctx, project, sessionDir); err != nil {
+				logger.Warn("could not ensure omnia session", "project", project, "error", err)
+			}
+		}
+	}
+
 	if len(sources) == 0 {
 		logger.Info("no sources enabled; check your config")
 		return nil
@@ -247,7 +279,7 @@ func runCollectStatus(args []string) error {
 		}
 	}
 
-	fmt.Printf("sources: github=%v discord=%v jira=%v confluence=%v\n",
-		cfg.Sources.GitHub.Enabled, cfg.Sources.Discord.Enabled, cfg.Sources.Atlassian.Jira.Enabled, cfg.Sources.Atlassian.Confluence.Enabled)
+	fmt.Printf("sources: github=%v discord=%v jira=%v confluence=%v repodoc=%v\n",
+		cfg.Sources.GitHub.Enabled, cfg.Sources.Discord.Enabled, cfg.Sources.Atlassian.Jira.Enabled, cfg.Sources.Atlassian.Confluence.Enabled, cfg.Sources.RepoDoc.Enabled)
 	return nil
 }

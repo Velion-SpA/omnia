@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/velion/omnia/internal/config"
+	"github.com/velion/omnia/internal/intent"
 	"github.com/velion/omnia/internal/ranker"
 	"github.com/velion/omnia/internal/store"
 )
@@ -51,6 +52,18 @@ type RankPipelineOptions struct {
 	Diversity config.DiversityConfig
 	Budget    config.TokenBudgetConfig
 
+	// IntentRouting gates P2's query-intent classification and routing
+	// (docs/conversational-retrieval-plan.md: "Query intent classification
+	// and routing"), layered ONTO the ranking/type-lens inputs above rather
+	// than replacing them — see RankPipeline's own doc for exactly which two
+	// stages it can influence and the "explicit filter always wins"/
+	// "never mutate the shared config" invariants it must preserve. The
+	// zero value (Enabled=false) is a pure no-op: intent.Classify is never
+	// even called, so RankPipeline's behavior (and RankPipelineOutput.Intent,
+	// which stays "") is byte-for-byte identical to before this field
+	// existed.
+	IntentRouting config.IntentRoutingConfig
+
 	// PreLensSnapshot, when non-nil, is invoked once with the result set
 	// exactly as it stands after RankResults -> ApplyLearnedRanker ->
 	// ApplyStalenessDownrank have run, and BEFORE ApplyTypeLens/ApplyMMR/
@@ -82,6 +95,23 @@ type RankPipelineOutput struct {
 	// instead of re-deriving it from a before/after length diff at the call
 	// site.
 	BudgetTrimmed int
+	// Intent is P2's classified query intent (internal/intent.Intent, as a
+	// plain string — this package does not import intent's type into its own
+	// exported surface beyond this string, so callers outside internal/mcp
+	// never need an internal/intent import just to read the response field).
+	// Empty ("") whenever opts.IntentRouting.Enabled is false — routing never
+	// ran, so there is nothing informational to report, matching the
+	// present-only-when-notable convention this codebase already uses for
+	// fts_relaxed/budget_trimmed/recall_degraded. When routing IS enabled,
+	// Intent is always one of internal/intent's Intent constants as a
+	// string, including "unknown" for a query no signal matched confidently
+	// — "unknown" is still informational (it tells a caller routing ran and
+	// found nothing to route on), unlike the enabled/disabled distinction
+	// above. Purely informational: nothing in this package or its callers
+	// re-parses this string to make a decision — the routing DECISION
+	// already happened inside RankPipeline itself, before this value is
+	// returned.
+	Intent string
 }
 
 // RankPipeline runs the post-fusion ranking pipeline shared by mem_search
@@ -128,8 +158,54 @@ type RankPipelineOutput struct {
 // nothing about how any one of them partitions its input; it does not
 // re-implement or duplicate the exclusion itself.
 func RankPipeline(results []store.SearchResult, relevance map[int64]float64, opts RankPipelineOptions, now time.Time) RankPipelineOutput {
-	results = RankResults(results, relevance, opts.Ranking, now)
-	results = ApplyLearnedRanker(results, relevance, opts.LearnedRanker, opts.LearnedRankerModel, opts.Ranking, now)
+	// P2 (docs/conversational-retrieval-plan.md): classify the query ONCE,
+	// up front, so both the ranking overlay below and the type-lens overlay
+	// further down read the same Classification — Classify is a pure
+	// regex-table scan (<1ms, see internal/intent's own bench_test.go), so
+	// re-running it per stage would cost nothing correctness-wise, but a
+	// single call keeps this function's control flow easy to audit against
+	// its own "byte-for-byte when disabled" claim. Gated entirely behind
+	// opts.IntentRouting.Enabled (default false, see that field's own doc):
+	// when off, classifiedIntent stays intent.Unknown and profile stays the
+	// zero-value RoutingProfile, so every overlay below is inert and this
+	// function's output is identical to before P2 existed.
+	classifiedIntent := intent.Unknown
+	var profile intent.RoutingProfile
+	intentLabel := ""
+	if opts.IntentRouting.Enabled {
+		cls := intent.Classify(opts.Query)
+		intentLabel = string(cls.Intent)
+		if cls.Intent != intent.Unknown {
+			classifiedIntent = cls.Intent
+			profile = intent.ProfileFor(classifiedIntent)
+		}
+	}
+
+	// Per-request clone (explicit constraint): ranking is a COPY of
+	// opts.Ranking, never opts.Ranking itself re-assigned in place. Even
+	// though Go already copies RankingConfig by value into opts.Ranking at
+	// the call site (RankPipelineOptions.Ranking is a value field, not a
+	// pointer), this local variable makes that copy impossible to
+	// accidentally lose in a future edit — opts.Ranking is a caller-owned
+	// value that may be built directly from a long-lived, request-shared
+	// config.RankingConfig (cfg.RecallRanking / appCfg.Recall.Ranking) that
+	// every OTHER request reads too; mutating it in place would leak one
+	// query's intent-derived recency profile into every subsequent query
+	// until the process restarts. RankingWeights (the only nested field this
+	// overlay touches) is a plain value struct with no pointers/maps of its
+	// own, so this copy is a genuine, independent value, not a shared alias.
+	ranking := opts.Ranking
+	if classifiedIntent != intent.Unknown {
+		if profile.RecencyWeight != nil {
+			ranking.Weights.Recency = *profile.RecencyWeight
+		}
+		if profile.RecencyHalfLifeDays != nil {
+			ranking.RecencyHalfLifeDays = *profile.RecencyHalfLifeDays
+		}
+	}
+
+	results = RankResults(results, relevance, ranking, now)
+	results = ApplyLearnedRanker(results, relevance, opts.LearnedRanker, opts.LearnedRankerModel, ranking, now)
 	results = ApplyStalenessDownrank(results, opts.AnchorsByObs)
 
 	if opts.PreLensSnapshot != nil {
@@ -138,6 +214,19 @@ func RankPipeline(results []store.SearchResult, relevance map[int64]float64, opt
 
 	if opts.TypeLens.Enabled {
 		lensType := InferLensType(opts.Query, opts.ExplicitType)
+		// P2 overlay: RoutingProfile.TypeLens replaces InferLensType's own
+		// inference — Classify already read the same query with intent-level
+		// context (bilingual phrase cues) InferLensType's flatter table
+		// lacks (see intent.RoutingProfile.TypeLens's own doc). Guarded by
+		// opts.ExplicitType == "" so the pre-existing "Explicit User Filter
+		// Always Wins" invariant is preserved unconditionally: InferLensType
+		// itself already returns "" whenever ExplicitType is non-empty, and
+		// this overlay only ever fires on the SAME condition, so a
+		// type-scoped search stands the lens down regardless of whether
+		// intent routing is enabled.
+		if classifiedIntent != intent.Unknown && opts.ExplicitType == "" && profile.TypeLens != "" {
+			lensType = profile.TypeLens
+		}
 		results = ApplyTypeLens(results, lensType, opts.TypeLens)
 	}
 
@@ -150,5 +239,5 @@ func RankPipeline(results []store.SearchResult, relevance map[int64]float64, opt
 		budgetTrimmed = preTrimCount - len(results)
 	}
 
-	return RankPipelineOutput{Results: results, BudgetTrimmed: budgetTrimmed}
+	return RankPipelineOutput{Results: results, BudgetTrimmed: budgetTrimmed, Intent: intentLabel}
 }

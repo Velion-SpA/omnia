@@ -330,9 +330,24 @@ func buildRecallService(s *store.Store, recallCfg config.RecallConfig, embCfg co
 
 	client := embed.New(embCfg.BaseURL, embCfg.Model, embCfg.Dim)
 	searcher := embed.NewSearcher(embStore, client)
+
+	// P6 (docs/conversational-retrieval-plan.md "Query embedding cache"):
+	// wrap the searcher in embed.CachedSearcher when recall.query_cache.enabled
+	// is true, memoizing EmbedQuery in a per-process LRU keyed on the
+	// normalized query string. Both embed.LocalSearcher (searcher above) and
+	// *embed.CachedSearcher satisfy embed.Searcher, so this is a drop-in
+	// swap — recall.NewService below never needs to know which one it got.
+	// Disabled by default (recallCfg.QueryCache.Enabled's own zero value),
+	// matching this composition root's existing "flag off -> exact same
+	// wiring as before the flag existed" convention for every other
+	// RecallConfig/EmbeddingsConfig sub-gate.
+	var semanticSearcher embed.Searcher = searcher
+	if recallCfg.QueryCache.Enabled {
+		semanticSearcher = embed.NewCachedSearcher(searcher, embCfg.Model, recallCfg.QueryCache.MaxEntries)
+	}
 	lexical := mcp.NewStoreLexicalSearcher(s)
 
-	return recall.NewService(lexical, searcher, recall.FuseParams{
+	return recall.NewService(lexical, semanticSearcher, recall.FuseParams{
 		RRFK:        recallCfg.RRFK,
 		DenseK:      recallCfg.DenseK,
 		StrongFloor: recallCfg.StrongFloor,
@@ -465,9 +480,10 @@ func buildHTTPSearchFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 			Diversity:          appCfg.Injection.Diversity,
 			Budget:             budget,
 			PreLensSnapshot:    preLensSnapshot,
+			IntentRouting:      appCfg.IntentRouting,
 		}, now)
 
-		envelope := server.SearchEnvelope{Results: pipelineOut.Results}
+		envelope := server.SearchEnvelope{Results: pipelineOut.Results, Intent: pipelineOut.Intent}
 
 		// #226 degradation envelope (P0 item 2): semanticActive mirrors
 		// mem_search's own cfg.Recall != nil check — "was semantic recall

@@ -117,6 +117,32 @@ type Config struct {
 	Ranker        RankerConfig        `yaml:"learned_ranker"`
 	Cartridge     CartridgeConfig     `yaml:"cartridge"`
 	VecIndex      VecIndexConfig      `yaml:"vector_index"`
+
+	// IntentRouting gates P2's query-intent classification and ranking
+	// routing (docs/conversational-retrieval-plan.md: "Query intent
+	// classification and routing"), consumed by mcp.RankPipeline
+	// (internal/mcp/rank_pipeline.go). The zero value (Enabled=false) is the
+	// default: RankPipeline never calls intent.Classify at all, so
+	// mem_search/GET /search stay byte-for-byte identical to today's output
+	// even though internal/intent (precision 1.000 on the blind eval gate)
+	// is fully built — mirroring every other Context Economy gate's
+	// off-by-default, rollback-is-a-config-edit convention (RecallRanking,
+	// StructuralForgetting, Injection.*). When enabled, a classified intent
+	// only ever OVERLAYS a per-request clone of RankingConfig/TypeLensConfig
+	// inputs RankPipeline already accepts — it introduces no new ranking
+	// primitive of its own (plan P2: "mostly a lookup table plus wiring").
+	IntentRouting IntentRoutingConfig `yaml:"intent_routing"`
+}
+
+// IntentRoutingConfig is P2's single gate. Unlike TokenBudgetConfig/
+// DiversityConfig, there is no numeric field to tune here — internal/intent's
+// signal table and internal/intent.ProfileFor's routing table are both
+// fixed, code-level rule lists (mirroring TypeLensConfig's own
+// "Enabled is the entire gate" rationale, see that type's doc comment above)
+// — so Enabled is the whole contract, and its zero value (false) IS the
+// default.
+type IntentRoutingConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // CodeGraphConfig configures the default-off code-to-decision graph capability.
@@ -423,6 +449,32 @@ type RecallConfig struct {
 	// block documents, not because it depends on Enabled/hybrid fusion —
 	// see TestRecall_FTSRelaxOnZero_IndependentOfRecallEnabled.
 	FTSRelaxOnZero bool `yaml:"fts_relax_on_zero"`
+	// QueryCache gates internal/embed.CachedSearcher (P6,
+	// docs/conversational-retrieval-plan.md: "Query embedding cache"): an
+	// in-process LRU from a normalized query string to its embedding vector,
+	// wrapped around the Searcher handed to recall.Service.Semantic at the
+	// composition root. Disabled by default (Enabled=false) — mirroring
+	// every other Context Economy/recall gate's off-by-default convention —
+	// so a fresh install pays zero memory/complexity cost for a cache the
+	// plan itself is explicitly sceptical of (P6: "if the hit rate is under
+	// ~20%, delete the cache"). See QueryCacheConfig's own doc for
+	// MaxEntries' defaulting rule.
+	QueryCache QueryCacheConfig `yaml:"query_cache"`
+}
+
+// QueryCacheConfig configures internal/embed's per-process query-embedding
+// LRU (P6). MaxEntries <= 0 (including the zero value — the default) means
+// "use internal/embed's own defaultQueryCacheCapacity (200)" —
+// deliberately NOT duplicated as a second constant here, mirroring how
+// RecallConfig's own doc explains its RRFK/DenseK/floor defaults are
+// duplicated FROM internal/recall (a leaf package that cannot import
+// internal/config): internal/embed.NewCachedSearcher already implements
+// this exact <=0-means-default zero-check, so config.QueryCacheConfig only
+// ever needs to forward MaxEntries through unchanged, never reimplement or
+// shadow the fallback value itself.
+type QueryCacheConfig struct {
+	Enabled    bool `yaml:"enabled"`
+	MaxEntries int  `yaml:"max_entries"`
 }
 
 // RankingConfig configures Omnia's optional recency x importance x relevance
@@ -498,6 +550,47 @@ type SourcesConfig struct {
 	Discord   DiscordConfig   `yaml:"discord"`
 	GitHub    GitHubConfig    `yaml:"github"`
 	Atlassian AtlassianConfig `yaml:"atlassian"`
+	// RepoDoc configures the repository-documentation source (P1,
+	// docs/conversational-retrieval-plan.md: "Ingest repository documentation
+	// as memories"). Disabled by default, mirroring every other SourcesConfig
+	// entry's own opt-in convention (Discord/GitHub/Jira/Confluence all
+	// default Enabled=false) — a fresh install/upgrade that never mentions
+	// `sources.repodoc` runs zero extra ingestion. See RepoDocConfig's own
+	// doc for the field-by-field defaulting rules.
+	RepoDoc RepoDocConfig `yaml:"repodoc"`
+}
+
+// RepoDocConfig configures internal/source/repodoc's Source (P1): a local,
+// no-network git-working-tree documentation ingester satisfying
+// core.Source. This block only carries the WIRING knobs — repo root,
+// target project, allowlist override — the package itself
+// (internal/source/repodoc) owns everything about HOW a file becomes an
+// Item (chunking, topic-key scheme, staleness anchors); see that package's
+// doc comment for the full design rationale.
+type RepoDocConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// RepoRoot MUST be an absolute path to a git working tree's top level
+	// (repodoc.New's own contract). Empty (the default) means "use the
+	// current working directory at collect time" — the common case for
+	// `omnia collect -source repodoc` run from inside the repo being
+	// documented; an operator running collect from a different cwd (e.g. a
+	// cron job) should set this explicitly.
+	RepoRoot string `yaml:"repo_root"`
+	// Project is the Engram project every emitted Item carries. Empty (the
+	// default) falls back to Engram.DefaultProject, mirroring how every other
+	// SourcesConfig entry ultimately bottoms out at the same fallback via
+	// Router — repodoc has no per-item routing table (unlike GitHub repos or
+	// Discord channels, there is exactly one repo per collect invocation), so
+	// this is a plain field, not a Router lookup.
+	Project string `yaml:"project"`
+	// Allowlist overrides repodoc.DefaultAllowlist (README*/VISION*/
+	// ARCHITECTURE*/CONTRIBUTING*/docs/**/*.md/adr/**/*.md/
+	// openspec/specs/**/*.md) when non-empty. Nil/empty (the default) leaves
+	// repodoc.New to apply its own package-level default — this config layer
+	// does not duplicate that list, so a future default change in
+	// internal/source/repodoc takes effect without a config.yaml edit unless
+	// an operator has explicitly opted into a custom allowlist here.
+	Allowlist []string `yaml:"allowlist"`
 }
 
 // AtlassianConfig holds ONE shared Atlassian Cloud site + Basic-auth

@@ -189,6 +189,17 @@ type MCPConfig struct {
 	// config.yaml sees zero behavior change. Built by cmd/omnia/main.go from
 	// config.EnforcementConfig only.
 	Enforcement config.EnforcementConfig
+
+	// IntentRouting gates P2's query-intent classification and routing
+	// (docs/conversational-retrieval-plan.md), threaded straight into every
+	// RankPipeline call handleSearch makes (rank_pipeline.go's own
+	// RankPipelineOptions.IntentRouting). The zero value (Enabled=false) is
+	// the default: RankPipeline never calls intent.Classify, so
+	// mem_search's response — including whether an "intent" envelope key is
+	// ever present — stays byte-for-byte identical to today, mirroring
+	// RecallRanking/StructuralForgetting's own off-by-default convention
+	// above.
+	IntentRouting config.IntentRoutingConfig
 }
 
 const recordedTimeDisclaimer = "\n---\nRecorded-time view: history starts when time_travel is enabled; retained revisions may not cover earlier timestamps."
@@ -1579,6 +1590,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			Diversity:          cfg.Injection.Diversity,
 			Budget:             cfg.Injection.Budget,
 			PreLensSnapshot:    preLensSnapshot,
+			IntentRouting:      cfg.IntentRouting,
 		}, now)
 		results = pipelineOut.Results
 		budgetTrimmed := pipelineOut.BudgetTrimmed
@@ -1744,6 +1756,19 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		envelope := map[string]any{"results": structuredResults}
 		if budgetTrimmed > 0 {
 			envelope["budget_trimmed"] = budgetTrimmed
+		}
+
+		// P2 (docs/conversational-retrieval-plan.md): surface the classified
+		// intent informationally — present-only-when-notable, mirroring
+		// fts_relaxed/budget_trimmed above. Empty whenever
+		// cfg.IntentRouting.Enabled is false (routing never ran, see
+		// RankPipelineOutput.Intent's own doc) or the query matched no
+		// signal confidently ("" is reserved for "routing did not run";
+		// intent.Unknown itself still serializes as "unknown" and IS
+		// surfaced, since that tells a caller routing ran and found nothing
+		// to route on).
+		if pipelineOut.Intent != "" {
+			envelope["intent"] = pipelineOut.Intent
 		}
 
 		// #226: declare this response's own recall quality. When embeddings.db

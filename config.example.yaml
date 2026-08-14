@@ -23,6 +23,25 @@ sources:
     repos:
       - owner/repo
 
+  # P1 (docs/conversational-retrieval-plan.md "Ingest repository
+  # documentation as memories"): local, no-network ingestion of THIS repo's
+  # own README/VISION/ARCHITECTURE/CONTRIBUTING/docs/adr/openspec-specs
+  # markdown, so an identity question ("what is Omnia") has an actual
+  # document to retrieve instead of nothing. Disabled by default.
+  # repo_root must be an absolute path to a git working tree's top level;
+  # left empty (the default), `omnia collect -source repodoc` uses the
+  # current working directory at run time. project falls back to
+  # engram.default_project above when unset. allowlist overrides
+  # repodoc.DefaultAllowlist only when non-empty — leave it unset to track
+  # that package's own default list.
+  # repodoc:
+  #   enabled: true
+  #   repo_root: /absolute/path/to/repo
+  #   project: omnia
+  #   allowlist:
+  #     - "README*"
+  #     - "docs/**/*.md"
+
 backfill_days: 30
 
 # Omnia's own local semantic-search index. Disabled by default: off keeps
@@ -72,6 +91,15 @@ backfill_days: 30
 #       importance: 1.0
 #       relevance: 1.0
 #       salience: 0.0
+#   # P6 (docs/conversational-retrieval-plan.md "Query embedding cache"): an
+#   # in-process LRU from normalized query string -> embedding vector,
+#   # wrapping the Searcher recall.Service.Semantic uses. Nearly free, and
+#   # explicitly a candidate for deletion if real-traffic hit rate stays
+#   # under ~20% (see GET /health's query_cache.hit_rate). max_entries <= 0
+#   # (including unset) uses internal/embed's own default of 200.
+#   query_cache:
+#     enabled: true
+#     max_entries: 200
 
 # memory-structural-forgetting: downranks (never excludes) a memory that
 # carries at least one code anchor whose file changed since it was saved —
@@ -183,3 +211,23 @@ backfill_days: 30
 #                   situational type lens (stands the lens down for that
 #                   query, same "explicit filter always wins" rule
 #                   mem_search's own `type` arg has always followed).
+
+# ─── P2: query intent classification and routing (docs/conversational-retrieval-plan.md) ──
+#
+# internal/intent classifies a query (identity/status/delta/open_items/
+# rationale/cross_project/unknown — lexical + pattern matching, ES/EN, no
+# LLM, <1ms) and mcp.RankPipeline overlays its routing profile onto the
+# ranking/type-lens inputs above for that one query: e.g. an identity
+# question ("qué es Omnia") gets recency zeroed and a "doc" type-lens hint;
+# a status question ("cómo va Workly") gets a short recency half-life. An
+# explicit `type` filter (mem_search's `type` arg / GET /search's `?type=`)
+# ALWAYS wins over any intent-derived lens hint — unchanged from P0's own
+# "Explicit User Filter Always Wins" rule. Disabled by default: off means
+# intent.Classify is never even called, and mem_search/GET /search stay
+# byte-for-byte identical to today. The classified intent is also surfaced
+# informationally (mem_search's "intent" envelope key, GET
+# /search?envelope=1's "intent" field) whenever this is on, regardless of
+# whether recall.ranking/injection.type_lens are themselves enabled — an
+# intent-derived overlay only has an effect once its target stage is on.
+# intent_routing:
+#   enabled: true
