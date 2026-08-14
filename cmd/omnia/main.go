@@ -1632,6 +1632,41 @@ func cmdSearchPrepared(cfg store.Config, plan searchCommandPlan) {
 		return
 	}
 
+	// Run the SAME post-fusion ranking pipeline GET /search runs (P0). Until
+	// this call existed, `omnia search` was the last surface still on raw
+	// fusion output: no ranking, no intent routing, no type lens, no MMR, no
+	// token budget. That mattered far more than "the CLI is a bit worse",
+	// because the CLI is Hermes' FALLBACK path — it shells out to `omnia
+	// search` whenever `omnia serve` is unreachable, and it does so silently.
+	// A voice agent would therefore drop to the weakest retrieval in the
+	// system at exactly the moment something was already wrong, with nothing
+	// in the transcript to say so. This is the same divergence P0 fixed one
+	// layer up: a pipeline wired into one consumer and not its sibling.
+	//
+	// Every stage self-gates on its own config and is a pure no-op when
+	// disabled, so this is byte-for-byte today's output on a default install
+	// (see mcp.RankPipeline's own doc). appCfg failing to load degrades to
+	// the zero-value config — every gate off — matching this file's existing
+	// config graceful-degradation convention rather than failing the search.
+	{
+		rankCfg := &config.Config{}
+		if loaded, cfgErr := loadAppConfigWithRecallAutodetect(); cfgErr == nil {
+			rankCfg = loaded
+		}
+		learnedRankerCfg, learnedRankerModel := loadLearnedRankerForCLI(rankCfg, cfg.DataDir)
+		results = mcp.RankPipeline(results, relevance, mcp.RankPipelineOptions{
+			Ranking:            rankCfg.Recall.Ranking,
+			LearnedRanker:      learnedRankerCfg,
+			LearnedRankerModel: learnedRankerModel,
+			Query:              query,
+			ExplicitType:       opts.Type,
+			TypeLens:           rankCfg.Injection.TypeLens,
+			Diversity:          rankCfg.Injection.Diversity,
+			Budget:             rankCfg.Injection.Budget,
+			IntentRouting:      rankCfg.IntentRouting,
+		}, time.Now()).Results
+	}
+
 	if len(results) == 0 {
 		fmt.Printf("No memories found for: %q\n", query)
 		if asOfEnabled {
