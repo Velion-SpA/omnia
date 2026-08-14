@@ -8,39 +8,58 @@ package mcp
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/velion/omnia/internal/store"
 )
 
 func TestExtractAnswerText(t *testing.T) {
 	tests := []struct {
-		name    string
-		content string
-		wantOK  bool
-		want    string // only checked when non-empty
+		name        string
+		content     string
+		wantOK      bool
+		wantFull    string // only checked when non-empty
+		wantPrimary string // only checked when non-empty
 	}{
 		{
-			name:    "bold field What/Why",
-			content: "**What**: Fixed a crash in checkout.\n**Why**: A customer reported it.",
-			wantOK:  true,
-			want:    "What: Fixed a crash in checkout.\nWhy: A customer reported it.",
+			name:        "bold field What/Why — no secondary tier, Primary == Full",
+			content:     "**What**: Fixed a crash in checkout.\n**Why**: A customer reported it.",
+			wantOK:      true,
+			wantFull:    "What: Fixed a crash in checkout.\nWhy: A customer reported it.",
+			wantPrimary: "What: Fixed a crash in checkout.\nWhy: A customer reported it.",
 		},
 		{
-			name:    "bold field with Where and Learned",
-			content: "**What**: Refactored auth.\n**Where**: internal/auth/middleware.go\n**Learned**: Must set httpOnly.",
-			wantOK:  true,
+			name:        "bold field with Where and Learned — Primary drops the secondary tier",
+			content:     "**What**: Refactored auth.\n**Where**: internal/auth/middleware.go\n**Learned**: Must set httpOnly.",
+			wantOK:      true,
+			wantFull:    "What: Refactored auth.\nWhere: internal/auth/middleware.go\nLearned: Must set httpOnly.",
+			wantPrimary: "What: Refactored auth.",
 		},
 		{
 			name: "session_summary heading style — the exact confabulation shape",
 			content: "## Goal\nImprove tests\n\n## Accomplished\n- Added coverage for the answer endpoint\n\n" +
 				"## Next Steps\n- Calibrate the confidence threshold",
-			wantOK: true,
+			wantOK:      true,
+			wantPrimary: "Goal: Improve tests\nAccomplished: - Added coverage for the answer endpoint",
 		},
 		{
-			name:    "repodoc chunk header (Document/Section)",
-			content: "Document: Omnia README\nSection: Installation\n\nRun `brew install omnia` to get started.\n",
-			wantOK:  true,
-			want:    "Document: Omnia README\nSection: Installation\n\nRun `brew install omnia` to get started.",
+			name:        "repodoc chunk header (Document/Section), single paragraph — no internal break, Primary == Full",
+			content:     "Document: Omnia README\nSection: Installation\n\nRun `brew install omnia` to get started.\n",
+			wantOK:      true,
+			wantFull:    "Document: Omnia README\nSection: Installation\n\nRun `brew install omnia` to get started.",
+			wantPrimary: "Document: Omnia README\nSection: Installation\n\nRun `brew install omnia` to get started.",
+		},
+		{
+			name: "repodoc chunk header, multiple paragraphs — Primary is header + lead paragraph only, never mid-sentence",
+			content: "Document: omnia\nSection: (introduction)\n\n" +
+				"Persistent memory for AI coding agents — local-first, one binary.\n\n" +
+				"This second paragraph should NOT appear in Primary, only in Full.",
+			wantOK: true,
+			wantFull: "Document: omnia\nSection: (introduction)\n\n" +
+				"Persistent memory for AI coding agents — local-first, one binary.\n\n" +
+				"This second paragraph should NOT appear in Primary, only in Full.",
+			wantPrimary: "Document: omnia\nSection: (introduction)\n\n" +
+				"Persistent memory for AI coding agents — local-first, one binary.",
 		},
 		{
 			name:    "unstructured freeform content — must be DROPPED, not sliced",
@@ -53,15 +72,23 @@ func TestExtractAnswerText(t *testing.T) {
 			wantOK:  false,
 		},
 		{
-			name:    "bold field with empty body is skipped, remaining fields still extracted",
-			content: "**What**: \n**Why**: real reason here",
-			wantOK:  true,
-			want:    "Why: real reason here",
+			name:        "bold field with empty body is skipped, remaining fields still extracted",
+			content:     "**What**: \n**Why**: real reason here",
+			wantOK:      true,
+			wantFull:    "Why: real reason here",
+			wantPrimary: "Why: real reason here",
 		},
 		{
 			name:    "an arbitrary bold phrase that is NOT a recognized label is not treated as structure",
 			content: "**Warning**: this is bold but not a recognized field name",
 			wantOK:  false,
+		},
+		{
+			name:        "only secondary-tier labels present — Primary falls back to Full rather than losing the chunk",
+			content:     "**Where**: internal/auth/middleware.go\n**Learned**: Must set httpOnly.",
+			wantOK:      true,
+			wantFull:    "Where: internal/auth/middleware.go\nLearned: Must set httpOnly.",
+			wantPrimary: "Where: internal/auth/middleware.go\nLearned: Must set httpOnly.",
 		},
 	}
 
@@ -70,10 +97,13 @@ func TestExtractAnswerText(t *testing.T) {
 			obs := store.Observation{Content: tt.content}
 			got, ok := ExtractAnswerText(obs)
 			if ok != tt.wantOK {
-				t.Fatalf("ExtractAnswerText(%q) ok = %v, want %v (got text %q)", tt.content, ok, tt.wantOK, got)
+				t.Fatalf("ExtractAnswerText(%q) ok = %v, want %v (got %+v)", tt.content, ok, tt.wantOK, got)
 			}
-			if tt.want != "" && got != tt.want {
-				t.Errorf("ExtractAnswerText(%q) = %q, want %q", tt.content, got, tt.want)
+			if tt.wantFull != "" && got.Full != tt.wantFull {
+				t.Errorf("ExtractAnswerText(%q).Full = %q, want %q", tt.content, got.Full, tt.wantFull)
+			}
+			if tt.wantPrimary != "" && got.Primary != tt.wantPrimary {
+				t.Errorf("ExtractAnswerText(%q).Primary = %q, want %q", tt.content, got.Primary, tt.wantPrimary)
 			}
 		})
 	}
@@ -91,11 +121,16 @@ func TestExtractAnswerText_MarkdownHeadingNeverReachesOutputAsBareText(t *testin
 	if !ok {
 		t.Fatalf("ExtractAnswerText(%q) ok = false, want true", content)
 	}
-	if got == "## Goal" || strings.TrimSpace(got) == "## Goal" {
-		t.Fatalf("ExtractAnswerText(%q) = %q — heading alone reached output with no body, the exact confabulation shape", content, got)
-	}
-	if !strings.Contains(got, "Work on the conversational retrieval plan") {
-		t.Errorf("ExtractAnswerText(%q) = %q, want it to contain the heading's body text", content, got)
+	for _, tier := range []struct {
+		name string
+		text string
+	}{{"Full", got.Full}, {"Primary", got.Primary}} {
+		if tier.text == "## Goal" || strings.TrimSpace(tier.text) == "## Goal" {
+			t.Fatalf("ExtractAnswerText(%q).%s = %q — heading alone reached output with no body, the exact confabulation shape", content, tier.name, tier.text)
+		}
+		if !strings.Contains(tier.text, "Work on the conversational retrieval plan") {
+			t.Errorf("ExtractAnswerText(%q).%s = %q, want it to contain the heading's body text", content, tier.name, tier.text)
+		}
 	}
 }
 
@@ -140,6 +175,113 @@ func TestAssembleAnswerContext_BudgetKeepsTopCompleteDropsRest(t *testing.T) {
 	}
 }
 
+// TestAssembleAnswerContext_FallsBackToPrimaryTierWhenFullDoesNotFit is the
+// direct regression test for the live-store bug: a chunk whose Full tier
+// (What+Where+Learned) exceeds the budget must still contribute its smaller
+// Primary tier (What alone) rather than being dropped outright.
+func TestAssembleAnswerContext_FallsBackToPrimaryTierWhenFullDoesNotFit(t *testing.T) {
+	results := []store.SearchResult{
+		srWithContent(1, "obs-1", "bugfix",
+			"**What**: "+strings.Repeat("a", 20)+"\n**Where**: "+strings.Repeat("b", 200)+"\n**Learned**: "+strings.Repeat("c", 200)),
+	}
+	// Full tier is ~430+ chars (too big); Primary tier ("What: aaa...a", ~26
+	// chars) fits comfortably in 100.
+	got := AssembleAnswerContext(results, 100)
+	if len(got.Sources) != 1 || got.Sources[0].SyncID != "obs-1" {
+		t.Fatalf("AssembleAnswerContext sources = %+v, want exactly [obs-1] via its Primary tier", got.Sources)
+	}
+	if strings.Contains(got.Context, "Where:") || strings.Contains(got.Context, "Learned:") {
+		t.Errorf("AssembleAnswerContext.Context = %q, must contain only the Primary (What) tier when Full doesn't fit", got.Context)
+	}
+	if !strings.Contains(got.Context, "What:") {
+		t.Errorf("AssembleAnswerContext.Context = %q, want it to contain the Primary tier", got.Context)
+	}
+}
+
+// TestAssembleAnswerContext_SkipsOversizedChunkKeepsSmallerLaterOne is the
+// direct regression test for the live-store bug report: when the
+// TOP-RANKED chunk is too big for the budget even at its Primary tier, that
+// chunk must be SKIPPED — not treated as a stop condition — so a smaller,
+// lower-ranked chunk behind it still makes it into the context. The old
+// token.TrimToBudget-based assembly returned a completely empty context in
+// exactly this shape.
+func TestAssembleAnswerContext_SkipsOversizedChunkKeepsSmallerLaterOne(t *testing.T) {
+	results := []store.SearchResult{
+		// Even its Primary (What alone) tier is bigger than the budget.
+		srWithContent(1, "obs-huge", "bugfix", "**What**: "+strings.Repeat("x", 500)),
+		// Small enough to fit entirely on its own.
+		srWithContent(2, "obs-small", "preference", "**What**: short answer\n**Why**: because"),
+	}
+	got := AssembleAnswerContext(results, 100)
+	if len(got.Sources) != 1 || got.Sources[0].SyncID != "obs-small" {
+		t.Fatalf("AssembleAnswerContext sources = %+v, want exactly [obs-small] — the oversized obs-huge must be SKIPPED, not abort assembly", got.Sources)
+	}
+	if got.Context == "" {
+		t.Fatalf("AssembleAnswerContext.Context is empty, want the smaller later chunk's text")
+	}
+}
+
+// TestAssembleAnswerContext_RealisticBudgetLiveStoreRepro reproduces the
+// exact failure the coordinator's live smoke test found: an ordinary
+// mem_save bugfix memory (What+Why+Where+Learned, ~2.2KB joined) ranked
+// first against the real 1400-char consumer budget. Before tiering, this
+// returned zero sources and an empty context.
+func TestAssembleAnswerContext_RealisticBudgetLiveStoreRepro(t *testing.T) {
+	bugfix := "**What**: " + strings.Repeat("w", 500) +
+		"\n**Why**: " + strings.Repeat("y", 500) +
+		"\n**Where**: internal/mcp/answer.go" +
+		"\n**Learned**: " + strings.Repeat("l", 900)
+	results := []store.SearchResult{srWithContent(1, "obs-bugfix", "bugfix", bugfix)}
+	got := AssembleAnswerContext(results, 1400)
+	if len(got.Sources) == 0 || got.Context == "" {
+		t.Fatalf("AssembleAnswerContext(maxChars=1400) = %+v, want a non-empty context via the Primary (What+Why) tier", got)
+	}
+}
+
+// TestAssembleAnswerContext_DocChunkLeadParagraphFitsMoreChunksInBudget is
+// the direct regression test for the measured live-store grounding bug
+// (identity grounding via GET /answer measured 0.000 vs 0.625 over GET
+// /search's raw top-4): a doc chunk ranked ahead that consumes most of the
+// budget on its Full tier used to starve every doc chunk behind it, even
+// when neither chunk was individually oversized. With docLeadParagraph
+// tiering, the first chunk's Primary (header + lead paragraph) is small
+// enough that the second chunk still fits.
+func TestAssembleAnswerContext_DocChunkLeadParagraphFitsMoreChunksInBudget(t *testing.T) {
+	firstHeader := "Document: Omnia — Architecture\nSection: Vision\n\n"
+	firstLead := strings.Repeat("Omnia is a knowledge layer, not just an ingestor. ", 20) // no internal "\n\n"
+	firstSecondParagraph := strings.Repeat("More unrelated architecture prose that should not be needed. ", 20)
+	rankedFirstDoc := firstHeader + firstLead + "\n\n" + firstSecondParagraph
+
+	secondDoc := "Document: omnia\nSection: (introduction)\n\n" +
+		"Persistent memory for AI coding agents — local-first, one binary."
+
+	results := []store.SearchResult{
+		srWithContent(1, "obs-vision", "doc", rankedFirstDoc),
+		srWithContent(2, "obs-intro", "doc", secondDoc),
+	}
+	// Budget computed FROM the fixtures, not a hand-picked magic number:
+	// fits the FIRST doc's Primary (header+lead) plus the SECOND doc's
+	// whole content, but NOT the first doc's Full tier (header+lead+second
+	// paragraph) plus the second doc's content — forcing the exact
+	// fallback path this test exists to cover.
+	firstPrimarySize := utf8.RuneCountInString(strings.TrimSpace(firstHeader + firstLead))
+	secondDocSize := utf8.RuneCountInString(secondDoc)
+	budget := firstPrimarySize + secondDocSize + 10 // +10 slack, still well under Full+second
+	if fullPlusSecond := utf8.RuneCountInString(rankedFirstDoc) + secondDocSize; budget >= fullPlusSecond {
+		t.Fatalf("test fixture sizing is wrong: budget %d must be LESS than Full+second (%d) to exercise the fallback", budget, fullPlusSecond)
+	}
+	got := AssembleAnswerContext(results, budget)
+	if len(got.Sources) != 2 {
+		t.Fatalf("AssembleAnswerContext sources = %+v, want both doc chunks (lead-paragraph tiering should free enough budget for the second)", got.Sources)
+	}
+	if !strings.Contains(got.Context, "Persistent memory for AI coding agents") {
+		t.Errorf("AssembleAnswerContext.Context = %q, want it to contain the second doc chunk's fact", got.Context)
+	}
+	if strings.Contains(got.Context, "second paragraph of unrelated architecture prose") {
+		t.Errorf("AssembleAnswerContext.Context = %q, must NOT contain the first doc's second paragraph (Primary tier should have excluded it)", got.Context)
+	}
+}
+
 func TestAssembleAnswerContext_ZeroBudgetYieldsEmpty(t *testing.T) {
 	results := []store.SearchResult{srWithContent(1, "obs-1", "bugfix", "**What**: something")}
 	got := AssembleAnswerContext(results, 0)
@@ -163,74 +305,108 @@ func TestAssembleAnswerContext_SourcesCiteSyncIDNeverIntegerID(t *testing.T) {
 	}
 }
 
+// TestClassifyAnswerConfidence covers the two-floor design (floorA=none,
+// floorB=low) that replaced the plan's original single-threshold-plus-
+// relaxation-trigger design. See ClassifyAnswerConfidence's own doc comment
+// for the measured reason both the original design AND a naive top-score
+// floor both fail to clear P3's targets simultaneously on the live corpus —
+// these tests cover the FUNCTION's logic in isolation, not corpus-level
+// pass/fail.
 func TestClassifyAnswerConfidence(t *testing.T) {
 	tests := []struct {
-		name string
-		sig  AnswerConfidenceSignals
-		thr  float64
-		want AnswerConfidence
+		name           string
+		sig            AnswerConfidenceSignals
+		floorA, floorB float64
+		want           AnswerConfidence
 	}{
 		{
-			name: "zero hits is none",
-			sig:  AnswerConfidenceSignals{HitCount: 0},
-			thr:  0.05,
+			name:   "zero hits is none regardless of score",
+			sig:    AnswerConfidenceSignals{HitCount: 0, TopScore: 1, HasTopScore: true},
+			floorA: 0.01, floorB: 0.03,
 			want: AnswerConfidenceNone,
 		},
 		{
-			name: "FTS ladder reached step 2 is none, even with hits",
-			sig:  AnswerConfidenceSignals{HitCount: 3, FTSRelaxed: true, FTSRelaxStep: 2, SourcesAssembled: 3, TopScore: 1, HasTopScore: true},
-			thr:  0.05,
+			name:   "top score below floorA is none",
+			sig:    AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopScore: 0.005, HasTopScore: true},
+			floorA: 0.01, floorB: 0.03,
 			want: AnswerConfidenceNone,
 		},
 		{
-			name: "FTS ladder at step 1 (stopwords only) does not force none",
-			sig:  AnswerConfidenceSignals{HitCount: 3, FTSRelaxed: true, FTSRelaxStep: 1, SourcesAssembled: 3, TopScore: 1, HasTopScore: true},
-			thr:  0.05,
-			want: AnswerConfidenceHigh,
-		},
-		{
-			name: "hits exist but nothing survived extraction is low, never high",
-			sig:  AnswerConfidenceSignals{HitCount: 2, SourcesAssembled: 0, TopScore: 1, HasTopScore: true},
-			thr:  0.05,
+			name:   "top score between floorA and floorB is low",
+			sig:    AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopScore: 0.02, HasTopScore: true},
+			floorA: 0.01, floorB: 0.03,
 			want: AnswerConfidenceLow,
 		},
 		{
-			name: "recall degraded is low even with a strong score",
-			sig:  AnswerConfidenceSignals{HitCount: 2, SourcesAssembled: 2, RecallDegraded: true, TopScore: 1, HasTopScore: true},
-			thr:  0.05,
-			want: AnswerConfidenceLow,
-		},
-		{
-			name: "top score below threshold is low",
-			sig:  AnswerConfidenceSignals{HitCount: 2, SourcesAssembled: 2, TopScore: 0.01, HasTopScore: true},
-			thr:  0.05,
-			want: AnswerConfidenceLow,
-		},
-		{
-			name: "top score at or above threshold, not degraded, has sources: high",
-			sig:  AnswerConfidenceSignals{HitCount: 2, SourcesAssembled: 2, TopScore: 0.05, HasTopScore: true},
-			thr:  0.05,
+			name:   "top score at or above floorB, not degraded, has sources: high",
+			sig:    AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopScore: 0.03, HasTopScore: true},
+			floorA: 0.01, floorB: 0.03,
 			want: AnswerConfidenceHigh,
 		},
 		{
-			name: "no top score available (sentinel-only match) with sources assembled: high",
-			sig:  AnswerConfidenceSignals{HitCount: 1, SourcesAssembled: 1, HasTopScore: false},
-			thr:  0.05,
+			name:   "floorA <= 0 disables the none-by-score trigger",
+			sig:    AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopScore: 0.0001, HasTopScore: true},
+			floorA: 0, floorB: 0.03,
+			want: AnswerConfidenceLow, // still catches floorB
+		},
+		{
+			name:   "floorB <= 0 disables the low-by-score trigger too, given floorA also off",
+			sig:    AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopScore: 0.0001, HasTopScore: true},
+			floorA: 0, floorB: 0,
 			want: AnswerConfidenceHigh,
 		},
 		{
-			name: "threshold <= 0 disables the score-based low trigger",
-			sig:  AnswerConfidenceSignals{HitCount: 1, SourcesAssembled: 1, TopScore: 0, HasTopScore: true},
-			thr:  0,
+			name: "FTS ladder step 2 WITHOUT fusion demotes high to low (soft signal, describes the actual path)",
+			sig: AnswerConfidenceSignals{
+				HitCount: 3, SourcesAssembled: 3, TopScore: 1, HasTopScore: true,
+				FTSRelaxed: true, FTSRelaxStep: 2, FusionRan: false,
+			},
+			floorA: 0.01, floorB: 0.03,
+			want: AnswerConfidenceLow,
+		},
+		{
+			name: "FTS ladder step 2 WITH fusion does NOT demote — the diagnostic describes a different path than the one that produced these results",
+			sig: AnswerConfidenceSignals{
+				HitCount: 3, SourcesAssembled: 3, TopScore: 1, HasTopScore: true,
+				FTSRelaxed: true, FTSRelaxStep: 2, FusionRan: true,
+			},
+			floorA: 0.01, floorB: 0.03,
+			want: AnswerConfidenceHigh,
+		},
+		{
+			name: "FTS ladder step 1 (stopwords only) never demotes, fusion or not",
+			sig: AnswerConfidenceSignals{
+				HitCount: 3, SourcesAssembled: 3, TopScore: 1, HasTopScore: true,
+				FTSRelaxed: true, FTSRelaxStep: 1, FusionRan: false,
+			},
+			floorA: 0.01, floorB: 0.03,
+			want: AnswerConfidenceHigh,
+		},
+		{
+			name:   "hits exist but nothing survived extraction is low, never high",
+			sig:    AnswerConfidenceSignals{HitCount: 2, SourcesAssembled: 0, TopScore: 1, HasTopScore: true},
+			floorA: 0.01, floorB: 0.03,
+			want: AnswerConfidenceLow,
+		},
+		{
+			name:   "recall degraded is low even with a strong score",
+			sig:    AnswerConfidenceSignals{HitCount: 2, SourcesAssembled: 2, RecallDegraded: true, TopScore: 1, HasTopScore: true},
+			floorA: 0.01, floorB: 0.03,
+			want: AnswerConfidenceLow,
+		},
+		{
+			name:   "no top score available (sentinel-only match) with sources assembled: high, floors skipped entirely",
+			sig:    AnswerConfidenceSignals{HitCount: 1, SourcesAssembled: 1, HasTopScore: false},
+			floorA: 0.01, floorB: 0.03,
 			want: AnswerConfidenceHigh,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ClassifyAnswerConfidence(tt.sig, tt.thr)
+			got := ClassifyAnswerConfidence(tt.sig, tt.floorA, tt.floorB)
 			if got != tt.want {
-				t.Errorf("ClassifyAnswerConfidence(%+v, %v) = %q, want %q", tt.sig, tt.thr, got, tt.want)
+				t.Errorf("ClassifyAnswerConfidence(%+v, floorA=%v, floorB=%v) = %q, want %q", tt.sig, tt.floorA, tt.floorB, got, tt.want)
 			}
 		})
 	}

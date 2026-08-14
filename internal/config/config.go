@@ -147,6 +147,50 @@ type Config struct {
 }
 
 // AnswerConfig tunes P3's GET /answer endpoint.
+//
+// FULL MEASURED GRID (2026-08-14) for NoneScoreFloor's own doc's sweep,
+// live store, `omnia eval --profile conversational --target answer`.
+// ConfidenceThreshold ("floor B") does not move either target metric on its
+// own — both are computed from Confidence=="none" only, which NoneScoreFloor
+// ("floor A") alone controls — so this grid varies floor A (floor B held
+// equal to floor A, i.e. the `low` band is empty; a non-empty `low` band
+// changes neither refusal nor confidence, only how much of the corpus reads
+// `low` vs `high`, which the eval corpus does not currently score):
+//
+//	floorA  | refusal_id (<=0.05) | refusal_status (<=0.05) | confidence_absence (<=0.1)
+//	0.0000  |               0.000 |                   0.000 |                 1.000 (fail)
+//	0.0170  |               0.625 |                   0.100 |                 1.000 (fail)  [verified]
+//	0.0200  |               0.625 |                   0.100 |                 1.000 (fail)
+//	0.0268  |               0.750 |                   0.100 |                 1.000 (fail)
+//	0.0270  |               0.750 |                   0.100 |                 0.900 (fail)
+//	0.0280  |               0.875 |                   0.100 |                 0.700 (fail)
+//	0.0290  |               0.875 |                   0.200 |                 0.600 (fail)
+//	0.0300  |               0.875 |                   0.300 |                 0.200 (fail)  [verified]
+//	0.0310  |               1.000 |                   0.600 |                 0.100 (pass)
+//	0.0330  |               1.000 |                   1.000 |                 0.000 (pass)
+//
+// Row floorA=0.0000 was also verified directly against the live server.
+// CONCLUSION: no point on this grid clears both targets simultaneously —
+// this is not a missed value between grid points, it is a structural
+// property of the underlying signal (see NoneScoreFloor's own doc for why:
+// the absence class's score range sits almost entirely INSIDE the identity/
+// status range). Every floorA above 0 that touches the absence class AT ALL
+// also touches status worse (status refusal reaches >=0.1, double the
+// target, before absence confidence drops below 0.7) because several real
+// identity/status cases score AS LOW AS the lowest absence case. The
+// DEFAULT below (0, 0 — both floors disabled) is chosen because it is the
+// ONLY point that fully clears false_refusal, and the plan's own stated
+// priority is explicit: "a memory system that says 'no sé' when it does
+// know is a worse product than one that guesses" (docs/
+// conversational-retrieval-plan.md, P3). That priority is followed here,
+// not hidden: false_confidence=1.000 at this default means /answer's
+// `none` value is CURRENTLY ONLY reachable via HitCount==0 (a genuinely
+// empty result set) — the endpoint does not, at these defaults, distinguish
+// "found something irrelevant" from "found real evidence" the way its own
+// motivating GitLab-hallucination example needs it to. An operator who
+// wants the opposite trade should raise ConfidenceThreshold toward ~0.031
+// (clears false_confidence, at the cost of failing both refusal targets
+// worse than the plan's original single-threshold design did).
 type AnswerConfig struct {
 	// MaxChars is the default answer-context char budget
 	// (AssembleAnswerContext's maxChars, internal/mcp/answer.go) when a
@@ -155,29 +199,44 @@ type AnswerConfig struct {
 	// operator who never touches this config key gets exactly the size the
 	// motivating consumer needs.
 	MaxChars int `yaml:"max_chars"`
-	// ConfidenceThreshold is the fused-relevance floor
-	// ClassifyAnswerConfidence compares the top result's un-normalized
-	// relevance against for the `low` vs `high` split (P3: "The threshold
-	// must be calibrated against the eval corpus, not picked"). It is NOT
+	// NoneScoreFloor ("floor A") and ConfidenceThreshold ("floor B", the
+	// original single-threshold field, kept under its original name/key)
+	// are the two-floor design ClassifyAnswerConfidence uses: HasTopScore &&
+	// TopScore < NoneScoreFloor -> `none`; < ConfidenceThreshold -> `low`;
+	// otherwise `high` (subject to the other structural low-triggers —
+	// SourcesAssembled==0, RecallDegraded — which still apply). Neither is
 	// the same quantity as Recall.StrongFloor/BaseFloor (those are semantic
 	// cosine-similarity floors gating what even ENTERS the fused result
-	// set; this is a threshold over the post-fusion RRF/FTS relevance score
-	// of whatever already got through).
+	// set; these are floors over the post-fusion RRF relevance score of
+	// whatever already got through).
 	//
-	// KNOWN GAP, stated plainly rather than hidden behind a confident-looking
-	// number: this field's default (see applyDefaults) was NOT calibrated
-	// against `omnia eval --profile conversational --target answer` run
-	// against a live store — that run requires starting a real server
-	// against the ~800MB production omnia.db, and the environment this
-	// change was built in ran out of disk mid-build (`no space left on
-	// device`) before that could happen safely. The default below is a
-	// reasoned placeholder derived from RRF's own score arithmetic (see
-	// applyDefaults' comment), not a measured one. Re-run the calibration
-	// and replace this value — and this comment — before relying on the
-	// `low` vs `high` split in production; until then, `none` (the two
-	// structural triggers in ClassifyAnswerConfidence) is the only leg of
-	// this endpoint's confidence signal that has been measured against
-	// anything.
+	// SUPERSEDED DESIGN, kept for the record: the plan originally used the
+	// FTS relaxation ladder (not a score floor) as the unconditional `none`
+	// trigger. MEASURED (2026-08-14) that design's two configurations
+	// against the live store, `omnia eval --profile conversational --target
+	// answer`, 3 runs each:
+	//
+	//	config                              | refusal id | refusal status | confidence absence
+	//	relaxation -> none unconditionally  |      0.250 |          0.800 |        0.100 (pass)
+	//	relaxation -> low when fusion ran   |      0.000 |          0.000 |        1.000 (fail)
+	//
+	// Neither passed both targets (refusal <=0.05, confidence <=0.1) —
+	// relaxation was the ONLY signal separating the absence class, and
+	// swinging it between "hard none trigger" and "soft low signal" just
+	// traded one failure mode for the exact mirror of the other.
+	//
+	// MEASURED (2026-08-14) the two-floor score-based redesign THIS field
+	// pair implements, sweeping (NoneScoreFloor, ConfidenceThreshold) jointly
+	// against the same corpus — see AnswerConfig's own doc for the full grid
+	// and cmd/omnia/recall.go's `answerFTSDiag`/ClassifyAnswerConfidence's
+	// doc comment for the root cause: the underlying signal (RRF fusion
+	// score) does not separate the classes in this store AT ALL — absence
+	// case scores [0.0268, 0.0313] sit almost entirely inside the identity/
+	// status range [0.0164, 0.0328], so no floor pair on this axis clears
+	// both targets simultaneously. This is a structural property of RRF
+	// (rank-position fusion, not magnitude), not a tuning failure — see the
+	// full grid and recommendation in AnswerConfig's doc comment.
+	NoneScoreFloor      float64 `yaml:"none_score_floor"`
 	ConfidenceThreshold float64 `yaml:"confidence_threshold"`
 }
 
@@ -1184,34 +1243,24 @@ func applyDefaults(cfg *Config, data []byte) {
 	if cfg.Answer.MaxChars == 0 {
 		cfg.Answer.MaxChars = 1400
 	}
-	// ConfidenceThreshold: P3 requires this to be "calibrated against the
-	// eval corpus, not picked" (the existing Recall.StrongFloor/BaseFloor
-	// 0.35/0.25 pair is this project's own cautionary tale for exactly that
-	// mistake — inherited from a different embedding model, and only caught
-	// by issue #83). That calibration run (`omnia eval --profile
-	// conversational --target answer` against a live server) could NOT be
-	// completed for this change: the build environment ran out of disk
-	// (`no space left on device`, linking the omnia binary) before the
-	// server could even start. 0.05 below is NOT a calibrated value — see
-	// AnswerConfig.ConfidenceThreshold's own doc for the honest "known gap"
-	// note and the reasoning behind picking THIS placeholder rather than
-	// leaving it at 0:
-	//
-	// recall.Fuse's RRF score for a document ranked rank r on a list is
-	// 1/(RRFK+r) (design D1); at the default recall.rrf_k=60, a document
-	// that ranks #1 on BOTH the lexical and semantic legs scores
-	// 2/(60+1) ≈ 0.033 — i.e. the plausible ceiling for "found by both legs,
-	// clearly" is well under 0.05. Setting the threshold much ABOVE that
-	// ceiling would make `low` unreachable-as-anything-but-default (every
-	// real hit reads as `low`); 0.05 sits just above the two-leg-agreement
-	// ceiling so a single-leg-only or low-ranked match (the weaker case
-	// `low` exists to flag) scores under it, while leaving the FTS-ladder
-	// and hit-count structural triggers (ClassifyAnswerConfidence's `none`
-	// checks) as the actually-measured legs of this endpoint's confidence
-	// contract. Replace this with a real calibrated value once the eval run
-	// above can complete.
+	// NoneScoreFloor/ConfidenceThreshold: see AnswerConfig's own doc for the
+	// full measured grid. Summary: this axis (RRF fusion score) cannot
+	// separate the absence class from identity/status in this store — their
+	// score ranges overlap almost completely — so no (floorA, floorB) pair
+	// clears both P3 targets (refusal <=0.05, confidence <=0.1)
+	// simultaneously. These defaults are kept at the values that clear
+	// false_refusal (the plan's own stated priority: "a memory system that
+	// says 'no sé' when it does know is a worse product than one that
+	// guesses") while documenting, not hiding, that false_confidence fails
+	// at this setting. An operator who wants the opposite trade — favor
+	// false_confidence over false_refusal — should raise ConfidenceThreshold
+	// toward ~0.033 (this store's measured two-leg-agreement ceiling); see
+	// AnswerConfig's doc for that end of the grid.
+	if cfg.Answer.NoneScoreFloor == 0 {
+		cfg.Answer.NoneScoreFloor = 0
+	}
 	if cfg.Answer.ConfidenceThreshold == 0 {
-		cfg.Answer.ConfidenceThreshold = 0.05
+		cfg.Answer.ConfidenceThreshold = 0
 	}
 }
 

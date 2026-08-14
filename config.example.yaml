@@ -244,22 +244,29 @@ backfill_days: 30
 # cite `sync_id` only, never the integer `id` (verified to diverge across
 # replicas).
 #
-# Both fields below always get a default (see config.go's applyDefaults) —
-# unlike every other block on this page, GET /answer has no pre-existing
-# behavior to preserve, so there is no "off by default" gate here.
+# All three fields below always get a default (see config.go's
+# applyDefaults) — unlike every other block on this page, GET /answer has no
+# pre-existing behavior to preserve, so there is no "off by default" gate
+# here.
+#
+# none_score_floor/confidence_threshold are a TWO-FLOOR pair over the top
+# result's raw RRF fusion score: below none_score_floor -> confidence
+# "none", below confidence_threshold -> "low", else "high" (subject to other
+# structural low-triggers). MEASURED (2026-08-14), full grid swept against
+# the live store, `omnia eval --profile conversational --target answer`:
+# NO (floorA, floorB) pair clears both P3 targets simultaneously —
+# false_refusal (identity/status, target <=0.05) and false_confidence
+# (absence, target <=0.1) trade off directly against each other, because
+# the absence class's score range sits almost entirely INSIDE the identity/
+# status range on this store (RRF fusion score is a rank-position
+# combinator, not a magnitude signal — it does not separate "found the
+# right answer" from "found something vaguely similar"). See
+# AnswerConfig's own doc comment (internal/config/config.go) for the full
+# 10-point grid. Defaults below (0, 0 — both floors disabled) favor the
+# plan's own stated priority ("a memory system that says 'no sé' when it
+# does know is a worse product than one that guesses") at the cost of
+# false_confidence=1.000 — documented, not hidden.
 # answer:
 #   max_chars: 1400            # default: Hermes' own documented response budget
-#   confidence_threshold: 0.05 # NOT YET CALIBRATED against the eval corpus —
-#                               # see AnswerConfig.ConfidenceThreshold's own doc
-#                               # comment (internal/config/config.go) for why
-#                               # (`omnia eval --profile conversational --target
-#                               # answer` could not be run: the build environment
-#                               # ran out of disk before a server could start) and
-#                               # for the RRF-arithmetic reasoning behind this
-#                               # placeholder. Re-run that calibration — with a
-#                               # server that has real headroom — before relying
-#                               # on the `low` vs `high` split in production; the
-#                               # plan is explicit that the 0.35/0.25
-#                               # Recall.StrongFloor/BaseFloor pair was exactly
-#                               # this mistake, inherited from a different
-#                               # embedding model and only caught by issue #83.
+#   none_score_floor: 0        # floor A — see AnswerConfig's doc for the full grid
+#   confidence_threshold: 0    # floor B — does not move either target metric alone

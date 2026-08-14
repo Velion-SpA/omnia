@@ -577,7 +577,7 @@ func buildHTTPAnswerFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 	readWatermarks := mcp.NewWatermarkReader(s, autoEmbed)
 
 	return func(ctx context.Context, query string, req server.AnswerRequest) (server.AnswerResponse, error) {
-		results, relevance, _, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
+		results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
 		if err != nil {
 			return server.AnswerResponse{}, err
 		}
@@ -642,9 +642,10 @@ func buildHTTPAnswerFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 			HasTopScore:      hasTopScore,
 			FTSRelaxed:       diag.Relaxed,
 			FTSRelaxStep:     diag.Step,
+			FusionRan:        fusionRan,
 			RecallDegraded:   health.Degraded,
 			SourcesAssembled: len(assembled.Sources),
-		}, appCfg.Answer.ConfidenceThreshold)
+		}, appCfg.Answer.NoneScoreFloor, appCfg.Answer.ConfidenceThreshold)
 
 		sources := make([]server.AnswerSource, 0, len(assembled.Sources))
 		for _, src := range assembled.Sources {
