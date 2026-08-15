@@ -267,8 +267,8 @@ func TestRunCrossProjectLeg_RecoversFromPanic(t *testing.T) {
 	if leg.project != "workly" {
 		t.Errorf("leg.project = %q, want %q (set before the deferred recover runs, so it survives a panic)", leg.project, "workly")
 	}
-	if leg.results != nil || leg.relevance != nil || leg.fusionRan {
-		t.Errorf("leg = %+v, want results/relevance/fusionRan all cleared to their zero value after a recovered panic", leg)
+	if leg.results != nil || leg.relevance != nil || leg.semantic != nil || leg.fusionRan {
+		t.Errorf("leg = %+v, want results/relevance/semantic/fusionRan all cleared to their zero value after a recovered panic", leg)
 	}
 }
 

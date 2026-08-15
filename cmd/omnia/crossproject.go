@@ -130,6 +130,7 @@ type crossProjectLeg struct {
 	project   string
 	results   []store.SearchResult
 	relevance map[int64]float64
+	semantic  map[int64]float64
 	fusionRan bool
 	err       error
 }
@@ -283,6 +284,7 @@ func runCrossProjectLeg(ctx context.Context, s *store.Store, recallSvc *recall.S
 		if r := recover(); r != nil {
 			leg.results = nil
 			leg.relevance = nil
+			leg.semantic = nil
 			leg.fusionRan = false
 			leg.err = fmt.Errorf("cross-project fan-out: leg %q panicked: %v", project, r)
 			log.Printf("[crossproject] recovered panic in fan-out leg project=%q query=%q: %v\n%s", project, query, r, debug.Stack())
@@ -291,7 +293,7 @@ func runCrossProjectLeg(ctx context.Context, s *store.Store, recallSvc *recall.S
 
 	legOpts := opts
 	legOpts.Project = project
-	leg.results, leg.relevance, leg.fusionRan, leg.err = recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, legOpts)
+	leg.results, leg.relevance, leg.semantic, leg.fusionRan, leg.err = recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, legOpts)
 	return leg
 }
 
@@ -345,10 +347,22 @@ func runCrossProjectLeg(ctx context.Context, s *store.Store, recallSvc *recall.S
 // GET /search?all_projects=1): see the P5 wiring engram observation
 // (topic_key architecture/multiproject-fanout-wiring) for the exact
 // p50/worst-case numbers that validated crossProjectWorkerCap's default.
-func crossProjectSearch(ctx context.Context, s *store.Store, recallSvc *recall.Service, appCfg *config.Config, query string, opts store.SearchOptions, allProjects bool, explicitProjects []string, now time.Time) (results []store.SearchResult, relevance map[int64]float64, normalizedScore map[int64]float64, fusionRan bool, diversity multiproject.DiversityReport, err error) {
+// semantic (the 3rd return value, engram obs #2585/#2612) is each returned
+// result's raw semantic cosine score, keyed by Observation.ID, merged from
+// whichever leg's crossProjectLeg.semantic actually produced that ID —
+// present only for rows a leg's fusion carried a cosine for, mirroring
+// relevance/rawRelevance's own per-leg merge and recall.Result.
+// SemanticScore's nil-means-absent contract. This is the data P5's own
+// measurement (engram obs #2612) found missing: every project's rank-1 RRF
+// score is ~equal, so raw cosine is the only candidate signal that could
+// tell "this project's top hit is a real match" apart from "this project's
+// top hit just happened to rank first locally" — this return value only
+// carries it out to the caller; it does not change ranking, Merge, or
+// diversity in any way this slice.
+func crossProjectSearch(ctx context.Context, s *store.Store, recallSvc *recall.Service, appCfg *config.Config, query string, opts store.SearchOptions, allProjects bool, explicitProjects []string, now time.Time) (results []store.SearchResult, relevance map[int64]float64, normalizedScore map[int64]float64, semantic map[int64]float64, fusionRan bool, diversity multiproject.DiversityReport, err error) {
 	projectNames, err := resolveFanoutProjects(s, allProjects, explicitProjects)
 	if err != nil {
-		return nil, nil, nil, false, multiproject.DiversityReport{}, err
+		return nil, nil, nil, nil, false, multiproject.DiversityReport{}, err
 	}
 
 	legLimit := opts.Limit
@@ -363,6 +377,7 @@ func crossProjectSearch(ctx context.Context, s *store.Store, recallSvc *recall.S
 	groups := make([]multiproject.Group, 0, len(legs))
 	hydrated := make(map[int64]store.SearchResult)
 	rawRelevance := make(map[int64]float64)
+	rawSemantic := make(map[int64]float64)
 
 	for _, leg := range legs {
 		if leg.err != nil || len(leg.results) == 0 {
@@ -384,6 +399,13 @@ func crossProjectSearch(ctx context.Context, s *store.Store, recallSvc *recall.S
 			hydrated[r.ID] = r
 			rel := leg.relevance[r.ID]
 			rawRelevance[r.ID] = rel
+			// Only copy an entry when this leg actually had a cosine for
+			// this ID — mirroring leg.semantic's own "absent means no
+			// signal" contract rather than defaulting a lexical-only hit to
+			// a misleading 0.0.
+			if v, ok := leg.semantic[r.ID]; ok {
+				rawSemantic[r.ID] = v
+			}
 			items = append(items, searchResultToItem(r, rel))
 		}
 		groups = append(groups, multiproject.Group{Project: leg.project, Items: items})
@@ -408,6 +430,7 @@ func crossProjectSearch(ctx context.Context, s *store.Store, recallSvc *recall.S
 
 	results = make([]store.SearchResult, 0, min(len(merged), finalLimit))
 	relevance = make(map[int64]float64, len(results))
+	semantic = make(map[int64]float64)
 	for _, mi := range merged {
 		if len(results) >= finalLimit {
 			break
@@ -418,6 +441,9 @@ func crossProjectSearch(ctx context.Context, s *store.Store, recallSvc *recall.S
 		}
 		results = append(results, r)
 		relevance[mi.ID] = rawRelevance[mi.ID]
+		if v, ok := rawSemantic[mi.ID]; ok {
+			semantic[mi.ID] = v
+		}
 	}
 
 	// explain=1's score display is normalized SEPARATELY from ranking, over
@@ -443,7 +469,7 @@ func crossProjectSearch(ctx context.Context, s *store.Store, recallSvc *recall.S
 	}
 	normalizedScore = mcp.MinMaxNormalizeRelevance(nonSentinel, relevance)
 
-	return results, relevance, normalizedScore, fusionRan, diversity, nil
+	return results, relevance, normalizedScore, semantic, fusionRan, diversity, nil
 }
 
 // crossProjectSearchEnvelope is buildHTTPSearchFunc's (recall.go) P5
@@ -460,7 +486,7 @@ func crossProjectSearch(ctx context.Context, s *store.Store, recallSvc *recall.S
 // callers with no anchor lookup wired.
 func crossProjectSearchEnvelope(ctx context.Context, s *store.Store, recallSvc *recall.Service, appCfg *config.Config, readWatermarks mcp.WatermarkReader, query string, req server.SearchRequest) (server.SearchEnvelope, error) {
 	now := time.Now()
-	results, relevance, normalizedScore, fusionRan, diversity, err := crossProjectSearch(ctx, s, recallSvc, appCfg, query, req.SearchOptions, req.AllProjects, req.Projects, now)
+	results, relevance, normalizedScore, semantic, fusionRan, diversity, err := crossProjectSearch(ctx, s, recallSvc, appCfg, query, req.SearchOptions, req.AllProjects, req.Projects, now)
 	if err != nil {
 		return server.SearchEnvelope{}, err
 	}
@@ -497,7 +523,7 @@ func crossProjectSearchEnvelope(ctx context.Context, s *store.Store, recallSvc *
 		envelope.ScoreBreakdown = make(map[string]map[string]any, len(results))
 		for _, r := range results {
 			envelope.ScoreBreakdown[strconv.FormatInt(r.ID, 10)] = mcp.BuildResultReceipt(
-				r, fusionRan, appCfg.Recall.Ranking, relevance, normalizedScore, now, 0,
+				r, fusionRan, appCfg.Recall.Ranking, relevance, normalizedScore, semantic, now, 0,
 			)
 		}
 	}
@@ -513,7 +539,12 @@ func crossProjectSearchEnvelope(ctx context.Context, s *store.Store, recallSvc *
 // buildHTTPAnswerFunc's own single-project loop does.
 func crossProjectAnswer(ctx context.Context, s *store.Store, recallSvc *recall.Service, appCfg *config.Config, readWatermarks mcp.WatermarkReader, query string, req server.AnswerRequest) (server.AnswerResponse, error) {
 	now := time.Now()
-	results, relevance, _, fusionRan, diversity, err := crossProjectSearch(ctx, s, recallSvc, appCfg, query, req.SearchOptions, req.AllProjects, req.Projects, now)
+	// semantic (crossProjectSearch's 4th return value) is deliberately
+	// discarded here — same rationale as buildHTTPAnswerFunc's
+	// single-project path (recall.go): wiring the per-hit cosine into
+	// confidence/ranking is later, gated consumer work, not this plumbing
+	// slice.
+	results, relevance, _, _, fusionRan, diversity, err := crossProjectSearch(ctx, s, recallSvc, appCfg, query, req.SearchOptions, req.AllProjects, req.Projects, now)
 	if err != nil {
 		return server.AnswerResponse{}, err
 	}

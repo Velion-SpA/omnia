@@ -166,7 +166,7 @@ func buildRecallServiceForCLI(s *store.Store, dataDir string) *recall.Service {
 const recallQueryTimeout = 5 * time.Second
 
 func recallOrFTSSearch(ctx context.Context, s *store.Store, recallSvc *recall.Service, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
-	results, _, _, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, opts)
+	results, _, _, _, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, opts)
 	return results, err
 }
 
@@ -197,10 +197,19 @@ const cliExactSentinelRank = -1000.0
 // (blocking fix: --explain mislabels fusion vs lexical on mid-query FTS5
 // fallback). recallOrFTSSearch delegates to this so existing callers keep
 // their exact original two-value signature.
-func recallOrFTSSearchWithRelevance(ctx context.Context, s *store.Store, recallSvc *recall.Service, query string, opts store.SearchOptions) ([]store.SearchResult, map[int64]float64, bool, error) {
+//
+// semantic is the fourth return value (engram obs #2585/#2612): each
+// result's raw semantic cosine score, keyed by Observation.ID, sourced from
+// recall.Result.SemanticScore — present only for rows fusion actually
+// carried a cosine for (see that field's own doc for the nil/absent
+// contract). Every fallback path here (nil recallSvc, a mid-query
+// recallSvc.Search error) has no semantic leg at all — storeSearch is pure
+// FTS5 — so those branches return an empty, non-nil map, exactly like
+// lexicalRelevance's own "no signal" convention.
+func recallOrFTSSearchWithRelevance(ctx context.Context, s *store.Store, recallSvc *recall.Service, query string, opts store.SearchOptions) ([]store.SearchResult, map[int64]float64, map[int64]float64, bool, error) {
 	if recallSvc == nil {
 		results, err := storeSearch(s, query, opts)
-		return results, lexicalRelevance(results), false, err
+		return results, lexicalRelevance(results), map[int64]float64{}, false, err
 	}
 
 	// Normalize the project exactly like the store does (mcp.go does this too):
@@ -220,12 +229,16 @@ func recallOrFTSSearchWithRelevance(ctx context.Context, s *store.Store, recallS
 	})
 	if err != nil {
 		results, serr := storeSearch(s, query, opts)
-		return results, lexicalRelevance(results), false, serr
+		return results, lexicalRelevance(results), map[int64]float64{}, false, serr
 	}
 
 	relevance := make(map[int64]float64, len(fused))
+	semantic := make(map[int64]float64, len(fused))
 	for _, fr := range fused {
 		relevance[fr.ID] = fr.Score
+		if fr.SemanticScore != nil {
+			semantic[fr.ID] = *fr.SemanticScore
+		}
 	}
 
 	limit := opts.Limit
@@ -237,7 +250,7 @@ func recallOrFTSSearchWithRelevance(ctx context.Context, s *store.Store, recallS
 		Project: opts.Project,
 		Scope:   opts.Scope,
 	})
-	return results, relevance, true, nil
+	return results, relevance, semantic, true, nil
 }
 
 // lexicalRelevance builds the FTS5-only-path relevance map: negated bm25
@@ -431,7 +444,7 @@ func buildHTTPSearchFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 			return crossProjectSearchEnvelope(ctx, s, recallSvc, appCfg, readWatermarks, query, req)
 		}
 
-		results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
+		results, relevance, semantic, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
 		if err != nil {
 			return server.SearchEnvelope{}, err
 		}
@@ -529,7 +542,7 @@ func buildHTTPSearchFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 			for _, r := range pipelineOut.Results {
 				stalenessPenalty := mcp.StalenessPenaltyFor(anchorsByObs[r.SyncID])
 				envelope.ScoreBreakdown[strconv.FormatInt(r.ID, 10)] = mcp.BuildResultReceipt(
-					r, fusionRan, appCfg.Recall.Ranking, relevance, normalizedRelevance, now, stalenessPenalty,
+					r, fusionRan, appCfg.Recall.Ranking, relevance, normalizedRelevance, semantic, now, stalenessPenalty,
 				)
 			}
 		}
@@ -595,7 +608,13 @@ func buildHTTPAnswerFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 			return crossProjectAnswer(ctx, s, recallSvc, appCfg, readWatermarks, query, req)
 		}
 
-		results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
+		// semantic (the 3rd return value) is deliberately discarded here:
+		// wiring it into GET /answer's confidence classification is
+		// consumer work for a later slice, gated on whether the per-hit
+		// cosine's cross-query magnitude actually separates absence from
+		// evidence over the real corpus (engram obs #2585) — this phase is
+		// plumbing only, no ranking/confidence behavior change.
+		results, relevance, _, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
 		if err != nil {
 			return server.AnswerResponse{}, err
 		}

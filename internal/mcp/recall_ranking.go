@@ -322,11 +322,17 @@ func BuildReceipt(lexicalRank *float64, exactMatch bool, semanticScore, fusionSc
 //     preserved past fusion/hydration (HydrateFusedResults only carries the
 //     final ranked ID list), so it degrades to null rather than guessing.
 //
-// semantic is always nil this slice: the per-hit semantic cosine score is
-// likewise internal to recall.Service.semanticHits and not currently
-// exposed past the combined RRF fusion score — surfacing it would require
-// extending recall.Service's public surface, deliberately deferred to keep
-// internal/recall fully untouched this slice (design D6).
+// semantic supplies each result's raw per-hit semantic cosine score, keyed
+// by Observation.ID — recall.Result.SemanticScore, surfaced past RRF fusion
+// (engram obs #2585/#2612: fusion Score is a rank-position combinator with
+// no cross-query magnitude; raw cosine is the one quantity in the system
+// that does have one). Only IDs that actually cleared recall.AdaptiveFloor
+// and won a semantic rank are present — a missing entry (map lookup ok
+// false) means "no cosine for this row" (lexical-only, floor-filtered, or
+// semantic recall not configured), which BuildReceipt/nullableFloat renders
+// as a null "semantic" field rather than a misleading 0.0. Callers on a
+// path with no semantic signal at all (FTS5-only, as-of) simply pass an
+// empty/nil map, which behaves identically to every row missing.
 //
 // recency/importance/salience/final are always computed from rankingCfg and
 // normalizedRelevance regardless of whether ranking is actually enabled, so
@@ -351,7 +357,7 @@ func BuildReceipt(lexicalRank *float64, exactMatch bool, semanticScore, fusionSc
 // returned receipt's "staleness_penalty" key. Callers with no anchor lookup
 // wired (currently `omnia search --explain`) pass 0, preserving this slot's
 // pre-PR2 reserved default exactly.
-func BuildResultReceipt(r store.SearchResult, fusionRan bool, rankingCfg config.RankingConfig, relevance, normalizedRelevance map[int64]float64, now time.Time, stalenessPenalty float64) map[string]any {
+func BuildResultReceipt(r store.SearchResult, fusionRan bool, rankingCfg config.RankingConfig, relevance, normalizedRelevance, semantic map[int64]float64, now time.Time, stalenessPenalty float64) map[string]any {
 	exact := r.Rank == exactSentinelRank
 	preempted := exact || r.SignatureMatch
 
@@ -366,6 +372,11 @@ func BuildResultReceipt(r store.SearchResult, fusionRan bool, rankingCfg config.
 	} else if !exact {
 		rank := r.Rank
 		lexicalRank = &rank
+	}
+
+	var semanticScore *float64
+	if v, ok := semantic[r.ID]; ok {
+		semanticScore = &v
 	}
 
 	recency, recencyOK := ComputeRecency(r.UpdatedAt, now, rankingCfg.RecencyHalfLifeDays)
@@ -385,7 +396,7 @@ func BuildResultReceipt(r store.SearchResult, fusionRan bool, rankingCfg config.
 	}
 	final := RankScore(normRel, recencyForScore, importance, salience, rankingCfg.Weights)
 
-	return BuildReceipt(lexicalRank, exact, nil, fusionScore, recencyPtr, &importance, &salience, &final, stalenessPenalty)
+	return BuildReceipt(lexicalRank, exact, semanticScore, fusionScore, recencyPtr, &importance, &salience, &final, stalenessPenalty)
 }
 
 func lexicalComponent(rank *float64, exact bool) map[string]any {

@@ -1613,10 +1613,11 @@ func cmdSearchPrepared(cfg store.Config, plan searchCommandPlan) {
 	asOfEnabled := cfg.TimeTravelEnabled && strings.TrimSpace(asOf) != ""
 	var results []store.SearchResult
 	var relevance map[int64]float64
+	var semantic map[int64]float64
 	var fusionRan bool
 	if asOfEnabled {
 		results, err = s.SearchAsOf(query, opts, asOf)
-		relevance, fusionRan = map[int64]float64{}, false
+		relevance, semantic, fusionRan = map[int64]float64{}, map[int64]float64{}, false
 		for _, result := range results {
 			if result.Rank == cliExactSentinelRank {
 				continue
@@ -1625,7 +1626,7 @@ func cmdSearchPrepared(cfg store.Config, plan searchCommandPlan) {
 		}
 	} else {
 		recallSvc := buildRecallServiceForCLI(s, cfg.DataDir)
-		results, relevance, fusionRan, err = recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, query, opts)
+		results, relevance, semantic, fusionRan, err = recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, query, opts)
 	}
 	if err != nil {
 		fatal(err)
@@ -1718,7 +1719,7 @@ func cmdSearchPrepared(cfg store.Config, plan searchCommandPlan) {
 			// doesn't need. `omnia mcp`/`mem_search` remain the surfaces
 			// with a real staleness_penalty (see internal/mcp/mcp.go's
 			// handleSearch wiring).
-			receipt := mcp.BuildResultReceipt(r, fusionRan, rankingCfg, relevance, normalizedRelevance, now, 0)
+			receipt := mcp.BuildResultReceipt(r, fusionRan, rankingCfg, relevance, normalizedRelevance, semantic, now, 0)
 			printScoreBreakdown(receipt)
 		}
 		fmt.Println()
