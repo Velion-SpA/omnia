@@ -105,6 +105,8 @@ var (
 //	omnia eval --profile conversational [--target inprocess|http|answer]
 //	           [--http-base-url URL] [--corpus PATH] [--config PATH]
 //	           [--runs N] [--injection]
+//	omnia eval --profile conversational --multi-project --http-base-url URL
+//	           [--corpus PATH]
 func cmdEval(args []string) {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
 	mode := fs.String("mode", string(eval.GateModeAdvisory), "release-gate mode: advisory|blocking (default advisory — spec EVAL-8)")
@@ -118,6 +120,7 @@ func cmdEval(args []string) {
 	profile := fs.String("profile", "coding", "eval corpus profile: coding (default, spec sdd/omnia-eval-harness) or conversational (docs/conversational-retrieval-plan.md's \"Baseline first\" item — identity/status/delta/open_items/rationale/cross_project/absence question kinds)")
 	target := fs.String("target", "inprocess", "--profile conversational only: inprocess (searches the local store directly, honoring --injection), http (calls GET /search on a running server via --http-base-url — quantifies the P0 gap between GET /search and mem_search's full pipeline), or answer (calls GET /answer on a running server via --http-base-url — scores P3's calibrated confidence: false_confidence on absence cases, false_refusal on identity/status cases)")
 	httpBaseURL := fs.String("http-base-url", "", "--profile conversational --target http|answer only: base URL of a running omnia server, e.g. http://localhost:7799 (no trailing slash)")
+	multiProject := fs.Bool("multi-project", false, "--profile conversational --target http only: run ONLY the corpus's cross_project cases through GET /search?all_projects=1&envelope=1 (P5, docs/conversational-retrieval-plan.md), reporting accuracy@1 AND project diversity in the top-4 PER CASE (not just an aggregate) — the P5 measurement gate. Requires --http-base-url")
 	if err := fs.Parse(args); err != nil {
 		fatal(err)
 		return
@@ -127,6 +130,18 @@ func cmdEval(args []string) {
 	if normalizedProfile != "coding" && normalizedProfile != "conversational" {
 		fmt.Fprintf(os.Stderr, "error: --profile must be %q or %q, got %q\n", "coding", "conversational", *profile)
 		exitFunc(1)
+		return
+	}
+
+	if normalizedProfile == "conversational" && *multiProject {
+		if err := runCrossProjectMeasurement(context.Background(), conversationalRunOptions{
+			CorpusPath:  *corpusPath,
+			ConfigPath:  *configPath,
+			Target:      *target,
+			HTTPBaseURL: *httpBaseURL,
+		}); err != nil {
+			fatal(fmt.Errorf("cross-project eval: %w", err))
+		}
 		return
 	}
 

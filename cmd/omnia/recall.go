@@ -420,6 +420,17 @@ func buildHTTPSearchFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 	readWatermarks := mcp.NewWatermarkReader(s, autoEmbed)
 
 	return func(ctx context.Context, query string, req server.SearchRequest) (server.SearchEnvelope, error) {
+		// P5 (docs/conversational-retrieval-plan.md "P5 — Cross-project
+		// retrieval", cmd/omnia/crossproject.go): a request that set
+		// all_projects=1 or 2+ repeated project= params branches into the
+		// fan-out-and-merge path entirely, BEFORE any of the single-project
+		// code below runs. This ordering is what keeps the single-project
+		// path (neither param present) byte-for-byte unchanged — the code
+		// below is untouched from its pre-P5 form.
+		if req.AllProjects || len(req.Projects) > 0 {
+			return crossProjectSearchEnvelope(ctx, s, recallSvc, appCfg, readWatermarks, query, req)
+		}
+
 		results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
 		if err != nil {
 			return server.SearchEnvelope{}, err
@@ -577,6 +588,13 @@ func buildHTTPAnswerFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 	readWatermarks := mcp.NewWatermarkReader(s, autoEmbed)
 
 	return func(ctx context.Context, query string, req server.AnswerRequest) (server.AnswerResponse, error) {
+		// P5: same fan-out branch as buildHTTPSearchFunc above — see that
+		// function's own comment for why this ordering keeps the
+		// single-project path below byte-for-byte unchanged.
+		if req.AllProjects || len(req.Projects) > 0 {
+			return crossProjectAnswer(ctx, s, recallSvc, appCfg, readWatermarks, query, req)
+		}
+
 		results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
 		if err != nil {
 			return server.AnswerResponse{}, err

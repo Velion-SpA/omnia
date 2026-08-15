@@ -36,6 +36,20 @@ type RetrievedCase struct {
 	// conversational-only one) because it costs nothing for the coding
 	// profile, which never reads it.
 	Confidence string
+
+	// DiversityDistinct/DiversityCounts are P5's own measurement gate
+	// (docs/conversational-retrieval-plan.md "P5 — Cross-project
+	// retrieval": "project diversity in the top-4 ... must span >= 2
+	// projects"), read directly off GET /search?all_projects=1&envelope=1's
+	// diversity_distinct/diversity_counts response fields
+	// (internal/server.SearchEnvelope) — only cmd/omnia/eval.go's
+	// conversationalCrossProjectHTTPFetcher (--profile conversational
+	// --multi-project) populates these today. Zero/nil for every other
+	// fetcher, meaning "not measured" — mirrors Confidence's own
+	// empty-means-unmeasured convention above, on the same shared type for
+	// the same reason (costs nothing for fetchers that never read it).
+	DiversityDistinct int
+	DiversityCounts   map[string]int
 }
 
 // RetrievedFetcher is the harness's single retrieval seam: specs EVAL-1
