@@ -121,6 +121,7 @@ func cmdEval(args []string) {
 	target := fs.String("target", "inprocess", "--profile conversational only: inprocess (searches the local store directly, honoring --injection), http (calls GET /search on a running server via --http-base-url — quantifies the P0 gap between GET /search and mem_search's full pipeline), or answer (calls GET /answer on a running server via --http-base-url — scores P3's calibrated confidence: false_confidence on absence cases, false_refusal on identity/status cases)")
 	httpBaseURL := fs.String("http-base-url", "", "--profile conversational --target http|answer only: base URL of a running omnia server, e.g. http://localhost:7799 (no trailing slash)")
 	multiProject := fs.Bool("multi-project", false, "--profile conversational --target http only: run ONLY the corpus's cross_project cases through GET /search?all_projects=1&envelope=1 (P5, docs/conversational-retrieval-plan.md), reporting accuracy@1 AND project diversity in the top-4 PER CASE (not just an aggregate) — the P5 measurement gate. Requires --http-base-url")
+	forceUnscoped := fs.Bool("force-unscoped", false, "--profile conversational only: ignore every case's project/unscoped scoping and search ALL projects for every case, reproducing the harness's pre-engram-#2623 behavior — kept reachable for before/after comparison, never the default (the real consumer, Hermes' detectProject, always scopes to one project)")
 	if err := fs.Parse(args); err != nil {
 		fatal(err)
 		return
@@ -147,12 +148,13 @@ func cmdEval(args []string) {
 
 	if normalizedProfile == "conversational" {
 		summary, err := runConversationalEval(context.Background(), conversationalRunOptions{
-			CorpusPath:  *corpusPath,
-			ConfigPath:  *configPath,
-			Runs:        *runs,
-			Target:      *target,
-			HTTPBaseURL: *httpBaseURL,
-			Injection:   *injection,
+			CorpusPath:    *corpusPath,
+			ConfigPath:    *configPath,
+			Runs:          *runs,
+			Target:        *target,
+			HTTPBaseURL:   *httpBaseURL,
+			Injection:     *injection,
+			ForceUnscoped: *forceUnscoped,
 		})
 		if err != nil {
 			fatal(fmt.Errorf("eval: %w", err))
@@ -802,6 +804,14 @@ type conversationalRunOptions struct {
 	// behavior) for conversationalPipelineFetcher (the v0.3 Context
 	// Economy injection pipeline, mirroring mem_search's fuller path).
 	Injection bool
+	// ForceUnscoped reproduces the harness's pre-engram-#2623 behavior:
+	// every case's own Project/Unscoped is ignored and every fetcher
+	// searches ALL projects regardless of kind. Kept reachable (--force-
+	// unscoped) purely for explicit before/after comparison against the
+	// scoped numbers, which are the ones that match the real consumer
+	// (Hermes' detectProject always scopes to one project) — never the
+	// default.
+	ForceUnscoped bool
 }
 
 // runConversationalEval is injectable for testing, mirroring runEvalHarness
@@ -824,7 +834,7 @@ func defaultRunConversationalEval(ctx context.Context, opts conversationalRunOpt
 		if strings.TrimSpace(opts.HTTPBaseURL) == "" {
 			return eval.ConversationalRunSummary{}, fmt.Errorf("conversational eval: --http-base-url is required when --target=http")
 		}
-		fetch := conversationalHTTPFetcher(&http.Client{Timeout: 30 * time.Second}, opts.HTTPBaseURL)
+		fetch := conversationalHTTPFetcher(&http.Client{Timeout: 30 * time.Second}, opts.HTTPBaseURL, opts.ForceUnscoped)
 		return runConversationalCases(ctx, cases, fetch, opts.Runs)
 
 	case "answer":
@@ -836,7 +846,7 @@ func defaultRunConversationalEval(ctx context.Context, opts conversationalRunOpt
 		if strings.TrimSpace(opts.HTTPBaseURL) == "" {
 			return eval.ConversationalRunSummary{}, fmt.Errorf("conversational eval: --http-base-url is required when --target=answer")
 		}
-		fetch := conversationalAnswerFetcher(&http.Client{Timeout: 30 * time.Second}, opts.HTTPBaseURL)
+		fetch := conversationalAnswerFetcher(&http.Client{Timeout: 30 * time.Second}, opts.HTTPBaseURL, opts.ForceUnscoped)
 		return runConversationalCases(ctx, cases, fetch, opts.Runs)
 
 	case "inprocess", "":
@@ -857,9 +867,9 @@ func defaultRunConversationalEval(ctx context.Context, opts conversationalRunOpt
 		var fetch eval.ConversationalFetcher
 		if opts.Injection && appCfgErr == nil {
 			recallSvc := buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir, appCfg.VecIndex.Enabled, appCfg.Encryption)
-			fetch = conversationalPipelineFetcher(s, recallSvc, appCfg.Injection, appCfg.Recall.Ranking)
+			fetch = conversationalPipelineFetcher(s, recallSvc, appCfg.Injection, appCfg.Recall.Ranking, opts.ForceUnscoped)
 		} else {
-			fetch = conversationalStoreFetcher(s)
+			fetch = conversationalStoreFetcher(s, opts.ForceUnscoped)
 		}
 		return runConversationalCases(ctx, cases, fetch, opts.Runs)
 
@@ -878,6 +888,15 @@ func runConversationalCases(ctx context.Context, cases []eval.ConversationalCase
 	return eval.RunConversationalHarness(ctx, runFunc, runs)
 }
 
+// conversationalCaseUnscoped reports whether fetching c should search EVERY
+// project rather than being scoped to c.Project (engram #2623) — true when
+// the corpus case itself declares kind cross_project (Unscoped) or the
+// caller passed --force-unscoped to reproduce the harness's pre-fix
+// all-projects-always behavior for explicit before/after comparison.
+func conversationalCaseUnscoped(c eval.ConversationalCase, forceUnscoped bool) bool {
+	return forceUnscoped || c.Unscoped
+}
+
 // conversationalStoreFetcher returns an eval.ConversationalFetcher that
 // searches the real store directly for each case's Query — the
 // conversational sibling of storeBackedFetcher (raw top-1 FTS5/store
@@ -887,9 +906,16 @@ func runConversationalCases(ctx context.Context, cases []eval.ConversationalCase
 // unless SetSearch was called) — i.e. this is the in-process equivalent of
 // today's default HTTP behavior, useful as a baseline distinct from
 // conversationalPipelineFetcher's fuller mem_search-equivalent path.
-func conversationalStoreFetcher(s *store.Store) eval.ConversationalFetcher {
+//
+// forceUnscoped, when true, overrides every case's own Project/Unscoped and
+// always searches all projects — see conversationalCaseUnscoped.
+func conversationalStoreFetcher(s *store.Store, forceUnscoped bool) eval.ConversationalFetcher {
 	return func(ctx context.Context, c eval.ConversationalCase) (eval.RetrievedCase, error) {
-		results, err := storeSearch(s, c.Query, store.SearchOptions{Limit: rankCandidateDepth})
+		opts := store.SearchOptions{Limit: rankCandidateDepth}
+		if !conversationalCaseUnscoped(c, forceUnscoped) {
+			opts.Project = c.Project
+		}
+		results, err := storeSearch(s, c.Query, opts)
 		if err != nil {
 			return eval.RetrievedCase{}, fmt.Errorf("search: %w", err)
 		}
@@ -920,16 +946,24 @@ func conversationalStoreFetcher(s *store.Store) eval.ConversationalFetcher {
 // (eval.EvalCase vs eval.ConversationalCase); the body below intentionally
 // mirrors pipelineBackedFetcher's structure line-for-line so the two stay
 // easy to diff against each other if one changes.
-func conversationalPipelineFetcher(s *store.Store, recallSvc *recall.Service, cfg config.InjectionConfig, ranking config.RankingConfig) eval.ConversationalFetcher {
+// forceUnscoped mirrors conversationalStoreFetcher's flag of the same name
+// — see conversationalCaseUnscoped.
+func conversationalPipelineFetcher(s *store.Store, recallSvc *recall.Service, cfg config.InjectionConfig, ranking config.RankingConfig, forceUnscoped bool) eval.ConversationalFetcher {
 	return func(ctx context.Context, c eval.ConversationalCase) (eval.RetrievedCase, error) {
 		var (
 			results   []store.SearchResult
 			relevance map[int64]float64
 		)
 
+		scopeProject := ""
+		if !conversationalCaseUnscoped(c, forceUnscoped) {
+			scopeProject = c.Project
+		}
+
 		if recallSvc != nil {
 			fused, ferr := recallSvc.Search(ctx, c.Query, recall.LexicalSearchOptions{
-				Limit: mcp.RecallFetchLimit(pipelineFetchLimit),
+				Project: scopeProject,
+				Limit:   mcp.RecallFetchLimit(pipelineFetchLimit),
 			})
 			if ferr != nil {
 				return eval.RetrievedCase{}, fmt.Errorf("search: %w", ferr)
@@ -938,9 +972,13 @@ func conversationalPipelineFetcher(s *store.Store, recallSvc *recall.Service, cf
 			for _, fr := range fused {
 				relevance[fr.ID] = fr.Score
 			}
-			results = mcp.HydrateFusedResults(s, fused, pipelineFetchLimit, mcp.RecallScopeFilter{})
+			// RecallScopeFilter re-checks Project at hydration time (its own
+			// doc: the semantic side has no project awareness pre-fusion), so
+			// it must carry the same scope the lexical leg above was given —
+			// otherwise a cross-project semantic neighbor could leak back in.
+			results = mcp.HydrateFusedResults(s, fused, pipelineFetchLimit, mcp.RecallScopeFilter{Project: scopeProject})
 		} else {
-			r, err := storeSearch(s, c.Query, store.SearchOptions{Limit: pipelineFetchLimit})
+			r, err := storeSearch(s, c.Query, store.SearchOptions{Project: scopeProject, Limit: pipelineFetchLimit})
 			if err != nil {
 				return eval.RetrievedCase{}, fmt.Errorf("search: %w", err)
 			}
@@ -992,7 +1030,16 @@ func conversationalPipelineFetcher(s *store.Store, recallSvc *recall.Service, cf
 //
 // baseURL is the server's origin, e.g. "http://localhost:7799" — a trailing
 // slash is tolerated and stripped.
-func conversationalHTTPFetcher(client *http.Client, baseURL string) eval.ConversationalFetcher {
+//
+// Every request scopes to c.Project via the server's `project=` query param
+// (internal/server/server.go's resolveProjectFanoutParams), matching the
+// real consumer: Hermes' detectProject always latches onto exactly one
+// project before searching. A case whose Kind is cross_project (or when
+// forceUnscoped is true) instead sends `all_projects=1`, searching every
+// project — see conversationalCaseUnscoped. Before this fix (engram #2623)
+// neither param was ever sent, so every conversational number this fetcher
+// produced was silently unscoped.
+func conversationalHTTPFetcher(client *http.Client, baseURL string, forceUnscoped bool) eval.ConversationalFetcher {
 	return func(ctx context.Context, c eval.ConversationalCase) (eval.RetrievedCase, error) {
 		u, err := url.Parse(strings.TrimRight(baseURL, "/") + "/search")
 		if err != nil {
@@ -1001,6 +1048,11 @@ func conversationalHTTPFetcher(client *http.Client, baseURL string) eval.Convers
 		q := u.Query()
 		q.Set("q", c.Query)
 		q.Set("limit", strconv.Itoa(rankCandidateDepth))
+		if conversationalCaseUnscoped(c, forceUnscoped) {
+			q.Set("all_projects", "1")
+		} else {
+			q.Set("project", c.Project)
+		}
 		u.RawQuery = q.Encode()
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -1077,7 +1129,10 @@ type answerHTTPResponse struct {
 // because P3's own anti-goal is exactly a response that cites more than it
 // assembled (or cites the wrong identifier — sync_id here, never an
 // integer id, matching AnswerSource's own contract).
-func conversationalAnswerFetcher(client *http.Client, baseURL string) eval.ConversationalFetcher {
+// forceUnscoped mirrors conversationalHTTPFetcher's flag of the same name —
+// see conversationalCaseUnscoped and that function's doc comment for the
+// project/all_projects scoping rule, which applies identically here.
+func conversationalAnswerFetcher(client *http.Client, baseURL string, forceUnscoped bool) eval.ConversationalFetcher {
 	return func(ctx context.Context, c eval.ConversationalCase) (eval.RetrievedCase, error) {
 		u, err := url.Parse(strings.TrimRight(baseURL, "/") + "/answer")
 		if err != nil {
@@ -1086,6 +1141,11 @@ func conversationalAnswerFetcher(client *http.Client, baseURL string) eval.Conve
 		q := u.Query()
 		q.Set("q", c.Query)
 		q.Set("limit", strconv.Itoa(rankCandidateDepth))
+		if conversationalCaseUnscoped(c, forceUnscoped) {
+			q.Set("all_projects", "1")
+		} else {
+			q.Set("project", c.Project)
+		}
 		u.RawQuery = q.Encode()
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)

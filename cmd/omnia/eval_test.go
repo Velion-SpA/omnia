@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -390,7 +391,7 @@ func TestConversationalHTTPFetcher_DecodesResults(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL)
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false)
 	got, err := fetch(context.Background(), eval.ConversationalCase{Query: "what is omnia"})
 	if err != nil {
 		t.Fatalf("conversationalHTTPFetcher: %v", err)
@@ -524,7 +525,7 @@ func TestConversationalHTTPFetcher_EmptyResultsNoError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL)
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false)
 	got, err := fetch(context.Background(), eval.ConversationalCase{Query: "nothing matches this"})
 	if err != nil {
 		t.Fatalf("conversationalHTTPFetcher: %v", err)
@@ -543,10 +544,136 @@ func TestConversationalHTTPFetcher_NonOKStatusReturnsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL)
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false)
 	_, err := fetch(context.Background(), eval.ConversationalCase{Query: "x"})
 	if err == nil {
 		t.Fatal("expected an error for a non-200 GET /search response")
+	}
+}
+
+// ── engram #2623 regression: conversationalHTTPFetcher/conversationalAnswerFetcher
+// must actually scope by project ──────────────────────────────────────────
+
+// TestConversationalHTTPFetcher_ScopesToProject is the regression test for
+// engram #2623: before this fix, neither conversationalHTTPFetcher nor
+// conversationalAnswerFetcher ever sent a project param, so every
+// conversational number was silently searching all ~49 projects at once. A
+// scoped case (Unscoped=false) must send project=<c.Project> and must NOT
+// send all_projects.
+func TestConversationalHTTPFetcher_ScopesToProject(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false)
+	if _, err := fetch(context.Background(), eval.ConversationalCase{Query: "q", Project: "omnia"}); err != nil {
+		t.Fatalf("conversationalHTTPFetcher: %v", err)
+	}
+
+	q, err := url.ParseQuery(gotQuery)
+	if err != nil {
+		t.Fatalf("parse request query %q: %v", gotQuery, err)
+	}
+	if q.Get("project") != "omnia" {
+		t.Errorf("project = %q, want %q — a scoped case must send project=", q.Get("project"), "omnia")
+	}
+	if q.Has("all_projects") {
+		t.Errorf("all_projects was set on a scoped case: %q", gotQuery)
+	}
+}
+
+// TestConversationalHTTPFetcher_UnscopedSendsAllProjects is the flip side:
+// a case that declares Unscoped=true (the corpus's cross_project kind) must
+// send all_projects=1 and must NOT send project=, so it keeps searching
+// every project — the entire point of that kind (see
+// ConversationalCase.Unscoped's doc).
+func TestConversationalHTTPFetcher_UnscopedSendsAllProjects(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false)
+	if _, err := fetch(context.Background(), eval.ConversationalCase{Query: "q", Unscoped: true}); err != nil {
+		t.Fatalf("conversationalHTTPFetcher: %v", err)
+	}
+
+	q, err := url.ParseQuery(gotQuery)
+	if err != nil {
+		t.Fatalf("parse request query %q: %v", gotQuery, err)
+	}
+	if q.Get("all_projects") != "1" {
+		t.Errorf("all_projects = %q, want %q — an unscoped case must fan out to every project", q.Get("all_projects"), "1")
+	}
+	if q.Has("project") {
+		t.Errorf("project was set on an unscoped case: %q", gotQuery)
+	}
+}
+
+// TestConversationalHTTPFetcher_ForceUnscopedOverridesProject proves
+// --force-unscoped (kept reachable for explicit before/after comparison
+// against the pre-fix behavior) ignores a scoped case's own Project and
+// still fans out to every project.
+func TestConversationalHTTPFetcher_ForceUnscopedOverridesProject(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, true /* forceUnscoped */)
+	if _, err := fetch(context.Background(), eval.ConversationalCase{Query: "q", Project: "omnia"}); err != nil {
+		t.Fatalf("conversationalHTTPFetcher: %v", err)
+	}
+
+	q, err := url.ParseQuery(gotQuery)
+	if err != nil {
+		t.Fatalf("parse request query %q: %v", gotQuery, err)
+	}
+	if q.Get("all_projects") != "1" {
+		t.Errorf("all_projects = %q, want %q — --force-unscoped must override a scoped case's project", q.Get("all_projects"), "1")
+	}
+	if q.Has("project") {
+		t.Errorf("project was set despite --force-unscoped: %q", gotQuery)
+	}
+}
+
+// TestConversationalAnswerFetcher_ScopesToProject is
+// TestConversationalHTTPFetcher_ScopesToProject's GET /answer sibling —
+// engram #2623 named conversationalAnswerFetcher explicitly as the other
+// fetcher that never scoped.
+func TestConversationalAnswerFetcher_ScopesToProject(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"context":"","confidence":"none","sources":[]}`))
+	}))
+	defer srv.Close()
+
+	fetch := conversationalAnswerFetcher(srv.Client(), srv.URL, false)
+	if _, err := fetch(context.Background(), eval.ConversationalCase{Query: "q", Project: "workly"}); err != nil {
+		t.Fatalf("conversationalAnswerFetcher: %v", err)
+	}
+
+	q, err := url.ParseQuery(gotQuery)
+	if err != nil {
+		t.Fatalf("parse request query %q: %v", gotQuery, err)
+	}
+	if q.Get("project") != "workly" {
+		t.Errorf("project = %q, want %q — a scoped case must send project=", q.Get("project"), "workly")
+	}
+	if q.Has("all_projects") {
+		t.Errorf("all_projects was set on a scoped case: %q", gotQuery)
 	}
 }
 
@@ -574,7 +701,7 @@ func TestConversationalFetchers_ParityWhenInjectionOff(t *testing.T) {
 
 	c := eval.ConversationalCase{ID: "case-1", Query: "Ollama embedding layer"}
 
-	storeCase, err := conversationalStoreFetcher(s)(context.Background(), c)
+	storeCase, err := conversationalStoreFetcher(s, false)(context.Background(), c)
 	if err != nil {
 		t.Fatalf("conversationalStoreFetcher: %v", err)
 	}
@@ -582,7 +709,7 @@ func TestConversationalFetchers_ParityWhenInjectionOff(t *testing.T) {
 		t.Fatal("test setup invalid: conversationalStoreFetcher found nothing")
 	}
 
-	pipelineCase, err := conversationalPipelineFetcher(s, nil, config.InjectionConfig{}, config.RankingConfig{})(context.Background(), c)
+	pipelineCase, err := conversationalPipelineFetcher(s, nil, config.InjectionConfig{}, config.RankingConfig{}, false)(context.Background(), c)
 	if err != nil {
 		t.Fatalf("conversationalPipelineFetcher: %v", err)
 	}
@@ -615,7 +742,7 @@ func TestConversationalPipelineFetcher_BudgetActuallyTrims(t *testing.T) {
 
 	c := eval.ConversationalCase{ID: "case-1", Query: "conversational budget wiring fixture"}
 
-	storeCase, err := conversationalStoreFetcher(s)(context.Background(), c)
+	storeCase, err := conversationalStoreFetcher(s, false)(context.Background(), c)
 	if err != nil {
 		t.Fatalf("conversationalStoreFetcher: %v", err)
 	}
@@ -624,7 +751,7 @@ func TestConversationalPipelineFetcher_BudgetActuallyTrims(t *testing.T) {
 	}
 
 	tightBudget := config.InjectionConfig{Budget: config.TokenBudgetConfig{Enabled: true, MaxTokens: 1}}
-	pipelineCase, err := conversationalPipelineFetcher(s, nil, tightBudget, config.RankingConfig{})(context.Background(), c)
+	pipelineCase, err := conversationalPipelineFetcher(s, nil, tightBudget, config.RankingConfig{}, false)(context.Background(), c)
 	if err != nil {
 		t.Fatalf("conversationalPipelineFetcher: %v", err)
 	}
