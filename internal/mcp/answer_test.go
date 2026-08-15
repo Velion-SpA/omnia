@@ -134,6 +134,134 @@ func TestExtractAnswerText_MarkdownHeadingNeverReachesOutputAsBareText(t *testin
 	}
 }
 
+// TestExtractAnswerText_StripsDocIngestionMetadataFences is the direct
+// regression test for Fix A (2026-08-15): every repodoc doc-type chunk's raw
+// content ends with ```repodoc-anchor and ```omnia-meta fenced blocks (blame
+// SHA, content hash, ingestion timestamps) that are pure provenance, never
+// prose. Both must be excluded from Primary AND Full, while ordinary prose
+// preceding them (the "Keywords:" line) is preserved.
+func TestExtractAnswerText_StripsDocIngestionMetadataFences(t *testing.T) {
+	content := "Document: omnia\nSection: Installation\n\n" +
+		"Run `brew install omnia` to get started.\n\n" +
+		"Keywords: install, omnia\n" +
+		"```repodoc-anchor\n" +
+		"repo_root: /Users/benja/Dev/omnia\n" +
+		"blame_sha: abc123\n" +
+		"```\n" +
+		"```omnia-meta\n" +
+		"schema_version: 1\n" +
+		"source: repodoc\n" +
+		"```\n"
+
+	obs := store.Observation{Content: content, Type: "doc"}
+	got, ok := ExtractAnswerText(obs)
+	if !ok {
+		t.Fatalf("ExtractAnswerText(%q) ok = false, want true", content)
+	}
+	for _, tier := range []struct {
+		name string
+		text string
+	}{{"Full", got.Full}, {"Primary", got.Primary}} {
+		if strings.Contains(tier.text, "repodoc-anchor") || strings.Contains(tier.text, "repo_root") || strings.Contains(tier.text, "blame_sha") {
+			t.Errorf("%s = %q, must not contain the repodoc-anchor fenced block", tier.name, tier.text)
+		}
+		if strings.Contains(tier.text, "omnia-meta") || strings.Contains(tier.text, "schema_version") {
+			t.Errorf("%s = %q, must not contain the omnia-meta fenced block", tier.name, tier.text)
+		}
+	}
+	if !strings.Contains(got.Full, "Keywords: install, omnia") {
+		t.Errorf("Full = %q, must still contain the real Keywords prose line (only the fenced blocks are metadata)", got.Full)
+	}
+}
+
+// TestExtractAnswerText_ListLeadParagraphDecomposesIntoPrimaryUnits is the
+// direct regression test for Fix B (2026-08-15): a doc chunk whose lead
+// paragraph is ENTIRELY a Markdown list (the shape of the README "Features"
+// section that caused the measured identity-storage grounding loss) must
+// decompose into one PrimaryUnits entry per list item, continuation lines
+// included, header carried separately via PrimaryUnitsHeader (not baked into
+// PrimaryUnits[0] — see AssembleAnswerContext for where it's attached).
+func TestExtractAnswerText_ListLeadParagraphDecomposesIntoPrimaryUnits(t *testing.T) {
+	content := "Document: omnia\nSection: Features\n\n" +
+		"- Bullet one is fairly long and\n  wraps onto a second continuation line here.\n" +
+		"- Bullet two is short.\n" +
+		"- Bullet three.\n\n" +
+		"Keywords: features, omnia"
+
+	obs := store.Observation{Content: content, Type: "doc"}
+	got, ok := ExtractAnswerText(obs)
+	if !ok {
+		t.Fatalf("ExtractAnswerText(%q) ok = false, want true", content)
+	}
+	if len(got.PrimaryUnits) != 3 {
+		t.Fatalf("PrimaryUnits = %+v, want exactly 3 (one per bullet)", got.PrimaryUnits)
+	}
+	wantFirst := "- Bullet one is fairly long and\n  wraps onto a second continuation line here."
+	if got.PrimaryUnits[0] != wantFirst {
+		t.Errorf("PrimaryUnits[0] = %q, want %q (bare item — the header travels separately via PrimaryUnitsHeader, see AssembleAnswerContext)", got.PrimaryUnits[0], wantFirst)
+	}
+	if got.PrimaryUnits[1] != "- Bullet two is short." {
+		t.Errorf("PrimaryUnits[1] = %q, want %q", got.PrimaryUnits[1], "- Bullet two is short.")
+	}
+	if got.PrimaryUnits[2] != "- Bullet three." {
+		t.Errorf("PrimaryUnits[2] = %q, want %q", got.PrimaryUnits[2], "- Bullet three.")
+	}
+	wantHeader := "Document: omnia\nSection: Features"
+	if got.PrimaryUnitsHeader != wantHeader {
+		t.Errorf("PrimaryUnitsHeader = %q, want %q", got.PrimaryUnitsHeader, wantHeader)
+	}
+	// Primary must still be the joined reconstruction, for any caller that
+	// only reads Primary (e.g. length-based confidence signals).
+	wantPrimary := "Document: omnia\nSection: Features\n\n" +
+		"- Bullet one is fairly long and\n  wraps onto a second continuation line here.\n" +
+		"- Bullet two is short.\n" +
+		"- Bullet three."
+	if got.Primary != wantPrimary {
+		t.Errorf("Primary = %q, want %q", got.Primary, wantPrimary)
+	}
+}
+
+// TestExtractAnswerText_NonListLeadParagraphHasNoPrimaryUnits pins today's
+// behavior for a doc chunk whose lead paragraph is ordinary prose (not a
+// list): PrimaryUnits must stay nil and Primary/Full must be exactly what
+// docLeadParagraph produced before Fix B — a pure regression test.
+func TestExtractAnswerText_NonListLeadParagraphHasNoPrimaryUnits(t *testing.T) {
+	content := "Document: omnia\nSection: (introduction)\n\n" +
+		"Persistent memory for AI coding agents — local-first, one binary.\n\n" +
+		"This second paragraph should NOT appear in Primary, only in Full."
+
+	obs := store.Observation{Content: content, Type: "doc"}
+	got, ok := ExtractAnswerText(obs)
+	if !ok {
+		t.Fatalf("ExtractAnswerText(%q) ok = false, want true", content)
+	}
+	if got.PrimaryUnits != nil {
+		t.Errorf("PrimaryUnits = %+v, want nil for a non-list lead paragraph", got.PrimaryUnits)
+	}
+	wantPrimary := "Document: omnia\nSection: (introduction)\n\n" +
+		"Persistent memory for AI coding agents — local-first, one binary."
+	if got.Primary != wantPrimary {
+		t.Errorf("Primary = %q, want %q", got.Primary, wantPrimary)
+	}
+}
+
+// TestExtractAnswerText_MemSaveChunkHasNoPrimaryUnits pins today's behavior
+// for mem_save-shaped content (bold What/Why/Where/Learned fields): Fix B's
+// list decomposition applies ONLY to doc-type chunks via docLeadParagraph —
+// tieredTextFromSections never sets PrimaryUnits at all.
+func TestExtractAnswerText_MemSaveChunkHasNoPrimaryUnits(t *testing.T) {
+	content := "**What**: Fixed a crash in checkout.\n**Why**: A customer reported it.\n" +
+		"**Where**: internal/checkout/handler.go\n**Learned**: Must validate the cart first."
+	obs := store.Observation{Content: content, Type: "bugfix"}
+	got, ok := ExtractAnswerText(obs)
+	if !ok {
+		t.Fatalf("ExtractAnswerText(%q) ok = false, want true", content)
+	}
+	if got.PrimaryUnits != nil {
+		t.Errorf("PrimaryUnits = %+v, want nil for a mem_save-shaped chunk", got.PrimaryUnits)
+	}
+}
+
 func srWithContent(id int64, syncID, typ, content string) store.SearchResult {
 	return store.SearchResult{
 		Observation: store.Observation{ID: id, SyncID: syncID, Type: typ, Title: "t" + syncID, Content: content},
@@ -279,6 +407,109 @@ func TestAssembleAnswerContext_DocChunkLeadParagraphFitsMoreChunksInBudget(t *te
 	}
 	if strings.Contains(got.Context, "second paragraph of unrelated architecture prose") {
 		t.Errorf("AssembleAnswerContext.Context = %q, must NOT contain the first doc's second paragraph (Primary tier should have excluded it)", got.Context)
+	}
+}
+
+// TestAssembleAnswerContext_ListUnitsPlacedIndependentlySkipNotAbort is the
+// direct regression test for Fix B (2026-08-15) at the assembly level: the
+// measured live-store bug had a 6-bullet README "Features" section skipped
+// ENTIRELY because its combined Primary (all bullets, all-or-nothing)
+// didn't fit the leftover budget — even though one individual bullet easily
+// would have. With PrimaryUnits, an oversized bullet in the MIDDLE of the
+// list must be skipped (skip-not-abort, same rule as the per-chunk case)
+// while a smaller bullet AFTER it still gets placed, and no fragment of the
+// skipped bullet ever appears in the output.
+func TestAssembleAnswerContext_ListUnitsPlacedIndependentlySkipNotAbort(t *testing.T) {
+	header := "Document: omnia\nSection: Features\n\n"
+	item0 := "- Short first bullet fits easily."
+	item1 := "- " + strings.Repeat("x", 200) // far too big for the remaining budget
+	item2 := "- Small third bullet also fits."
+	content := header + item0 + "\n" + item1 + "\n" + item2 + "\n\nKeywords: features, omnia"
+
+	results := []store.SearchResult{srWithContent(1, "obs-features", "doc", content)}
+
+	// Budget fits header+item0 plus item2, with a little slack, but NOT the
+	// oversized item1 and NOT the chunk's whole Full tier (which includes
+	// item1 verbatim).
+	firstUnitSize := utf8.RuneCountInString(strings.TrimSpace(header + item0))
+	budget := firstUnitSize + 1 /* join separator */ + utf8.RuneCountInString(item2) + 5
+
+	got := AssembleAnswerContext(results, budget)
+	if len(got.Sources) != 1 || got.Sources[0].SyncID != "obs-features" {
+		t.Fatalf("AssembleAnswerContext sources = %+v, want exactly [obs-features]", got.Sources)
+	}
+	if !strings.Contains(got.Context, "Short first bullet fits easily") {
+		t.Errorf("AssembleAnswerContext.Context = %q, want the first bullet (fits with the header)", got.Context)
+	}
+	if !strings.Contains(got.Context, "Small third bullet also fits") {
+		t.Errorf("AssembleAnswerContext.Context = %q, want the third bullet placed after skipping the oversized middle one (skip-not-abort)", got.Context)
+	}
+	if strings.ContainsRune(got.Context, 'x') {
+		t.Errorf("AssembleAnswerContext.Context = %q, must not contain any fragment of the skipped oversized bullet — a unit is placed whole or not at all, never truncated", got.Context)
+	}
+}
+
+// TestAssembleAnswerContext_ListUnitsUpgradeToFullWhenLeftoverBudgetAllows
+// confirms Pass 2 composes correctly with a chunk that Pass 1 only
+// partially placed via PrimaryUnits: with enough leftover budget, the
+// partially-placed bullets are replaced by the chunk's whole Full tier
+// (same upgrade rule Pass 2 already applies to non-list chunks).
+func TestAssembleAnswerContext_ListUnitsUpgradeToFullWhenLeftoverBudgetAllows(t *testing.T) {
+	header := "Document: omnia\nSection: Features\n\n"
+	item0 := "- First bullet."
+	item1 := "- Second bullet."
+	content := header + item0 + "\n" + item1 + "\n\nKeywords: features, omnia"
+
+	results := []store.SearchResult{srWithContent(1, "obs-features", "doc", content)}
+
+	// Generous budget: the whole chunk (Full tier) fits comfortably.
+	got := AssembleAnswerContext(results, 500)
+	if len(got.Sources) != 1 {
+		t.Fatalf("AssembleAnswerContext sources = %+v, want exactly 1", got.Sources)
+	}
+	if !strings.Contains(got.Context, "Keywords: features, omnia") {
+		t.Errorf("AssembleAnswerContext.Context = %q, want the Full tier (including the Keywords line, which is not part of any PrimaryUnits entry) once leftover budget allows the upgrade", got.Context)
+	}
+}
+
+// TestAssembleAnswerContext_ListHeaderTravelsWithFirstUnitActuallyPlaced is
+// the direct regression test for the follow-up fix (2026-08-15, this
+// measurement): the chunk header used to be statically baked into
+// PrimaryUnits[0]. When unit 0 didn't fit the remaining budget but a LATER
+// unit of the same chunk did (Pass 1 places units independently,
+// skip-not-abort per unit), that later unit used to get placed WITHOUT the
+// header, undercutting the whole point of carrying it — the header must
+// travel with whichever unit actually makes it into the assembled context,
+// not with a unit that never got placed at all.
+func TestAssembleAnswerContext_ListHeaderTravelsWithFirstUnitActuallyPlaced(t *testing.T) {
+	header := "Document: omnia\nSection: Notes\n\n"
+	item0 := "- " + strings.Repeat("z", 300) // too big to place even bare, header or not
+	item1 := "- Second bullet is small enough to fit alongside the header."
+	content := header + item0 + "\n" + item1 + "\n\nKeywords: notes, omnia"
+
+	results := []store.SearchResult{srWithContent(1, "obs-notes", "doc", content)}
+
+	// Budget fits header+item1 with a little slack, but is well under item0
+	// alone (bare, no header) — forcing item0 to be skipped and item1 to be
+	// the first unit of this chunk that actually gets placed.
+	headerPlusItem1 := utf8.RuneCountInString(strings.TrimSpace(header + item1))
+	budget := headerPlusItem1 + 10
+	if item0Size := utf8.RuneCountInString(item0); budget >= item0Size {
+		t.Fatalf("test fixture sizing is wrong: budget %d must be LESS than item0 alone (%d) to exercise the fallback", budget, item0Size)
+	}
+
+	got := AssembleAnswerContext(results, budget)
+	if len(got.Sources) != 1 || got.Sources[0].SyncID != "obs-notes" {
+		t.Fatalf("AssembleAnswerContext sources = %+v, want exactly [obs-notes]", got.Sources)
+	}
+	if !strings.Contains(got.Context, "Document: omnia") || !strings.Contains(got.Context, "Section: Notes") {
+		t.Errorf("AssembleAnswerContext.Context = %q, want the chunk's header attached to whichever unit was actually placed (item1), not silently dropped", got.Context)
+	}
+	if !strings.Contains(got.Context, "Second bullet is small enough to fit alongside the header.") {
+		t.Errorf("AssembleAnswerContext.Context = %q, want the second (actually placed) bullet's text", got.Context)
+	}
+	if strings.ContainsRune(got.Context, 'z') {
+		t.Errorf("AssembleAnswerContext.Context = %q, must not contain any fragment of the skipped first bullet — the header must never attach to a unit that wasn't placed", got.Context)
 	}
 }
 

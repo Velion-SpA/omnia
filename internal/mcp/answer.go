@@ -63,19 +63,51 @@ package mcp
 //
 // Both fixes measurably increased the number of distinct sources GET
 // /answer surfaces per identity query (roughly 1 -> 3-7 on the live
-// store). Grounding STILL measures 0.000 after both fixes, and the
-// remaining cause is OUT OF THIS FILE'S SCOPE: the one README chunk that
-// literally contains all four identity corpus facts ("Features," a single
-// undivided bullet list with no internal paragraph breaks — so its OWN
-// Primary tier alone runs ~1400-1500 chars, close to the whole budget)
-// either does not rank inside the retrieval candidate window at all for
-// several query phrasings, or ranks around position 9 of 10-25 — behind
-// enough other extraction-successful candidates that no assembly ordering
-// strategy can be expected to reliably fit it. This is a retrieval/ranking
-// problem (RankPipeline's scoring, type-lens, or intent-routing for
-// identity-classified queries — none of which this file owns), not an
-// assembly one; see the live diagnosis this doc comment summarizes for the
-// full per-query evidence trail.
+// store). Grounding STILL measured 0.000 after both fixes for two of the
+// eight identity cases (identity-storage-es/en) — the rest of the identity
+// suite's residual loss is retrieval/ranking (candidates never surfaced in
+// the top-10 at all) or a corpus-metric artifact (an unrelated bugfix memory
+// happens to quote the facts in its own Keywords trailer), both genuinely
+// out of this file's scope. The identity-storage pair, however, WAS an
+// assembly bug, traced end to end: the README "Features" section — a single
+// undivided bullet list with no internal paragraph break, so
+// docLeadParagraph's old "first paragraph block" rule captured all six
+// bullets (~1142 chars) as one atomic, all-or-nothing Primary unit — ranked
+// around position 8-9 of 10 candidates for these two queries; by the time
+// breadth-first Pass 1 reached it, only ~130-380 chars of the 1400-char
+// budget remained, never enough for the whole block, even though the one
+// relevant bullet ("SQLite is the source of truth", ~140 chars) would
+// easily have fit alone.
+//
+// FIXED (2026-08-15, this measurement) two compounding causes:
+//
+//  1. Every repodoc doc-type chunk's raw content ends with two fenced
+//     ingestion-provenance blocks (```repodoc-anchor and ```omnia-meta —
+//     blame SHA, content hash, timestamps; ~500 combined chars) that are
+//     never prose and never answer-bearing. stripDocIngestionMetadata now
+//     removes these COMPLETE fenced blocks (never a partial one) from both
+//     tiers before Primary/Full are computed — the same class of operation
+//     as excluding mem_save's Where/Learned fields from Primary: a defined
+//     structural boundary, not arbitrary truncation.
+//  2. When a doc chunk's lead paragraph is ENTIRELY a Markdown list (every
+//     line is either a new item's start or an indented continuation of the
+//     item above it), splitListItems now decomposes it into one
+//     independently-placeable unit per list item (continuation lines always
+//     stay with their own item — a unit is never split mid-bullet). See
+//     AnswerText.PrimaryUnits and AssembleAnswerContext's Pass 1 for how
+//     these units are placed: skip-not-abort PER ITEM, one level finer than
+//     the existing per-chunk skip-not-abort rule, so a single relevant
+//     bullet can fit and place even when the chunk's other five bullets
+//     cannot. Every other chunk shape (non-list doc chunks, mem_save/
+//     session_summary chunks) leaves PrimaryUnits nil/empty and is
+//     completely unaffected — this is strictly additive to the existing
+//     tiering, not a redesign of it.
+//
+// MEASURED effect on the conversational eval corpus, live store, --target
+// answer: see this repo's working-tree diff / PR description for the
+// before/after table this fix produced (identity-storage-es/en grounding,
+// plus delta/open_items held steady) — not duplicated here to avoid this
+// comment drifting out of sync with the next measurement.
 import (
 	"regexp"
 	"strings"
@@ -300,6 +332,36 @@ type AnswerText struct {
 	// complete extraction, same shape ExtractAnswerText returned before
 	// this file's tiering fix.
 	Full string
+	// PrimaryUnits, when non-empty, is Primary decomposed into
+	// independently-placeable pieces: one entry per Markdown list item, for
+	// a doc chunk whose lead paragraph is ENTIRELY a list (see
+	// splitListItems). nil/empty (the default, and the ONLY value for every
+	// non-list-doc chunk shape — mem_save, session_summary, and any doc
+	// chunk whose lead paragraph is ordinary prose) means "atomic" and
+	// preserves today's all-or-nothing Primary placement exactly —
+	// AssembleAnswerContext's Pass 1 only takes the finer-grained per-unit
+	// path when this is set. Units are bare list items — the header is NOT
+	// baked into any fixed index (see PrimaryUnitsHeader for why, and for
+	// where it actually gets attached). strings.Join(PrimaryUnits, "\n")
+	// reconstructs exactly Primary's text once PrimaryUnitsHeader is
+	// prepended to the text of whichever unit came first.
+	PrimaryUnits []string
+	// PrimaryUnitsHeader is the chunk's "Document: …\nSection: …" header
+	// (see docLeadParagraph), trimmed, carried alongside PrimaryUnits rather
+	// than baked into PrimaryUnits[0].
+	//
+	// EARLIER version of this fix statically attached the header to
+	// PrimaryUnits[0]. That broke when Pass 1's skip-not-abort placement
+	// (AssembleAnswerContext) skipped unit 0 for budget reasons but placed a
+	// LATER unit of the same chunk: the header traveled with unit 0, which
+	// never made it into the assembled context, so the unit that DID get
+	// placed carried no document/section context at all. Storing the header
+	// separately lets AssembleAnswerContext attach it to whichever unit ends
+	// up FIRST in placement order — the header rides with whatever actually
+	// gets included, never with a unit that got skipped.
+	//
+	// Empty string for every chunk shape where PrimaryUnits is nil/empty.
+	PrimaryUnitsHeader string
 }
 
 // tieredTextFromSections builds an AnswerText from extractLabeledSections'
@@ -350,15 +412,129 @@ func tieredTextFromSections(sections []labeledSection) AnswerText {
 // unit the What/Why split already uses for mem_save content — never a
 // mid-sentence cut, just a smaller complete unit — so more distinct doc
 // chunks now fit the same budget.
+//
+// EXTENDED (2026-08-15): the lead paragraph itself can still be one giant
+// atomic unit when it's a Markdown list with no internal blank line (the
+// README "Features" section — six bullets, ~1142 chars, no "\n\n" between
+// them). docLeadParagraph now also calls stripDocIngestionMetadata (drop
+// trailing repodoc-anchor/omnia-meta fences — never prose) and
+// splitListItems (decompose an all-list lead paragraph into
+// AnswerText.PrimaryUnits, one per bullet) — see both functions' own docs.
+// This function's OWN return shape (Primary/Full) is unchanged; it just also
+// populates PrimaryUnits when the list-decomposition rule applies.
 func docLeadParagraph(content string) AnswerText {
+	content = stripDocIngestionMetadata(content)
 	whole := strings.TrimSpace(content)
 	header := docChunkHeaderRE.FindString(content)
 	body := content[len(header):]
-	primary := whole
+	leadParagraph := body
 	if idx := strings.Index(body, "\n\n"); idx >= 0 {
-		primary = strings.TrimSpace(header + body[:idx])
+		leadParagraph = body[:idx]
 	}
-	return AnswerText{Primary: primary, Full: whole}
+	primary := strings.TrimSpace(header + leadParagraph)
+
+	items, ok := splitListItems(strings.TrimRight(leadParagraph, "\n"))
+	if !ok {
+		return AnswerText{Primary: primary, Full: whole}
+	}
+
+	// Bare items — the header is NOT baked into any fixed index here; see
+	// AnswerText.PrimaryUnitsHeader's doc for why AssembleAnswerContext, not
+	// this function, decides which placed unit it travels with.
+	units := make([]string, len(items))
+	for i, item := range items {
+		units[i] = strings.TrimSpace(item)
+	}
+	return AnswerText{
+		Primary:            primary,
+		Full:               whole,
+		PrimaryUnits:       units,
+		PrimaryUnitsHeader: strings.TrimSpace(header),
+	}
+}
+
+// docIngestionMetadataFenceRE matches a COMPLETE fenced code block whose
+// info-string is exactly "repodoc-anchor" or "omnia-meta" — the trailing
+// ingestion-provenance blocks repodoc's chunk builder
+// (internal/source/repodoc/repodoc.go) appends to every doc-type chunk's raw
+// content: blame SHA, content hash, and ingestion timestamps. This is pure
+// provenance, never prose, and never answer-bearing — see the package doc
+// comment's "FIXED (2026-08-15)" section for the measurement that motivated
+// stripping it.
+//
+// Anchored to require the closing "```" on its own line right after the
+// opening fence's info-string line, so this only ever matches a COMPLETE
+// block — a truncated or malformed fence (missing its closer) is left
+// alone rather than partially removed, keeping the "never ship a fragment"
+// invariant intact even for this new cut boundary.
+var docIngestionMetadataFenceRE = regexp.MustCompile(
+	"(?s)```(?:repodoc-anchor|omnia-meta)\n.*?\n```\n?",
+)
+
+// stripDocIngestionMetadata removes every complete repodoc-anchor/omnia-meta
+// fenced block from content and trims the trailing blank line(s) their
+// removal leaves behind. Applied before Primary/Full are computed so
+// neither tier ever carries ingestion provenance — see
+// docIngestionMetadataFenceRE's own doc.
+func stripDocIngestionMetadata(content string) string {
+	return strings.TrimRight(docIngestionMetadataFenceRE.ReplaceAllString(content, ""), "\n")
+}
+
+// listItemStartRE matches the first line of a Markdown list item: an
+// unordered marker (-, *, +) or an ordered marker (digits then "." or ")"),
+// each followed by required whitespace before the item's own text. Used by
+// splitListItems to find item boundaries within a lead paragraph that is
+// entirely a list.
+var listItemStartRE = regexp.MustCompile(`^\s*(?:[-*+]\s|\d+[.)]\s)`)
+
+// splitListItems decomposes paragraph into one string per Markdown list
+// item — continuation lines included, so a single bullet's own wrapped
+// lines are never separated from it — IF AND ONLY IF paragraph consists
+// ENTIRELY of list items: every line is either a new item's start
+// (listItemStartRE) or an indented continuation line of the item above it.
+// Returns (nil, false) for anything else (plain prose, a heading, a list
+// mixed with non-list lines, or a "list" of exactly one item with nothing
+// to decompose) — callers must fall back to treating the whole paragraph as
+// one atomic unit, exactly as before this fix existed.
+//
+// This is the structural boundary behind AnswerText.PrimaryUnits — see its
+// doc and the package doc comment's "FIXED (2026-08-15)" section for the
+// measured bug (a 6-bullet README section, ~1142 chars, placed as one
+// all-or-nothing unit that never fit the leftover budget) this exists to
+// fix.
+func splitListItems(paragraph string) ([]string, bool) {
+	lines := strings.Split(paragraph, "\n")
+	if len(lines) == 0 || !listItemStartRE.MatchString(lines[0]) {
+		return nil, false
+	}
+
+	var items []string
+	var current []string
+	for _, line := range lines {
+		if listItemStartRE.MatchString(line) {
+			if current != nil {
+				items = append(items, strings.Join(current, "\n"))
+			}
+			current = []string{line}
+			continue
+		}
+		// Not a new item's start: only a legal continuation of the item
+		// above if it's indented. An unindented non-item line means this
+		// paragraph is NOT entirely a list — bail out.
+		if current == nil || line == "" || (line[0] != ' ' && line[0] != '\t') {
+			return nil, false
+		}
+		current = append(current, line)
+	}
+	if current != nil {
+		items = append(items, strings.Join(current, "\n"))
+	}
+	if len(items) < 2 {
+		// A single item has nothing to decompose into — treat it the same
+		// as any other atomic paragraph.
+		return nil, false
+	}
+	return items, true
 }
 
 // ExtractAnswerText returns the answer-shaped text obs.Content actually
@@ -480,8 +656,58 @@ func AssembleAnswerContext(results []store.SearchResult, maxChars int) AnswerAss
 	placedText := make([]string, 0, len(chunks))
 	used := 0
 
-	// Pass 1 (breadth): Primary tier only, skip-not-abort.
+	// Pass 1 (breadth): Primary tier only, skip-not-abort. A chunk with
+	// non-empty PrimaryUnits (see AnswerText's own doc) is placed one level
+	// finer: each list item is tried independently, in its own original
+	// order, skip-not-abort PER ITEM — so a chunk whose combined Primary is
+	// too big can still contribute the one item that actually fits, instead
+	// of being skipped whole. A unit is never itself split; the finer grain
+	// is "one list item," not "one character."
+	//
+	// The chunk's header (PrimaryUnitsHeader) travels with whichever unit
+	// ends up FIRST in placement order, not statically with index 0 (see
+	// PrimaryUnitsHeader's own doc for the bug this fixes): once
+	// placedUnits is non-empty for this chunk, the header has already been
+	// tried (successfully or not) and is never attempted again. The attempt
+	// is best-effort, not a second fit gate that can skip an otherwise-
+	// fitting unit — this chunk's citation is recorded independently in
+	// AnswerAssembly.Sources (added once per placed chunk below, regardless
+	// of which unit(s) made it in), so the inline header is purely a
+	// readability aid for the assembled Context text, not the thing that
+	// makes a placed unit's source traceable. A unit whose header doesn't
+	// fit is therefore placed bare rather than skipped.
 	for i, c := range chunks {
+		if len(c.text.PrimaryUnits) > 0 {
+			var placedUnits []string
+			for _, unit := range c.text.PrimaryUnits {
+				candidate := unit
+				if len(placedUnits) == 0 && c.text.PrimaryUnitsHeader != "" {
+					withHeader := strings.TrimSpace(c.text.PrimaryUnitsHeader + "\n\n" + unit)
+					if used+utf8.RuneCountInString(withHeader) <= maxChars {
+						candidate = withHeader
+					}
+					// else: header+unit doesn't fit — fall back to the bare
+					// unit below; the header is dropped for this chunk (see
+					// this loop's own doc for why that's safe).
+				}
+				size := utf8.RuneCountInString(candidate)
+				if len(placedUnits) > 0 {
+					size++ // "\n" separator joining this unit to units already placed for this chunk
+				}
+				if used+size > maxChars {
+					continue
+				}
+				placedUnits = append(placedUnits, candidate)
+				used += size
+			}
+			if len(placedUnits) == 0 {
+				continue
+			}
+			placedIdx = append(placedIdx, i)
+			placedText = append(placedText, strings.Join(placedUnits, "\n"))
+			continue
+		}
+
 		size := utf8.RuneCountInString(c.text.Primary)
 		if used+size > maxChars {
 			continue
@@ -496,7 +722,13 @@ func AssembleAnswerContext(results []store.SearchResult, maxChars int) AnswerAss
 
 	// Pass 2 (depth): upgrade Primary -> Full with leftover budget, in the
 	// same rank order pass 1 placed them in (== candidates' original rank
-	// order, since pass 1 never reorders).
+	// order, since pass 1 never reorders). This composes correctly with a
+	// chunk that pass 1 only partially placed via PrimaryUnits: placedText[i]
+	// already holds whatever subset of units fit (not necessarily the whole
+	// Primary), delta is computed against that ACTUAL placed size (not
+	// against the full Primary), and if the chunk's whole Full tier now fits
+	// in leftover budget it replaces the partial bullets outright — no
+	// separate per-unit upgrade path needed.
 	for i, ci := range placedIdx {
 		full := chunks[ci].text.Full
 		if full == placedText[i] {
