@@ -50,17 +50,20 @@ type ConversationalCaseResult struct {
 
 	// FalseRefusal is P3's OTHER failure mode, the mirror image of
 	// HonestRefusal: for identity/status cases, true when the fetcher
-	// reported Confidence "none" despite the corpus guaranteeing real
-	// evidence exists for that case (every non-absence ConversationalCase
-	// requires a non-empty ExpectedFact by construction — see
-	// validateConversationalCases). "A memory system that says 'no sé' when
-	// it does know is a worse product than one that guesses" (P3's own
-	// wording) — false_confidence (HonestRefusal's mirror) and
-	// false_refusal are the two directions that single sentence asks this
-	// harness to measure. nil for every kind except identity/status, AND
-	// nil for those two kinds whenever the fetcher supplied no Confidence
-	// signal at all (RetrievedCase.Confidence == "" — --target
-	// inprocess/http have no such signal to score).
+	// reported Confidence "none" OR "off_topic" despite the corpus
+	// guaranteeing real evidence exists for that case (every non-absence
+	// ConversationalCase requires a non-empty ExpectedFact by construction
+	// — see validateConversationalCases). Both values are refusal-shaped
+	// from the consumer's perspective: "no tengo nada sobre eso" (none) and
+	// "eso está fuera de lo que sé" (off_topic) both tell an identity/status
+	// asker the system found nothing usable, when in fact it did.
+	// "A memory system that says 'no sé' when it does know is a worse
+	// product than one that guesses" (P3's own wording) — false_confidence
+	// (HonestRefusal's mirror) and false_refusal are the two directions
+	// that single sentence asks this harness to measure. nil for every kind
+	// except identity/status, AND nil for those two kinds whenever the
+	// fetcher supplied no Confidence signal at all (RetrievedCase.Confidence
+	// == "" — --target inprocess/http have no such signal to score).
 	FalseRefusal *bool
 }
 
@@ -92,7 +95,7 @@ func ScoreConversationalCase(c ConversationalCase, rc RetrievedCase) (Conversati
 	// and an unset field must read as "unmeasured," not "scored zero" (see
 	// FalseRefusal's own doc).
 	if (c.Kind == KindIdentity || c.Kind == KindStatus) && rc.Confidence != "" {
-		falseRefusal := rc.Confidence == "none"
+		falseRefusal := rc.Confidence == confidenceNone || rc.Confidence == confidenceOffTopic
 		result.FalseRefusal = &falseRefusal
 	}
 	return result, nil
@@ -100,17 +103,19 @@ func ScoreConversationalCase(c ConversationalCase, rc RetrievedCase) (Conversati
 
 // scoreAbsenceRefusal decides an absence case's honest-refusal verdict.
 // When the fetcher reported an explicit Confidence (P3's --target answer,
-// via GET /answer's own calibrated signal), "none" is used DIRECTLY — that
-// is the exact contract P3 promises ("confidence: 'none' counts as an
-// honest refusal"), and re-deriving it from presence/absence of retrieved
-// text would silently re-introduce a second, uncalibrated floor exactly
-// like the one ScoreAbsence's own doc warns against. Fetchers with no
-// confidence signal (--target inprocess/http, which predate P3 and measure
-// the retrieval PATHS' raw honesty rather than the endpoint's calibrated
-// one) fall back to ScoreAbsence's presence-based check, unchanged.
+// via GET /answer's own calibrated signal), "none" OR "off_topic" is used
+// DIRECTLY — for an absence case, both values mean the endpoint correctly
+// did not confidently hand back irrelevant or nonexistent evidence, so both
+// count as an honest refusal. Re-deriving this from presence/absence of
+// retrieved text would silently re-introduce a second, uncalibrated floor
+// exactly like the one ScoreAbsence's own doc warns against. Fetchers with
+// no confidence signal (--target inprocess/http, which predate P3 and
+// measure the retrieval PATHS' raw honesty rather than the endpoint's
+// calibrated one) fall back to ScoreAbsence's presence-based check,
+// unchanged.
 func scoreAbsenceRefusal(rc RetrievedCase) bool {
 	if rc.Confidence != "" {
-		return rc.Confidence == confidenceNone
+		return rc.Confidence == confidenceNone || rc.Confidence == confidenceOffTopic
 	}
 	return ScoreAbsence(rc)
 }
@@ -122,6 +127,11 @@ func scoreAbsenceRefusal(rc RetrievedCase) bool {
 // eval.go) already uses, applied here because internal/eval must stay free
 // of a dependency on the mcp package it is busy evaluating.
 const confidenceNone = "none"
+
+// confidenceOffTopic mirrors internal/mcp.AnswerConfidenceOffTopic's string
+// value ("off_topic") — same cross-package duplicate-and-document
+// convention confidenceNone already uses.
+const confidenceOffTopic = "off_topic"
 
 // ScoreAbsence implements requirement 3's inverted scoring: an absence case
 // PASSES (returns true) when retrieval returned NOTHING, and FAILS (returns

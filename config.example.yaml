@@ -249,24 +249,20 @@ backfill_days: 30
 # pre-existing behavior to preserve, so there is no "off by default" gate
 # here.
 #
-# none_score_floor/confidence_threshold are a TWO-FLOOR pair over the top
-# result's raw RRF fusion score: below none_score_floor -> confidence
-# "none", below confidence_threshold -> "low", else "high" (subject to other
-# structural low-triggers). MEASURED (2026-08-14), full grid swept against
-# the live store, `omnia eval --profile conversational --target answer`:
-# NO (floorA, floorB) pair clears both P3 targets simultaneously —
-# false_refusal (identity/status, target <=0.05) and false_confidence
-# (absence, target <=0.1) trade off directly against each other, because
-# the absence class's score range sits almost entirely INSIDE the identity/
-# status range on this store (RRF fusion score is a rank-position
-# combinator, not a magnitude signal — it does not separate "found the
-# right answer" from "found something vaguely similar"). See
+# semantic_cosine_floor gates confidence "off_topic": below this floor, the
+# top result's raw semantic cosine similarity says retrieval found content
+# that isn't about the asked question. MEASURED (2026-08-14, engram obs
+# #2618), live store: identity questions range [0.6371, 0.7454], status
+# [0.4362, 0.7443]. The absence class is BIMODAL — genuinely off-topic
+# questions cluster at [0.2963, 0.3826]; false premises phrased in the
+# store's own vocabulary (e.g. "is Omnia a GitLab CLI") cluster at
+# [0.5687, 0.7115], ABOVE the lowest real identity question. 0.55 sits
+# between the two off-topic clusters: it catches the low cluster cleanly
+# and KNOWINGLY does not reach the high cluster — that is the documented
+# limit of a similarity signal (detecting a false premise is an entailment
+# problem, not a similarity-threshold one), not a tuning gap. See
 # AnswerConfig's own doc comment (internal/config/config.go) for the full
-# 10-point grid. Defaults below (0, 0 — both floors disabled) favor the
-# plan's own stated priority ("a memory system that says 'no sé' when it
-# does know is a worse product than one that guesses") at the cost of
-# false_confidence=1.000 — documented, not hidden.
+# derivation.
 # answer:
-#   max_chars: 1400            # default: Hermes' own documented response budget
-#   none_score_floor: 0        # floor A — see AnswerConfig's doc for the full grid
-#   confidence_threshold: 0    # floor B — does not move either target metric alone
+#   max_chars: 1400              # default: Hermes' own documented response budget
+#   semantic_cosine_floor: 0.55  # see AnswerConfig's doc for the full measurement

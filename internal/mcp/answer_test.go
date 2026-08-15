@@ -305,108 +305,113 @@ func TestAssembleAnswerContext_SourcesCiteSyncIDNeverIntegerID(t *testing.T) {
 	}
 }
 
-// TestClassifyAnswerConfidence covers the two-floor design (floorA=none,
-// floorB=low) that replaced the plan's original single-threshold-plus-
-// relaxation-trigger design. See ClassifyAnswerConfidence's own doc comment
-// for the measured reason both the original design AND a naive top-score
-// floor both fail to clear P3's targets simultaneously on the live corpus —
-// these tests cover the FUNCTION's logic in isolation, not corpus-level
-// pass/fail.
+// TestClassifyAnswerConfidence covers the semantic-cosine-floor design
+// (engram obs #2618) that replaced the post-fusion RRF two-floor design
+// (engram obs #2585). See ClassifyAnswerConfidence's own doc comment for the
+// measurement behind semanticFloor's default and for what off_topic can and
+// cannot detect — these tests cover the FUNCTION's logic in isolation, not
+// corpus-level pass/fail.
 func TestClassifyAnswerConfidence(t *testing.T) {
 	tests := []struct {
-		name           string
-		sig            AnswerConfidenceSignals
-		floorA, floorB float64
-		want           AnswerConfidence
+		name          string
+		sig           AnswerConfidenceSignals
+		semanticFloor float64
+		want          AnswerConfidence
 	}{
 		{
-			name:   "zero hits is none regardless of score",
-			sig:    AnswerConfidenceSignals{HitCount: 0, TopScore: 1, HasTopScore: true},
-			floorA: 0.01, floorB: 0.03,
-			want: AnswerConfidenceNone,
+			name:          "zero hits is none regardless of semantic score",
+			sig:           AnswerConfidenceSignals{HitCount: 0, TopSemanticScore: 1, HasTopSemanticScore: true},
+			semanticFloor: 0.55,
+			want:          AnswerConfidenceNone,
 		},
 		{
-			name:   "top score below floorA is none",
-			sig:    AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopScore: 0.005, HasTopScore: true},
-			floorA: 0.01, floorB: 0.03,
-			want: AnswerConfidenceNone,
+			name:          "top semantic score below floor is off_topic",
+			sig:           AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopSemanticScore: 0.30, HasTopSemanticScore: true},
+			semanticFloor: 0.55,
+			want:          AnswerConfidenceOffTopic,
 		},
 		{
-			name:   "top score between floorA and floorB is low",
-			sig:    AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopScore: 0.02, HasTopScore: true},
-			floorA: 0.01, floorB: 0.03,
-			want: AnswerConfidenceLow,
+			name:          "top semantic score exactly at the floor is NOT off_topic (strictly-below only) — falls through to high",
+			sig:           AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopSemanticScore: 0.55, HasTopSemanticScore: true},
+			semanticFloor: 0.55,
+			want:          AnswerConfidenceHigh,
 		},
 		{
-			name:   "top score at or above floorB, not degraded, has sources: high",
-			sig:    AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopScore: 0.03, HasTopScore: true},
-			floorA: 0.01, floorB: 0.03,
-			want: AnswerConfidenceHigh,
+			name:          "top semantic score above floor, sources assembled, nothing degraded: high",
+			sig:           AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopSemanticScore: 0.70, HasTopSemanticScore: true},
+			semanticFloor: 0.55,
+			want:          AnswerConfidenceHigh,
 		},
 		{
-			name:   "floorA <= 0 disables the none-by-score trigger",
-			sig:    AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopScore: 0.0001, HasTopScore: true},
-			floorA: 0, floorB: 0.03,
-			want: AnswerConfidenceLow, // still catches floorB
+			name:          "semanticFloor <= 0 disables the off_topic trigger even with a very low cosine",
+			sig:           AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopSemanticScore: 0.01, HasTopSemanticScore: true},
+			semanticFloor: 0,
+			want:          AnswerConfidenceHigh,
 		},
 		{
-			name:   "floorB <= 0 disables the low-by-score trigger too, given floorA also off",
-			sig:    AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, TopScore: 0.0001, HasTopScore: true},
-			floorA: 0, floorB: 0,
-			want: AnswerConfidenceHigh,
+			name:          "nil cosine + otherwise-clean signals never produces off_topic, falls through to high",
+			sig:           AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 3, HasTopSemanticScore: false},
+			semanticFloor: 0.55,
+			want:          AnswerConfidenceHigh,
+		},
+		{
+			name:          "nil cosine + SourcesAssembled 0 falls through to low, NOT off_topic",
+			sig:           AnswerConfidenceSignals{HitCount: 3, SourcesAssembled: 0, HasTopSemanticScore: false},
+			semanticFloor: 0.55,
+			want:          AnswerConfidenceLow,
+		},
+		{
+			name:          "hits exist but nothing survived extraction is low, never high",
+			sig:           AnswerConfidenceSignals{HitCount: 2, SourcesAssembled: 0, TopSemanticScore: 1, HasTopSemanticScore: true},
+			semanticFloor: 0.55,
+			want:          AnswerConfidenceLow,
+		},
+		{
+			name:          "recall degraded is low even with a strong semantic score",
+			sig:           AnswerConfidenceSignals{HitCount: 2, SourcesAssembled: 2, RecallDegraded: true, TopSemanticScore: 1, HasTopSemanticScore: true},
+			semanticFloor: 0.55,
+			want:          AnswerConfidenceLow,
 		},
 		{
 			name: "FTS ladder step 2 WITHOUT fusion demotes high to low (soft signal, describes the actual path)",
 			sig: AnswerConfidenceSignals{
-				HitCount: 3, SourcesAssembled: 3, TopScore: 1, HasTopScore: true,
+				HitCount: 3, SourcesAssembled: 3, TopSemanticScore: 1, HasTopSemanticScore: true,
 				FTSRelaxed: true, FTSRelaxStep: 2, FusionRan: false,
 			},
-			floorA: 0.01, floorB: 0.03,
-			want: AnswerConfidenceLow,
+			semanticFloor: 0.55,
+			want:          AnswerConfidenceLow,
 		},
 		{
 			name: "FTS ladder step 2 WITH fusion does NOT demote — the diagnostic describes a different path than the one that produced these results",
 			sig: AnswerConfidenceSignals{
-				HitCount: 3, SourcesAssembled: 3, TopScore: 1, HasTopScore: true,
+				HitCount: 3, SourcesAssembled: 3, TopSemanticScore: 1, HasTopSemanticScore: true,
 				FTSRelaxed: true, FTSRelaxStep: 2, FusionRan: true,
 			},
-			floorA: 0.01, floorB: 0.03,
-			want: AnswerConfidenceHigh,
+			semanticFloor: 0.55,
+			want:          AnswerConfidenceHigh,
 		},
 		{
 			name: "FTS ladder step 1 (stopwords only) never demotes, fusion or not",
 			sig: AnswerConfidenceSignals{
-				HitCount: 3, SourcesAssembled: 3, TopScore: 1, HasTopScore: true,
+				HitCount: 3, SourcesAssembled: 3, TopSemanticScore: 1, HasTopSemanticScore: true,
 				FTSRelaxed: true, FTSRelaxStep: 1, FusionRan: false,
 			},
-			floorA: 0.01, floorB: 0.03,
-			want: AnswerConfidenceHigh,
+			semanticFloor: 0.55,
+			want:          AnswerConfidenceHigh,
 		},
 		{
-			name:   "hits exist but nothing survived extraction is low, never high",
-			sig:    AnswerConfidenceSignals{HitCount: 2, SourcesAssembled: 0, TopScore: 1, HasTopScore: true},
-			floorA: 0.01, floorB: 0.03,
-			want: AnswerConfidenceLow,
-		},
-		{
-			name:   "recall degraded is low even with a strong score",
-			sig:    AnswerConfidenceSignals{HitCount: 2, SourcesAssembled: 2, RecallDegraded: true, TopScore: 1, HasTopScore: true},
-			floorA: 0.01, floorB: 0.03,
-			want: AnswerConfidenceLow,
-		},
-		{
-			name:   "no top score available (sentinel-only match) with sources assembled: high, floors skipped entirely",
-			sig:    AnswerConfidenceSignals{HitCount: 1, SourcesAssembled: 1, HasTopScore: false},
-			floorA: 0.01, floorB: 0.03,
-			want: AnswerConfidenceHigh,
+			name:          "no semantic score available (sentinel-only match) with sources assembled: high, off_topic branch skipped entirely",
+			sig:           AnswerConfidenceSignals{HitCount: 1, SourcesAssembled: 1, HasTopSemanticScore: false},
+			semanticFloor: 0.55,
+			want:          AnswerConfidenceHigh,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ClassifyAnswerConfidence(tt.sig, tt.floorA, tt.floorB)
+			got := ClassifyAnswerConfidence(tt.sig, tt.semanticFloor)
 			if got != tt.want {
-				t.Errorf("ClassifyAnswerConfidence(%+v, floorA=%v, floorB=%v) = %q, want %q", tt.sig, tt.floorA, tt.floorB, got, tt.want)
+				t.Errorf("ClassifyAnswerConfidence(%+v, semanticFloor=%v) = %q, want %q", tt.sig, tt.semanticFloor, got, tt.want)
 			}
 		})
 	}

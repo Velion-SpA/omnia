@@ -75,6 +75,77 @@ func TestScoreConversationalCase_AbsenceInvertsScoring(t *testing.T) {
 	}
 }
 
+// TestScoreConversationalCase_FalseRefusalTreatsOffTopicLikeNone covers the
+// widened FalseRefusal check: for identity/status cases, both "none" and
+// "off_topic" are refusal-shaped from the consumer's perspective, so both
+// must set FalseRefusal = true when the corpus guarantees real evidence.
+func TestScoreConversationalCase_FalseRefusalTreatsOffTopicLikeNone(t *testing.T) {
+	tests := []struct {
+		name       string
+		confidence string
+		wantFalse  bool
+	}{
+		{name: "none", confidence: "none", wantFalse: true},
+		{name: "off_topic", confidence: "off_topic", wantFalse: true},
+		{name: "high", confidence: "high", wantFalse: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := ConversationalCase{ID: "i1", Kind: KindIdentity, ExpectedFact: "Persistent memory for AI coding agents"}
+			result, err := ScoreConversationalCase(c, RetrievedCase{
+				Retrieved:  "Omnia: Persistent memory for AI coding agents, local-first.",
+				Confidence: tt.confidence,
+			})
+			if err != nil {
+				t.Fatalf("ScoreConversationalCase: %v", err)
+			}
+			if result.FalseRefusal == nil {
+				t.Fatalf("FalseRefusal must be non-nil when Confidence is set, got nil")
+			}
+			if *result.FalseRefusal != tt.wantFalse {
+				t.Errorf("Confidence %q: FalseRefusal = %v, want %v", tt.confidence, *result.FalseRefusal, tt.wantFalse)
+			}
+		})
+	}
+}
+
+// TestScoreConversationalCase_AbsenceHonestRefusalTreatsOffTopicLikeNone
+// covers scoreAbsenceRefusal's widened check: for absence cases, both
+// "none" and "off_topic" mean the endpoint correctly avoided confidently
+// returning irrelevant/nonexistent evidence, so both count as an honest
+// refusal (PASS). "high" must NOT.
+func TestScoreConversationalCase_AbsenceHonestRefusalTreatsOffTopicLikeNone(t *testing.T) {
+	tests := []struct {
+		name       string
+		confidence string
+		want       bool
+	}{
+		{name: "none", confidence: "none", want: true},
+		{name: "off_topic", confidence: "off_topic", want: true},
+		{name: "high", confidence: "high", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := ConversationalCase{ID: "a1", Kind: KindAbsence, ExpectAbsence: true}
+			result, err := ScoreConversationalCase(c, RetrievedCase{
+				Retrieved:  "Omnia is a command-line client for GitLab.",
+				Confidence: tt.confidence,
+			})
+			if err != nil {
+				t.Fatalf("ScoreConversationalCase: %v", err)
+			}
+			if result.HonestRefusal == nil {
+				t.Fatalf("HonestRefusal must be non-nil, got nil")
+			}
+			if *result.HonestRefusal != tt.want {
+				t.Errorf("Confidence %q: HonestRefusal = %v, want %v", tt.confidence, *result.HonestRefusal, tt.want)
+			}
+		})
+	}
+}
+
 // TestScoreAbsence_RetrievedTextAloneCountsAsConfident covers the edge case
 // where a fetcher returns prose but no ranked ID list (e.g. a single-hit
 // fetcher) — text alone is still "returned something", so it must still

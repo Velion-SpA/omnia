@@ -534,17 +534,16 @@ func crossProjectSearchEnvelope(ctx context.Context, s *store.Store, recallSvc *
 // crossProjectAnswer is buildHTTPAnswerFunc's (recall.go) P5 branch: runs
 // crossProjectSearch, then applies the SAME confidence-classification
 // shaping the single-project path applies (mcp.AssembleAnswerContext ->
-// mcp.ClassifyAnswerConfidence), reading topScore/hasTopScore off
-// crossProjectSearch's returned raw relevance map exactly like
-// buildHTTPAnswerFunc's own single-project loop does.
+// mcp.ClassifyAnswerConfidence), reading topSemanticScore/hasTopSemanticScore
+// off crossProjectSearch's returned raw semantic-cosine map exactly like
+// buildHTTPAnswerFunc's own single-project loop does — see
+// mcp.ClassifyAnswerConfidence's doc comment (internal/mcp/answer.go) for
+// what that signal can and cannot detect (engram obs #2618).
 func crossProjectAnswer(ctx context.Context, s *store.Store, recallSvc *recall.Service, appCfg *config.Config, readWatermarks mcp.WatermarkReader, query string, req server.AnswerRequest) (server.AnswerResponse, error) {
 	now := time.Now()
-	// semantic (crossProjectSearch's 4th return value) is deliberately
-	// discarded here — same rationale as buildHTTPAnswerFunc's
-	// single-project path (recall.go): wiring the per-hit cosine into
-	// confidence/ranking is later, gated consumer work, not this plumbing
-	// slice.
-	results, relevance, _, _, fusionRan, diversity, err := crossProjectSearch(ctx, s, recallSvc, appCfg, query, req.SearchOptions, req.AllProjects, req.Projects, now)
+	// semantic (crossProjectSearch's 4th return value) feeds
+	// ClassifyAnswerConfidence's `off_topic` trigger below.
+	results, _, _, semantic, fusionRan, diversity, err := crossProjectSearch(ctx, s, recallSvc, appCfg, query, req.SearchOptions, req.AllProjects, req.Projects, now)
 	if err != nil {
 		return server.AnswerResponse{}, err
 	}
@@ -561,28 +560,18 @@ func crossProjectAnswer(ctx context.Context, s *store.Store, recallSvc *recall.S
 	diag := answerFTSDiag(s, query, req.SearchOptions)
 	health := mcp.EvaluateRecallHealth(ctx, recallSvc != nil, readWatermarks)
 
-	var topScore float64
-	var hasTopScore bool
-	for _, r := range results {
-		if r.Rank == cliExactSentinelRank || r.SignatureMatch {
-			continue
-		}
-		if sc, ok := relevance[r.ID]; ok {
-			topScore, hasTopScore = sc, true
-		}
-		break
-	}
+	topSemanticScore, hasTopSemanticScore := bestSemanticScore(results, semantic)
 
 	confidence := mcp.ClassifyAnswerConfidence(mcp.AnswerConfidenceSignals{
-		HitCount:         len(results),
-		TopScore:         topScore,
-		HasTopScore:      hasTopScore,
-		FTSRelaxed:       diag.Relaxed,
-		FTSRelaxStep:     diag.Step,
-		FusionRan:        fusionRan,
-		RecallDegraded:   health.Degraded,
-		SourcesAssembled: len(assembled.Sources),
-	}, appCfg.Answer.NoneScoreFloor, appCfg.Answer.ConfidenceThreshold)
+		HitCount:            len(results),
+		TopSemanticScore:    topSemanticScore,
+		HasTopSemanticScore: hasTopSemanticScore,
+		FTSRelaxed:          diag.Relaxed,
+		FTSRelaxStep:        diag.Step,
+		FusionRan:           fusionRan,
+		RecallDegraded:      health.Degraded,
+		SourcesAssembled:    len(assembled.Sources),
+	}, appCfg.Answer.SemanticCosineFloor)
 
 	sources := make([]server.AnswerSource, 0, len(assembled.Sources))
 	for _, src := range assembled.Sources {

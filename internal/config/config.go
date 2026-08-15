@@ -136,61 +136,31 @@ type Config struct {
 	// Answer configures P3's GET /answer endpoint
 	// (docs/conversational-retrieval-plan.md "Answer-shaped context
 	// endpoint"): the char budget its assembled context is trimmed to, and
-	// the calibrated fused-score threshold ClassifyAnswerConfidence
-	// (internal/mcp/answer.go) uses for its `low` vs `high` split. Unlike
-	// every other gate in this file, GET /answer has no "off = pre-existing
-	// behavior" fallback to preserve (it is a brand-new endpoint, not a
-	// widened existing one) — Answer's fields are always read by
-	// buildHTTPAnswerFunc (cmd/omnia/recall.go), with applyDefaults filling
-	// both to a sane value when config.yaml never mentions `answer` at all.
+	// the semantic cosine floor ClassifyAnswerConfidence (internal/mcp/
+	// answer.go) uses for its `off_topic` trigger. Unlike every other gate
+	// in this file, GET /answer has no "off = pre-existing behavior"
+	// fallback to preserve (it is a brand-new endpoint, not a widened
+	// existing one) — Answer's fields are always read by buildHTTPAnswerFunc
+	// (cmd/omnia/recall.go), with applyDefaults filling both to a sane value
+	// when config.yaml never mentions `answer` at all.
 	Answer AnswerConfig `yaml:"answer"`
 }
 
 // AnswerConfig tunes P3's GET /answer endpoint.
 //
-// FULL MEASURED GRID (2026-08-14) for NoneScoreFloor's own doc's sweep,
-// live store, `omnia eval --profile conversational --target answer`.
-// ConfidenceThreshold ("floor B") does not move either target metric on its
-// own — both are computed from Confidence=="none" only, which NoneScoreFloor
-// ("floor A") alone controls — so this grid varies floor A (floor B held
-// equal to floor A, i.e. the `low` band is empty; a non-empty `low` band
-// changes neither refusal nor confidence, only how much of the corpus reads
-// `low` vs `high`, which the eval corpus does not currently score):
-//
-//	floorA  | refusal_id (<=0.05) | refusal_status (<=0.05) | confidence_absence (<=0.1)
-//	0.0000  |               0.000 |                   0.000 |                 1.000 (fail)
-//	0.0170  |               0.625 |                   0.100 |                 1.000 (fail)  [verified]
-//	0.0200  |               0.625 |                   0.100 |                 1.000 (fail)
-//	0.0268  |               0.750 |                   0.100 |                 1.000 (fail)
-//	0.0270  |               0.750 |                   0.100 |                 0.900 (fail)
-//	0.0280  |               0.875 |                   0.100 |                 0.700 (fail)
-//	0.0290  |               0.875 |                   0.200 |                 0.600 (fail)
-//	0.0300  |               0.875 |                   0.300 |                 0.200 (fail)  [verified]
-//	0.0310  |               1.000 |                   0.600 |                 0.100 (pass)
-//	0.0330  |               1.000 |                   1.000 |                 0.000 (pass)
-//
-// Row floorA=0.0000 was also verified directly against the live server.
-// CONCLUSION: no point on this grid clears both targets simultaneously —
-// this is not a missed value between grid points, it is a structural
-// property of the underlying signal (see NoneScoreFloor's own doc for why:
-// the absence class's score range sits almost entirely INSIDE the identity/
-// status range). Every floorA above 0 that touches the absence class AT ALL
-// also touches status worse (status refusal reaches >=0.1, double the
-// target, before absence confidence drops below 0.7) because several real
-// identity/status cases score AS LOW AS the lowest absence case. The
-// DEFAULT below (0, 0 — both floors disabled) is chosen because it is the
-// ONLY point that fully clears false_refusal, and the plan's own stated
-// priority is explicit: "a memory system that says 'no sé' when it does
-// know is a worse product than one that guesses" (docs/
-// conversational-retrieval-plan.md, P3). That priority is followed here,
-// not hidden: false_confidence=1.000 at this default means /answer's
-// `none` value is CURRENTLY ONLY reachable via HitCount==0 (a genuinely
-// empty result set) — the endpoint does not, at these defaults, distinguish
-// "found something irrelevant" from "found real evidence" the way its own
-// motivating GitLab-hallucination example needs it to. An operator who
-// wants the opposite trade should raise ConfidenceThreshold toward ~0.031
-// (clears false_confidence, at the cost of failing both refusal targets
-// worse than the plan's original single-threshold design did).
+// DESIGN (2026-08-14, engram obs #2618): SemanticCosineFloor gates
+// ClassifyAnswerConfidence's `off_topic` value using the top result's raw
+// semantic cosine similarity — a signal that carries real magnitude, unlike
+// the post-fusion RRF score the endpoint originally tried to gate on (see
+// engram obs #2585 / git history: that axis is a rank-position combinator
+// and was measured to not separate ANY of identity/status/absence on this
+// store). See SemanticCosineFloor's own field doc for the full measurement
+// this floor is derived from, and internal/mcp/answer.go's
+// AnswerConfidenceOffTopic / ClassifyAnswerConfidence doc comments for what
+// this signal can and (importantly) cannot detect — it separates genuinely
+// off-topic questions from on-topic ones; it does NOT and cannot detect a
+// false premise phrased in the store's own vocabulary, which is an
+// entailment problem, not a similarity-threshold problem.
 type AnswerConfig struct {
 	// MaxChars is the default answer-context char budget
 	// (AssembleAnswerContext's maxChars, internal/mcp/answer.go) when a
@@ -199,45 +169,32 @@ type AnswerConfig struct {
 	// operator who never touches this config key gets exactly the size the
 	// motivating consumer needs.
 	MaxChars int `yaml:"max_chars"`
-	// NoneScoreFloor ("floor A") and ConfidenceThreshold ("floor B", the
-	// original single-threshold field, kept under its original name/key)
-	// are the two-floor design ClassifyAnswerConfidence uses: HasTopScore &&
-	// TopScore < NoneScoreFloor -> `none`; < ConfidenceThreshold -> `low`;
-	// otherwise `high` (subject to the other structural low-triggers —
-	// SourcesAssembled==0, RecallDegraded — which still apply). Neither is
-	// the same quantity as Recall.StrongFloor/BaseFloor (those are semantic
-	// cosine-similarity floors gating what even ENTERS the fused result
-	// set; these are floors over the post-fusion RRF relevance score of
-	// whatever already got through).
+	// SemanticCosineFloor gates ClassifyAnswerConfidence's `off_topic` value
+	// (internal/mcp/answer.go): the top result's raw semantic cosine
+	// similarity below this floor means retrieval found content, but it
+	// isn't about the asked question.
 	//
-	// SUPERSEDED DESIGN, kept for the record: the plan originally used the
-	// FTS relaxation ladder (not a score floor) as the unconditional `none`
-	// trigger. MEASURED (2026-08-14) that design's two configurations
-	// against the live store, `omnia eval --profile conversational --target
-	// answer`, 3 runs each:
+	// MEASURED (2026-08-14, engram obs #2618), conversational eval corpus,
+	// live store: identity questions range [0.6371, 0.7454], status
+	// [0.4362, 0.7443]. The absence class is BIMODAL: genuinely off-topic
+	// questions (salary, an unrelated product's user count) cluster at
+	// [0.2963, 0.3826]; questions that are FALSE but phrased in the store's
+	// own vocabulary (does Omnia deploy on Kubernetes, is Omnia a GitLab
+	// CLI) cluster at [0.5687, 0.7115] — ABOVE the lowest real identity
+	// question. 0.55 sits between the two off-topic clusters: it cleanly
+	// separates the low cluster (genuinely unrelated content) while
+	// KNOWINGLY not reaching the high cluster (false premises in-vocabulary)
+	// — that is not a tuning gap, it is the documented limit of what a
+	// similarity signal can express (see AnswerConfidenceOffTopic's own doc
+	// in internal/mcp/answer.go). 0.55 is a floor chosen FROM this
+	// measurement, not a magic number independently tuned.
 	//
-	//	config                              | refusal id | refusal status | confidence absence
-	//	relaxation -> none unconditionally  |      0.250 |          0.800 |        0.100 (pass)
-	//	relaxation -> low when fusion ran   |      0.000 |          0.000 |        1.000 (fail)
-	//
-	// Neither passed both targets (refusal <=0.05, confidence <=0.1) —
-	// relaxation was the ONLY signal separating the absence class, and
-	// swinging it between "hard none trigger" and "soft low signal" just
-	// traded one failure mode for the exact mirror of the other.
-	//
-	// MEASURED (2026-08-14) the two-floor score-based redesign THIS field
-	// pair implements, sweeping (NoneScoreFloor, ConfidenceThreshold) jointly
-	// against the same corpus — see AnswerConfig's own doc for the full grid
-	// and cmd/omnia/recall.go's `answerFTSDiag`/ClassifyAnswerConfidence's
-	// doc comment for the root cause: the underlying signal (RRF fusion
-	// score) does not separate the classes in this store AT ALL — absence
-	// case scores [0.0268, 0.0313] sit almost entirely inside the identity/
-	// status range [0.0164, 0.0328], so no floor pair on this axis clears
-	// both targets simultaneously. This is a structural property of RRF
-	// (rank-position fusion, not magnitude), not a tuning failure — see the
-	// full grid and recommendation in AnswerConfig's doc comment.
-	NoneScoreFloor      float64 `yaml:"none_score_floor"`
-	ConfidenceThreshold float64 `yaml:"confidence_threshold"`
+	// 0 disables the off_topic trigger entirely (same "0 means off"
+	// convention the removed NoneScoreFloor/ConfidenceThreshold fused-score
+	// floors used) — SUPERSEDED, see git history / engram obs #2585 for why
+	// those were removed: the fused RRF score carries no usable magnitude on
+	// this axis and could never separate the classes.
+	SemanticCosineFloor float64 `yaml:"semantic_cosine_floor"`
 }
 
 // IntentRoutingConfig is P2's single gate. Unlike TokenBudgetConfig/
@@ -1243,24 +1200,33 @@ func applyDefaults(cfg *Config, data []byte) {
 	if cfg.Answer.MaxChars == 0 {
 		cfg.Answer.MaxChars = 1400
 	}
-	// NoneScoreFloor/ConfidenceThreshold: see AnswerConfig's own doc for the
-	// full measured grid. Summary: this axis (RRF fusion score) cannot
-	// separate the absence class from identity/status in this store — their
-	// score ranges overlap almost completely — so no (floorA, floorB) pair
-	// clears both P3 targets (refusal <=0.05, confidence <=0.1)
-	// simultaneously. These defaults are kept at the values that clear
-	// false_refusal (the plan's own stated priority: "a memory system that
-	// says 'no sé' when it does know is a worse product than one that
-	// guesses") while documenting, not hiding, that false_confidence fails
-	// at this setting. An operator who wants the opposite trade — favor
-	// false_confidence over false_refusal — should raise ConfidenceThreshold
-	// toward ~0.033 (this store's measured two-leg-agreement ceiling); see
-	// AnswerConfig's doc for that end of the grid.
-	if cfg.Answer.NoneScoreFloor == 0 {
-		cfg.Answer.NoneScoreFloor = 0
-	}
-	if cfg.Answer.ConfidenceThreshold == 0 {
-		cfg.Answer.ConfidenceThreshold = 0
+	// SemanticCosineFloor: 0.40, the boundary the live-store measurement
+	// actually supports (engram obs #2618) — see AnswerConfig's own field doc
+	// for the full per-kind numbers.
+	//
+	// 0.55 was the first value tried, taken from where the absence class's
+	// bimodal split appeared. It was measurably too aggressive: legitimate
+	// questions reach much lower than that, with rationale bottoming out at
+	// 0.4025, cross_project at 0.4053 and status at 0.4362 (top cosine over
+	// all returned results, project-scoped). At 0.55 both "¿cómo va Workly?"
+	// and "¿por qué elegimos SQLite?" were classified off_topic — refusing to
+	// answer questions the store answers well, which the plan names as the
+	// worse failure of the two.
+	//
+	// 0.40 sits in the gap between the four genuinely off-topic absence cases
+	// (0.296 / 0.322 / 0.333 / 0.383 — salary, paying users) and the lowest
+	// legitimate question (0.4025). It refuses nothing legitimate and catches
+	// exactly those four.
+	//
+	// That gap is 0.02 wide. This is a NARROW boundary, not a comfortable
+	// one, and it is measured on one store: an operator whose corpus has a
+	// different topical density should re-measure rather than trust it. It is
+	// also scope-dependent — unscoped, the same off-topic queries rise to
+	// 0.46-0.54 because unrelated projects' content muddies the maximum, and
+	// the separation collapses entirely. Treat this default as calibrated for
+	// project-scoped queries.
+	if cfg.Answer.SemanticCosineFloor == 0 {
+		cfg.Answer.SemanticCosineFloor = 0.40
 	}
 }
 

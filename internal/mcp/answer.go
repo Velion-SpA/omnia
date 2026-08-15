@@ -107,16 +107,62 @@ type AnswerSource struct {
 type AnswerConfidence string
 
 const (
-	// AnswerConfidenceNone means the caller should treat this as "no
-	// evidence found," not as a low-quality answer — Hermes' contract is to
-	// say "no tengo eso registrado" on this value rather than let its LLM
-	// fill the hole with a guess.
+	// AnswerConfidenceNone means retrieval returned literally nothing —
+	// HitCount == 0 (zero hits above the adaptive floor, or a genuinely
+	// empty FTS5 result set). Consumer-facing framing: "No tengo nada sobre
+	// eso."
+	//
+	// This is a NARROWER claim than the value used to make. The prior
+	// design tied `none` to a false-premise/absence detector built on the
+	// post-fusion RRF score (see ClassifyAnswerConfidence's history for why
+	// that axis was measured to carry no usable magnitude, engram obs
+	// #2585) — that overclaimed, and the wording this value used to justify
+	// ("no tengo eso registrado", implying the store was checked and found
+	// nothing ABOUT the topic) has been removed along with it. `none` now
+	// says exactly one thing: retrieval found zero results. It says nothing
+	// about whether the store has related-but-unretrieved content, and
+	// nothing about whether the question's premise is false — see
+	// AnswerConfidenceOffTopic for the (also limited) signal that now owns
+	// the "found something, but not about this" case.
 	AnswerConfidenceNone AnswerConfidence = "none"
+	// AnswerConfidenceOffTopic means retrieval returned results, but the
+	// top-ranked one's raw semantic cosine similarity is below the
+	// configured floor (config.AnswerConfig.SemanticCosineFloor) — the
+	// store has content, it just doesn't appear to be about this question.
+	// Consumer-facing framing: "Eso está fuera de lo que sé."
+	//
+	// MEASURED (2026-08-14, engram obs #2618), conversational eval corpus,
+	// live store: this reliably catches GENUINELY off-topic questions —
+	// salary and unrelated-product-usage questions measured top-hit cosine
+	// 0.2963-0.3826, cleanly below every identity ([0.6371, 0.7454]) and
+	// status ([0.4362, 0.7443]) case in the corpus.
+	//
+	// It does NOT, and structurally CANNOT, catch a false premise phrased
+	// in the store's own vocabulary. Concrete counter-example from the same
+	// measurement: "is Omnia a GitLab command-line client" (false — Omnia
+	// is not a GitLab CLI) scored top-hit cosine 0.691, ABOVE the lowest
+	// legitimate identity question in the corpus (0.6371). Cosine measures
+	// TOPICALITY — how much a question's embedding overlaps the embedding
+	// of what got retrieved — not ANSWERHOOD. A false claim built entirely
+	// out of the store's own vocabulary ("Omnia", "deploy", "Kubernetes")
+	// embeds close to the store's real content about deployment precisely
+	// BECAUSE it borrows that vocabulary; nothing about cosine similarity
+	// distinguishes "this text is relevant to the claim" from "this text
+	// confirms the claim." Detecting a false premise is an ENTAILMENT
+	// problem (does the retrieved evidence support or contradict the
+	// specific claim in the question), not a SIMILARITY problem — no
+	// embedding-distance threshold, on this axis or any other, resolves
+	// that. `off_topic` is a real, useful, narrower signal than the false-
+	// premise detector the endpoint originally aimed for; it must not be
+	// read as that detector.
+	AnswerConfidenceOffTopic AnswerConfidence = "off_topic"
 	// AnswerConfidenceLow means evidence exists but is weak, degraded, or
-	// (this file's own added rule) had nothing safely quotable in it.
+	// (this file's own added rule) had nothing safely quotable in it. It no
+	// longer overlaps AnswerConfidenceOffTopic's case — a top result below
+	// the semantic floor is classified off_topic, not low.
 	AnswerConfidenceLow AnswerConfidence = "low"
 	// AnswerConfidenceHigh means full-quality retrieval surfaced at least
-	// one strongly-scored, structurally-extractable source.
+	// one strongly-scored, structurally-extractable source. Unchanged.
 	AnswerConfidenceHigh AnswerConfidence = "high"
 )
 
@@ -485,15 +531,17 @@ type AnswerConfidenceSignals struct {
 	// AdaptiveFloor, or a plain empty FTS5 result set) is the first `none`
 	// trigger.
 	HitCount int
-	// TopScore is the top surviving result's un-normalized relevance —
-	// RRF fusion Score for the hybrid path, negated FTS5 bm25 Rank for the
-	// FTS5-only path (the SAME relevance map RankPipeline itself scores
-	// against, see rank_pipeline.go) — read BEFORE RankResults'
-	// recency/importance reweighting, matching "fused score" in the plan's
-	// own wording. Meaningless when HasTopScore is false (the sentinel/
-	// signature pre-emption lanes carry no relevance score).
-	TopScore    float64
-	HasTopScore bool
+	// TopSemanticScore is the top surviving result's raw semantic cosine
+	// similarity (recall.Result.SemanticScore, see cmd/omnia/recall.go's
+	// wiring) — NOT the fused RRF score (that axis, engram obs #2585,
+	// carries no usable magnitude). HasTopSemanticScore false means this
+	// result had NO cosine at all (23.1% of results, measured — arrived via
+	// the lexical leg alone, below AdaptiveFloor): that is a MISSING signal,
+	// not a low one, and must never be coerced to 0 or treated as evidence
+	// of off-topicality — see ClassifyAnswerConfidence's own doc for how
+	// this file handles that case.
+	TopSemanticScore    float64
+	HasTopSemanticScore bool
 	// FTSRelaxed/FTSRelaxStep mirror store.SearchDiag.Relaxed/Step for a
 	// dedicated lexical-only diagnostic query (see cmd/omnia/recall.go's
 	// answerFTSDiag). Read ONLY together with FusionRan below — see
@@ -534,67 +582,78 @@ type AnswerConfidenceSignals struct {
 }
 
 // ClassifyAnswerConfidence derives GET /answer's confidence value from
-// signals the retrieval pipeline already computes (P3's "Calibrated 'I
-// don't have this'" section) — never guessed, never LLM-scored.
+// signals the retrieval pipeline already computes — never guessed, never
+// LLM-scored.
 //
-// SUPERSEDES the plan's original single-threshold design (relaxation as an
-// unconditional `none` trigger). MEASURED (2026-08-14) over the live store,
-// `omnia eval --profile conversational --target answer`, 3 runs:
+// THIS DESIGN (2026-08-14, engram obs #2618) replaces the prior post-fusion
+// RRF-score two-floor design (engram obs #2585) with a floor over the top
+// result's raw SEMANTIC COSINE similarity (recall.Result.SemanticScore).
+// The RRF axis was measured to carry no usable magnitude at all — it is a
+// rank-position combinator (1/(k+rank) per leg), not a similarity score, so
+// it stays ~constant for any query where something ranks near the top of
+// both legs (nearly every query, in a store this size and topically
+// overlapping) — see git history for that measurement's full grid. Cosine
+// DOES carry real magnitude, and was measured directly against the
+// conversational eval corpus on the live store:
 //
-//	config                                    | refusal id | refusal status | confidence absence
-//	relaxation -> none unconditionally        |      0.250 |          0.800 |        0.100 (pass)
-//	relaxation -> low when FusionRan          |      0.000 |          0.000 |        1.000 (fail)
+//	identity  min=0.6371 max=0.7454 (n=8)
+//	status    min=0.4362 max=0.7443 (n=10)
+//	absence (n=10), top-hit cosine per case — BIMODAL:
+//	  genuinely off-topic (salary, unrelated product usage): 0.2963-0.3826
+//	  false premise, in-vocabulary (GitLab CLI, K8s deploy):  0.5687-0.7115
 //
-// Neither passed both targets — relaxation was the ONLY signal separating
-// the absence class, and it is too blunt in both directions. The natural
-// next idea, "gate on top-score strength instead," was tested directly by
-// pulling the top result's raw fusion score (GET /search?envelope=1&explain=1,
-// the `score_breakdown[id].fusion` field — the SAME quantity as TopScore
-// below) for all 28 identity/status/absence corpus cases against this live
-// store. It does NOT separate the classes: identity range [0.0164, 0.0306],
-// status range [0.0164, 0.0328], absence range [0.0268, 0.0313] — absence
-// sits almost entirely INSIDE the identity/status range, and several real
-// identity/status cases score BELOW every absence case (e.g.
-// identity-tagline-es 0.0164 vs. absence-gitlab-hallucination-es 0.0268).
-// No single floor, and no PAIR of floors on this axis, can cleanly split
-// them — this is not a calibration gap, it is that RRF fusion score
-// deliberately discards magnitude (it is a rank-position combinator, 1/(k+
-// rank) per leg) so it stays ~constant for any query where SOMETHING ranks
-// near the top of both legs, which nearly every query does in a store this
-// size and topically overlapping. See config.AnswerConfig's own doc for the
-// two-floor sweep this file's grid produced and the recommendation that
-// follows from it — TL;DR: floorA/floorB below still exist because a future
-// signal WITH real magnitude (e.g. raw semantic cosine similarity, not
-// currently surfaced per-item by this store's explain path) could use this
-// exact two-branch shape productively; they are NOT currently claimed to
-// clear both P3 targets simultaneously.
+// The off-topic cluster sits well below the identity/status range —
+// SemanticCosineFloor (config.AnswerConfig, default 0.55) is chosen to
+// separate it cleanly. The false-premise cluster does NOT separate from
+// identity/status — it overlaps them, because cosine measures TOPICALITY
+// (embedding overlap with the question) not ANSWERHOOD (does the retrieved
+// text actually support or refute the specific claim). That is a structural
+// limit of a similarity signal, not a threshold-tuning gap: no floor on
+// this axis, and no floor on any single-vector-similarity axis, can catch a
+// false claim built from the store's own vocabulary. See
+// AnswerConfidenceOffTopic's own doc for the concrete GitLab counter-example
+// and config.AnswerConfig.SemanticCosineFloor's doc for the full floor
+// derivation.
 //
-//   - none: HitCount == 0 (zero hits above the adaptive floor), OR
-//     HasTopScore && TopScore < floorA (noneFloor).
-//   - low: HasTopScore && TopScore < floorB (lowFloor) and >= floorA, OR
-//     nothing survived structural extraction into a citable source (this
-//     file's own added rule — see SourcesAssembled's doc: `high` must never
-//     describe an empty Context), OR RecallDegraded is true, OR (soft
+//   - none: HitCount == 0 (zero hits above the adaptive floor). This is now
+//     the ONLY meaning `none` carries — see AnswerConfidenceNone's own doc
+//     for why the prior wording overclaimed.
+//   - off_topic: HasTopSemanticScore && TopSemanticScore < semanticFloor
+//     (strictly below — a score exactly AT the floor is not off_topic).
+//     HasTopSemanticScore == false NEVER triggers this branch (see below).
+//   - low: nothing survived structural extraction into a citable source
+//     (this file's own added rule — see SourcesAssembled's doc: `high` must
+//     never describe an empty Context), OR RecallDegraded is true, OR (soft
 //     signal, see FusionRan's doc) the lexical relaxation ladder reached
 //     step 2 on a retrieval that did NOT use fusion (i.e. the diagnostic
 //     describes the actual path that produced these results).
 //   - high: otherwise.
 //
-// floorA <= 0 disables the none-by-score trigger; floorB <= 0 disables the
-// low-by-score trigger — same "0 means off" convention the single-threshold
-// version used, preserved for operators who want confidence driven purely
-// by the structural signals.
-func ClassifyAnswerConfidence(sig AnswerConfidenceSignals, floorA, floorB float64) AnswerConfidence {
+// semanticFloor <= 0 disables the off_topic trigger entirely — same "0
+// means off" convention the removed fused-score floors used.
+//
+// Nil-cosine rule (deliberate, tested explicitly): when HasTopSemanticScore
+// is false, the off_topic branch NEVER fires, regardless of semanticFloor —
+// it falls straight through to the normal low/high logic below, exactly as
+// if semanticFloor were disabled for this result. "Absence of evidence
+// about topicality is not evidence of off-topicality." This matters beyond
+// the single 23.1%-of-results case where one hit's cosine is missing: when
+// hybrid recall is unavailable at all (no recall.Service configured, or a
+// mid-query fallback to plain FTS5 — see recallOrFTSSearchWithRelevance),
+// EVERY result in that response has no cosine, because cosine is a
+// hybrid-recall byproduct with nothing to fall back to. Forcing a nil
+// cosine to `low` would therefore permanently cap the ENTIRE non-hybrid
+// operating mode at `low` — a much bigger behavior change than this task
+// scopes (it would make `high` unreachable any time embeddings are down or
+// unconfigured, independent of retrieval quality). Falling through instead
+// keeps non-hybrid mode exactly as capable as it was before this signal
+// existed: the off_topic axis just isn't evaluated for it.
+func ClassifyAnswerConfidence(sig AnswerConfidenceSignals, semanticFloor float64) AnswerConfidence {
 	if sig.HitCount == 0 {
 		return AnswerConfidenceNone
 	}
-	if sig.HasTopScore {
-		if floorA > 0 && sig.TopScore < floorA {
-			return AnswerConfidenceNone
-		}
-		if floorB > 0 && sig.TopScore < floorB {
-			return AnswerConfidenceLow
-		}
+	if semanticFloor > 0 && sig.HasTopSemanticScore && sig.TopSemanticScore < semanticFloor {
+		return AnswerConfidenceOffTopic
 	}
 	if sig.SourcesAssembled == 0 {
 		return AnswerConfidenceLow
@@ -603,17 +662,14 @@ func ClassifyAnswerConfidence(sig AnswerConfidenceSignals, floorA, floorB float6
 		return AnswerConfidenceLow
 	}
 	// Relaxation kept as a CONTRIBUTING signal (never a hard none/low
-	// trigger anymore — the score floors above own that job): it can only
-	// demote high->low, and only when fusion did NOT run, i.e. only when
-	// answerFTSDiag's lexical-only probe actually describes the retrieval
-	// path that produced these results. Under fusion, the probe measures a
-	// DIFFERENT path (see FusionRan's own doc) and is noise with respect to
-	// these specific results — applying it even as a soft cap there would
-	// reintroduce spurious `low` verdicts on genuinely strong fused hits for
-	// no evidential reason. Verified for this live store: fusion runs for
-	// essentially every corpus query (embeddings+recall+vector_index all
-	// enabled, Ollama reachable), so this branch is a rare-path safety net
-	// (embeddings outage, degraded fallback) rather than a live lever here.
+	// trigger — that is what the off_topic/none branches above own now): it
+	// can only demote high->low, and only when fusion did NOT run, i.e.
+	// only when answerFTSDiag's lexical-only probe actually describes the
+	// retrieval path that produced these results. Under fusion, the probe
+	// measures a DIFFERENT path (see FusionRan's own doc) and is noise with
+	// respect to these specific results — applying it even as a soft cap
+	// there would reintroduce spurious `low` verdicts on genuinely strong
+	// fused hits for no evidential reason.
 	if sig.FTSRelaxed && sig.FTSRelaxStep >= 2 && !sig.FusionRan {
 		return AnswerConfidenceLow
 	}

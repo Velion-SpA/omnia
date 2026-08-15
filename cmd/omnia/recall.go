@@ -136,6 +136,44 @@ func buildRecallServiceForCLI(s *store.Store, dataDir string) *recall.Service {
 	return buildRecallService(s, appCfg.Recall, appCfg.Embeddings, dataDir, appCfg.VecIndex.Enabled, appCfg.Encryption)
 }
 
+// bestSemanticScore returns the HIGHEST semantic cosine among results, and
+// whether any result had one at all.
+//
+// Deliberately the maximum, not the top-ranked result's. Both were tried; the
+// top-ranked-only version is measurably wrong. Results are ordered by FUSED
+// score, which is rank-derived and says nothing about topical closeness, so a
+// lexical-leg-only row — one that never cleared recall.AdaptiveFloor and
+// therefore carries NO cosine at all — can rank first and blind the caller to
+// every lower-ranked row that does have one. Measured on the live store: the
+// four genuinely off-topic absence cases all classified `high` because the
+// rank-1 hit had a nil cosine, while the real best cosine for those same
+// queries was 0.296-0.543, comfortably under the 0.55 off-topic floor.
+//
+// The maximum is also the semantically correct question. The caller is asking
+// "is ANYTHING we retrieved actually about this topic?", not "is the single
+// best-fused row about this topic?" — one on-topic result anywhere in the set
+// is enough to make the query on-topic.
+//
+// Pre-empted rows (topic_key sentinel, signature match) are skipped: their
+// relevance is an outlier by construction, the same exclusion RankResults and
+// MinMaxNormalizeRelevance both document.
+func bestSemanticScore(results []store.SearchResult, semantic map[int64]float64) (float64, bool) {
+	best, found := 0.0, false
+	for _, r := range results {
+		if r.Rank == cliExactSentinelRank || r.SignatureMatch {
+			continue
+		}
+		sc, ok := semantic[r.ID]
+		if !ok {
+			continue
+		}
+		if !found || sc > best {
+			best, found = sc, true
+		}
+	}
+	return best, found
+}
+
 // recallOrFTSSearch is the shared search-routing seam between `omnia search`
 // (cmdSearch) and `omnia serve`'s HTTP GET /search (internal/server.Server,
 // wired via SetSearch in cmdServe) — issue #86's "avoid divergence" ask.
@@ -608,13 +646,11 @@ func buildHTTPAnswerFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 			return crossProjectAnswer(ctx, s, recallSvc, appCfg, readWatermarks, query, req)
 		}
 
-		// semantic (the 3rd return value) is deliberately discarded here:
-		// wiring it into GET /answer's confidence classification is
-		// consumer work for a later slice, gated on whether the per-hit
-		// cosine's cross-query magnitude actually separates absence from
-		// evidence over the real corpus (engram obs #2585) — this phase is
-		// plumbing only, no ranking/confidence behavior change.
-		results, relevance, _, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
+		// semantic (the 3rd return value) feeds ClassifyAnswerConfidence's
+		// `off_topic` trigger below — see that function's own doc comment
+		// (internal/mcp/answer.go) for what the per-hit cosine can and
+		// cannot detect (engram obs #2618).
+		results, relevance, semantic, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
 		if err != nil {
 			return server.AnswerResponse{}, err
 		}
@@ -661,28 +697,18 @@ func buildHTTPAnswerFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 		diag := answerFTSDiag(s, query, req.SearchOptions)
 		health := mcp.EvaluateRecallHealth(ctx, recallSvc != nil, readWatermarks)
 
-		var topScore float64
-		var hasTopScore bool
-		for _, r := range pipelineOut.Results {
-			if r.Rank == cliExactSentinelRank || r.SignatureMatch {
-				continue // pre-empted rows carry no relevance score (see relevance map's own doc)
-			}
-			if sc, ok := relevance[r.ID]; ok {
-				topScore, hasTopScore = sc, true
-			}
-			break
-		}
+		topSemanticScore, hasTopSemanticScore := bestSemanticScore(pipelineOut.Results, semantic)
 
 		confidence := mcp.ClassifyAnswerConfidence(mcp.AnswerConfidenceSignals{
-			HitCount:         len(results),
-			TopScore:         topScore,
-			HasTopScore:      hasTopScore,
-			FTSRelaxed:       diag.Relaxed,
-			FTSRelaxStep:     diag.Step,
-			FusionRan:        fusionRan,
-			RecallDegraded:   health.Degraded,
-			SourcesAssembled: len(assembled.Sources),
-		}, appCfg.Answer.NoneScoreFloor, appCfg.Answer.ConfidenceThreshold)
+			HitCount:            len(results),
+			TopSemanticScore:    topSemanticScore,
+			HasTopSemanticScore: hasTopSemanticScore,
+			FTSRelaxed:          diag.Relaxed,
+			FTSRelaxStep:        diag.Step,
+			FusionRan:           fusionRan,
+			RecallDegraded:      health.Degraded,
+			SourcesAssembled:    len(assembled.Sources),
+		}, appCfg.Answer.SemanticCosineFloor)
 
 		sources := make([]server.AnswerSource, 0, len(assembled.Sources))
 		for _, src := range assembled.Sources {
