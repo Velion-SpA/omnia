@@ -257,3 +257,94 @@ func TestFuse_EmptyInputs_ReturnsEmptyNotError(t *testing.T) {
 		t.Fatalf("Fuse(nil, nil, ...) = %v, want empty", got)
 	}
 }
+
+// semanticScoreOf finds id in got and returns its SemanticScore pointer, or
+// fails the test if id is missing entirely (distinguishing "not found" from
+// "found with a nil score," which every case below cares about).
+func semanticScoreOf(t *testing.T, got []Result, id int64) *float64 {
+	t.Helper()
+	for _, r := range got {
+		if r.ID == id {
+			return r.SemanticScore
+		}
+	}
+	t.Fatalf("id %d not found in %v", id, idsOf(got))
+	return nil
+}
+
+// TestFuse_SemanticScore_SurfacedPastFusion is the plumbing proof for engram
+// obs #2585/#2612: recall.Service.semanticHits computes a per-hit cosine
+// that Fuse used to discard once RRF ranking was done with it. This locks
+// four cases in one table so the nil-vs-real-value contract documented on
+// Result.SemanticScore can't silently drift:
+//
+//   - a candidate that won a semantic rank (cleared the floor, not the
+//     exact sentinel) carries its real cosine through;
+//   - a candidate present ONLY in the lexical list never had a cosine to
+//     carry — nil, not 0.0;
+//   - a candidate whose semantic score falls below AdaptiveFloor is
+//     filtered out before it ever competes in RRF, so it also carries nil,
+//     identical to "never seen it" from the caller's point of view — this
+//     is the exact case docs/conversational-retrieval-plan.md's calibrated-
+//     confidence work needs to not mistake for "scored zero";
+//   - the topic_key exact-match sentinel pre-empts both lists entirely
+//     (Fuse's own step 1, before either list's floor/rank loop runs), so it
+//     never gets a semantic candidate either, even when the same ID also
+//     appears in the raw semantic input — nil, matching its pre-existing
+//     "never competes" behavior for every other component.
+func TestFuse_SemanticScore_SurfacedPastFusion(t *testing.T) {
+	lexical := []LexicalHit{
+		{ID: 100, UpdatedAt: "2024-01-01", Exact: true}, // sentinel; also in semantic below
+		{ID: 1, UpdatedAt: "2024-01-01"},                // lexical-only, never in semantic
+		{ID: 2, UpdatedAt: "2024-01-01"},                // wins a semantic rank too
+		// id 3 also appears on the lexical leg, purely so it survives into
+		// the output despite its semantic score being floor-filtered — this
+		// is exactly the "reached the output via the lexical leg alone"
+		// case the task's own doc calls out: a floor-filtered semantic
+		// candidate that has NO lexical hit simply never becomes a Result
+		// at all (Fuse's pre-existing, unrelated behavior), so isolating
+		// "filtered semantic score -> nil" requires giving it a reason to
+		// exist in the output in the first place.
+		{ID: 3, UpdatedAt: "2024-01-01"},
+	}
+	semantic := []SemanticHit{
+		{ID: 100, UpdatedAt: "2024-01-01", Score: 0.99}, // excluded: sentinel pre-empts
+		{ID: 2, UpdatedAt: "2024-01-01", Score: 0.42},   // clears the floor → real score
+		{ID: 3, UpdatedAt: "2024-01-01", Score: 0.10},   // below floor → filtered out
+	}
+	params := FuseParams{RRFK: 60, StrongFloor: 0.65, BaseFloor: 0.25, DenseK: 5, MaxResults: 0}
+
+	got := Fuse(lexical, semantic, params)
+
+	tests := []struct {
+		name string
+		id   int64
+		want *float64
+	}{
+		{"exact sentinel: pre-empted, no semantic candidate", 100, nil},
+		{"lexical-only: never had a cosine", 1, nil},
+		{"below AdaptiveFloor: filtered before competing", 3, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := semanticScoreOf(t, got, tt.id)
+			if got != nil {
+				t.Fatalf("SemanticScore = %v, want nil", *got)
+			}
+		})
+	}
+
+	t.Run("won a semantic rank: real cosine surfaced", func(t *testing.T) {
+		score := semanticScoreOf(t, got, 2)
+		if score == nil {
+			t.Fatal("SemanticScore = nil, want ~0.42 (this ID cleared the floor and won a semantic rank)")
+		}
+		// SemanticHit.Score is float32; Result.SemanticScore widens it to
+		// float64 without rounding, so the comparison must go back through
+		// float32 too, or a value like 0.42 (inexact in both widths, but
+		// inexact DIFFERENTLY) spuriously fails on the widening alone.
+		if want := float64(float32(0.42)); *score != want {
+			t.Fatalf("SemanticScore = %v, want %v (must match the SemanticHit's raw Score exactly, not a rounded/derived value)", *score, want)
+		}
+	})
+}

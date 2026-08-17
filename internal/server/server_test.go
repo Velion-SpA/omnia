@@ -1097,6 +1097,193 @@ func TestHandleSearchNilSearchFuncEnvelopeReportsDegraded(t *testing.T) {
 	}
 }
 
+// ─── GET /search?as_of= tests (engram eval/http-search-as-of-isolation) ────
+//
+// These exercise searchRecordedTime end-to-end over real HTTP, proving the
+// store-isolation seam `omnia eval --as-of` depends on: a caller that
+// cannot write to a store (or, symmetrically, wants to read it as it stood
+// BEFORE its own session's writes) gets recorded-time results, verifiable
+// via the echoed SearchEnvelope.AsOf, and a loud failure — never a silent
+// live fallback — whenever isolation cannot actually be guaranteed.
+
+func newServerTestStoreWithTimeTravel(t *testing.T) *store.Store {
+	t.Helper()
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	cfg.TimeTravelEnabled = true
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// TestHandleSearchAsOfBypassesInjectedSearchFuncAndUsesRecordedTime proves
+// as_of= pre-empts a wired SearchFunc (the hybrid recall/ranking pipeline)
+// entirely, exactly like mem_search's own as_of branch does — see
+// searchRecordedTime's doc for why (no historical embeddings index exists,
+// so an as-of request must never reach the semantic leg).
+func TestHandleSearchAsOfBypassesInjectedSearchFuncAndUsesRecordedTime(t *testing.T) {
+	st := newServerTestStoreWithTimeTravel(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	if err := st.CreateSession("s-asof", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "s-asof", Type: "bugfix", Title: "Fix panic", Content: "Fix panic in parser",
+		Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	searchFuncCalled := false
+	srv.SetSearch(func(ctx context.Context, query string, req SearchRequest) (SearchEnvelope, error) {
+		searchFuncCalled = true
+		return SearchEnvelope{Results: []store.SearchResult{{Observation: store.Observation{ID: 999, Title: "should never be returned"}}}}, nil
+	})
+
+	asOf := time.Now().UTC().Format(time.RFC3339Nano)
+	req := httptest.NewRequest(http.MethodGet, "/search?q=panic&project=engram&scope=project&envelope=1&as_of="+asOf, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if searchFuncCalled {
+		t.Fatalf("as_of= must bypass the injected SearchFunc entirely, but it was called")
+	}
+	var body searchEnvelopeJSON
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode envelope response: %v", err)
+	}
+	if len(body.Results) != 1 || body.Results[0].Title != "Fix panic" {
+		t.Fatalf("expected the real store's recorded-time result, got %+v", body.Results)
+	}
+	if body.AsOf == "" {
+		t.Fatalf("expected SearchEnvelope.AsOf to echo the applied recorded-time timestamp, got empty")
+	}
+	if !body.RecallDegraded {
+		t.Fatalf("expected RecallDegraded=true on the as_of path (FTS5-only, no ranking pipeline)")
+	}
+}
+
+// TestHandleSearchAsOfExcludesObservationCreatedAfterCutoff is the HTTP-level
+// sibling of internal/store's
+// TestSearchAsOfExcludesObservationCreatedAfterTimestamp — same property,
+// exercised through the real endpoint an operator/eval run actually calls,
+// with no SearchFunc wired (mirroring the eval tool's own minimal isolated
+// server, cmd/omnia's evalIsolatedServer).
+func TestHandleSearchAsOfExcludesObservationCreatedAfterCutoff(t *testing.T) {
+	st := newServerTestStoreWithTimeTravel(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	if err := st.CreateSession("s-asof-cutoff", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	beforeID, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "s-asof-cutoff", Type: "decision", Title: "before cutoff",
+		Content: "quarantine token appears before the cutoff", Project: "engram", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("add before observation: %v", err)
+	}
+	cutoff := time.Now().UTC().Format(time.RFC3339Nano)
+	// created_at is second-resolution (store.parseObservationTime's own
+	// "2006-01-02 15:04:05" literal) — see the store-level test's own
+	// comment for why a sub-second gap would not exercise the boundary.
+	time.Sleep(1100 * time.Millisecond)
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "s-asof-cutoff", Type: "decision", Title: "after cutoff",
+		Content: "quarantine token appears after the cutoff", Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatalf("add after observation: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/search?q=quarantine&project=engram&scope=project&as_of=%s", cutoff), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var results []store.SearchResult
+	if err := json.NewDecoder(rec.Body).Decode(&results); err != nil {
+		t.Fatalf("decode search response: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != beforeID {
+		t.Fatalf("GET /search?as_of=%s = %+v, want exactly the observation created BEFORE cutoff (id %d)", cutoff, results, beforeID)
+	}
+}
+
+// TestHandleSearchAsOfFailsLoudlyWhenTimeTravelDisabled proves the
+// isolation guard: a store opened WITHOUT time_travel.enabled would make
+// store.SearchAsOf silently fall back to a live search (its own documented
+// behavior) — this endpoint must refuse instead, with a 400 explaining why,
+// rather than returning 200 with live (unisolated) results.
+func TestHandleSearchAsOfFailsLoudlyWhenTimeTravelDisabled(t *testing.T) {
+	st := newServerTestStore(t) // TimeTravelEnabled defaults false
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=hello&as_of="+time.Now().UTC().Format(time.RFC3339Nano), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when time_travel is disabled, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "time_travel is not enabled") {
+		t.Fatalf("expected error to explain time_travel is disabled, got %s", rec.Body.String())
+	}
+}
+
+// TestHandleSearchAsOfFailsLoudlyOnFutureTimestamp proves the second guard:
+// store.NormalizeAsOf resolves a future/clock-skewed timestamp to "" (the
+// live-read sentinel, the right default for mem_search's own as_of arg) —
+// this endpoint refuses that outright instead of silently searching live.
+func TestHandleSearchAsOfFailsLoudlyOnFutureTimestamp(t *testing.T) {
+	st := newServerTestStoreWithTimeTravel(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	future := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano)
+	req := httptest.NewRequest(http.MethodGet, "/search?q=hello&as_of="+future, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a future as_of, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "resolved to live data") {
+		t.Fatalf("expected error to explain the future-timestamp refusal, got %s", rec.Body.String())
+	}
+}
+
+// TestHandleSearchAsOfInvalidTimestamp proves a malformed as_of value is a
+// loud 400, not a silently-ignored parameter.
+func TestHandleSearchAsOfInvalidTimestamp(t *testing.T) {
+	st := newServerTestStoreWithTimeTravel(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=hello&as_of=not-a-timestamp", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an invalid as_of, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // ─── DELETE /sessions/{id} tests ─────────────────────────────────────────────
 
 func TestHandleDeleteSession_Success(t *testing.T) {

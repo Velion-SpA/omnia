@@ -63,19 +63,51 @@ package mcp
 //
 // Both fixes measurably increased the number of distinct sources GET
 // /answer surfaces per identity query (roughly 1 -> 3-7 on the live
-// store). Grounding STILL measures 0.000 after both fixes, and the
-// remaining cause is OUT OF THIS FILE'S SCOPE: the one README chunk that
-// literally contains all four identity corpus facts ("Features," a single
-// undivided bullet list with no internal paragraph breaks — so its OWN
-// Primary tier alone runs ~1400-1500 chars, close to the whole budget)
-// either does not rank inside the retrieval candidate window at all for
-// several query phrasings, or ranks around position 9 of 10-25 — behind
-// enough other extraction-successful candidates that no assembly ordering
-// strategy can be expected to reliably fit it. This is a retrieval/ranking
-// problem (RankPipeline's scoring, type-lens, or intent-routing for
-// identity-classified queries — none of which this file owns), not an
-// assembly one; see the live diagnosis this doc comment summarizes for the
-// full per-query evidence trail.
+// store). Grounding STILL measured 0.000 after both fixes for two of the
+// eight identity cases (identity-storage-es/en) — the rest of the identity
+// suite's residual loss is retrieval/ranking (candidates never surfaced in
+// the top-10 at all) or a corpus-metric artifact (an unrelated bugfix memory
+// happens to quote the facts in its own Keywords trailer), both genuinely
+// out of this file's scope. The identity-storage pair, however, WAS an
+// assembly bug, traced end to end: the README "Features" section — a single
+// undivided bullet list with no internal paragraph break, so
+// docLeadParagraph's old "first paragraph block" rule captured all six
+// bullets (~1142 chars) as one atomic, all-or-nothing Primary unit — ranked
+// around position 8-9 of 10 candidates for these two queries; by the time
+// breadth-first Pass 1 reached it, only ~130-380 chars of the 1400-char
+// budget remained, never enough for the whole block, even though the one
+// relevant bullet ("SQLite is the source of truth", ~140 chars) would
+// easily have fit alone.
+//
+// FIXED (2026-08-15, this measurement) two compounding causes:
+//
+//  1. Every repodoc doc-type chunk's raw content ends with two fenced
+//     ingestion-provenance blocks (```repodoc-anchor and ```omnia-meta —
+//     blame SHA, content hash, timestamps; ~500 combined chars) that are
+//     never prose and never answer-bearing. stripDocIngestionMetadata now
+//     removes these COMPLETE fenced blocks (never a partial one) from both
+//     tiers before Primary/Full are computed — the same class of operation
+//     as excluding mem_save's Where/Learned fields from Primary: a defined
+//     structural boundary, not arbitrary truncation.
+//  2. When a doc chunk's lead paragraph is ENTIRELY a Markdown list (every
+//     line is either a new item's start or an indented continuation of the
+//     item above it), splitListItems now decomposes it into one
+//     independently-placeable unit per list item (continuation lines always
+//     stay with their own item — a unit is never split mid-bullet). See
+//     AnswerText.PrimaryUnits and AssembleAnswerContext's Pass 1 for how
+//     these units are placed: skip-not-abort PER ITEM, one level finer than
+//     the existing per-chunk skip-not-abort rule, so a single relevant
+//     bullet can fit and place even when the chunk's other five bullets
+//     cannot. Every other chunk shape (non-list doc chunks, mem_save/
+//     session_summary chunks) leaves PrimaryUnits nil/empty and is
+//     completely unaffected — this is strictly additive to the existing
+//     tiering, not a redesign of it.
+//
+// MEASURED effect on the conversational eval corpus, live store, --target
+// answer: see this repo's working-tree diff / PR description for the
+// before/after table this fix produced (identity-storage-es/en grounding,
+// plus delta/open_items held steady) — not duplicated here to avoid this
+// comment drifting out of sync with the next measurement.
 import (
 	"regexp"
 	"strings"
@@ -107,16 +139,62 @@ type AnswerSource struct {
 type AnswerConfidence string
 
 const (
-	// AnswerConfidenceNone means the caller should treat this as "no
-	// evidence found," not as a low-quality answer — Hermes' contract is to
-	// say "no tengo eso registrado" on this value rather than let its LLM
-	// fill the hole with a guess.
+	// AnswerConfidenceNone means retrieval returned literally nothing —
+	// HitCount == 0 (zero hits above the adaptive floor, or a genuinely
+	// empty FTS5 result set). Consumer-facing framing: "No tengo nada sobre
+	// eso."
+	//
+	// This is a NARROWER claim than the value used to make. The prior
+	// design tied `none` to a false-premise/absence detector built on the
+	// post-fusion RRF score (see ClassifyAnswerConfidence's history for why
+	// that axis was measured to carry no usable magnitude, engram obs
+	// #2585) — that overclaimed, and the wording this value used to justify
+	// ("no tengo eso registrado", implying the store was checked and found
+	// nothing ABOUT the topic) has been removed along with it. `none` now
+	// says exactly one thing: retrieval found zero results. It says nothing
+	// about whether the store has related-but-unretrieved content, and
+	// nothing about whether the question's premise is false — see
+	// AnswerConfidenceOffTopic for the (also limited) signal that now owns
+	// the "found something, but not about this" case.
 	AnswerConfidenceNone AnswerConfidence = "none"
+	// AnswerConfidenceOffTopic means retrieval returned results, but the
+	// top-ranked one's raw semantic cosine similarity is below the
+	// configured floor (config.AnswerConfig.SemanticCosineFloor) — the
+	// store has content, it just doesn't appear to be about this question.
+	// Consumer-facing framing: "Eso está fuera de lo que sé."
+	//
+	// MEASURED (2026-08-14, engram obs #2618), conversational eval corpus,
+	// live store: this reliably catches GENUINELY off-topic questions —
+	// salary and unrelated-product-usage questions measured top-hit cosine
+	// 0.2963-0.3826, cleanly below every identity ([0.6371, 0.7454]) and
+	// status ([0.4362, 0.7443]) case in the corpus.
+	//
+	// It does NOT, and structurally CANNOT, catch a false premise phrased
+	// in the store's own vocabulary. Concrete counter-example from the same
+	// measurement: "is Omnia a GitLab command-line client" (false — Omnia
+	// is not a GitLab CLI) scored top-hit cosine 0.691, ABOVE the lowest
+	// legitimate identity question in the corpus (0.6371). Cosine measures
+	// TOPICALITY — how much a question's embedding overlaps the embedding
+	// of what got retrieved — not ANSWERHOOD. A false claim built entirely
+	// out of the store's own vocabulary ("Omnia", "deploy", "Kubernetes")
+	// embeds close to the store's real content about deployment precisely
+	// BECAUSE it borrows that vocabulary; nothing about cosine similarity
+	// distinguishes "this text is relevant to the claim" from "this text
+	// confirms the claim." Detecting a false premise is an ENTAILMENT
+	// problem (does the retrieved evidence support or contradict the
+	// specific claim in the question), not a SIMILARITY problem — no
+	// embedding-distance threshold, on this axis or any other, resolves
+	// that. `off_topic` is a real, useful, narrower signal than the false-
+	// premise detector the endpoint originally aimed for; it must not be
+	// read as that detector.
+	AnswerConfidenceOffTopic AnswerConfidence = "off_topic"
 	// AnswerConfidenceLow means evidence exists but is weak, degraded, or
-	// (this file's own added rule) had nothing safely quotable in it.
+	// (this file's own added rule) had nothing safely quotable in it. It no
+	// longer overlaps AnswerConfidenceOffTopic's case — a top result below
+	// the semantic floor is classified off_topic, not low.
 	AnswerConfidenceLow AnswerConfidence = "low"
 	// AnswerConfidenceHigh means full-quality retrieval surfaced at least
-	// one strongly-scored, structurally-extractable source.
+	// one strongly-scored, structurally-extractable source. Unchanged.
 	AnswerConfidenceHigh AnswerConfidence = "high"
 )
 
@@ -254,6 +332,36 @@ type AnswerText struct {
 	// complete extraction, same shape ExtractAnswerText returned before
 	// this file's tiering fix.
 	Full string
+	// PrimaryUnits, when non-empty, is Primary decomposed into
+	// independently-placeable pieces: one entry per Markdown list item, for
+	// a doc chunk whose lead paragraph is ENTIRELY a list (see
+	// splitListItems). nil/empty (the default, and the ONLY value for every
+	// non-list-doc chunk shape — mem_save, session_summary, and any doc
+	// chunk whose lead paragraph is ordinary prose) means "atomic" and
+	// preserves today's all-or-nothing Primary placement exactly —
+	// AssembleAnswerContext's Pass 1 only takes the finer-grained per-unit
+	// path when this is set. Units are bare list items — the header is NOT
+	// baked into any fixed index (see PrimaryUnitsHeader for why, and for
+	// where it actually gets attached). strings.Join(PrimaryUnits, "\n")
+	// reconstructs exactly Primary's text once PrimaryUnitsHeader is
+	// prepended to the text of whichever unit came first.
+	PrimaryUnits []string
+	// PrimaryUnitsHeader is the chunk's "Document: …\nSection: …" header
+	// (see docLeadParagraph), trimmed, carried alongside PrimaryUnits rather
+	// than baked into PrimaryUnits[0].
+	//
+	// EARLIER version of this fix statically attached the header to
+	// PrimaryUnits[0]. That broke when Pass 1's skip-not-abort placement
+	// (AssembleAnswerContext) skipped unit 0 for budget reasons but placed a
+	// LATER unit of the same chunk: the header traveled with unit 0, which
+	// never made it into the assembled context, so the unit that DID get
+	// placed carried no document/section context at all. Storing the header
+	// separately lets AssembleAnswerContext attach it to whichever unit ends
+	// up FIRST in placement order — the header rides with whatever actually
+	// gets included, never with a unit that got skipped.
+	//
+	// Empty string for every chunk shape where PrimaryUnits is nil/empty.
+	PrimaryUnitsHeader string
 }
 
 // tieredTextFromSections builds an AnswerText from extractLabeledSections'
@@ -304,15 +412,129 @@ func tieredTextFromSections(sections []labeledSection) AnswerText {
 // unit the What/Why split already uses for mem_save content — never a
 // mid-sentence cut, just a smaller complete unit — so more distinct doc
 // chunks now fit the same budget.
+//
+// EXTENDED (2026-08-15): the lead paragraph itself can still be one giant
+// atomic unit when it's a Markdown list with no internal blank line (the
+// README "Features" section — six bullets, ~1142 chars, no "\n\n" between
+// them). docLeadParagraph now also calls stripDocIngestionMetadata (drop
+// trailing repodoc-anchor/omnia-meta fences — never prose) and
+// splitListItems (decompose an all-list lead paragraph into
+// AnswerText.PrimaryUnits, one per bullet) — see both functions' own docs.
+// This function's OWN return shape (Primary/Full) is unchanged; it just also
+// populates PrimaryUnits when the list-decomposition rule applies.
 func docLeadParagraph(content string) AnswerText {
+	content = stripDocIngestionMetadata(content)
 	whole := strings.TrimSpace(content)
 	header := docChunkHeaderRE.FindString(content)
 	body := content[len(header):]
-	primary := whole
+	leadParagraph := body
 	if idx := strings.Index(body, "\n\n"); idx >= 0 {
-		primary = strings.TrimSpace(header + body[:idx])
+		leadParagraph = body[:idx]
 	}
-	return AnswerText{Primary: primary, Full: whole}
+	primary := strings.TrimSpace(header + leadParagraph)
+
+	items, ok := splitListItems(strings.TrimRight(leadParagraph, "\n"))
+	if !ok {
+		return AnswerText{Primary: primary, Full: whole}
+	}
+
+	// Bare items — the header is NOT baked into any fixed index here; see
+	// AnswerText.PrimaryUnitsHeader's doc for why AssembleAnswerContext, not
+	// this function, decides which placed unit it travels with.
+	units := make([]string, len(items))
+	for i, item := range items {
+		units[i] = strings.TrimSpace(item)
+	}
+	return AnswerText{
+		Primary:            primary,
+		Full:               whole,
+		PrimaryUnits:       units,
+		PrimaryUnitsHeader: strings.TrimSpace(header),
+	}
+}
+
+// docIngestionMetadataFenceRE matches a COMPLETE fenced code block whose
+// info-string is exactly "repodoc-anchor" or "omnia-meta" — the trailing
+// ingestion-provenance blocks repodoc's chunk builder
+// (internal/source/repodoc/repodoc.go) appends to every doc-type chunk's raw
+// content: blame SHA, content hash, and ingestion timestamps. This is pure
+// provenance, never prose, and never answer-bearing — see the package doc
+// comment's "FIXED (2026-08-15)" section for the measurement that motivated
+// stripping it.
+//
+// Anchored to require the closing "```" on its own line right after the
+// opening fence's info-string line, so this only ever matches a COMPLETE
+// block — a truncated or malformed fence (missing its closer) is left
+// alone rather than partially removed, keeping the "never ship a fragment"
+// invariant intact even for this new cut boundary.
+var docIngestionMetadataFenceRE = regexp.MustCompile(
+	"(?s)```(?:repodoc-anchor|omnia-meta)\n.*?\n```\n?",
+)
+
+// stripDocIngestionMetadata removes every complete repodoc-anchor/omnia-meta
+// fenced block from content and trims the trailing blank line(s) their
+// removal leaves behind. Applied before Primary/Full are computed so
+// neither tier ever carries ingestion provenance — see
+// docIngestionMetadataFenceRE's own doc.
+func stripDocIngestionMetadata(content string) string {
+	return strings.TrimRight(docIngestionMetadataFenceRE.ReplaceAllString(content, ""), "\n")
+}
+
+// listItemStartRE matches the first line of a Markdown list item: an
+// unordered marker (-, *, +) or an ordered marker (digits then "." or ")"),
+// each followed by required whitespace before the item's own text. Used by
+// splitListItems to find item boundaries within a lead paragraph that is
+// entirely a list.
+var listItemStartRE = regexp.MustCompile(`^\s*(?:[-*+]\s|\d+[.)]\s)`)
+
+// splitListItems decomposes paragraph into one string per Markdown list
+// item — continuation lines included, so a single bullet's own wrapped
+// lines are never separated from it — IF AND ONLY IF paragraph consists
+// ENTIRELY of list items: every line is either a new item's start
+// (listItemStartRE) or an indented continuation line of the item above it.
+// Returns (nil, false) for anything else (plain prose, a heading, a list
+// mixed with non-list lines, or a "list" of exactly one item with nothing
+// to decompose) — callers must fall back to treating the whole paragraph as
+// one atomic unit, exactly as before this fix existed.
+//
+// This is the structural boundary behind AnswerText.PrimaryUnits — see its
+// doc and the package doc comment's "FIXED (2026-08-15)" section for the
+// measured bug (a 6-bullet README section, ~1142 chars, placed as one
+// all-or-nothing unit that never fit the leftover budget) this exists to
+// fix.
+func splitListItems(paragraph string) ([]string, bool) {
+	lines := strings.Split(paragraph, "\n")
+	if len(lines) == 0 || !listItemStartRE.MatchString(lines[0]) {
+		return nil, false
+	}
+
+	var items []string
+	var current []string
+	for _, line := range lines {
+		if listItemStartRE.MatchString(line) {
+			if current != nil {
+				items = append(items, strings.Join(current, "\n"))
+			}
+			current = []string{line}
+			continue
+		}
+		// Not a new item's start: only a legal continuation of the item
+		// above if it's indented. An unindented non-item line means this
+		// paragraph is NOT entirely a list — bail out.
+		if current == nil || line == "" || (line[0] != ' ' && line[0] != '\t') {
+			return nil, false
+		}
+		current = append(current, line)
+	}
+	if current != nil {
+		items = append(items, strings.Join(current, "\n"))
+	}
+	if len(items) < 2 {
+		// A single item has nothing to decompose into — treat it the same
+		// as any other atomic paragraph.
+		return nil, false
+	}
+	return items, true
 }
 
 // ExtractAnswerText returns the answer-shaped text obs.Content actually
@@ -434,8 +656,58 @@ func AssembleAnswerContext(results []store.SearchResult, maxChars int) AnswerAss
 	placedText := make([]string, 0, len(chunks))
 	used := 0
 
-	// Pass 1 (breadth): Primary tier only, skip-not-abort.
+	// Pass 1 (breadth): Primary tier only, skip-not-abort. A chunk with
+	// non-empty PrimaryUnits (see AnswerText's own doc) is placed one level
+	// finer: each list item is tried independently, in its own original
+	// order, skip-not-abort PER ITEM — so a chunk whose combined Primary is
+	// too big can still contribute the one item that actually fits, instead
+	// of being skipped whole. A unit is never itself split; the finer grain
+	// is "one list item," not "one character."
+	//
+	// The chunk's header (PrimaryUnitsHeader) travels with whichever unit
+	// ends up FIRST in placement order, not statically with index 0 (see
+	// PrimaryUnitsHeader's own doc for the bug this fixes): once
+	// placedUnits is non-empty for this chunk, the header has already been
+	// tried (successfully or not) and is never attempted again. The attempt
+	// is best-effort, not a second fit gate that can skip an otherwise-
+	// fitting unit — this chunk's citation is recorded independently in
+	// AnswerAssembly.Sources (added once per placed chunk below, regardless
+	// of which unit(s) made it in), so the inline header is purely a
+	// readability aid for the assembled Context text, not the thing that
+	// makes a placed unit's source traceable. A unit whose header doesn't
+	// fit is therefore placed bare rather than skipped.
 	for i, c := range chunks {
+		if len(c.text.PrimaryUnits) > 0 {
+			var placedUnits []string
+			for _, unit := range c.text.PrimaryUnits {
+				candidate := unit
+				if len(placedUnits) == 0 && c.text.PrimaryUnitsHeader != "" {
+					withHeader := strings.TrimSpace(c.text.PrimaryUnitsHeader + "\n\n" + unit)
+					if used+utf8.RuneCountInString(withHeader) <= maxChars {
+						candidate = withHeader
+					}
+					// else: header+unit doesn't fit — fall back to the bare
+					// unit below; the header is dropped for this chunk (see
+					// this loop's own doc for why that's safe).
+				}
+				size := utf8.RuneCountInString(candidate)
+				if len(placedUnits) > 0 {
+					size++ // "\n" separator joining this unit to units already placed for this chunk
+				}
+				if used+size > maxChars {
+					continue
+				}
+				placedUnits = append(placedUnits, candidate)
+				used += size
+			}
+			if len(placedUnits) == 0 {
+				continue
+			}
+			placedIdx = append(placedIdx, i)
+			placedText = append(placedText, strings.Join(placedUnits, "\n"))
+			continue
+		}
+
 		size := utf8.RuneCountInString(c.text.Primary)
 		if used+size > maxChars {
 			continue
@@ -450,7 +722,13 @@ func AssembleAnswerContext(results []store.SearchResult, maxChars int) AnswerAss
 
 	// Pass 2 (depth): upgrade Primary -> Full with leftover budget, in the
 	// same rank order pass 1 placed them in (== candidates' original rank
-	// order, since pass 1 never reorders).
+	// order, since pass 1 never reorders). This composes correctly with a
+	// chunk that pass 1 only partially placed via PrimaryUnits: placedText[i]
+	// already holds whatever subset of units fit (not necessarily the whole
+	// Primary), delta is computed against that ACTUAL placed size (not
+	// against the full Primary), and if the chunk's whole Full tier now fits
+	// in leftover budget it replaces the partial bullets outright — no
+	// separate per-unit upgrade path needed.
 	for i, ci := range placedIdx {
 		full := chunks[ci].text.Full
 		if full == placedText[i] {
@@ -485,15 +763,17 @@ type AnswerConfidenceSignals struct {
 	// AdaptiveFloor, or a plain empty FTS5 result set) is the first `none`
 	// trigger.
 	HitCount int
-	// TopScore is the top surviving result's un-normalized relevance —
-	// RRF fusion Score for the hybrid path, negated FTS5 bm25 Rank for the
-	// FTS5-only path (the SAME relevance map RankPipeline itself scores
-	// against, see rank_pipeline.go) — read BEFORE RankResults'
-	// recency/importance reweighting, matching "fused score" in the plan's
-	// own wording. Meaningless when HasTopScore is false (the sentinel/
-	// signature pre-emption lanes carry no relevance score).
-	TopScore    float64
-	HasTopScore bool
+	// TopSemanticScore is the top surviving result's raw semantic cosine
+	// similarity (recall.Result.SemanticScore, see cmd/omnia/recall.go's
+	// wiring) — NOT the fused RRF score (that axis, engram obs #2585,
+	// carries no usable magnitude). HasTopSemanticScore false means this
+	// result had NO cosine at all (23.1% of results, measured — arrived via
+	// the lexical leg alone, below AdaptiveFloor): that is a MISSING signal,
+	// not a low one, and must never be coerced to 0 or treated as evidence
+	// of off-topicality — see ClassifyAnswerConfidence's own doc for how
+	// this file handles that case.
+	TopSemanticScore    float64
+	HasTopSemanticScore bool
 	// FTSRelaxed/FTSRelaxStep mirror store.SearchDiag.Relaxed/Step for a
 	// dedicated lexical-only diagnostic query (see cmd/omnia/recall.go's
 	// answerFTSDiag). Read ONLY together with FusionRan below — see
@@ -534,67 +814,78 @@ type AnswerConfidenceSignals struct {
 }
 
 // ClassifyAnswerConfidence derives GET /answer's confidence value from
-// signals the retrieval pipeline already computes (P3's "Calibrated 'I
-// don't have this'" section) — never guessed, never LLM-scored.
+// signals the retrieval pipeline already computes — never guessed, never
+// LLM-scored.
 //
-// SUPERSEDES the plan's original single-threshold design (relaxation as an
-// unconditional `none` trigger). MEASURED (2026-08-14) over the live store,
-// `omnia eval --profile conversational --target answer`, 3 runs:
+// THIS DESIGN (2026-08-14, engram obs #2618) replaces the prior post-fusion
+// RRF-score two-floor design (engram obs #2585) with a floor over the top
+// result's raw SEMANTIC COSINE similarity (recall.Result.SemanticScore).
+// The RRF axis was measured to carry no usable magnitude at all — it is a
+// rank-position combinator (1/(k+rank) per leg), not a similarity score, so
+// it stays ~constant for any query where something ranks near the top of
+// both legs (nearly every query, in a store this size and topically
+// overlapping) — see git history for that measurement's full grid. Cosine
+// DOES carry real magnitude, and was measured directly against the
+// conversational eval corpus on the live store:
 //
-//	config                                    | refusal id | refusal status | confidence absence
-//	relaxation -> none unconditionally        |      0.250 |          0.800 |        0.100 (pass)
-//	relaxation -> low when FusionRan          |      0.000 |          0.000 |        1.000 (fail)
+//	identity  min=0.6371 max=0.7454 (n=8)
+//	status    min=0.4362 max=0.7443 (n=10)
+//	absence (n=10), top-hit cosine per case — BIMODAL:
+//	  genuinely off-topic (salary, unrelated product usage): 0.2963-0.3826
+//	  false premise, in-vocabulary (GitLab CLI, K8s deploy):  0.5687-0.7115
 //
-// Neither passed both targets — relaxation was the ONLY signal separating
-// the absence class, and it is too blunt in both directions. The natural
-// next idea, "gate on top-score strength instead," was tested directly by
-// pulling the top result's raw fusion score (GET /search?envelope=1&explain=1,
-// the `score_breakdown[id].fusion` field — the SAME quantity as TopScore
-// below) for all 28 identity/status/absence corpus cases against this live
-// store. It does NOT separate the classes: identity range [0.0164, 0.0306],
-// status range [0.0164, 0.0328], absence range [0.0268, 0.0313] — absence
-// sits almost entirely INSIDE the identity/status range, and several real
-// identity/status cases score BELOW every absence case (e.g.
-// identity-tagline-es 0.0164 vs. absence-gitlab-hallucination-es 0.0268).
-// No single floor, and no PAIR of floors on this axis, can cleanly split
-// them — this is not a calibration gap, it is that RRF fusion score
-// deliberately discards magnitude (it is a rank-position combinator, 1/(k+
-// rank) per leg) so it stays ~constant for any query where SOMETHING ranks
-// near the top of both legs, which nearly every query does in a store this
-// size and topically overlapping. See config.AnswerConfig's own doc for the
-// two-floor sweep this file's grid produced and the recommendation that
-// follows from it — TL;DR: floorA/floorB below still exist because a future
-// signal WITH real magnitude (e.g. raw semantic cosine similarity, not
-// currently surfaced per-item by this store's explain path) could use this
-// exact two-branch shape productively; they are NOT currently claimed to
-// clear both P3 targets simultaneously.
+// The off-topic cluster sits well below the identity/status range —
+// SemanticCosineFloor (config.AnswerConfig, default 0.55) is chosen to
+// separate it cleanly. The false-premise cluster does NOT separate from
+// identity/status — it overlaps them, because cosine measures TOPICALITY
+// (embedding overlap with the question) not ANSWERHOOD (does the retrieved
+// text actually support or refute the specific claim). That is a structural
+// limit of a similarity signal, not a threshold-tuning gap: no floor on
+// this axis, and no floor on any single-vector-similarity axis, can catch a
+// false claim built from the store's own vocabulary. See
+// AnswerConfidenceOffTopic's own doc for the concrete GitLab counter-example
+// and config.AnswerConfig.SemanticCosineFloor's doc for the full floor
+// derivation.
 //
-//   - none: HitCount == 0 (zero hits above the adaptive floor), OR
-//     HasTopScore && TopScore < floorA (noneFloor).
-//   - low: HasTopScore && TopScore < floorB (lowFloor) and >= floorA, OR
-//     nothing survived structural extraction into a citable source (this
-//     file's own added rule — see SourcesAssembled's doc: `high` must never
-//     describe an empty Context), OR RecallDegraded is true, OR (soft
+//   - none: HitCount == 0 (zero hits above the adaptive floor). This is now
+//     the ONLY meaning `none` carries — see AnswerConfidenceNone's own doc
+//     for why the prior wording overclaimed.
+//   - off_topic: HasTopSemanticScore && TopSemanticScore < semanticFloor
+//     (strictly below — a score exactly AT the floor is not off_topic).
+//     HasTopSemanticScore == false NEVER triggers this branch (see below).
+//   - low: nothing survived structural extraction into a citable source
+//     (this file's own added rule — see SourcesAssembled's doc: `high` must
+//     never describe an empty Context), OR RecallDegraded is true, OR (soft
 //     signal, see FusionRan's doc) the lexical relaxation ladder reached
 //     step 2 on a retrieval that did NOT use fusion (i.e. the diagnostic
 //     describes the actual path that produced these results).
 //   - high: otherwise.
 //
-// floorA <= 0 disables the none-by-score trigger; floorB <= 0 disables the
-// low-by-score trigger — same "0 means off" convention the single-threshold
-// version used, preserved for operators who want confidence driven purely
-// by the structural signals.
-func ClassifyAnswerConfidence(sig AnswerConfidenceSignals, floorA, floorB float64) AnswerConfidence {
+// semanticFloor <= 0 disables the off_topic trigger entirely — same "0
+// means off" convention the removed fused-score floors used.
+//
+// Nil-cosine rule (deliberate, tested explicitly): when HasTopSemanticScore
+// is false, the off_topic branch NEVER fires, regardless of semanticFloor —
+// it falls straight through to the normal low/high logic below, exactly as
+// if semanticFloor were disabled for this result. "Absence of evidence
+// about topicality is not evidence of off-topicality." This matters beyond
+// the single 23.1%-of-results case where one hit's cosine is missing: when
+// hybrid recall is unavailable at all (no recall.Service configured, or a
+// mid-query fallback to plain FTS5 — see recallOrFTSSearchWithRelevance),
+// EVERY result in that response has no cosine, because cosine is a
+// hybrid-recall byproduct with nothing to fall back to. Forcing a nil
+// cosine to `low` would therefore permanently cap the ENTIRE non-hybrid
+// operating mode at `low` — a much bigger behavior change than this task
+// scopes (it would make `high` unreachable any time embeddings are down or
+// unconfigured, independent of retrieval quality). Falling through instead
+// keeps non-hybrid mode exactly as capable as it was before this signal
+// existed: the off_topic axis just isn't evaluated for it.
+func ClassifyAnswerConfidence(sig AnswerConfidenceSignals, semanticFloor float64) AnswerConfidence {
 	if sig.HitCount == 0 {
 		return AnswerConfidenceNone
 	}
-	if sig.HasTopScore {
-		if floorA > 0 && sig.TopScore < floorA {
-			return AnswerConfidenceNone
-		}
-		if floorB > 0 && sig.TopScore < floorB {
-			return AnswerConfidenceLow
-		}
+	if semanticFloor > 0 && sig.HasTopSemanticScore && sig.TopSemanticScore < semanticFloor {
+		return AnswerConfidenceOffTopic
 	}
 	if sig.SourcesAssembled == 0 {
 		return AnswerConfidenceLow
@@ -603,17 +894,14 @@ func ClassifyAnswerConfidence(sig AnswerConfidenceSignals, floorA, floorB float6
 		return AnswerConfidenceLow
 	}
 	// Relaxation kept as a CONTRIBUTING signal (never a hard none/low
-	// trigger anymore — the score floors above own that job): it can only
-	// demote high->low, and only when fusion did NOT run, i.e. only when
-	// answerFTSDiag's lexical-only probe actually describes the retrieval
-	// path that produced these results. Under fusion, the probe measures a
-	// DIFFERENT path (see FusionRan's own doc) and is noise with respect to
-	// these specific results — applying it even as a soft cap there would
-	// reintroduce spurious `low` verdicts on genuinely strong fused hits for
-	// no evidential reason. Verified for this live store: fusion runs for
-	// essentially every corpus query (embeddings+recall+vector_index all
-	// enabled, Ollama reachable), so this branch is a rare-path safety net
-	// (embeddings outage, degraded fallback) rather than a live lever here.
+	// trigger — that is what the off_topic/none branches above own now): it
+	// can only demote high->low, and only when fusion did NOT run, i.e.
+	// only when answerFTSDiag's lexical-only probe actually describes the
+	// retrieval path that produced these results. Under fusion, the probe
+	// measures a DIFFERENT path (see FusionRan's own doc) and is noise with
+	// respect to these specific results — applying it even as a soft cap
+	// there would reintroduce spurious `low` verdicts on genuinely strong
+	// fused hits for no evidential reason.
 	if sig.FTSRelaxed && sig.FTSRelaxStep >= 2 && !sig.FusionRan {
 		return AnswerConfidenceLow
 	}

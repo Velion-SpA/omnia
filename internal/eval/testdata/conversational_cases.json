@@ -5,6 +5,7 @@
     "query": "háblame sobre el proyecto Omnia",
     "language": "es",
     "expected_fact": "Persistent memory for AI coding agents",
+    "project": "omnia",
     "notes": "The brief's own concrete failure case. No gold observation exists for this query today (P1/repodoc not yet built) — expected_fact is a verbatim excerpt from README.md's tagline, so this case measures Grounded, not ranking position. Baseline expectation: Grounded=false until P1 ships."
   },
   {
@@ -13,6 +14,7 @@
     "query": "what is Omnia",
     "language": "en",
     "expected_fact": "Persistent memory for AI coding agents",
+    "project": "omnia",
     "notes": "English pairing of identity-tagline-es, same gold excerpt (README.md)."
   },
   {
@@ -21,6 +23,7 @@
     "query": "¿cómo busca Omnia la información?",
     "language": "es",
     "expected_fact": "Hybrid lexical + semantic search",
+    "project": "omnia",
     "notes": "README.md Features bullet, verbatim, single physical line (ends before the paragraph's line-wrap)."
   },
   {
@@ -29,6 +32,7 @@
     "query": "how does Omnia's search work",
     "language": "en",
     "expected_fact": "Hybrid lexical + semantic search",
+    "project": "omnia",
     "notes": "English pairing of identity-search-es."
   },
   {
@@ -37,6 +41,7 @@
     "query": "¿dónde guarda Omnia sus datos?",
     "language": "es",
     "expected_fact": "SQLite is the source of truth",
+    "project": "omnia",
     "notes": "README.md Features bullet, verbatim."
   },
   {
@@ -45,6 +50,7 @@
     "query": "where does Omnia store its data",
     "language": "en",
     "expected_fact": "SQLite is the source of truth",
+    "project": "omnia",
     "notes": "English pairing of identity-storage-es."
   },
   {
@@ -53,6 +59,7 @@
     "query": "¿Omnia tiene una nube propia?",
     "language": "es",
     "expected_fact": "Self-hosted multi-tenant cloud (optional)",
+    "project": "omnia",
     "notes": "README.md Features bullet, verbatim."
   },
   {
@@ -61,6 +68,7 @@
     "query": "does Omnia have a cloud offering",
     "language": "en",
     "expected_fact": "Self-hosted multi-tenant cloud (optional)",
+    "project": "omnia",
     "notes": "English pairing of identity-cloud-es."
   },
   {
@@ -70,6 +78,7 @@
     "language": "es",
     "observation_id": "obs-329c4af683c2a8eb",
     "expected_fact": "Veredicto: ~62-65% listo. Base sólida pero NO apto para primer cliente pagando.",
+    "project": "workly",
     "notes": "The brief's own concrete example query. Gold: #1212, Workly go-live readiness audit."
   },
   {
@@ -79,6 +88,7 @@
     "language": "en",
     "observation_id": "obs-329c4af683c2a8eb",
     "expected_fact": "Veredicto: ~62-65% listo. Base sólida pero NO apto para primer cliente pagando.",
+    "project": "workly",
     "notes": "English pairing of status-workly-golive-es."
   },
   {
@@ -88,6 +98,7 @@
     "language": "es",
     "observation_id": "obs-1a9cdb972d90a843",
     "expected_fact": "Omnia v0.1.0 PROMOVIDO A PRODUCCIÓN en la Mac de Benja.",
+    "project": "omnia",
     "notes": "Gold: #980, nightly GitHub->Engram production config record."
   },
   {
@@ -97,6 +108,7 @@
     "language": "en",
     "observation_id": "obs-1a9cdb972d90a843",
     "expected_fact": "Omnia v0.1.0 PROMOVIDO A PRODUCCIÓN en la Mac de Benja.",
+    "project": "omnia",
     "notes": "English pairing of status-omnia-prod-es."
   },
   {
@@ -106,6 +118,7 @@
     "language": "es",
     "observation_id": "obs-60b5d9ebde98124e",
     "expected_fact": "Implemented and TDD-verified fixes for all 5 findings from real E2E testing of Omnia v0.4",
+    "project": "omnia",
     "notes": "Gold: #1854, v0.4 E2E hardening summary."
   },
   {
@@ -115,6 +128,7 @@
     "language": "en",
     "observation_id": "obs-60b5d9ebde98124e",
     "expected_fact": "Implemented and TDD-verified fixes for all 5 findings from real E2E testing of Omnia v0.4",
+    "project": "omnia",
     "notes": "English pairing of status-v04-hardening-es."
   },
   {
@@ -124,6 +138,7 @@
     "language": "es",
     "observation_id": "obs-17326fb918b3008a",
     "expected_fact": "the push STILL 401s — so the bug is inside Omnia's sync auth, not the environment.",
+    "project": "omnia",
     "notes": "Gold: #1341, cloud sync push 401 status."
   },
   {
@@ -133,6 +148,7 @@
     "language": "en",
     "observation_id": "obs-17326fb918b3008a",
     "expected_fact": "the push STILL 401s — so the bug is inside Omnia's sync auth, not the environment.",
+    "project": "omnia",
     "notes": "English pairing of status-cloud-push-es."
   },
   {
@@ -142,6 +158,7 @@
     "language": "es",
     "observation_id": "obs-b33eabf3e90686cb",
     "expected_fact": "Audited the 96 local projects after Benja reported name fragmentation and that nothing reaches the personal Omnia Cloud.",
+    "project": "omnia",
     "notes": "Gold: #2021, project fragmentation audit."
   },
   {
@@ -151,6 +168,7 @@
     "language": "en",
     "observation_id": "obs-b33eabf3e90686cb",
     "expected_fact": "Audited the 96 local projects after Benja reported name fragmentation and that nothing reaches the personal Omnia Cloud.",
+    "project": "omnia",
     "notes": "English pairing of status-projects-fragmentation-es."
   },
   {
@@ -160,6 +178,7 @@
     "language": "es",
     "observation_id": "obs-22c9549183a930de",
     "expected_fact": "the check silently failed and a missing config file was treated as a hard error instead of",
+    "project": "omnia",
     "notes": "Gold: #1828, os.IsNotExist wrapped-error bugfix."
   },
   {
@@ -169,6 +188,7 @@
     "language": "en",
     "observation_id": "obs-22c9549183a930de",
     "expected_fact": "the check silently failed and a missing config file was treated as a hard error instead of",
+    "project": "omnia",
     "notes": "English pairing of delta-blame-config-es."
   },
   {
@@ -178,6 +198,7 @@
     "language": "es",
     "observation_id": "obs-5cb926782739acf4",
     "expected_fact": "generalizing the existing single-window ErrorSignatureProbes (left untouched) over multiple n-gram sizes",
+    "project": "omnia",
     "notes": "Gold: #1519, signature-lane false-negative fix (#84)."
   },
   {
@@ -187,6 +208,7 @@
     "language": "en",
     "observation_id": "obs-5cb926782739acf4",
     "expected_fact": "generalizing the existing single-window ErrorSignatureProbes (left untouched) over multiple n-gram sizes",
+    "project": "omnia",
     "notes": "English pairing of delta-signature-lane-es."
   },
   {
@@ -196,6 +218,7 @@
     "language": "es",
     "observation_id": "obs-a8fb12191d166d4e",
     "expected_fact": "Fixed the /graph hover that did nothing (click worked, hover didn't)",
+    "project": "omnia",
     "notes": "Gold: #1116, dead graph hover fix."
   },
   {
@@ -205,6 +228,7 @@
     "language": "en",
     "observation_id": "obs-a8fb12191d166d4e",
     "expected_fact": "Fixed the /graph hover that did nothing (click worked, hover didn't)",
+    "project": "omnia",
     "notes": "English pairing of delta-graph-hover-es."
   },
   {
@@ -214,6 +238,7 @@
     "language": "es",
     "observation_id": "obs-2e233fa3b3695793",
     "expected_fact": "found the SAME class of bug as PR6B's blame.go fix",
+    "project": "omnia",
     "notes": "Gold: #1830, consolidate.go config-load bug, same root cause class as delta-blame-config."
   },
   {
@@ -223,6 +248,7 @@
     "language": "en",
     "observation_id": "obs-2e233fa3b3695793",
     "expected_fact": "found the SAME class of bug as PR6B's blame.go fix",
+    "project": "omnia",
     "notes": "English pairing of delta-consolidate-config-es."
   },
   {
@@ -232,6 +258,7 @@
     "language": "es",
     "observation_id": "obs-60b5d9ebde98124e",
     "expected_fact": "keychainCLITimeout = 12 * time.Second",
+    "project": "omnia",
     "notes": "Gold: #1854, keychain CLI subprocess timeout fix (finding 5) — same observation as status-v04-hardening but a distinct verbatim fact, since one memory legitimately carries both a status narrative and specific delta-shaped sub-fixes."
   },
   {
@@ -241,6 +268,7 @@
     "language": "en",
     "observation_id": "obs-60b5d9ebde98124e",
     "expected_fact": "keychainCLITimeout = 12 * time.Second",
+    "project": "omnia",
     "notes": "English pairing of delta-keychain-timeout-es."
   },
   {
@@ -250,6 +278,7 @@
     "language": "es",
     "observation_id": "obs-a969f2aa6d723628",
     "expected_fact": "WhatsApp import parser: needs a sample export to calibrate (es-CL, iOS/Android format varies).",
+    "project": "omnia",
     "notes": "Gold: #1119 session summary, '## Next Steps' bullet — the exact shape P4's claim extraction targets."
   },
   {
@@ -259,6 +288,7 @@
     "language": "en",
     "observation_id": "obs-a969f2aa6d723628",
     "expected_fact": "WhatsApp import parser: needs a sample export to calibrate (es-CL, iOS/Android format varies).",
+    "project": "omnia",
     "notes": "English pairing of open-items-whatsapp-es."
   },
   {
@@ -268,6 +298,7 @@
     "language": "es",
     "observation_id": "obs-a969f2aa6d723628",
     "expected_fact": "If activating commits: rebuild+deploy ~/.local/bin/omnia, set include_commits:true, dry-run preview first.",
+    "project": "omnia",
     "notes": "Gold: #1119 session summary, another '## Next Steps' bullet from the same session."
   },
   {
@@ -277,6 +308,7 @@
     "language": "en",
     "observation_id": "obs-a969f2aa6d723628",
     "expected_fact": "If activating commits: rebuild+deploy ~/.local/bin/omnia, set include_commits:true, dry-run preview first.",
+    "project": "omnia",
     "notes": "English pairing of open-items-commits-activation-es."
   },
   {
@@ -286,6 +318,7 @@
     "language": "es",
     "observation_id": "obs-2bfc727710fecf3d",
     "expected_fact": "Recover the v0.3.2 integration commit/worktree, verify it against the current base, then prepare a reviewable release PR.",
+    "project": "omnia",
     "notes": "Gold: #1779 session summary, '## Next Steps'."
   },
   {
@@ -295,6 +328,7 @@
     "language": "en",
     "observation_id": "obs-2bfc727710fecf3d",
     "expected_fact": "Recover the v0.3.2 integration commit/worktree, verify it against the current base, then prepare a reviewable release PR.",
+    "project": "omnia",
     "notes": "English pairing of open-items-v032-recovery-es."
   },
   {
@@ -304,6 +338,7 @@
     "language": "es",
     "observation_id": "obs-3aa511c1bd61f903",
     "expected_fact": "Preserve the 400-line review boundary even if it increases PR count; no further phase-by-phase approval is required for v0.3.2.",
+    "project": "omnia",
     "notes": "Gold: #1711, standing preference for the v0.3.2 rollout."
   },
   {
@@ -313,6 +348,7 @@
     "language": "en",
     "observation_id": "obs-3aa511c1bd61f903",
     "expected_fact": "Preserve the 400-line review boundary even if it increases PR count; no further phase-by-phase approval is required for v0.3.2.",
+    "project": "omnia",
     "notes": "English pairing of open-items-v032-boundary-es."
   },
   {
@@ -322,6 +358,7 @@
     "language": "es",
     "observation_id": "obs-06ce22a04615a30f",
     "expected_fact": "3 problemas con la misma raíz (Engram no enumera, solo FTS por texto)",
+    "project": "omnia",
     "notes": "Gold: #1070, structural-index architecture decision."
   },
   {
@@ -331,6 +368,7 @@
     "language": "en",
     "observation_id": "obs-06ce22a04615a30f",
     "expected_fact": "3 problemas con la misma raíz (Engram no enumera, solo FTS por texto)",
+    "project": "omnia",
     "notes": "English pairing of rationale-structural-index-es; gold content stays Spanish (the decision was recorded in Spanish) — the query language and the evidence language are independent, matching the bilingual consumer's real usage."
   },
   {
@@ -340,6 +378,7 @@
     "language": "es",
     "observation_id": "obs-2b1616e1856f3ce8",
     "expected_fact": "an exception costs less than a split that fragments a mechanical signature change",
+    "project": "omnia",
     "notes": "Gold: #1969, PR #259 size-exception decision."
   },
   {
@@ -349,6 +388,7 @@
     "language": "en",
     "observation_id": "obs-2b1616e1856f3ce8",
     "expected_fact": "an exception costs less than a split that fragments a mechanical signature change",
+    "project": "omnia",
     "notes": "English pairing of rationale-pr259-exception-es."
   },
   {
@@ -358,6 +398,7 @@
     "language": "es",
     "observation_id": "obs-3de2c6eced8c3db5",
     "expected_fact": "Independent as-of scanning diverged when preceding options consumed values and repeated wall-clock normalization caused near-future requests to cross from live to recorded-time after a network delay.",
+    "project": "omnia",
     "notes": "Gold: #1756, unified recorded-time command planning decision."
   },
   {
@@ -367,6 +408,7 @@
     "language": "en",
     "observation_id": "obs-3de2c6eced8c3db5",
     "expected_fact": "Independent as-of scanning diverged when preceding options consumed values and repeated wall-clock normalization caused near-future requests to cross from live to recorded-time after a network delay.",
+    "project": "omnia",
     "notes": "English pairing of rationale-recorded-time-es."
   },
   {
@@ -376,6 +418,7 @@
     "language": "es",
     "observation_id": "obs-48a05b7a1789ed7b",
     "expected_fact": "ships structural forgetting fast and dodges the cgo-free tree-sitter risk",
+    "project": "omnia",
     "notes": "Gold: #1592, 0.2 scope decisions (code anchor depth)."
   },
   {
@@ -385,6 +428,7 @@
     "language": "en",
     "observation_id": "obs-48a05b7a1789ed7b",
     "expected_fact": "ships structural forgetting fast and dodges the cgo-free tree-sitter risk",
+    "project": "omnia",
     "notes": "English pairing of rationale-code-anchor-es."
   },
   {
@@ -394,6 +438,7 @@
     "language": "es",
     "observation_id": "obs-b33eabf3e90686cb",
     "expected_fact": "merging 54 COMPLETELY UNRELATED projects into canonical `omnia`",
+    "unscoped": true,
     "notes": "Gold: #2021 — spans workly/velion-homelab/agenda-medica/etc, the only genuinely multi-project memory in this seed set."
   },
   {
@@ -403,6 +448,7 @@
     "language": "en",
     "observation_id": "obs-b33eabf3e90686cb",
     "expected_fact": "merging 54 COMPLETELY UNRELATED projects into canonical `omnia`",
+    "unscoped": true,
     "notes": "English pairing of cross-project-fragmentation-es."
   },
   {
@@ -412,6 +458,7 @@
     "language": "es",
     "observation_id": "obs-b33eabf3e90686cb",
     "expected_fact": "`omnia sync --cloud` requires an explicit `--project` and the project must be enrolled.",
+    "unscoped": true,
     "notes": "Gold: #2021, cloud enrollment finding — applies across every project, not just one."
   },
   {
@@ -421,6 +468,7 @@
     "language": "en",
     "observation_id": "obs-b33eabf3e90686cb",
     "expected_fact": "`omnia sync --cloud` requires an explicit `--project` and the project must be enrolled.",
+    "unscoped": true,
     "notes": "English pairing of cross-project-cloud-enrollment-es."
   },
   {
@@ -430,6 +478,7 @@
     "language": "es",
     "observation_id": "obs-329c4af683c2a8eb",
     "expected_fact": "Sin CI (.github/workflows) — 120 tests no gatean el deploy (push directo a Vercel).",
+    "unscoped": true,
     "notes": "Gold: #1212 (project workly) — the brief's own 'en qué estoy bloqueado ... esta semana' shape, answerable only by a search that reaches OUTSIDE the omnia project."
   },
   {
@@ -439,6 +488,7 @@
     "language": "en",
     "observation_id": "obs-329c4af683c2a8eb",
     "expected_fact": "Sin CI (.github/workflows) — 120 tests no gatean el deploy (push directo a Vercel).",
+    "unscoped": true,
     "notes": "English pairing of cross-project-workly-ci-es."
   },
   {
@@ -448,6 +498,7 @@
     "language": "es",
     "observation_id": "obs-329c4af683c2a8eb",
     "expected_fact": "BLOQUEANTES go-live: (1) Confirmar/upgradar Supabase a Pro — si Free, sin backups = riesgo pérdida total.",
+    "unscoped": true,
     "notes": "Gold: #1212 (project workly), a second distinct verbatim fact from the same go-live audit."
   },
   {
@@ -457,6 +508,7 @@
     "language": "en",
     "observation_id": "obs-329c4af683c2a8eb",
     "expected_fact": "BLOQUEANTES go-live: (1) Confirmar/upgradar Supabase a Pro — si Free, sin backups = riesgo pérdida total.",
+    "unscoped": true,
     "notes": "English pairing of cross-project-workly-blockers-es."
   },
   {
@@ -465,6 +517,7 @@
     "query": "¿Omnia es un cliente de línea de comandos para GitLab?",
     "language": "es",
     "expect_absence": true,
+    "project": "omnia",
     "notes": "The plan's own cited hallucination (docs/conversational-retrieval-plan.md, P1's problem statement): a real agent answered this way when it had no grounded identity source. Correct behavior is 'no evidence exists' (Omnia is not a GitLab client at all), not a confident wrong answer."
   },
   {
@@ -473,6 +526,7 @@
     "query": "is Omnia a GitLab command-line client",
     "language": "en",
     "expect_absence": true,
+    "project": "omnia",
     "notes": "English pairing of absence-gitlab-hallucination-es."
   },
   {
@@ -481,7 +535,8 @@
     "query": "¿cuál es el salario de Benja?",
     "language": "es",
     "expect_absence": true,
-    "notes": "Never recorded in this memory store — plausible-sounding, unanswerable query."
+    "project": "omnia",
+    "notes": "Never recorded in this memory store — plausible-sounding, unanswerable query. [project scoping: assigned omnia — the query names no project at all; scoped to the active dogfooding project per this fix's absence-case judgement call (engram #2623), not because the query is about Omnia. Genuinely ambiguous.]"
   },
   {
     "id": "absence-salary-en",
@@ -489,7 +544,8 @@
     "query": "what is Benja's salary",
     "language": "en",
     "expect_absence": true,
-    "notes": "English pairing of absence-salary-es."
+    "project": "omnia",
+    "notes": "English pairing of absence-salary-es. [project scoping: assigned omnia — the query names no project at all; scoped to the active dogfooding project per this fix's absence-case judgement call (engram #2623), not because the query is about Omnia. Genuinely ambiguous.]"
   },
   {
     "id": "absence-ceo-es",
@@ -497,6 +553,7 @@
     "query": "¿quién es el CEO de Omnia?",
     "language": "es",
     "expect_absence": true,
+    "project": "omnia",
     "notes": "No such corporate-role memory exists in this store."
   },
   {
@@ -505,6 +562,7 @@
     "query": "who is the CEO of Omnia",
     "language": "en",
     "expect_absence": true,
+    "project": "omnia",
     "notes": "English pairing of absence-ceo-es."
   },
   {
@@ -513,6 +571,7 @@
     "query": "¿Omnia se despliega con Kubernetes?",
     "language": "es",
     "expect_absence": true,
+    "project": "omnia",
     "notes": "Real deploy is a systemd unit (deploy/omnia-cloud.service per the plan section 0.1), never Kubernetes — a plausible-sounding but false premise."
   },
   {
@@ -521,6 +580,7 @@
     "query": "does Omnia deploy on Kubernetes",
     "language": "en",
     "expect_absence": true,
+    "project": "omnia",
     "notes": "English pairing of absence-kubernetes-es."
   },
   {
@@ -529,6 +589,7 @@
     "query": "¿cuántos usuarios pagos tiene Workly hoy?",
     "language": "es",
     "expect_absence": true,
+    "project": "workly",
     "notes": "The Workly go-live audit (#1212) explicitly says Workly is NOT YET apt for its first paying customer — a paying-user COUNT was never recorded because there are none yet."
   },
   {
@@ -537,6 +598,7 @@
     "query": "how many paying users does Workly have today",
     "language": "en",
     "expect_absence": true,
+    "project": "workly",
     "notes": "English pairing of absence-workly-paying-users-es."
   }
 ]

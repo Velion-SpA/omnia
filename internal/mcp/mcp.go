@@ -1413,6 +1413,15 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		// alongside results below so both branches populate it consistently.
 		relevance := make(map[int64]float64)
 
+		// semantic carries each result's raw semantic (cosine) score, keyed
+		// by Observation.ID, when the hybrid recall path produced one
+		// (recall.Result.SemanticScore — engram obs #2585/#2612). Only the
+		// cfg.Recall != nil branch below ever populates an entry; the as-of
+		// and FTS5-only branches have no semantic leg at all, so this stays
+		// empty for them — a missing entry is BuildResultReceipt's "no
+		// cosine for this row" case, not a 0.0.
+		semantic := make(map[int64]float64)
+
 		// ftsDiag receives Store.Search's zero-hit relaxation ladder outcome
 		// (design obs #1668 D7, spec fts-recall REQ "Fallback Transparency",
 		// omnia-0.3.1-write-hygiene PR7) on the plain FTS5-only path below.
@@ -1456,6 +1465,9 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			}
 			for _, fr := range fused {
 				relevance[fr.ID] = fr.Score
+				if fr.SemanticScore != nil {
+					semantic[fr.ID] = *fr.SemanticScore
+				}
 			}
 			results = HydrateFusedResults(s, fused, limit, RecallScopeFilter{
 				Type:    typ,
@@ -1678,7 +1690,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 				// path on a fusion error above — it returns an error result
 				// instead (see the cfg.Recall != nil branch), so there is no
 				// mid-query fallback case to distinguish here.
-				entry["score_breakdown"] = BuildResultReceipt(r, cfg.Recall != nil && asOf == "", cfg.RecallRanking, relevance, normalizedRelevance, now, stalenessPenalty)
+				entry["score_breakdown"] = BuildResultReceipt(r, cfg.Recall != nil && asOf == "", cfg.RecallRanking, relevance, normalizedRelevance, semantic, now, stalenessPenalty)
 			}
 			structuredResults = append(structuredResults, entry)
 

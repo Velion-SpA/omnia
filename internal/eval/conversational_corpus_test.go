@@ -9,9 +9,12 @@ import (
 
 // makeConvCase builds one minimal, individually-valid ConversationalCase for
 // a non-absence kind, so per-field validation tests can isolate the rule
-// under test from every other one.
+// under test from every other one. KindCrossProject gets Unscoped=true and
+// no Project (its own required shape, engram #2623); every other kind gets
+// a Project so it stays independently valid against the project/unscoped
+// gate this same fix added.
 func makeConvCase(id string, kind QuestionKind) ConversationalCase {
-	return ConversationalCase{
+	c := ConversationalCase{
 		ID:            id,
 		Kind:          kind,
 		Query:         "query",
@@ -19,6 +22,12 @@ func makeConvCase(id string, kind QuestionKind) ConversationalCase {
 		ObservationID: "obs-" + id,
 		ExpectedFact:  "fact",
 	}
+	if kind == KindCrossProject {
+		c.Unscoped = true
+	} else {
+		c.Project = "test-project"
+	}
+	return c
 }
 
 // makeFullConvCorpus builds one valid case per AllQuestionKinds entry (the
@@ -34,6 +43,11 @@ func makeFullConvCorpus() []ConversationalCase {
 				Query:         "query",
 				Language:      LanguageEN,
 				ExpectAbsence: true,
+				// Absence cases are scoped like every other non-cross_project
+				// kind (see this file's design decision doc + the loader's
+				// own gate): a real consumer still routes an absence
+				// question to some project.
+				Project: "test-project",
 			})
 			continue
 		}
@@ -182,6 +196,83 @@ func TestLoadConversationalCorpus_NonAbsenceForbidsExpectAbsence(t *testing.T) {
 	path := writeConvCasesFile(t, cases)
 	if _, err := LoadConversationalCorpus(path); err == nil {
 		t.Error("expected error for a non-absence case with expect_absence=true, got nil")
+	}
+}
+
+// TestLoadConversationalCorpus_CrossProjectRequiresUnscoped is engram
+// #2623's core gate: a cross_project case's whole point is a search
+// spanning every project, so it must declare unscoped=true explicitly — a
+// cross_project case that forgot to set it must fail loudly at load time,
+// not silently scope to a single (empty) project.
+func TestLoadConversationalCorpus_CrossProjectRequiresUnscoped(t *testing.T) {
+	cases := makeFullConvCorpus()
+	for i := range cases {
+		if cases[i].Kind == KindCrossProject {
+			cases[i].Unscoped = false
+		}
+	}
+	path := writeConvCasesFile(t, cases)
+	if _, err := LoadConversationalCorpus(path); err == nil {
+		t.Error("expected error for a cross_project case with unscoped=false, got nil")
+	}
+}
+
+// TestLoadConversationalCorpus_CrossProjectForbidsProject is the flip side:
+// a cross_project case that sets BOTH unscoped=true AND a project
+// contradicts its own gold shape (search every project vs. search exactly
+// one).
+func TestLoadConversationalCorpus_CrossProjectForbidsProject(t *testing.T) {
+	cases := makeFullConvCorpus()
+	for i := range cases {
+		if cases[i].Kind == KindCrossProject {
+			cases[i].Project = "omnia"
+		}
+	}
+	path := writeConvCasesFile(t, cases)
+	if _, err := LoadConversationalCorpus(path); err == nil {
+		t.Error("expected error for a cross_project case carrying both unscoped=true and project, got nil")
+	}
+}
+
+// TestLoadConversationalCorpus_NonCrossProjectForbidsUnscoped guards the
+// other direction: unscoped=true is reserved for KindCrossProject, so a
+// scoped-kind case can never accidentally search every project.
+func TestLoadConversationalCorpus_NonCrossProjectForbidsUnscoped(t *testing.T) {
+	cases := makeFullConvCorpus()
+	for i := range cases {
+		if cases[i].Kind == KindStatus {
+			cases[i].Unscoped = true
+		}
+	}
+	path := writeConvCasesFile(t, cases)
+	if _, err := LoadConversationalCorpus(path); err == nil {
+		t.Error("expected error for a non-cross_project case with unscoped=true, got nil")
+	}
+}
+
+// TestLoadConversationalCorpus_NonCrossProjectRequiresProject covers every
+// non-cross_project kind (including absence, per this fix's judgement call
+// that a real consumer still routes an absence question to some project):
+// an empty Project must fail loudly rather than silently becoming an
+// unscoped, cross-project search (engram #2623's whole point).
+func TestLoadConversationalCorpus_NonCrossProjectRequiresProject(t *testing.T) {
+	for _, k := range AllQuestionKinds {
+		if k == KindCrossProject {
+			continue
+		}
+		k := k
+		t.Run(string(k), func(t *testing.T) {
+			cases := makeFullConvCorpus()
+			for i := range cases {
+				if cases[i].Kind == k {
+					cases[i].Project = ""
+				}
+			}
+			path := writeConvCasesFile(t, cases)
+			if _, err := LoadConversationalCorpus(path); err == nil {
+				t.Errorf("expected error for a %s case missing project, got nil", k)
+			}
+		})
 	}
 }
 

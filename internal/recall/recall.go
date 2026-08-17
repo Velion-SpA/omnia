@@ -37,6 +37,33 @@ type Result struct {
 	ID    int64
 	Score float64
 	Exact bool // true if this result came from the topic_key sentinel, not RRF
+
+	// SemanticScore is this candidate's raw semantic (cosine) similarity —
+	// the same per-hit value SemanticHit.Score carries in, surfaced past
+	// fusion instead of being discarded (engram obs #2585/#2612: RRF's Score
+	// above is a rank-position combinator, not comparable across queries, so
+	// it cannot answer "how relevant is this, really" — raw cosine is the
+	// one quantity in this package with real cross-query magnitude, which is
+	// exactly why AdaptiveFloor's StrongFloor/BaseFloor thresholds it at
+	// all).
+	//
+	// nil means "no cosine for this row", NOT "cosine 0.0" — two genuinely
+	// different situations a caller must not conflate (a nil SemanticScore
+	// reading as 0 would make a lexical-only row look maximally IRRELEVANT
+	// on the one axis that has real magnitude, which is worse than not
+	// reporting it at all). nil covers three cases, all indistinguishable
+	// past this point and all correctly "no signal":
+	//   - the semantic leg was never run (Semantic == nil, EmbedQuery/Search
+	//     failed — Service.semanticHits degrades to an empty slice), so this
+	//     ID never had a candidate cosine to carry;
+	//   - this ID appeared in the semantic list but scored below
+	//     AdaptiveFloor's floor, so it was filtered out before competing in
+	//     RRF and never received a semRank (see the semantic loop below);
+	//   - this result reached the output via the lexical leg only — a real,
+	//     common case (design D2), not an error.
+	// A non-nil value is only ever set from a hit that both passed the floor
+	// and was not deduped into the exact-sentinel lane.
+	SemanticScore *float64
 }
 
 // Weight keys for FuseParams.Weights.
@@ -116,6 +143,14 @@ type candidate struct {
 	lexRank   int // 1-based; 0 = absent from the lexical list
 	semRank   int // 1-based; 0 = absent from the (floor-filtered) semantic list
 	rrf       float64
+
+	// semScore/semScoreOK carry the raw cosine value through to Result.
+	// SemanticScore, set alongside semRank (same guard: passed the floor,
+	// not the exact sentinel) — semScoreOK distinguishes "scored 0.0" from
+	// "never had a semantic hit", the same nil-means-absent contract
+	// Result.SemanticScore documents.
+	semScore   float32
+	semScoreOK bool
 }
 
 func (c *candidate) bothLists() bool { return c.lexRank > 0 && c.semRank > 0 }
@@ -151,6 +186,12 @@ func getOrCreate(cands map[int64]*candidate, order *[]int64, id int64, updatedAt
 // RRF ties are broken by (1) presence in both lists beating a single list,
 // (2) UpdatedAt DESC, (3) ID ASC — fully deterministic. The final list
 // (sentinel rows + RRF-ranked rows) is capped at MaxResults.
+//
+// Each non-sentinel Result also carries SemanticScore — the raw cosine
+// value the winning semantic hit (if any) contributed, surfaced past RRF
+// rather than discarded (see Result.SemanticScore's own doc for the nil
+// contract). This is pure plumbing: it does not change rrf, floor
+// filtering, ordering, or MaxResults truncation in any way.
 func Fuse(lexical []LexicalHit, semantic []SemanticHit, p FuseParams) []Result {
 	if p.RRFK <= 0 {
 		p.RRFK = 60
@@ -209,6 +250,8 @@ func Fuse(lexical []LexicalHit, semantic []SemanticHit, p FuseParams) []Result {
 		semRank++
 		c := getOrCreate(cands, &order, h.ID, h.UpdatedAt)
 		c.semRank = semRank
+		c.semScore = h.Score
+		c.semScoreOK = true
 		if h.UpdatedAt > c.updatedAt {
 			c.updatedAt = h.UpdatedAt
 		}
@@ -242,7 +285,12 @@ func Fuse(lexical []LexicalHit, semantic []SemanticHit, p FuseParams) []Result {
 
 	for _, id := range order {
 		c := cands[id]
-		results = append(results, Result{ID: c.id, Score: c.rrf})
+		var semScore *float64
+		if c.semScoreOK {
+			v := float64(c.semScore)
+			semScore = &v
+		}
+		results = append(results, Result{ID: c.id, Score: c.rrf, SemanticScore: semScore})
 	}
 
 	if p.MaxResults > 0 && len(results) > p.MaxResults {

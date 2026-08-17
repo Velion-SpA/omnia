@@ -371,7 +371,7 @@ func TestRecallOrFTSSearchWithRelevance_NilRecallReportsFusionDidNotRun(t *testi
 	}
 	defer s.Close()
 
-	_, _, fusionRan, err := recallOrFTSSearchWithRelevance(context.Background(), s, nil, "panic", store.SearchOptions{Limit: 5})
+	_, _, _, fusionRan, err := recallOrFTSSearchWithRelevance(context.Background(), s, nil, "panic", store.SearchOptions{Limit: 5})
 	if err != nil {
 		t.Fatalf("recallOrFTSSearchWithRelevance(nil recall): %v", err)
 	}
@@ -408,7 +408,7 @@ func TestRecallOrFTSSearchWithRelevance_SuccessReportsFusionRan(t *testing.T) {
 	semantic := fakeCLIEmbedSearcher{hits: []embed.Hit{{ObsID: int(obsID), Score: 0.9}}}
 	recallSvc := recall.NewService(mcp.NewStoreLexicalSearcher(s), semantic, recall.DefaultFuseParams())
 
-	_, _, fusionRan, err := recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, "login timeout", store.SearchOptions{
+	_, _, _, fusionRan, err := recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, "login timeout", store.SearchOptions{
 		Project: "engram", Scope: "project", Limit: 10,
 	})
 	if err != nil {
@@ -452,7 +452,7 @@ func TestRecallOrFTSSearchWithRelevance_FallbackReportsFusionDidNotRun(t *testin
 
 	recallSvc := recall.NewService(failingLexicalSearcher{}, nil, recall.DefaultFuseParams())
 
-	results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, "panic", store.SearchOptions{
+	results, relevance, _, fusionRan, err := recallOrFTSSearchWithRelevance(context.Background(), s, recallSvc, "panic", store.SearchOptions{
 		Project: "engram", Scope: "project", Limit: 5,
 	})
 	if err != nil {

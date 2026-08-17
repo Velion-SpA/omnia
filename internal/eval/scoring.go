@@ -89,15 +89,98 @@ func (s JudgeFreeScorer) Score(ctx context.Context, c EvalCase, retrieved string
 	return hit, 0, nil
 }
 
+// groundingSegmentSeparator mirrors cmd/omnia's
+// conversationalGroundingContextSeparator, which joins each retrieved
+// result's content into the single string factMatches receives. Duplicated
+// rather than imported for the same reason confidenceNone is (see
+// conversational_scoring.go): internal/eval must not depend on the packages
+// it evaluates. Splitting on it restores per-DOCUMENT boundaries, without
+// which "where in the text did this fact appear" is meaningless — position
+// 90% of a four-document concatenation may be the very start of the fourth
+// document.
+const groundingSegmentSeparator = "\n\n---\n\n"
+
+// groundingMaxRelativePosition caps how far into a document the expected fact
+// may appear and still count as evidence: the first half.
+//
+// Measured (2026-08-15, engram obs #2633 and its follow-up). Every identity
+// "grounding" this harness had ever reported was a false pass against ONE
+// 7468-char memory — a bugfix note written by the session doing the
+// measuring, which quoted the corpus's own expected facts while discussing
+// them:
+//
+//	pos 7292/7468 (98%)  inside its `Keywords:` trailer
+//	pos 7334/7468 (98%)  same trailer
+//	pos 5246/7468 (70%)  inside its results table: `"where does Omnia store
+//	                     its data" -> rank 18 (... also contains "SQLite is
+//	                     the source of truth" verbatim)`
+//
+// A fact stated where a document DEFINES its subject appears early. A fact
+// appearing in a trailing index, an appendix, or a quoted measurement table
+// appears late. That is the distinction this cap encodes.
+//
+// IT IS NOT SUFFICIENT, and must not be mistaken for a fix. It rejects both
+// cases above, but only because they happen to sit late; a measurement note
+// that quoted the same strings in its opening paragraph would still pass. No
+// textual heuristic reliably separates "document containing the fact as
+// evidence" from "document quoting the fact while discussing it". The real
+// fix is to keep the eval store read-only and separate from the store the
+// measuring session writes to — see the retraction observation.
+const groundingMaxRelativePosition = 0.5
+
 // factMatches covers both spec EVAL-5's "exact-match" and "substring" modes:
 // case-insensitive containment already subsumes exact equality (a fully
 // equal, trimmed pair is trivially a substring of itself), so one check
 // serves both without duplicated logic.
+//
+// It is positional and prose-scoped, NOT a bare substring test, because a
+// bare substring test scored a session's own notes about measuring as
+// evidence — see groundingMaxRelativePosition for the measurement that
+// forced this. A fact counts only when it appears in a document's prose
+// body, in the first groundingMaxRelativePosition of it.
 func factMatches(expected, retrieved string) bool {
-	if expected == "" {
+	want := strings.ToLower(strings.TrimSpace(expected))
+	if want == "" {
 		return false
 	}
-	return strings.Contains(strings.ToLower(retrieved), strings.ToLower(strings.TrimSpace(expected)))
+	for _, segment := range strings.Split(retrieved, groundingSegmentSeparator) {
+		if factInProse(want, segment) {
+			return true
+		}
+	}
+	return false
+}
+
+// factInProse reports whether want appears in segment's prose body, early
+// enough to be a definition rather than an index entry. want must already be
+// lowercased and trimmed.
+func factInProse(want, segment string) bool {
+	prose := strings.ToLower(stripKeywordsTrailer(segment))
+	if prose == "" {
+		return false
+	}
+	pos := strings.Index(prose, want)
+	if pos < 0 {
+		return false
+	}
+	return float64(pos) <= float64(len(prose))*groundingMaxRelativePosition
+}
+
+// stripKeywordsTrailer cuts a memory at its `Keywords:` line, which by this
+// project's own save convention is a trailing index of exact strings —
+// error messages, file paths, bilingual search terms — deliberately written
+// to make the memory findable later. That makes it the single most likely
+// place for a corpus's expected fact to appear verbatim without the memory
+// being evidence for anything. Documents with no such line are returned
+// unchanged.
+func stripKeywordsTrailer(segment string) string {
+	lower := strings.ToLower(segment)
+	for _, marker := range []string{"\nkeywords:", "\nkeywords :"} {
+		if i := strings.LastIndex(lower, marker); i >= 0 {
+			return segment[:i]
+		}
+	}
+	return segment
 }
 
 func (s JudgeFreeScorer) embeddingThresholdHit(ctx context.Context, expected, retrieved string) (bool, error) {

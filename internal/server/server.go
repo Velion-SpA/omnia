@@ -75,9 +75,15 @@ type SemanticPromptBuilder func(a, b store.ObservationSnippet) string
 // on the embedded SearchOptions and threads straight into
 // mcp.RankPipelineOptions.ExplicitType at the SearchFunc implementation.
 //
-// all_projects is deliberately NOT here: P0 explicitly defers cross-project
-// HTTP wiring to a separate item (P5, docs/conversational-retrieval-plan.md)
-// so this seam doesn't have to be re-widened twice.
+// AllProjects/Projects are P5's cross-project fan-out knobs
+// (docs/conversational-retrieval-plan.md "P5 — Cross-project retrieval"),
+// deferred here by P0 on purpose so this seam only had to be widened once.
+// See resolveProjectFanoutParams (below) for exactly how a request's
+// `project=`/`all_projects=` query params map onto these two fields plus
+// the embedded SearchOptions.Project — the short version: a request with
+// neither AllProjects nor Projects set is byte-for-byte the pre-P5 single-
+// project shape (SearchOptions.Project alone), which is what keeps the
+// hard back-compat gate in handleSearch's own doc true.
 type SearchRequest struct {
 	store.SearchOptions
 	// MaxTokens, when > 0, is the caller's per-request override for the
@@ -92,6 +98,22 @@ type SearchRequest struct {
 	// populate SearchEnvelope.ScoreBreakdown for every returned result
 	// (mirrors mem_search's own `explain` arg).
 	Explain bool
+	// AllProjects, when true (query param `all_projects=1`), asks the
+	// SearchFunc implementation to fan out across EVERY project instead of
+	// the single SearchOptions.Project — mirrors mem_search's own
+	// `all_projects` arg (internal/mcp/mcp.go). Always wins over any
+	// `project=` values the request also carries (resolveProjectFanoutParams
+	// enforces this at parse time, same as mem_search's "project is ignored
+	// when all_projects=true" contract), so SearchOptions.Project is always
+	// "" whenever this is true.
+	AllProjects bool
+	// Projects, when non-empty (2+ repeated `project=` query params, and
+	// AllProjects is false), asks the SearchFunc implementation to fan out
+	// across exactly this explicit subset instead of a single project.
+	// SearchOptions.Project is always "" whenever this is non-empty — a
+	// single `project=` value still routes through SearchOptions.Project
+	// alone, unchanged.
+	Projects []string
 }
 
 // SearchEnvelope is SearchFunc's return value: the results plus mem_search's
@@ -128,6 +150,38 @@ type SearchEnvelope struct {
 	// own `omitempty`), matching this struct's existing present-only-when-
 	// notable convention for every other degradation/explain field above.
 	Intent string
+
+	// DiversityDistinct/DiversityCounts surface P5's own measurement gate
+	// (docs/conversational-retrieval-plan.md: "project diversity in the
+	// top-4 ... must span >= 2 projects") directly in the response, instead
+	// of leaving a caller to re-derive it by inspecting each result's
+	// Project field itself. Mirrors multiproject.DiversityReport's
+	// Distinct/Counts fields (internal/multiproject/multiproject.go) — this
+	// package does not import internal/multiproject (same "SearchFunc
+	// implementation owns internal/mcp and friends" boundary SearchFunc's
+	// own doc explains), so the SearchFunc implementation (cmd/omnia)
+	// computes the report and copies just these two values across.
+	//
+	// Both stay the zero value (0, nil) — and searchEnvelopeJSON omits them
+	// entirely — for every request that did NOT go through the P5 fan-out
+	// (AllProjects false and Projects empty): a single-project search has
+	// exactly one project by construction, so "diversity" is not a
+	// meaningful signal to report for it.
+	DiversityDistinct int
+	DiversityCounts   map[string]int
+
+	// AsOf is the normalized recorded-time timestamp that was ACTUALLY
+	// applied, populated ONLY by handleSearch's own as_of branch
+	// (searchRecordedTime, below) — never by a SearchFunc implementation.
+	// This is the store-isolation verification seam (engram
+	// eval/http-search-as-of-isolation): a caller that requested `as_of=`
+	// and needs to be SURE the server actually honored it (rather than
+	// silently falling back to a live search — the exact failure mode that
+	// contaminated `omnia eval`'s conversational corpus with the measuring
+	// session's own notes) reads this field back and compares it against
+	// what it sent. Empty on every other response shape, including a
+	// healthy live search that never requested as_of at all.
+	AsOf string
 }
 
 // SearchFunc performs a memory search and returns a SearchEnvelope. Injected
@@ -158,9 +212,16 @@ type SearchFunc func(ctx context.Context, query string, req SearchRequest) (Sear
 // `type` is deliberately NOT exposed here (unlike SearchRequest): P3's
 // endpoint is a question-answering surface, not a filtered browse — a
 // caller wanting a type-scoped result should use GET /search instead.
+//
+// AllProjects/Projects mirror SearchRequest's own P5 fan-out fields (see
+// that struct's doc) — GET /answer accepts the same `all_projects=1`/
+// repeated `project=` query params as GET /search, resolved by the same
+// resolveProjectFanoutParams helper.
 type AnswerRequest struct {
 	store.SearchOptions
-	MaxChars int
+	MaxChars    int
+	AllProjects bool
+	Projects    []string
 }
 
 // AnswerSource cites one piece of evidence AnswerResponse.Context was
@@ -190,6 +251,12 @@ type AnswerResponse struct {
 	Intent     string         `json:"intent,omitempty"`
 	Sources    []AnswerSource `json:"sources"`
 	Degraded   bool           `json:"degraded"`
+	// DiversityDistinct/DiversityCounts mirror SearchEnvelope's own P5
+	// fields (see that struct's doc) — populated only when the AnswerFunc
+	// implementation ran the cross-project fan-out (AnswerRequest.AllProjects
+	// or Projects), omitted otherwise.
+	DiversityDistinct int            `json:"diversity_distinct,omitempty"`
+	DiversityCounts   map[string]int `json:"diversity_counts,omitempty"`
 }
 
 // AnswerFunc computes an answer-shaped, budgeted context for GET /answer.
@@ -672,14 +739,23 @@ type searchEnvelopeJSON struct {
 	// consumer must be able to read `"recall_degraded": false` and believe
 	// it. The string/map fields below stay omitempty because their empty
 	// value carries no such claim.
-	RecallDegraded       bool   `json:"recall_degraded"`
-	RecallDegradedReason string `json:"recall_degraded_reason,omitempty"`
-	EmbeddingsStale      bool   `json:"embeddings_stale"`
-	EmbeddingsBehindBy   int    `json:"embeddings_behind_by"`
+	RecallDegraded       bool                      `json:"recall_degraded"`
+	RecallDegradedReason string                    `json:"recall_degraded_reason,omitempty"`
+	EmbeddingsStale      bool                      `json:"embeddings_stale"`
+	EmbeddingsBehindBy   int                       `json:"embeddings_behind_by"`
 	NewestEmbeddedAt     string                    `json:"newest_embedded_at,omitempty"`
 	ScoreBreakdown       map[string]map[string]any `json:"score_breakdown,omitempty"`
 	// Intent mirrors SearchEnvelope.Intent — see that field's own doc.
 	Intent string `json:"intent,omitempty"`
+	// DiversityDistinct/DiversityCounts mirror SearchEnvelope's own fields
+	// (see that struct's doc) — both omitempty, since a single-project
+	// search (the overwhelming majority of requests) never populates them.
+	DiversityDistinct int            `json:"diversity_distinct,omitempty"`
+	DiversityCounts   map[string]int `json:"diversity_counts,omitempty"`
+	// AsOf mirrors SearchEnvelope.AsOf — the store-isolation verification
+	// seam (see that field's own doc). omitempty like every field above:
+	// absent unless the request actually carried `as_of=`.
+	AsOf string `json:"as_of,omitempty"`
 }
 
 // handleSearch serves GET /search.
@@ -707,6 +783,15 @@ type searchEnvelopeJSON struct {
 // "healthy" (mirrors mem_search's own EvaluateRecallHealth(semanticActive:
 // false, ...) contract in internal/mcp/recall_degradation.go, without this
 // package importing internal/mcp — see SearchFunc's own doc for why).
+//
+// `as_of=` (engram eval/http-search-as-of-isolation) takes a THIRD branch
+// that pre-empts BOTH of the above, regardless of whether a SearchFunc is
+// wired: see searchRecordedTime's own doc for why (mirrors mem_search's own
+// established as_of branch, internal/mcp/mcp.go's handleSearch, which
+// already bypasses cfg.Recall the same way). This is the seam `omnia eval
+// --as-of` uses to measure the conversational corpus against a store view
+// the CURRENT session cannot have written to — see cmd/omnia/eval.go's
+// conversationalHTTPFetcher.
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -717,15 +802,18 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	explain := queryBool(r, "explain", false)
 	wantEnvelope := queryBool(r, "envelope", false) || explain
 
+	project, allProjects, projects := resolveProjectFanoutParams(r)
 	req := SearchRequest{
 		SearchOptions: store.SearchOptions{
 			Type:    r.URL.Query().Get("type"),
-			Project: r.URL.Query().Get("project"),
+			Project: project,
 			Scope:   r.URL.Query().Get("scope"),
 			Limit:   queryInt(r, "limit", 10),
 		},
-		MaxTokens: queryInt(r, "max_tokens", 0),
-		Explain:   explain,
+		MaxTokens:   queryInt(r, "max_tokens", 0),
+		Explain:     explain,
+		AllProjects: allProjects,
+		Projects:    projects,
 	}
 
 	// Issue #86 / P0: when cmd/omnia wired a SearchFunc via SetSearch, it
@@ -734,18 +822,32 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// fallback to FTS5 baked in). Unset (s.search == nil) keeps the
 	// `results` payload byte-for-byte the legacy s.store.Search-only path —
 	// see this function's own doc for what envelope=1 reports in that case.
+	//
+	// as_of pre-empts both: a recorded-time request must never be silently
+	// upgraded into a live hybrid search just because a SearchFunc happens
+	// to be wired — see searchRecordedTime's own doc.
 	var envelope SearchEnvelope
 	var err error
-	if s.search != nil {
+	if asOf := strings.TrimSpace(r.URL.Query().Get("as_of")); asOf != "" {
+		envelope, err = s.searchRecordedTime(query, req.SearchOptions, asOf)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	} else if s.search != nil {
 		envelope, err = s.search(r.Context(), query, req)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	} else {
 		envelope.Results, err = s.store.Search(query, req.SearchOptions)
 		envelope.RecallDegraded = true
 		envelope.RecallDegradedReason = "no SearchFunc configured (SetSearch was never called); results come from direct FTS5 keyword search with no ranking pipeline"
-	}
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
-		return
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 
 	if !wantEnvelope {
@@ -762,7 +864,114 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		NewestEmbeddedAt:     envelope.NewestEmbeddedAt,
 		ScoreBreakdown:       envelope.ScoreBreakdown,
 		Intent:               envelope.Intent,
+		DiversityDistinct:    envelope.DiversityDistinct,
+		DiversityCounts:      envelope.DiversityCounts,
+		AsOf:                 envelope.AsOf,
 	})
+}
+
+// searchRecordedTime serves handleSearch's `as_of=` branch (engram
+// eval/http-search-as-of-isolation) — the fix for a measured contamination
+// bug: `omnia eval --profile conversational --target http` read GET /search
+// against the SAME live store the measuring session's own mem_save calls
+// wrote to, and the project's memory convention (a trailing `Keywords:`
+// line quoting exact strings so memories stay findable) planted the eval
+// corpus's own gold answers into the corpus under test. A textual
+// heuristic on the scorer side (positional/prose-scoped factMatches) was
+// tried first and still let a same-session note through twice — see engram
+// #2633. The only robust fix is store isolation: read a view of the store
+// the current session's writes cannot have touched.
+//
+// This DELIBERATELY bypasses s.search (whatever hybrid lexical+semantic
+// recall.Service / ranking pipeline cmd/omnia wired via SetSearch) and goes
+// straight to s.store.SearchAsOf, mirroring mem_search's OWN as_of branch
+// (internal/mcp/mcp.go's handleSearch: `if asOf != ""` takes the same
+// detour around cfg.Recall, already shipped and reviewed). This is not a
+// new limitation this endpoint introduces: recorded-time correctness is a
+// STORE-layer guarantee (observation_revisions + created/updated/deleted_at
+// timestamps), and there is no historical embeddings index to search — an
+// as-of request routed through the semantic leg would silently mix LIVE
+// vector neighbors into a "recorded-time" result set, which is worse than
+// just being FTS5-only and honest about it (RecallDegraded=true below).
+//
+// Fails loudly (a descriptive error — handleSearch maps it to 400, a
+// client-facing/config problem, not a transient server error) rather than
+// silently degrading to a live read, in either of the two ways that would
+// quietly defeat a caller relying on this for isolation:
+//   - time-travel is not enabled on this store: store.SearchAsOf would
+//     otherwise silently return s.store.Search's LIVE results with no way
+//     for the caller to tell (see SearchAsOf's own doc) — exactly the
+//     failure mode this whole mechanism exists to rule out.
+//   - the requested timestamp normalizes to the live-read sentinel
+//     (store.NormalizeAsOf resolves a future/clock-skewed timestamp to ""
+//     specifically so an ordinary as_of caller transparently falls back to
+//     live data) — the right default for mem_search's own as_of arg, and
+//     the wrong one for a caller whose whole point is "never silently
+//     search live," so this endpoint refuses instead.
+//
+// On success, envelope.AsOf carries the exact NORMALIZED timestamp that was
+// applied — the verification signal a caller checks back (see
+// SearchEnvelope.AsOf's own doc) instead of trusting that `as_of=` was
+// honored just because the request returned 200.
+func (s *Server) searchRecordedTime(query string, opts store.SearchOptions, asOf string) (SearchEnvelope, error) {
+	if !s.store.TimeTravelEnabled() {
+		return SearchEnvelope{}, fmt.Errorf("as_of requested but time_travel is not enabled on this store; recorded-time isolation cannot be guaranteed (see time_travel.enabled in config.yaml)")
+	}
+	normalized, err := store.NormalizeAsOf(asOf)
+	if err != nil {
+		return SearchEnvelope{}, fmt.Errorf("invalid as_of: %w", err)
+	}
+	if normalized == "" {
+		return SearchEnvelope{}, fmt.Errorf("as_of %q resolved to live data (timestamp is in the future, or within the clock-skew tolerance of now); refusing to silently search live state", asOf)
+	}
+	results, err := s.store.SearchAsOf(query, opts, normalized)
+	if err != nil {
+		return SearchEnvelope{}, fmt.Errorf("recorded-time search: %w", err)
+	}
+	return SearchEnvelope{
+		Results:              results,
+		RecallDegraded:       true,
+		RecallDegradedReason: "as_of recorded-time search bypasses the ranking/recall pipeline (FTS5-only, matching mem_search's own as_of branch — no historical embeddings index exists)",
+		AsOf:                 normalized,
+	}, nil
+}
+
+// resolveProjectFanoutParams parses this endpoint's project-scoping query
+// params, shared by handleSearch and handleAnswer (P5, docs/
+// conversational-retrieval-plan.md "P5 — Cross-project retrieval"):
+//
+//   - No `project=` and no `all_projects=1`: returns ("", false, nil) —
+//     the pre-P5 shape, unchanged.
+//   - Exactly one `project=value`: returns ("value", false, nil) — also the
+//     pre-P5 shape (identical to r.URL.Query().Get("project")), so a caller
+//     that only ever sent one `project=` sees byte-for-byte the same
+//     SearchRequest/AnswerRequest it always has.
+//   - `all_projects=1` (any truthy value queryBool accepts): returns ("",
+//     true, nil), ALWAYS — any `project=` values present are ignored, since
+//     a fan-out over every project has no single project to filter by
+//     (mirrors mem_search's own documented "project is ignored when
+//     all_projects=true" contract, internal/mcp/mcp.go).
+//   - 2+ repeated `project=` values (and all_projects is not set): returns
+//     ("", false, values) — an explicit-subset fan-out.
+//
+// This is the ONLY place either handler decides fan-out-vs-single-project
+// routing; the hard back-compat gate in handleSearch's own doc holds
+// because the SearchFunc/AnswerFunc implementation branches on
+// AllProjects/Projects being non-zero, and this function guarantees both
+// stay exactly zero unless one of the two new query params was actually
+// used.
+func resolveProjectFanoutParams(r *http.Request) (project string, allProjects bool, projects []string) {
+	values := r.URL.Query()["project"]
+	if queryBool(r, "all_projects", false) {
+		return "", true, nil
+	}
+	if len(values) > 1 {
+		return "", false, values
+	}
+	if len(values) == 1 {
+		return values[0], false, nil
+	}
+	return "", false, nil
 }
 
 // handleAnswer serves GET /answer (P3, docs/conversational-retrieval-plan.md
@@ -795,13 +1004,16 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	project, allProjects, projects := resolveProjectFanoutParams(r)
 	req := AnswerRequest{
 		SearchOptions: store.SearchOptions{
-			Project: r.URL.Query().Get("project"),
+			Project: project,
 			Scope:   r.URL.Query().Get("scope"),
 			Limit:   queryInt(r, "limit", 10),
 		},
-		MaxChars: queryInt(r, "max_chars", 0),
+		MaxChars:    queryInt(r, "max_chars", 0),
+		AllProjects: allProjects,
+		Projects:    projects,
 	}
 
 	resp, err := s.answer(r.Context(), query, req)

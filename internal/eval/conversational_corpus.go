@@ -157,6 +157,36 @@ type ConversationalCase struct {
 	// scoring, purely so the corpus stays reviewable per the hard
 	// requirement above.
 	Notes string `json:"notes,omitempty"`
+
+	// Project is the project this case's Query should be SCOPED to when
+	// fetched — the fix for the measurement-validity gap discovered in
+	// engram #2623: the real consumer (Hermes' detectProject) always
+	// latches onto exactly one project before searching, but this corpus
+	// carried no project field at all, so every conversational number ever
+	// measured searched all ~49 projects at once. Unscoped, an off-topic
+	// query routinely finds something topically adjacent somewhere across
+	// every project (measured: "what is Benja's salary" scored top cosine
+	// 0.463 unscoped vs 0.296 scoped to omnia), which collapses exactly the
+	// on-topic/off-topic separation AnswerConfig.SemanticCosineFloor
+	// depends on.
+	//
+	// Required and non-empty for every kind except KindCrossProject, which
+	// MUST leave this empty and set Unscoped instead (see Unscoped's doc).
+	// There is deliberately no "empty means unscoped" fallback: an
+	// accidentally-empty Project on a non-cross_project case fails corpus
+	// validation instead of silently turning into a cross-project search.
+	Project string `json:"project,omitempty"`
+
+	// Unscoped marks a case whose Query is deliberately searched across
+	// EVERY project rather than one — the whole point of KindCrossProject
+	// (a question like "en qué estoy bloqueado esta semana" is only
+	// answerable by a search that reaches outside a single project).
+	// Required true for KindCrossProject and forbidden (must be false) for
+	// every other kind — see validateConversationalCases. Kept as an
+	// explicit boolean, not inferred from Project=="", so a
+	// cross-project-vs-scoped case is unmissable in the JSON and in a
+	// diff, exactly like ExpectAbsence is for KindAbsence.
+	Unscoped bool `json:"unscoped,omitempty"`
 }
 
 // MinCasesPerKind is the conversational corpus's fail-fast floor: every one
@@ -253,6 +283,26 @@ func validateConversationalCases(cases []ConversationalCase, source string) erro
 			// ObservationID is intentionally NOT required here: identity
 			// cases legitimately have none until P1 ships (see the struct
 			// doc above) and are scored on Grounded instead.
+		}
+
+		// Project/Unscoped (engram #2623): every case must declare EXACTLY
+		// one of "search this one project" or "search every project", and
+		// which one is legal is fully determined by Kind — see Project's
+		// and Unscoped's own doc comments on ConversationalCase.
+		if c.Kind == KindCrossProject {
+			if !c.Unscoped {
+				return fmt.Errorf("eval: conversational corpus %s: case %q (index %d) has kind %q but unscoped is not true — a cross_project case's whole point is a search spanning every project, so it must declare that explicitly (engram #2623)", source, c.ID, i, KindCrossProject)
+			}
+			if c.Project != "" {
+				return fmt.Errorf("eval: conversational corpus %s: case %q (index %d) has kind %q and unscoped=true but also sets project %q — a cross_project case must not name a single project to scope to", source, c.ID, i, KindCrossProject, c.Project)
+			}
+		} else {
+			if c.Unscoped {
+				return fmt.Errorf("eval: conversational corpus %s: case %q (index %d) has kind %q but unscoped is true — only %q cases may set it (engram #2623: an accidental unscoped search must never happen silently)", source, c.ID, i, c.Kind, KindCrossProject)
+			}
+			if c.Project == "" {
+				return fmt.Errorf("eval: conversational corpus %s: case %q (index %d) missing project — every case except %q must declare which single project its query is scoped to, matching how the real consumer (Hermes' detectProject) always scopes retrieval (engram #2623)", source, c.ID, i, KindCrossProject)
+			}
 		}
 
 		perKind[c.Kind]++

@@ -3,6 +3,7 @@ package eval
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/velion/omnia/internal/llm"
@@ -223,5 +224,51 @@ func TestLLMJudgeScorer_RejectsJudgeFreeCapability(t *testing.T) {
 	}
 	if judge.calls != 0 {
 		t.Errorf("judge.calls = %d, want 0 (rejected before invoking the judge)", judge.calls)
+	}
+}
+
+// TestFactMatches_RejectsKeywordsTrailerAndLatePositions locks the two false
+// passes that made this harness report identity grounding it had not earned
+// (engram obs #2633). Both come from ONE real memory: a bugfix note written
+// by the session doing the measuring, which quoted the corpus's own expected
+// facts while discussing them — once in its `Keywords:` index trailer, once
+// inside a results table. Neither is evidence about the subject.
+func TestFactMatches_RejectsKeywordsTrailerAndLatePositions(t *testing.T) {
+	const fact = "SQLite is the source of truth"
+	body := strings.Repeat("prose about an unrelated bugfix. ", 200)
+
+	tests := []struct {
+		name      string
+		retrieved string
+		want      bool
+	}{
+		{
+			name:      "fact in the Keywords trailer is an index entry, not evidence",
+			retrieved: body + "\nKeywords: repodoc, chunk title, \"" + fact + "\", eval",
+			want:      false,
+		},
+		{
+			name:      "fact quoted late in a results table is not evidence",
+			retrieved: body + "\n\"where does Omnia store its data\" -> rank 18 (also contains \"" + fact + "\" verbatim)",
+			want:      false,
+		},
+		{
+			name:      "fact stated early in prose IS evidence",
+			retrieved: "Omnia keeps everything locally. " + fact + ". " + body,
+			want:      true,
+		},
+		{
+			name:      "position is measured per document, not across the concatenation",
+			retrieved: body + groundingSegmentSeparator + fact + " and more prose.",
+			want:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := factMatches(fact, tt.retrieved); got != tt.want {
+				t.Errorf("factMatches = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

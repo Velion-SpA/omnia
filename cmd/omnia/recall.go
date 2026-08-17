@@ -136,6 +136,44 @@ func buildRecallServiceForCLI(s *store.Store, dataDir string) *recall.Service {
 	return buildRecallService(s, appCfg.Recall, appCfg.Embeddings, dataDir, appCfg.VecIndex.Enabled, appCfg.Encryption)
 }
 
+// bestSemanticScore returns the HIGHEST semantic cosine among results, and
+// whether any result had one at all.
+//
+// Deliberately the maximum, not the top-ranked result's. Both were tried; the
+// top-ranked-only version is measurably wrong. Results are ordered by FUSED
+// score, which is rank-derived and says nothing about topical closeness, so a
+// lexical-leg-only row — one that never cleared recall.AdaptiveFloor and
+// therefore carries NO cosine at all — can rank first and blind the caller to
+// every lower-ranked row that does have one. Measured on the live store: the
+// four genuinely off-topic absence cases all classified `high` because the
+// rank-1 hit had a nil cosine, while the real best cosine for those same
+// queries was 0.296-0.543, comfortably under the 0.55 off-topic floor.
+//
+// The maximum is also the semantically correct question. The caller is asking
+// "is ANYTHING we retrieved actually about this topic?", not "is the single
+// best-fused row about this topic?" — one on-topic result anywhere in the set
+// is enough to make the query on-topic.
+//
+// Pre-empted rows (topic_key sentinel, signature match) are skipped: their
+// relevance is an outlier by construction, the same exclusion RankResults and
+// MinMaxNormalizeRelevance both document.
+func bestSemanticScore(results []store.SearchResult, semantic map[int64]float64) (float64, bool) {
+	best, found := 0.0, false
+	for _, r := range results {
+		if r.Rank == cliExactSentinelRank || r.SignatureMatch {
+			continue
+		}
+		sc, ok := semantic[r.ID]
+		if !ok {
+			continue
+		}
+		if !found || sc > best {
+			best, found = sc, true
+		}
+	}
+	return best, found
+}
+
 // recallOrFTSSearch is the shared search-routing seam between `omnia search`
 // (cmdSearch) and `omnia serve`'s HTTP GET /search (internal/server.Server,
 // wired via SetSearch in cmdServe) — issue #86's "avoid divergence" ask.
@@ -166,7 +204,7 @@ func buildRecallServiceForCLI(s *store.Store, dataDir string) *recall.Service {
 const recallQueryTimeout = 5 * time.Second
 
 func recallOrFTSSearch(ctx context.Context, s *store.Store, recallSvc *recall.Service, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
-	results, _, _, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, opts)
+	results, _, _, _, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, opts)
 	return results, err
 }
 
@@ -197,10 +235,19 @@ const cliExactSentinelRank = -1000.0
 // (blocking fix: --explain mislabels fusion vs lexical on mid-query FTS5
 // fallback). recallOrFTSSearch delegates to this so existing callers keep
 // their exact original two-value signature.
-func recallOrFTSSearchWithRelevance(ctx context.Context, s *store.Store, recallSvc *recall.Service, query string, opts store.SearchOptions) ([]store.SearchResult, map[int64]float64, bool, error) {
+//
+// semantic is the fourth return value (engram obs #2585/#2612): each
+// result's raw semantic cosine score, keyed by Observation.ID, sourced from
+// recall.Result.SemanticScore — present only for rows fusion actually
+// carried a cosine for (see that field's own doc for the nil/absent
+// contract). Every fallback path here (nil recallSvc, a mid-query
+// recallSvc.Search error) has no semantic leg at all — storeSearch is pure
+// FTS5 — so those branches return an empty, non-nil map, exactly like
+// lexicalRelevance's own "no signal" convention.
+func recallOrFTSSearchWithRelevance(ctx context.Context, s *store.Store, recallSvc *recall.Service, query string, opts store.SearchOptions) ([]store.SearchResult, map[int64]float64, map[int64]float64, bool, error) {
 	if recallSvc == nil {
 		results, err := storeSearch(s, query, opts)
-		return results, lexicalRelevance(results), false, err
+		return results, lexicalRelevance(results), map[int64]float64{}, false, err
 	}
 
 	// Normalize the project exactly like the store does (mcp.go does this too):
@@ -220,12 +267,16 @@ func recallOrFTSSearchWithRelevance(ctx context.Context, s *store.Store, recallS
 	})
 	if err != nil {
 		results, serr := storeSearch(s, query, opts)
-		return results, lexicalRelevance(results), false, serr
+		return results, lexicalRelevance(results), map[int64]float64{}, false, serr
 	}
 
 	relevance := make(map[int64]float64, len(fused))
+	semantic := make(map[int64]float64, len(fused))
 	for _, fr := range fused {
 		relevance[fr.ID] = fr.Score
+		if fr.SemanticScore != nil {
+			semantic[fr.ID] = *fr.SemanticScore
+		}
 	}
 
 	limit := opts.Limit
@@ -237,7 +288,7 @@ func recallOrFTSSearchWithRelevance(ctx context.Context, s *store.Store, recallS
 		Project: opts.Project,
 		Scope:   opts.Scope,
 	})
-	return results, relevance, true, nil
+	return results, relevance, semantic, true, nil
 }
 
 // lexicalRelevance builds the FTS5-only-path relevance map: negated bm25
@@ -420,7 +471,18 @@ func buildHTTPSearchFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 	readWatermarks := mcp.NewWatermarkReader(s, autoEmbed)
 
 	return func(ctx context.Context, query string, req server.SearchRequest) (server.SearchEnvelope, error) {
-		results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
+		// P5 (docs/conversational-retrieval-plan.md "P5 — Cross-project
+		// retrieval", cmd/omnia/crossproject.go): a request that set
+		// all_projects=1 or 2+ repeated project= params branches into the
+		// fan-out-and-merge path entirely, BEFORE any of the single-project
+		// code below runs. This ordering is what keeps the single-project
+		// path (neither param present) byte-for-byte unchanged — the code
+		// below is untouched from its pre-P5 form.
+		if req.AllProjects || len(req.Projects) > 0 {
+			return crossProjectSearchEnvelope(ctx, s, recallSvc, appCfg, readWatermarks, query, req)
+		}
+
+		results, relevance, semantic, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
 		if err != nil {
 			return server.SearchEnvelope{}, err
 		}
@@ -518,7 +580,7 @@ func buildHTTPSearchFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 			for _, r := range pipelineOut.Results {
 				stalenessPenalty := mcp.StalenessPenaltyFor(anchorsByObs[r.SyncID])
 				envelope.ScoreBreakdown[strconv.FormatInt(r.ID, 10)] = mcp.BuildResultReceipt(
-					r, fusionRan, appCfg.Recall.Ranking, relevance, normalizedRelevance, now, stalenessPenalty,
+					r, fusionRan, appCfg.Recall.Ranking, relevance, normalizedRelevance, semantic, now, stalenessPenalty,
 				)
 			}
 		}
@@ -577,7 +639,18 @@ func buildHTTPAnswerFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 	readWatermarks := mcp.NewWatermarkReader(s, autoEmbed)
 
 	return func(ctx context.Context, query string, req server.AnswerRequest) (server.AnswerResponse, error) {
-		results, relevance, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
+		// P5: same fan-out branch as buildHTTPSearchFunc above — see that
+		// function's own comment for why this ordering keeps the
+		// single-project path below byte-for-byte unchanged.
+		if req.AllProjects || len(req.Projects) > 0 {
+			return crossProjectAnswer(ctx, s, recallSvc, appCfg, readWatermarks, query, req)
+		}
+
+		// semantic (the 3rd return value) feeds ClassifyAnswerConfidence's
+		// `off_topic` trigger below — see that function's own doc comment
+		// (internal/mcp/answer.go) for what the per-hit cosine can and
+		// cannot detect (engram obs #2618).
+		results, relevance, semantic, fusionRan, err := recallOrFTSSearchWithRelevance(ctx, s, recallSvc, query, req.SearchOptions)
 		if err != nil {
 			return server.AnswerResponse{}, err
 		}
@@ -624,28 +697,18 @@ func buildHTTPAnswerFunc(s *store.Store, recallSvc *recall.Service, appCfg *conf
 		diag := answerFTSDiag(s, query, req.SearchOptions)
 		health := mcp.EvaluateRecallHealth(ctx, recallSvc != nil, readWatermarks)
 
-		var topScore float64
-		var hasTopScore bool
-		for _, r := range pipelineOut.Results {
-			if r.Rank == cliExactSentinelRank || r.SignatureMatch {
-				continue // pre-empted rows carry no relevance score (see relevance map's own doc)
-			}
-			if sc, ok := relevance[r.ID]; ok {
-				topScore, hasTopScore = sc, true
-			}
-			break
-		}
+		topSemanticScore, hasTopSemanticScore := bestSemanticScore(pipelineOut.Results, semantic)
 
 		confidence := mcp.ClassifyAnswerConfidence(mcp.AnswerConfidenceSignals{
-			HitCount:         len(results),
-			TopScore:         topScore,
-			HasTopScore:      hasTopScore,
-			FTSRelaxed:       diag.Relaxed,
-			FTSRelaxStep:     diag.Step,
-			FusionRan:        fusionRan,
-			RecallDegraded:   health.Degraded,
-			SourcesAssembled: len(assembled.Sources),
-		}, appCfg.Answer.NoneScoreFloor, appCfg.Answer.ConfidenceThreshold)
+			HitCount:            len(results),
+			TopSemanticScore:    topSemanticScore,
+			HasTopSemanticScore: hasTopSemanticScore,
+			FTSRelaxed:          diag.Relaxed,
+			FTSRelaxStep:        diag.Step,
+			FusionRan:           fusionRan,
+			RecallDegraded:      health.Degraded,
+			SourcesAssembled:    len(assembled.Sources),
+		}, appCfg.Answer.SemanticCosineFloor)
 
 		sources := make([]server.AnswerSource, 0, len(assembled.Sources))
 		for _, src := range assembled.Sources {

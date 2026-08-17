@@ -497,7 +497,7 @@ func TestBuildResultReceipt_SignatureMatchTreatedAsMaximallyRelevant(t *testing.
 	normalizedRelevance := map[int64]float64{}
 	cfg := config.RankingConfig{Weights: config.RankingWeights{Recency: 1, Importance: 1, Relevance: 1}, RecencyHalfLifeDays: 14}
 
-	receipt := BuildResultReceipt(r, false, cfg, relevance, normalizedRelevance, now, 0)
+	receipt := BuildResultReceipt(r, false, cfg, relevance, normalizedRelevance, nil, now, 0)
 
 	lexical, ok := receipt["lexical"].(map[string]any)
 	if !ok {
@@ -512,6 +512,72 @@ func TestBuildResultReceipt_SignatureMatchTreatedAsMaximallyRelevant(t *testing.
 	wantFinal := RankScore(1.0, recency, importance, 0, cfg.Weights)
 	if got := receipt["final"]; got != wantFinal {
 		t.Errorf("receipt[final] = %v, want %v (signature match must normalize relevance to 1.0, not the missing-key default 0)", got, wantFinal)
+	}
+}
+
+// TestBuildResultReceipt_SemanticScoreFromMap is the wiring proof for engram
+// obs #2585/#2612's plumbing slice: BuildResultReceipt's "semantic" field
+// used to be hardcoded nil (recall.Service.semanticHits computed a per-hit
+// cosine that never reached this far). It now reads the caller-supplied
+// semantic map keyed by Observation.ID — table-driven over the three
+// distinct row shapes a caller can hand it:
+//
+//   - an ID present in the map: the receipt surfaces that exact value;
+//   - an ID absent from the map (nil map, or a real map missing this key —
+//     both must behave identically): the receipt reports null, never a
+//     silently-defaulted 0.0 — conflating "no cosine" with "cosine 0.0"
+//     would make a lexical-only row look maximally irrelevant on the one
+//     score component that has real cross-query magnitude;
+//   - the topic_key exact-match sentinel: even when the map happens to
+//     carry an entry for its ID (Fuse never produces one in practice, but
+//     BuildResultReceipt must not rely on that upstream invariant to stay
+//     correct on its own), semantic is still surfaced from the map lookup
+//     like any other row — pre-emption only changes lexical/fusion, per its
+//     own doc comment, so this locks that scope explicitly.
+func TestBuildResultReceipt_SemanticScoreFromMap(t *testing.T) {
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	cfg := config.RankingConfig{Weights: config.RankingWeights{Recency: 1, Importance: 1, Relevance: 1}, RecencyHalfLifeDays: 14}
+	relevance := map[int64]float64{1: 0.03, 2: 0.02, 100: 0.05}
+	normalizedRelevance := map[int64]float64{1: 1.0, 2: 0.5}
+
+	tests := []struct {
+		name     string
+		r        store.SearchResult
+		semantic map[int64]float64
+		want     any // nil or a float64
+	}{
+		{
+			name:     "present in map: real cosine surfaced",
+			r:        sr(1, "bugfix", now.Format("2006-01-02 15:04:05"), -1.2),
+			semantic: map[int64]float64{1: 0.42},
+			want:     0.42,
+		},
+		{
+			name:     "absent from a non-nil map: null, not 0.0",
+			r:        sr(2, "bugfix", now.Format("2006-01-02 15:04:05"), -1.5),
+			semantic: map[int64]float64{1: 0.42}, // has an entry, just not for id 2
+			want:     nil,
+		},
+		{
+			name:     "nil map: null (FTS5-only/as-of caller with no semantic leg)",
+			r:        sr(2, "bugfix", now.Format("2006-01-02 15:04:05"), -1.5),
+			semantic: nil,
+			want:     nil,
+		},
+		{
+			name:     "exact sentinel row: map lookup still applies to semantic",
+			r:        sr(100, "bugfix", now.Format("2006-01-02 15:04:05"), exactSentinelRank),
+			semantic: map[int64]float64{100: 0.77},
+			want:     0.77,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			receipt := BuildResultReceipt(tt.r, true, cfg, relevance, normalizedRelevance, tt.semantic, now, 0)
+			if got := receipt["semantic"]; got != tt.want {
+				t.Errorf("receipt[semantic] = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
