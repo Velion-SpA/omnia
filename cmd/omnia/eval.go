@@ -123,6 +123,7 @@ func cmdEval(args []string) {
 	httpBaseURL := fs.String("http-base-url", "", "--profile conversational --target http|answer only: base URL of a running omnia server, e.g. http://localhost:7799 (no trailing slash)")
 	multiProject := fs.Bool("multi-project", false, "--profile conversational --target http only: run ONLY the corpus's cross_project cases through GET /search?all_projects=1&envelope=1 (P5, docs/conversational-retrieval-plan.md), reporting accuracy@1 AND project diversity in the top-4 PER CASE (not just an aggregate) — the P5 measurement gate. Requires --http-base-url")
 	forceUnscoped := fs.Bool("force-unscoped", false, "--profile conversational only: ignore every case's project/unscoped scoping and search ALL projects for every case, reproducing the harness's pre-engram-#2623 behavior — kept reachable for before/after comparison, never the default (the real consumer, Hermes' detectProject, always scopes to one project)")
+	allowLive := fs.Bool("allow-live", false, "--profile conversational only: deliberately measure the LIVE store instead of an isolated view, accepting that this session's own memories about the eval will be scored as retrieved evidence. Exists so the refusal in place of --as-of is a speed bump rather than a wall — there are legitimate uses (debugging the harness itself, measuring a store no session is writing to). It is never the right flag for producing a number you intend to report.")
 	asOf := fs.String("as-of", "", "--profile conversational only: recorded-time isolation (engram eval/http-search-as-of-isolation) — read the store as it stood at this RFC3339 timestamp instead of live. THIS IS THE FIX for a measured contamination bug: the session running this eval writes memories (mem_save, following this project's own Keywords: convention) that quote the corpus's gold facts verbatim, and the NEXT eval run then scores those notes as if they were genuine retrieved evidence (engram #2633: identity grounding was reported 0.625, corrected to 0.250, actually 0.000). Setting --as-of makes BOTH --target inprocess (store.SearchAsOf) and --target http (GET /search?as_of=, this endpoint's own isolation branch) read a view of the store that cannot contain anything written after the timestamp — verified, not assumed: this flag makes the eval FAIL LOUDLY (fatal, non-zero exit) instead of silently measuring a contaminated store whenever isolation cannot be confirmed (time_travel.enabled is false, the timestamp resolves to live data, or a --target http server doesn't echo the applied as_of back). Empty (default) keeps today's live-read behavior unchanged for every other use of this tool.")
 	if err := fs.Parse(args); err != nil {
 		fatal(err)
@@ -149,6 +150,30 @@ func cmdEval(args []string) {
 	}
 
 	if normalizedProfile == "conversational" {
+		// Isolation is REQUIRED, not optional. Measured three times over: a
+		// session that runs this eval and then writes memories about it
+		// poisons the next run, because documenting an evaluation faithfully
+		// means naming what the evaluation looks for, and this project's
+		// `Keywords:` save convention then makes those strings maximally
+		// findable. Three separate memories — a bugfix note, the retraction
+		// documenting that bugfix note, and a field-test note — each became a
+		// false pass independently, hours apart (engram
+		// eval/decontamination-of-poisoning-memories). Identity grounding read
+		// 0.625, then 0.250, and is actually 0.000.
+		//
+		// So the default cannot be "live unless you remember the flag".
+		// Forgetting produced a wrong number three times, and a wrong number
+		// that looks plausible is worse than a refusal. Running against live
+		// state is still possible — it is just no longer what happens when
+		// nobody thinks about it.
+		if strings.TrimSpace(*asOf) == "" && !*allowLive {
+			fatal(fmt.Errorf(
+				"eval: --profile conversational requires isolation: pass --as-of RFC3339 (a timestamp from BEFORE this session's first mem_save), or --allow-live to deliberately measure the live store.\n"+
+					"       Reading live state means this session's own notes about the eval are scored as retrieved evidence; that is not hypothetical, it happened three times (engram eval/decontamination-of-poisoning-memories).\n"+
+					"       Suggested: --as-of %s",
+				sessionStartHint()))
+			return
+		}
 		summary, err := runConversationalEval(context.Background(), conversationalRunOptions{
 			CorpusPath:    *corpusPath,
 			ConfigPath:    *configPath,
@@ -1323,4 +1348,17 @@ func printConversationalSummary(summary eval.ConversationalRunSummary) {
 				"", s.HonestRefusalRate.Mean, s.HonestRefusalRate.StdDev, 1-s.HonestRefusalRate.Mean)
 		}
 	}
+}
+
+// sessionStartHint returns an RFC3339 timestamp a few hours back, offered in
+// the isolation-required error as a starting point rather than a default.
+//
+// It is deliberately NOT applied automatically. A cutoff is a real choice with
+// a real cost in both directions: too recent and the session's own notes are
+// still included; too early and legitimate evidence is excluded along with
+// them, which was measured (delta fell from 0.700 to 0.300 at a cutoff chosen
+// for safety margin). Only the operator knows when their session actually
+// began writing, so the tool proposes and the operator decides.
+func sessionStartHint() string {
+	return time.Now().UTC().Add(-6 * time.Hour).Format(time.RFC3339)
 }
