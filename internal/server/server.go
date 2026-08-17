@@ -169,6 +169,19 @@ type SearchEnvelope struct {
 	// meaningful signal to report for it.
 	DiversityDistinct int
 	DiversityCounts   map[string]int
+
+	// AsOf is the normalized recorded-time timestamp that was ACTUALLY
+	// applied, populated ONLY by handleSearch's own as_of branch
+	// (searchRecordedTime, below) — never by a SearchFunc implementation.
+	// This is the store-isolation verification seam (engram
+	// eval/http-search-as-of-isolation): a caller that requested `as_of=`
+	// and needs to be SURE the server actually honored it (rather than
+	// silently falling back to a live search — the exact failure mode that
+	// contaminated `omnia eval`'s conversational corpus with the measuring
+	// session's own notes) reads this field back and compares it against
+	// what it sent. Empty on every other response shape, including a
+	// healthy live search that never requested as_of at all.
+	AsOf string
 }
 
 // SearchFunc performs a memory search and returns a SearchEnvelope. Injected
@@ -739,6 +752,10 @@ type searchEnvelopeJSON struct {
 	// search (the overwhelming majority of requests) never populates them.
 	DiversityDistinct int            `json:"diversity_distinct,omitempty"`
 	DiversityCounts   map[string]int `json:"diversity_counts,omitempty"`
+	// AsOf mirrors SearchEnvelope.AsOf — the store-isolation verification
+	// seam (see that field's own doc). omitempty like every field above:
+	// absent unless the request actually carried `as_of=`.
+	AsOf string `json:"as_of,omitempty"`
 }
 
 // handleSearch serves GET /search.
@@ -766,6 +783,15 @@ type searchEnvelopeJSON struct {
 // "healthy" (mirrors mem_search's own EvaluateRecallHealth(semanticActive:
 // false, ...) contract in internal/mcp/recall_degradation.go, without this
 // package importing internal/mcp — see SearchFunc's own doc for why).
+//
+// `as_of=` (engram eval/http-search-as-of-isolation) takes a THIRD branch
+// that pre-empts BOTH of the above, regardless of whether a SearchFunc is
+// wired: see searchRecordedTime's own doc for why (mirrors mem_search's own
+// established as_of branch, internal/mcp/mcp.go's handleSearch, which
+// already bypasses cfg.Recall the same way). This is the seam `omnia eval
+// --as-of` uses to measure the conversational corpus against a store view
+// the CURRENT session cannot have written to — see cmd/omnia/eval.go's
+// conversationalHTTPFetcher.
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -796,18 +822,32 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// fallback to FTS5 baked in). Unset (s.search == nil) keeps the
 	// `results` payload byte-for-byte the legacy s.store.Search-only path —
 	// see this function's own doc for what envelope=1 reports in that case.
+	//
+	// as_of pre-empts both: a recorded-time request must never be silently
+	// upgraded into a live hybrid search just because a SearchFunc happens
+	// to be wired — see searchRecordedTime's own doc.
 	var envelope SearchEnvelope
 	var err error
-	if s.search != nil {
+	if asOf := strings.TrimSpace(r.URL.Query().Get("as_of")); asOf != "" {
+		envelope, err = s.searchRecordedTime(query, req.SearchOptions, asOf)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	} else if s.search != nil {
 		envelope, err = s.search(r.Context(), query, req)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	} else {
 		envelope.Results, err = s.store.Search(query, req.SearchOptions)
 		envelope.RecallDegraded = true
 		envelope.RecallDegradedReason = "no SearchFunc configured (SetSearch was never called); results come from direct FTS5 keyword search with no ranking pipeline"
-	}
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
-		return
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 
 	if !wantEnvelope {
@@ -826,7 +866,74 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Intent:               envelope.Intent,
 		DiversityDistinct:    envelope.DiversityDistinct,
 		DiversityCounts:      envelope.DiversityCounts,
+		AsOf:                 envelope.AsOf,
 	})
+}
+
+// searchRecordedTime serves handleSearch's `as_of=` branch (engram
+// eval/http-search-as-of-isolation) — the fix for a measured contamination
+// bug: `omnia eval --profile conversational --target http` read GET /search
+// against the SAME live store the measuring session's own mem_save calls
+// wrote to, and the project's memory convention (a trailing `Keywords:`
+// line quoting exact strings so memories stay findable) planted the eval
+// corpus's own gold answers into the corpus under test. A textual
+// heuristic on the scorer side (positional/prose-scoped factMatches) was
+// tried first and still let a same-session note through twice — see engram
+// #2633. The only robust fix is store isolation: read a view of the store
+// the current session's writes cannot have touched.
+//
+// This DELIBERATELY bypasses s.search (whatever hybrid lexical+semantic
+// recall.Service / ranking pipeline cmd/omnia wired via SetSearch) and goes
+// straight to s.store.SearchAsOf, mirroring mem_search's OWN as_of branch
+// (internal/mcp/mcp.go's handleSearch: `if asOf != ""` takes the same
+// detour around cfg.Recall, already shipped and reviewed). This is not a
+// new limitation this endpoint introduces: recorded-time correctness is a
+// STORE-layer guarantee (observation_revisions + created/updated/deleted_at
+// timestamps), and there is no historical embeddings index to search — an
+// as-of request routed through the semantic leg would silently mix LIVE
+// vector neighbors into a "recorded-time" result set, which is worse than
+// just being FTS5-only and honest about it (RecallDegraded=true below).
+//
+// Fails loudly (a descriptive error — handleSearch maps it to 400, a
+// client-facing/config problem, not a transient server error) rather than
+// silently degrading to a live read, in either of the two ways that would
+// quietly defeat a caller relying on this for isolation:
+//   - time-travel is not enabled on this store: store.SearchAsOf would
+//     otherwise silently return s.store.Search's LIVE results with no way
+//     for the caller to tell (see SearchAsOf's own doc) — exactly the
+//     failure mode this whole mechanism exists to rule out.
+//   - the requested timestamp normalizes to the live-read sentinel
+//     (store.NormalizeAsOf resolves a future/clock-skewed timestamp to ""
+//     specifically so an ordinary as_of caller transparently falls back to
+//     live data) — the right default for mem_search's own as_of arg, and
+//     the wrong one for a caller whose whole point is "never silently
+//     search live," so this endpoint refuses instead.
+//
+// On success, envelope.AsOf carries the exact NORMALIZED timestamp that was
+// applied — the verification signal a caller checks back (see
+// SearchEnvelope.AsOf's own doc) instead of trusting that `as_of=` was
+// honored just because the request returned 200.
+func (s *Server) searchRecordedTime(query string, opts store.SearchOptions, asOf string) (SearchEnvelope, error) {
+	if !s.store.TimeTravelEnabled() {
+		return SearchEnvelope{}, fmt.Errorf("as_of requested but time_travel is not enabled on this store; recorded-time isolation cannot be guaranteed (see time_travel.enabled in config.yaml)")
+	}
+	normalized, err := store.NormalizeAsOf(asOf)
+	if err != nil {
+		return SearchEnvelope{}, fmt.Errorf("invalid as_of: %w", err)
+	}
+	if normalized == "" {
+		return SearchEnvelope{}, fmt.Errorf("as_of %q resolved to live data (timestamp is in the future, or within the clock-skew tolerance of now); refusing to silently search live state", asOf)
+	}
+	results, err := s.store.SearchAsOf(query, opts, normalized)
+	if err != nil {
+		return SearchEnvelope{}, fmt.Errorf("recorded-time search: %w", err)
+	}
+	return SearchEnvelope{
+		Results:              results,
+		RecallDegraded:       true,
+		RecallDegradedReason: "as_of recorded-time search bypasses the ranking/recall pipeline (FTS5-only, matching mem_search's own as_of branch — no historical embeddings index exists)",
+		AsOf:                 normalized,
+	}, nil
 }
 
 // resolveProjectFanoutParams parses this endpoint's project-scoping query

@@ -757,6 +757,25 @@ func (s *Store) DBPath() string {
 	return datadir.DBPath(s.cfg.DataDir)
 }
 
+// TimeTravelEnabled reports whether this store was opened with recorded-time
+// history capture on (time_travel.enabled in config.yaml). Exported so
+// callers outside this package can verify — and refuse loudly instead of
+// silently degrading — that a requested recorded-time read will actually be
+// honored rather than transparently falling back to live/current data. Every
+// as-of read path in this package (SearchAsOf, StateAsOf, FormatContextAsOf)
+// already checks s.cfg.TimeTravelEnabled internally and silently returns the
+// live-equivalent result when it is false — the right behavior for an
+// ordinary caller that treats --as-of as a nice-to-have, and the WRONG one
+// for a caller (internal/server's GET /search?as_of=, cmd/omnia's eval
+// isolation guard) whose entire contract depends on recorded-time isolation
+// actually holding. Those callers check this first and fail the request
+// instead of quietly measuring live data (engram eval/http-search-as-of-
+// isolation — the fix for a store-isolation bug where a session's own
+// mem_save calls contaminated the very corpus its eval was scoring).
+func (s *Store) TimeTravelEnabled() bool {
+	return s.cfg.TimeTravelEnabled
+}
+
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {

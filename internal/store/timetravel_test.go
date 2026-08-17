@@ -729,3 +729,81 @@ func TestSearchAsOfZeroHitBeforeRecordingBoundary(t *testing.T) {
 		t.Fatalf("zero-hit boundary error = %v, want exact persisted %s", err, startedAt)
 	}
 }
+
+// TestSearchAsOfExcludesObservationCreatedAfterTimestamp settles, with a real
+// store and a real query, the exact question the eval store-isolation guard
+// (engram eval/http-search-as-of-isolation, GET /search?as_of= and `omnia
+// eval --as-of`) depends on: does a row CREATED AFTER the requested as-of
+// timestamp reliably fail to appear in SearchAsOf's results?
+//
+// This question came up because the eval harness's own textual contamination
+// bug (engram #2633: `factMatches` positional/prose-scoping still let a
+// same-session note quoting the corpus's gold fact through, twice) forced a
+// move from a textual heuristic to store-level isolation, and two DIFFERENT
+// as-of documentation gaps needed to be checked before trusting it:
+//   - engram obs #1739 ("as-of search filters only current rows then
+//     rewrites history, missing historical project/type/scope semantics") —
+//     already fixed same-day (obs #1746, PR3B); see
+//     TestSearchAsOfRecordedFiltersRetentionAndMixedCaseProject above, which
+//     is the regression test for exactly that gap.
+//   - mem_search's own doc warning ("words found only in older revisions are
+//     not searchable") — a missed HISTORICAL match (false negative on old
+//     text that was later edited away), never a wrongly INCLUDED future row.
+//     Neither gap is about the exclusion property this test checks.
+//
+// Answered here by construction, not by re-reading either doc comment: add
+// one observation, capture a cutoff, add a second observation (strictly
+// later, real wall-clock separation) whose content shares a search term with
+// the first, then assert SearchAsOf(cutoff) returns the first and ONLY the
+// first. SearchAsOf's candidate pool is built from s.Search with
+// IncludeDeleted:true and Limit set to the store's total observation count
+// (store.go's `!opts.IncludeDeleted` guard on the MaxSearchResults clamp) —
+// so the later row IS a candidate; StateAsOf's own `at.Before(created)` check
+// (timetravel.go) is what excludes it. This test exercises that path
+// end-to-end via the public SearchAsOf API, exactly as GET /search?as_of=
+// and `omnia eval --as-of` call it.
+func TestSearchAsOfExcludesObservationCreatedAfterTimestamp(t *testing.T) {
+	s := newTimeTravelStore(t, true, 0)
+
+	beforeID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "decision", Title: "isolation cutoff before",
+		Content: "quarantine token appears before the cutoff", Project: "omnia", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation(before): %v", err)
+	}
+	cutoff := time.Now().UTC().Format(time.RFC3339Nano)
+	// created_at is persisted at ONE-SECOND resolution ("2006-01-02
+	// 15:04:05" — store.go's own observationCreatedAtFormat-equivalent
+	// literal), not RFC3339Nano, so a sub-second gap would round-trip to
+	// the SAME stored second as cutoff and this test would not actually
+	// exercise the boundary. Real wall-clock separation, not a forced
+	// timestamp, so this proves the property the store actually persists.
+	time.Sleep(1100 * time.Millisecond)
+
+	afterID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "decision", Title: "isolation cutoff after",
+		Content: "quarantine token appears after the cutoff", Project: "omnia", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation(after): %v", err)
+	}
+
+	live, err := s.Search("quarantine", SearchOptions{})
+	if err != nil || len(live) != 2 {
+		t.Fatalf("setup: live search = %#v, %v, want both rows visible live", live, err)
+	}
+
+	hits, err := s.SearchAsOf("quarantine", SearchOptions{}, cutoff)
+	if err != nil {
+		t.Fatalf("SearchAsOf(cutoff): %v", err)
+	}
+	if len(hits) != 1 || hits[0].ID != beforeID {
+		t.Fatalf("SearchAsOf(cutoff) = %#v, want exactly [%d] (the row created BEFORE cutoff)", hits, beforeID)
+	}
+	for _, h := range hits {
+		if h.ID == afterID {
+			t.Fatalf("observation %d, created strictly AFTER the as-of cutoff, leaked into recorded-time search results — this is the exact isolation guarantee eval/http-search-as-of-isolation depends on", afterID)
+		}
+	}
+}

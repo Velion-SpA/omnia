@@ -368,6 +368,71 @@ func TestDefaultRunConversationalEval_InvalidTargetErrors(t *testing.T) {
 	}
 }
 
+// TestDefaultRunConversationalEval_AsOfIncompatibleWithInjection proves the
+// engram eval/http-search-as-of-isolation guard: --as-of + --injection must
+// fail loudly before anything is measured, because the injection pipeline's
+// recall.Service leg has no historical embeddings index — silently ignoring
+// --as-of there would let a caller believe isolation held when it didn't.
+func TestDefaultRunConversationalEval_AsOfIncompatibleWithInjection(t *testing.T) {
+	_, err := defaultRunConversationalEval(context.Background(), conversationalRunOptions{
+		AsOf:      "2026-08-14T03:00:00Z",
+		Injection: true,
+	})
+	if err == nil {
+		t.Fatal("expected an error when --as-of is combined with --injection")
+	}
+	if !strings.Contains(err.Error(), "as-of") || !strings.Contains(err.Error(), "injection") {
+		t.Errorf("expected the error to name both --as-of and --injection, got: %v", err)
+	}
+}
+
+// TestDefaultRunConversationalEval_AsOfNotSupportedWithAnswerTarget proves
+// the same guard for --target=answer: GET /answer has no as_of seam (only
+// GET /search and --target inprocess do), so this must fail loudly instead
+// of silently running --target=answer live.
+func TestDefaultRunConversationalEval_AsOfNotSupportedWithAnswerTarget(t *testing.T) {
+	_, err := defaultRunConversationalEval(context.Background(), conversationalRunOptions{
+		AsOf:        "2026-08-14T03:00:00Z",
+		Target:      "answer",
+		HTTPBaseURL: "http://localhost:0",
+	})
+	if err == nil {
+		t.Fatal("expected an error when --as-of is combined with --target=answer")
+	}
+	if !strings.Contains(err.Error(), "as-of") || !strings.Contains(err.Error(), "answer") {
+		t.Errorf("expected the error to name both --as-of and --target=answer, got: %v", err)
+	}
+}
+
+// TestDefaultRunConversationalEval_AsOfFailsLoudlyWhenTimeTravelDisabled
+// proves the --target=inprocess isolation guard: a store opened with
+// time_travel.enabled=false would make store.SearchAsOf silently degrade to
+// a live search (its own documented behavior), so defaultRunConversationalEval
+// must refuse before building the fetcher at all, rather than letting a
+// contaminated live store masquerade as an isolated one.
+func TestDefaultRunConversationalEval_AsOfFailsLoudlyWhenTimeTravelDisabled(t *testing.T) {
+	dataDir := t.TempDir()
+	origStoreNew := storeNew
+	storeNew = func(cfg store.Config) (*store.Store, error) {
+		cfg.DataDir = dataDir
+		cfg.TimeTravelEnabled = false
+		return store.New(cfg)
+	}
+	defer func() { storeNew = origStoreNew }()
+
+	_, err := defaultRunConversationalEval(context.Background(), conversationalRunOptions{
+		AsOf:       "2026-08-14T03:00:00Z",
+		Target:     "inprocess",
+		ConfigPath: "/tmp/eval-as-of-guard-nonexistent-config.yaml",
+	})
+	if err == nil {
+		t.Fatal("expected an error when --as-of is requested against a store with time_travel disabled")
+	}
+	if !strings.Contains(err.Error(), "time_travel is not enabled") {
+		t.Errorf("expected the error to name the disabled time_travel guard, got: %v", err)
+	}
+}
+
 // ── conversationalHTTPFetcher: real HTTP round-trip against httptest ──────
 
 // TestConversationalHTTPFetcher_DecodesResults proves the fetcher builds
@@ -391,7 +456,7 @@ func TestConversationalHTTPFetcher_DecodesResults(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false)
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false, "")
 	got, err := fetch(context.Background(), eval.ConversationalCase{Query: "what is omnia"})
 	if err != nil {
 		t.Fatalf("conversationalHTTPFetcher: %v", err)
@@ -525,7 +590,7 @@ func TestConversationalHTTPFetcher_EmptyResultsNoError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false)
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false, "")
 	got, err := fetch(context.Background(), eval.ConversationalCase{Query: "nothing matches this"})
 	if err != nil {
 		t.Fatalf("conversationalHTTPFetcher: %v", err)
@@ -544,7 +609,7 @@ func TestConversationalHTTPFetcher_NonOKStatusReturnsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false)
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false, "")
 	_, err := fetch(context.Background(), eval.ConversationalCase{Query: "x"})
 	if err == nil {
 		t.Fatal("expected an error for a non-200 GET /search response")
@@ -569,7 +634,7 @@ func TestConversationalHTTPFetcher_ScopesToProject(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false)
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false, "")
 	if _, err := fetch(context.Background(), eval.ConversationalCase{Query: "q", Project: "omnia"}); err != nil {
 		t.Fatalf("conversationalHTTPFetcher: %v", err)
 	}
@@ -600,7 +665,7 @@ func TestConversationalHTTPFetcher_UnscopedSendsAllProjects(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false)
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false, "")
 	if _, err := fetch(context.Background(), eval.ConversationalCase{Query: "q", Unscoped: true}); err != nil {
 		t.Fatalf("conversationalHTTPFetcher: %v", err)
 	}
@@ -630,7 +695,7 @@ func TestConversationalHTTPFetcher_ForceUnscopedOverridesProject(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, true /* forceUnscoped */)
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, true /* forceUnscoped */, "")
 	if _, err := fetch(context.Background(), eval.ConversationalCase{Query: "q", Project: "omnia"}); err != nil {
 		t.Fatalf("conversationalHTTPFetcher: %v", err)
 	}
@@ -644,6 +709,75 @@ func TestConversationalHTTPFetcher_ForceUnscopedOverridesProject(t *testing.T) {
 	}
 	if q.Has("project") {
 		t.Errorf("project was set despite --force-unscoped: %q", gotQuery)
+	}
+}
+
+// TestConversationalHTTPFetcher_AsOfSendsEnvelopeAndVerifiesEcho proves the
+// isolation-verification contract (engram eval/http-search-as-of-isolation):
+// a non-empty asOf sends BOTH as_of= and envelope=1 (the bare-array shape
+// has no echo field to verify against), and a matching echo is required
+// before the fetcher trusts the response.
+func TestConversationalHTTPFetcher_AsOfSendsEnvelopeAndVerifiesEcho(t *testing.T) {
+	const cutoff = "2026-08-14T03:00:00Z"
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"id":1,"sync_id":"obs-abc","content":"isolated hit"}],"recall_degraded":true,"as_of":"` + cutoff + `"}`))
+	}))
+	defer srv.Close()
+
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false, cutoff)
+	got, err := fetch(context.Background(), eval.ConversationalCase{Query: "what is omnia", Project: "omnia"})
+	if err != nil {
+		t.Fatalf("conversationalHTTPFetcher: %v", err)
+	}
+
+	q, err := url.ParseQuery(gotQuery)
+	if err != nil {
+		t.Fatalf("parse request query %q: %v", gotQuery, err)
+	}
+	if q.Get("as_of") != cutoff {
+		t.Errorf("as_of = %q, want %q", q.Get("as_of"), cutoff)
+	}
+	if q.Get("envelope") != "1" {
+		t.Errorf("envelope = %q, want %q — the echo can only be read from the widened shape", q.Get("envelope"), "1")
+	}
+	if got.SurfacedObservationID != "obs-abc" {
+		t.Errorf("SurfacedObservationID = %q, want the envelope's decoded result", got.SurfacedObservationID)
+	}
+}
+
+// TestConversationalHTTPFetcher_AsOfFailsLoudlyOnEchoMismatch is the guard's
+// core proof: a server that does NOT echo back the exact as_of it was sent
+// (empty AsOf — an older server binary with no as_of support, silently
+// running a live search — or a mismatched value) must fail the fetch with
+// an error, never silently return whatever results it got. This is the
+// mechanism the whole store-isolation guard depends on: without it, an
+// eval run against a stale server binary would silently measure a
+// contaminated live store while believing itself isolated.
+func TestConversationalHTTPFetcher_AsOfFailsLoudlyOnEchoMismatch(t *testing.T) {
+	tests := map[string]string{
+		"empty echo (server ignored as_of entirely)": `{"results":[{"id":1,"content":"live leak"}],"recall_degraded":false}`,
+		"mismatched echo":                             `{"results":[{"id":1,"content":"live leak"}],"as_of":"2020-01-01T00:00:00Z"}`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+
+			fetch := conversationalHTTPFetcher(srv.Client(), srv.URL, false, "2026-08-14T03:00:00Z")
+			_, err := fetch(context.Background(), eval.ConversationalCase{Query: "q", Project: "omnia"})
+			if err == nil {
+				t.Fatal("expected an error when the server does not echo the requested as_of, got nil (this would silently trust an unisolated store)")
+			}
+			if !strings.Contains(err.Error(), "isolation NOT verified") {
+				t.Errorf("error = %v, want it to name the isolation failure explicitly", err)
+			}
+		})
 	}
 }
 
@@ -701,7 +835,7 @@ func TestConversationalFetchers_ParityWhenInjectionOff(t *testing.T) {
 
 	c := eval.ConversationalCase{ID: "case-1", Query: "Ollama embedding layer"}
 
-	storeCase, err := conversationalStoreFetcher(s, false)(context.Background(), c)
+	storeCase, err := conversationalStoreFetcher(s, false, "")(context.Background(), c)
 	if err != nil {
 		t.Fatalf("conversationalStoreFetcher: %v", err)
 	}
@@ -742,7 +876,7 @@ func TestConversationalPipelineFetcher_BudgetActuallyTrims(t *testing.T) {
 
 	c := eval.ConversationalCase{ID: "case-1", Query: "conversational budget wiring fixture"}
 
-	storeCase, err := conversationalStoreFetcher(s, false)(context.Background(), c)
+	storeCase, err := conversationalStoreFetcher(s, false, "")(context.Background(), c)
 	if err != nil {
 		t.Fatalf("conversationalStoreFetcher: %v", err)
 	}

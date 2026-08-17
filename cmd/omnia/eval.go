@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -122,6 +123,7 @@ func cmdEval(args []string) {
 	httpBaseURL := fs.String("http-base-url", "", "--profile conversational --target http|answer only: base URL of a running omnia server, e.g. http://localhost:7799 (no trailing slash)")
 	multiProject := fs.Bool("multi-project", false, "--profile conversational --target http only: run ONLY the corpus's cross_project cases through GET /search?all_projects=1&envelope=1 (P5, docs/conversational-retrieval-plan.md), reporting accuracy@1 AND project diversity in the top-4 PER CASE (not just an aggregate) — the P5 measurement gate. Requires --http-base-url")
 	forceUnscoped := fs.Bool("force-unscoped", false, "--profile conversational only: ignore every case's project/unscoped scoping and search ALL projects for every case, reproducing the harness's pre-engram-#2623 behavior — kept reachable for before/after comparison, never the default (the real consumer, Hermes' detectProject, always scopes to one project)")
+	asOf := fs.String("as-of", "", "--profile conversational only: recorded-time isolation (engram eval/http-search-as-of-isolation) — read the store as it stood at this RFC3339 timestamp instead of live. THIS IS THE FIX for a measured contamination bug: the session running this eval writes memories (mem_save, following this project's own Keywords: convention) that quote the corpus's gold facts verbatim, and the NEXT eval run then scores those notes as if they were genuine retrieved evidence (engram #2633: identity grounding was reported 0.625, corrected to 0.250, actually 0.000). Setting --as-of makes BOTH --target inprocess (store.SearchAsOf) and --target http (GET /search?as_of=, this endpoint's own isolation branch) read a view of the store that cannot contain anything written after the timestamp — verified, not assumed: this flag makes the eval FAIL LOUDLY (fatal, non-zero exit) instead of silently measuring a contaminated store whenever isolation cannot be confirmed (time_travel.enabled is false, the timestamp resolves to live data, or a --target http server doesn't echo the applied as_of back). Empty (default) keeps today's live-read behavior unchanged for every other use of this tool.")
 	if err := fs.Parse(args); err != nil {
 		fatal(err)
 		return
@@ -155,6 +157,7 @@ func cmdEval(args []string) {
 			HTTPBaseURL:   *httpBaseURL,
 			Injection:     *injection,
 			ForceUnscoped: *forceUnscoped,
+			AsOf:          *asOf,
 		})
 		if err != nil {
 			fatal(fmt.Errorf("eval: %w", err))
@@ -296,6 +299,18 @@ func printGateResult(result eval.GateResult) {
 // exactly as it did before this existed. Mirrors applyEncryptionConfig
 // (main.go), kept as a pure function so the wiring is testable without opening
 // a real store or touching a keychain.
+//
+// TimeTravelEnabled/HistoryRevisionCap (engram eval/http-search-as-of-
+// isolation) mirror main.go's own applyTimeTravelConfig — before this, eval
+// opened its store with these left at store.DefaultConfig()'s zero value
+// (time-travel OFF) regardless of what config.yaml said, so `--target
+// inprocess --as-of` could never work: store.SearchAsOf silently degrades to
+// a live search whenever cfg.TimeTravelEnabled is false (see that method's
+// own doc), and defaultRunConversationalEval's own isolation guard
+// (s.TimeTravelEnabled()) would ALWAYS fail closed. This has no effect on
+// eval's default (no --as-of) behavior: eval never writes, so enabling
+// recorded-time history capture on a read-only process changes nothing
+// observable except making the as-of read paths actually work.
 func evalStoreConfig(base store.Config, appCfg *config.Config) store.Config {
 	if appCfg == nil {
 		return base
@@ -303,6 +318,8 @@ func evalStoreConfig(base store.Config, appCfg *config.Config) store.Config {
 	base.EncryptionEnabled = appCfg.Encryption.Enabled
 	base.EncryptionKeychainService = appCfg.Encryption.KeychainService
 	base.EncryptionAllowPlaintextFallback = appCfg.Encryption.AllowPlaintextFallback
+	base.TimeTravelEnabled = appCfg.TimeTravel.Enabled
+	base.HistoryRevisionCap = appCfg.TimeTravel.MaxRevisionsPerMemory
 	return base
 }
 
@@ -812,6 +829,17 @@ type conversationalRunOptions struct {
 	// (Hermes' detectProject always scopes to one project) — never the
 	// default.
 	ForceUnscoped bool
+	// AsOf, when non-empty, requests store-isolated recorded-time reads
+	// (engram eval/http-search-as-of-isolation — see the --as-of flag's own
+	// help text in cmdEval for the full contamination story this fixes).
+	// Threaded into BOTH conversationalStoreFetcher (--target inprocess,
+	// via store.Store.SearchAsOf) and conversationalHTTPFetcher (--target
+	// http, via GET /search?as_of=, internal/server's own isolation
+	// branch). Setting this is an explicit request for VERIFIED isolation:
+	// defaultRunConversationalEval fails loudly (a returned error, which
+	// cmdEval turns into a fatal exit) rather than silently falling back to
+	// a live read whenever that verification cannot succeed.
+	AsOf string
 }
 
 // runConversationalEval is injectable for testing, mirroring runEvalHarness
@@ -822,19 +850,39 @@ var runConversationalEval = defaultRunConversationalEval
 // ConversationalFetcher per opts.Target, then runs it through
 // eval.RunConversationalHarness for the same [MinRuns,MaxRuns]
 // reproducibility discipline the coding profile already enforces.
+//
+// opts.AsOf (engram eval/http-search-as-of-isolation) is an explicit request
+// for VERIFIED store isolation — see the --as-of flag's own help text
+// (cmdEval) for the contamination bug this fixes. It is validated up front,
+// before any fetcher is built: --target=answer has no as-of support (GET
+// /answer was not touched by this fix — out of scope, see its own doc), and
+// --injection has no as-of support either (the injection pipeline's
+// recall.Service leg has no historical embeddings index — recorded-time
+// reads are FTS5-only everywhere in this codebase, matching mem_search's own
+// as_of branch). Both combinations fail loudly here rather than silently
+// ignoring --as-of and measuring a live (unisolated) store.
 func defaultRunConversationalEval(ctx context.Context, opts conversationalRunOptions) (eval.ConversationalRunSummary, error) {
 	cases, err := loadConversationalCorpus(opts.CorpusPath)
 	if err != nil {
 		return eval.ConversationalRunSummary{}, fmt.Errorf("load conversational corpus: %w", err)
 	}
 
+	asOf := strings.TrimSpace(opts.AsOf)
 	target := strings.ToLower(strings.TrimSpace(opts.Target))
+
+	if asOf != "" && opts.Injection {
+		return eval.ConversationalRunSummary{}, fmt.Errorf("conversational eval: --as-of is incompatible with --injection: recorded-time reads bypass the ranking/recall pipeline (no historical embeddings index exists), so injection scoring would silently ignore --as-of")
+	}
+	if asOf != "" && target == "answer" {
+		return eval.ConversationalRunSummary{}, fmt.Errorf("conversational eval: --as-of is not supported with --target=answer (GET /answer has no recorded-time isolation seam — only GET /search and --target inprocess do)")
+	}
+
 	switch target {
 	case "http":
 		if strings.TrimSpace(opts.HTTPBaseURL) == "" {
 			return eval.ConversationalRunSummary{}, fmt.Errorf("conversational eval: --http-base-url is required when --target=http")
 		}
-		fetch := conversationalHTTPFetcher(&http.Client{Timeout: 30 * time.Second}, opts.HTTPBaseURL, opts.ForceUnscoped)
+		fetch := conversationalHTTPFetcher(&http.Client{Timeout: 30 * time.Second}, opts.HTTPBaseURL, opts.ForceUnscoped, asOf)
 		return runConversationalCases(ctx, cases, fetch, opts.Runs)
 
 	case "answer":
@@ -864,12 +912,16 @@ func defaultRunConversationalEval(ctx context.Context, opts conversationalRunOpt
 		}
 		defer s.Close()
 
+		if asOf != "" && !s.TimeTravelEnabled() {
+			return eval.ConversationalRunSummary{}, fmt.Errorf("conversational eval: --as-of requested but time_travel is not enabled on this store; recorded-time isolation cannot be guaranteed (see time_travel.enabled in config.yaml) — refusing to silently measure a live, unisolated store")
+		}
+
 		var fetch eval.ConversationalFetcher
 		if opts.Injection && appCfgErr == nil {
 			recallSvc := buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir, appCfg.VecIndex.Enabled, appCfg.Encryption)
 			fetch = conversationalPipelineFetcher(s, recallSvc, appCfg.Injection, appCfg.Recall.Ranking, opts.ForceUnscoped)
 		} else {
-			fetch = conversationalStoreFetcher(s, opts.ForceUnscoped)
+			fetch = conversationalStoreFetcher(s, opts.ForceUnscoped, asOf)
 		}
 		return runConversationalCases(ctx, cases, fetch, opts.Runs)
 
@@ -909,13 +961,27 @@ func conversationalCaseUnscoped(c eval.ConversationalCase, forceUnscoped bool) b
 //
 // forceUnscoped, when true, overrides every case's own Project/Unscoped and
 // always searches all projects — see conversationalCaseUnscoped.
-func conversationalStoreFetcher(s *store.Store, forceUnscoped bool) eval.ConversationalFetcher {
+//
+// asOf, when non-empty (engram eval/http-search-as-of-isolation), routes
+// every case through s.SearchAsOf instead of storeSearch (s.Search) — the
+// store-isolation seam: the caller (defaultRunConversationalEval) has
+// already verified s.TimeTravelEnabled() before this fetcher is ever built,
+// so a non-empty asOf here is guaranteed to actually apply rather than
+// silently degrade to a live read (see store.SearchAsOf's own doc for that
+// degrade behavior, which is why the caller checks first).
+func conversationalStoreFetcher(s *store.Store, forceUnscoped bool, asOf string) eval.ConversationalFetcher {
 	return func(ctx context.Context, c eval.ConversationalCase) (eval.RetrievedCase, error) {
 		opts := store.SearchOptions{Limit: rankCandidateDepth}
 		if !conversationalCaseUnscoped(c, forceUnscoped) {
 			opts.Project = c.Project
 		}
-		results, err := storeSearch(s, c.Query, opts)
+		var results []store.SearchResult
+		var err error
+		if asOf != "" {
+			results, err = s.SearchAsOf(c.Query, opts, asOf)
+		} else {
+			results, err = storeSearch(s, c.Query, opts)
+		}
 		if err != nil {
 			return eval.RetrievedCase{}, fmt.Errorf("search: %w", err)
 		}
@@ -1039,7 +1105,19 @@ func conversationalPipelineFetcher(s *store.Store, recallSvc *recall.Service, cf
 // project — see conversationalCaseUnscoped. Before this fix (engram #2623)
 // neither param was ever sent, so every conversational number this fetcher
 // produced was silently unscoped.
-func conversationalHTTPFetcher(client *http.Client, baseURL string, forceUnscoped bool) eval.ConversationalFetcher {
+//
+// asOf, when non-empty (engram eval/http-search-as-of-isolation), sends
+// `as_of=` AND `envelope=1` instead of the plain bare-array request — the
+// server's own as_of branch (internal/server's searchRecordedTime) can only
+// be verified by reading its echoed SearchEnvelope.AsOf back, and the
+// back-compat bare-array shape has no field to carry that echo. This
+// fetcher then VERIFIES the echo matches exactly what was requested before
+// trusting a single result: a mismatch (empty AsOf, wrong value, or an old
+// server binary that doesn't understand as_of at all and silently ran a
+// live search instead) is a hard error, not a degraded-but-tolerated
+// result — the entire point of this parameter is that the caller must be
+// able to trust isolation held, not hope it did.
+func conversationalHTTPFetcher(client *http.Client, baseURL string, forceUnscoped bool, asOf string) eval.ConversationalFetcher {
 	return func(ctx context.Context, c eval.ConversationalCase) (eval.RetrievedCase, error) {
 		u, err := url.Parse(strings.TrimRight(baseURL, "/") + "/search")
 		if err != nil {
@@ -1053,6 +1131,10 @@ func conversationalHTTPFetcher(client *http.Client, baseURL string, forceUnscope
 		} else {
 			q.Set("project", c.Project)
 		}
+		if asOf != "" {
+			q.Set("as_of", asOf)
+			q.Set("envelope", "1")
+		}
 		u.RawQuery = q.Encode()
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -1065,19 +1147,34 @@ func conversationalHTTPFetcher(client *http.Client, baseURL string, forceUnscope
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return eval.RetrievedCase{}, fmt.Errorf("conversationalHTTPFetcher: GET %s: status %d", u.String(), resp.StatusCode)
+			body, _ := io.ReadAll(resp.Body)
+			return eval.RetrievedCase{}, fmt.Errorf("conversationalHTTPFetcher: GET %s: status %d: %s", u.String(), resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
-		// GET /search's response body is ([]store.SearchResult) whether or not
-		// the server has a SearchFunc override wired (internal/server/
-		// server.go's handleSearch doc comment: "the JSON response shape
-		// ([]store.SearchResult) is identical either way") — decoding into the
-		// real store type here, not a hand-rolled shadow struct, keeps this
-		// fetcher from silently drifting out of sync with the server's actual
-		// response shape.
 		var results []store.SearchResult
-		if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
-			return eval.RetrievedCase{}, fmt.Errorf("conversationalHTTPFetcher: decode response: %w", err)
+		if asOf != "" {
+			// envelope=1 shape (searchEnvelopeHTTPResponse below) — decoded
+			// separately from the plain-request branch because the bare-array
+			// shape carries no as_of echo to verify against.
+			var envelope searchEnvelopeHTTPResponse
+			if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+				return eval.RetrievedCase{}, fmt.Errorf("conversationalHTTPFetcher: decode envelope response: %w", err)
+			}
+			if envelope.AsOf != asOf {
+				return eval.RetrievedCase{}, fmt.Errorf("conversationalHTTPFetcher: isolation NOT verified — requested as_of=%q but the server echoed as_of=%q (empty means it silently ran a live search instead, e.g. an older server binary with no as_of support); refusing to trust this store as isolated", asOf, envelope.AsOf)
+			}
+			results = envelope.Results
+		} else {
+			// GET /search's default response body is ([]store.SearchResult)
+			// whether or not the server has a SearchFunc override wired
+			// (internal/server/server.go's handleSearch doc comment: "the JSON
+			// response shape ([]store.SearchResult) is identical either way") —
+			// decoding into the real store type here, not a hand-rolled shadow
+			// struct, keeps this fetcher from silently drifting out of sync
+			// with the server's actual response shape.
+			if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+				return eval.RetrievedCase{}, fmt.Errorf("conversationalHTTPFetcher: decode response: %w", err)
+			}
 		}
 		if len(results) == 0 {
 			return eval.RetrievedCase{}, nil
@@ -1094,6 +1191,18 @@ func conversationalHTTPFetcher(client *http.Client, baseURL string, forceUnscope
 			RankedObservationIDs:  rankedSyncIDs(results),
 		}, nil
 	}
+}
+
+// searchEnvelopeHTTPResponse is conversationalHTTPFetcher's own shadow of
+// GET /search?envelope=1's wire shape (internal/server's searchEnvelopeJSON)
+// — the SAME "decode over HTTP into a local shadow struct" convention
+// answerHTTPResponse below already follows for GET /answer, not by
+// importing internal/server's type directly. Only the two fields this
+// fetcher actually needs are declared: the results and the as_of echo it
+// verifies against.
+type searchEnvelopeHTTPResponse struct {
+	Results []store.SearchResult `json:"results"`
+	AsOf    string               `json:"as_of"`
 }
 
 // answerHTTPResponse mirrors server.AnswerResponse's JSON shape (P3) — a

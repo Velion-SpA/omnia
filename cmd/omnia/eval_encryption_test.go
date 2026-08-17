@@ -69,3 +69,26 @@ func TestEvalStoreConfig_DisabledEncryptionStaysDisabled(t *testing.T) {
 		t.Fatal("encryption.enabled=false must stay disabled")
 	}
 }
+
+// TestEvalStoreConfig_ThreadsTimeTravelFromAppConfig is the engram
+// eval/http-search-as-of-isolation regression test: before this fix, eval's
+// store.Config never carried config.yaml's time_travel block at all, so
+// `--target inprocess --as-of` could never work — store.SearchAsOf silently
+// falls back to a live search whenever TimeTravelEnabled is false, and this
+// fetcher's own isolation guard (s.TimeTravelEnabled()) would always fail
+// closed even on a store where config.yaml says time_travel.enabled: true.
+func TestEvalStoreConfig_ThreadsTimeTravelFromAppConfig(t *testing.T) {
+	base := store.Config{DataDir: t.TempDir()}
+	app := &config.Config{}
+	app.TimeTravel.Enabled = true
+	app.TimeTravel.MaxRevisionsPerMemory = 7
+
+	got := evalStoreConfig(base, app)
+
+	if !got.TimeTravelEnabled {
+		t.Fatal("eval must open the store with time-travel enabled when config.yaml says so — otherwise --as-of can never work")
+	}
+	if got.HistoryRevisionCap != 7 {
+		t.Fatalf("max_revisions_per_memory must be threaded: got %d, want 7", got.HistoryRevisionCap)
+	}
+}
