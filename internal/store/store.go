@@ -6864,6 +6864,56 @@ func (s *Store) getSyncState(targetKey string) (*SyncState, error) {
 	return &state, nil
 }
 
+// ListSyncStatesForAlias returns every sync_state row belonging to one cloud
+// alias: the bare alias key itself plus every per-project key under it
+// ("personal" and "personal:omnia-test", ...), newest first.
+//
+// It exists because the two surfaces that report sync health were reading
+// DIFFERENT rows and could never agree. `omnia sync --cloud --project X`
+// writes cloudTargetKeyFor(alias, project) -- a PER-PROJECT key -- while
+// `omnia cloud status` read cloudTargetKeyFor(alias, "") -- a PER-CLOUD key
+// that only a whole-cloud operation ever touches.
+//
+// Measured 2026-09-06: the bare "personal" row still carried a
+// transport_failed/530 written 30 days earlier, while per-project rows had
+// long since moved on. Two successful manual syncs left the reported status
+// untouched, because they updated per-project keys the status surface never
+// looked at. An operator who fixes their own problem is otherwise left
+// staring at a status that still says it is broken.
+func (s *Store) ListSyncStatesForAlias(alias string) ([]SyncState, error) {
+	// Same normalization contract as GetSyncState: a blank alias means the
+	// default cloud target, never "every cloud in the store".
+	alias = normalizeSyncTargetKey(alias)
+	rows, err := s.db.Query(`
+		SELECT target_key, lifecycle, last_enqueued_seq, last_acked_seq, last_pulled_seq,
+		       consecutive_failures, backoff_until, lease_owner, lease_until, reason_code, reason_message, last_error, updated_at
+		FROM sync_state
+		WHERE target_key = ? OR target_key LIKE ? ESCAPE '\'
+		ORDER BY updated_at DESC, target_key ASC`,
+		alias, escapeSyncKeyLike(alias)+":%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SyncState
+	for rows.Next() {
+		var st SyncState
+		if err := rows.Scan(&st.TargetKey, &st.Lifecycle, &st.LastEnqueuedSeq, &st.LastAckedSeq, &st.LastPulledSeq, &st.ConsecutiveFailures, &st.BackoffUntil, &st.LeaseOwner, &st.LeaseUntil, &st.ReasonCode, &st.ReasonMessage, &st.LastError, &st.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+// escapeSyncKeyLike neutralizes LIKE wildcards in an alias before it is used
+// as a prefix pattern. An alias is operator-supplied, so a literal "%" or "_"
+// in one would otherwise silently widen the match to unrelated clouds.
+func escapeSyncKeyLike(alias string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(alias)
+}
+
 func (s *Store) getSyncStateTx(tx *sql.Tx, targetKey string) (*SyncState, error) {
 	if _, err := s.execHook(tx,
 		`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, ?, datetime('now'))`,

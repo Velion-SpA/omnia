@@ -1006,21 +1006,44 @@ func printCloudStatusSyncDiagnostic(cfg store.Config, targetKey string) {
 		return
 	}
 	defer s.Close()
-	state, err := s.GetSyncState(targetKey)
-	if err != nil || state == nil {
+	// Read EVERY row for this alias, not just the bare per-cloud key.
+	//
+	// `omnia sync --cloud --project X` writes a PER-PROJECT key
+	// ("personal:omnia-test"); only whole-cloud operations touch the bare
+	// alias key ("personal"). Reading just the bare key meant a successful
+	// sync never changed what status reported. Measured 2026-09-06: two
+	// successful manual syncs left status showing a transport_failed/530
+	// written 30 days earlier, while the per-project rows had moved on and
+	// the autosync daemon's own row correctly said auth_required the whole
+	// time. The classification was never wrong -- the surfaces were reading
+	// different rows and could not agree.
+	states, err := s.ListSyncStatesForAlias(targetKey)
+	if err != nil || len(states) == 0 {
 		return
+	}
+	// Newest first (ORDER BY updated_at DESC), so states[0] is what most
+	// recently happened on this cloud — the honest answer to "how is it
+	// going right now".
+	state := &states[0]
+	degraded := 0
+	for i := range states {
+		if states[i].Lifecycle == store.SyncLifecycleDegraded {
+			degraded++
+		}
 	}
 	code := strings.TrimSpace(derefString(state.ReasonCode))
 	message := strings.TrimSpace(derefString(state.ReasonMessage))
 	if code == "" && message == "" {
-		return
+		if degraded == 0 {
+			return
+		}
 	}
 	// Age matters more than the value. This row is written by whichever sync
 	// last ran and is never expired, so a diagnostic from an outage that ended
 	// days ago reads exactly like one from thirty seconds ago. Printing how old
 	// it is turns "the tunnel is down" into "the tunnel was down, when this was
 	// last measured" — which is a claim a reader can weigh.
-	fmt.Printf("Sync diagnostic: %s%s\n", state.Lifecycle, cloudDiagnosticAge(state.UpdatedAt))
+	fmt.Printf("Sync diagnostic: %s%s [%s]%s\n", state.Lifecycle, cloudDiagnosticAge(state.UpdatedAt), state.TargetKey, otherDegradedNote(degraded, state.Lifecycle))
 	if code != "" {
 		fmt.Printf("reason_code: %s\n", code)
 	}
@@ -1528,4 +1551,21 @@ func cloudDiagnosticAge(updatedAt string) string {
 	default:
 		return fmt.Sprintf(" (measured %dd ago — LIKELY STALE, nothing expires this)", int(age.Hours()/24))
 	}
+}
+
+// otherDegradedNote reports degraded rows BEYOND the newest one being printed,
+// so a healthy-looking headline cannot hide a project that is still stuck. One
+// cloud has many per-project rows and they fail independently.
+func otherDegradedNote(degraded int, headline string) string {
+	others := degraded
+	if headline == store.SyncLifecycleDegraded {
+		others--
+	}
+	if others <= 0 {
+		return ""
+	}
+	if others == 1 {
+		return " (1 other project also degraded)"
+	}
+	return fmt.Sprintf(" (%d other projects also degraded)", others)
 }
