@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/velion/omnia/internal/cloud"
 	"github.com/velion/omnia/internal/cloud/auth"
@@ -976,7 +977,19 @@ func printCloudStatusForAlias(cfg store.Config, alias, defaultAlias, explicitAli
 		printCloudStatusSyncDiagnostic(cfg, targetKey)
 		return nil
 	}
-	fmt.Println("Auth status: ready (token provided via runtime cloud config)")
+	// NOT "ready". A token STRING being present says nothing about whether it
+	// still works, and claiming otherwise actively misleads: on 2026-08-18 the
+	// personal cloud reported "Auth status: ready" alongside a stale
+	// transport_failed/530 diagnostic, while the truth was the exact inverse —
+	// the tunnel was healthy and the token had expired past renewal (401 on
+	// both `cloud project list` and `cloud refresh`). Someone spent real time
+	// chasing a tunnel that was fine, because status pointed away from the
+	// actual fault.
+	//
+	// Preflight deliberately does not spend a network round trip here, so the
+	// honest report is "configured", not "ready", with the command that does
+	// establish the answer.
+	fmt.Println("Auth status: token configured (not validated — run `omnia cloud project list` to verify it still works)")
 	fmt.Println("Sync readiness: ready for explicit --project sync (project must be enrolled)")
 	printCloudStatusDaemonProbe()
 	printCloudStatusSyncDiagnostic(cfg, targetKey)
@@ -1002,7 +1015,12 @@ func printCloudStatusSyncDiagnostic(cfg store.Config, targetKey string) {
 	if code == "" && message == "" {
 		return
 	}
-	fmt.Printf("Sync diagnostic: %s\n", state.Lifecycle)
+	// Age matters more than the value. This row is written by whichever sync
+	// last ran and is never expired, so a diagnostic from an outage that ended
+	// days ago reads exactly like one from thirty seconds ago. Printing how old
+	// it is turns "the tunnel is down" into "the tunnel was down, when this was
+	// last measured" — which is a claim a reader can weigh.
+	fmt.Printf("Sync diagnostic: %s%s\n", state.Lifecycle, cloudDiagnosticAge(state.UpdatedAt))
 	if code != "" {
 		fmt.Printf("reason_code: %s\n", code)
 	}
@@ -1472,4 +1490,42 @@ func writeCloudConfigV2(cfg store.Config, v2 *cloudConfigV2) error {
 		return err
 	}
 	return os.WriteFile(cloudConfigPath(cfg), b, 0o644)
+}
+
+// cloudDiagnosticAge renders how stale a persisted sync diagnostic is, as a
+// parenthetical suffix. Empty when the timestamp is missing or unparseable —
+// an unknown age is reported as no age rather than as a guess.
+//
+// Anything older than a few minutes deserves suspicion: nothing expires these
+// rows, so the last failure recorded stays the reported state until the next
+// sync attempt overwrites it, however long that takes.
+func cloudDiagnosticAge(updatedAt string) string {
+	ts := strings.TrimSpace(updatedAt)
+	if ts == "" {
+		return ""
+	}
+	var parsed time.Time
+	var err error
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		if parsed, err = time.Parse(layout, ts); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return ""
+	}
+	age := time.Since(parsed.UTC())
+	if age < 0 {
+		age = 0
+	}
+	switch {
+	case age < time.Minute:
+		return " (measured just now)"
+	case age < time.Hour:
+		return fmt.Sprintf(" (measured %dm ago — may be stale)", int(age.Minutes()))
+	case age < 24*time.Hour:
+		return fmt.Sprintf(" (measured %dh ago — LIKELY STALE)", int(age.Hours()))
+	default:
+		return fmt.Sprintf(" (measured %dd ago — LIKELY STALE, nothing expires this)", int(age.Hours()/24))
+	}
 }

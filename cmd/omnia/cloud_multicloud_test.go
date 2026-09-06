@@ -507,8 +507,8 @@ func TestCmdCloudStatusMultiCloudShowsPerAliasHealth(t *testing.T) {
 	if !strings.Contains(workBlock, "Cloud status: configured (target=work)") {
 		t.Fatalf("expected work's own target key in its status block, got %q", workBlock)
 	}
-	if !strings.Contains(workBlock, "Auth status: ready") {
-		t.Fatalf("expected work cloud (has a token) to report ready auth, got %q", workBlock)
+	if !strings.Contains(workBlock, "Auth status: token configured") {
+		t.Fatalf("expected work cloud (has a token) to report a configured-but-unvalidated token, got %q", workBlock)
 	}
 
 	personalBlock := extractCloudStatusBlock(t, stdout, "personal")

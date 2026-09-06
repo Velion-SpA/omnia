@@ -995,7 +995,7 @@ func TestCmdCloudStatusDistinguishesAuthAndSyncReadiness(t *testing.T) {
 		if recovered != nil || stderr != "" {
 			t.Fatalf("cloud status should succeed, panic=%v stderr=%q", recovered, stderr)
 		}
-		if !strings.Contains(stdout, "Auth status: ready") || !strings.Contains(stdout, "Sync readiness: ready") {
+		if !strings.Contains(stdout, "Auth status: token configured") || !strings.Contains(stdout, "Sync readiness: ready") {
 			t.Fatalf("expected ready readiness output, got %q", stdout)
 		}
 	})
@@ -1792,8 +1792,8 @@ func TestCmdCloudStatusHonorsEnvServerOverride(t *testing.T) {
 	if !strings.Contains(stdout, "Server: https://env-cloud.example.test") {
 		t.Fatalf("expected env server override to be reported, got %q", stdout)
 	}
-	if !strings.Contains(stdout, "Auth status: ready") {
-		t.Fatalf("expected ready auth state with env token, got %q", stdout)
+	if !strings.Contains(stdout, "Auth status: token configured") {
+		t.Fatalf("expected a configured-but-unvalidated token with env override, got %q", stdout)
 	}
 }
 
