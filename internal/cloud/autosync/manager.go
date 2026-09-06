@@ -388,10 +388,23 @@ func (m *Manager) cycle(ctx context.Context) {
 		return
 	}
 
-	// Check if we've exceeded the failure ceiling — enters PhaseBackoff.
+	// Failure ceiling reached: pin the reported phase to PhaseBackoff, but let
+	// the shared backoff gate below decide whether to probe. Do NOT return here.
+	//
+	// This branch used to return unconditionally, which latched the breaker open
+	// for the life of the process: ConsecutiveFailures is cleared only by
+	// recordSuccess, and recordSuccess is only reachable by running a cycle that
+	// this branch refused to run. Measured 2026-09-06 against the personal cloud:
+	// a stale token produced 10 failures, after which the daemon never retried
+	// again. Correcting the token changed nothing — recovery required restarting
+	// the process by hand, and nothing surfaced the stall in the meantime.
+	//
+	// recordFailureWithReason always refreshes BackoffUntil (capped at
+	// MaxBackoff), so a cloud that is still broken gets probed at the ceiling
+	// interval rather than hammered, and one that has been fixed recovers on its
+	// own without operator intervention.
 	if failures >= m.cfg.MaxConsecutiveFailures {
 		m.setPhase(PhaseBackoff)
-		return
 	}
 
 	// Respect backoff timing — skip cycle without changing phase.
