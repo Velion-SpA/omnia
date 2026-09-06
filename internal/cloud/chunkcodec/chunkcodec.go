@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -349,7 +350,32 @@ func validateSupportedMutation(entity, op string) error {
 	}
 }
 
+// ErrInvalidPayload marks a failure caused by the CLIENT's mutation payload
+// rather than by the server. Callers map it to 400; everything else stays 500.
+//
+// Without it these reads as server faults. Measured 2026-09-06: project
+// "umbral" pushed a prompt upsert with empty content and the cloud answered
+// `status 500: insert mutations: cloudstore: canonicalize materialized
+// mutation batch chunk: mutations[17]: prompt payload content is required for
+// upsert`. A 5xx is retryable, so the client classified it transport_failed and
+// retried the same doomed batch forever instead of surfacing a payload it can
+// never make valid.
+var ErrInvalidPayload = errors.New("invalid mutation payload")
+
+// normalizeMutationPayload validates and canonicalizes ONE mutation payload.
+//
+// Every field it inspects comes from the client (body is decoded from payload),
+// so every error it returns — decode failures and marshal failures included —
+// describes client input. The deferred wrap therefore tags all of them with
+// ErrInvalidPayload rather than tagging 25 individual return sites, which would
+// drift apart the first time someone adds a rule.
 func normalizeMutationPayload(entity, op, payload, project string) (normalizedPayload string, expectedEntityKey string, err error) {
+	defer func() {
+		if err != nil && !errors.Is(err, ErrInvalidPayload) {
+			err = fmt.Errorf("%w: %w", ErrInvalidPayload, err)
+		}
+	}()
+
 	switch entity {
 	case store.SyncEntitySession:
 		var body mutationSessionPayload

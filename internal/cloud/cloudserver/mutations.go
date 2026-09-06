@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/velion/omnia/internal/cloud/auth"
+	"github.com/velion/omnia/internal/cloud/chunkcodec"
 	"github.com/velion/omnia/internal/cloud/cloudstore"
 	"github.com/velion/omnia/internal/cloud/constants"
 	"github.com/velion/omnia/internal/project"
@@ -249,6 +250,23 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 
 	acceptedSeqs, err := ms.InsertMutationBatch(r.Context(), req.Entries)
 	if err != nil {
+		// A payload the client can never make valid is a 400, not a 500.
+		//
+		// validateMutationEntry above applies only the "lenient floor" to the
+		// legacy entities (session, observation, prompt), so a payload it lets
+		// through can still fail the STRICT canonicalization inside
+		// InsertMutationBatch. That second failure used to land in this generic
+		// branch and answer 500, which the client reads as a retryable server
+		// fault: project "umbral" retried the same empty-content prompt upsert
+		// indefinitely instead of being told its payload was rejected.
+		if errors.Is(err, chunkcodec.ErrInvalidPayload) {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{
+				"error":       "invalid mutation payload",
+				"reason_code": "validation_error",
+				"detail":      err.Error(),
+			})
+			return
+		}
 		http.Error(w, fmt.Sprintf("insert mutations: %v", err), http.StatusInternalServerError)
 		return
 	}
