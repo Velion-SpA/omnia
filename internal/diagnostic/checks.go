@@ -103,6 +103,29 @@ func (c StoreExposureCheck) Run(ctx context.Context, scope Scope) (CheckResult, 
 		})
 	}
 
+	// Operational item #3 (docs/conversational-retrieval-plan.md): the top-level
+	// data dir and db file were already hardened to 0700/0600 by the
+	// omnia-provenance-foundation slice, but BackupSQLite's own directory
+	// (a full VACUUM INTO snapshot of the store — same content, same
+	// exposure) was not covered by either that slice or this check. Reported
+	// separately from the data-dir check above so the evidence names the
+	// exact path an operator needs to chmod, and skipped entirely when the
+	// directory does not exist (no backup has been taken yet — nothing to
+	// flag).
+	backupDir := scope.Store.BackupDir()
+	if info, err := storeFileStat(backupDir); err == nil && info.Mode().Perm()&0o077 != 0 {
+		findings = append(findings, Finding{
+			CheckID:              c.Code(),
+			Severity:             SeverityWarning,
+			ReasonCode:           "store_backups_dir_group_or_world_readable",
+			Message:              "Store backups directory is group- or world-readable/writable.",
+			Why:                  "A backup is a full VACUUM INTO copy of the store's content — group/world access there exposes the same memory content and embeddings a loose data directory would, just under a different path.",
+			Evidence:             mustJSON(map[string]any{"backup_dir": backupDir, "mode": info.Mode().Perm().String()}),
+			SafeNextStep:         "Run `chmod 700` on the Omnia backups directory.",
+			RequiresConfirmation: true,
+		})
+	}
+
 	return resultFromFindings(c.Code(), map[string]any{"data_dir": dir}, findings), nil
 }
 
@@ -220,17 +243,21 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		if validation.ReasonCode == "" {
 			continue
 		}
-		nextStep := "Run `omnia cloud upgrade doctor` and inspect the mutation payload before any manual repair."
+		nextStep := "Run `omnia doctor repair --check sync_mutation_required_fields --plan` (add --project to scope it) and review which rows it would delete before running --apply."
 		if strings.TrimSpace(scope.Project) != "" {
-			nextStep = "Run `omnia cloud upgrade doctor --project " + scope.Project + "` and inspect the mutation payload before any manual repair."
+			nextStep = "Run `omnia doctor repair --project " + scope.Project + " --check sync_mutation_required_fields --plan` and review which rows it would delete before running --apply."
 		}
 		findings = append(findings, Finding{
-			CheckID:              c.Code(),
-			Severity:             SeverityBlocking,
-			ReasonCode:           validation.ReasonCode,
-			Message:              validation.Message,
-			Why:                  "A pending sync mutation with missing required fields can block safe cloud replication and must fail loudly instead of being silently dropped.",
-			Evidence:             mustJSON(map[string]any{"seq": mutation.Seq, "target_key": mutation.TargetKey, "project": mutation.Project, "entity": mutation.Entity, "op": mutation.Op, "entity_key": mutation.EntityKey, "missing_fields": validation.MissingFields}),
+			CheckID:    c.Code(),
+			Severity:   SeverityBlocking,
+			ReasonCode: validation.ReasonCode,
+			Message:    validation.Message,
+			Why:        "A pending sync mutation with missing required fields can block safe cloud replication and must fail loudly instead of being silently dropped.",
+			// occurred_at is included so `doctor repair`'s plan/dry-run output
+			// can show it directly — the operator needs it to recognize the row
+			// before it disappears (see internal/diagnostic/repair.go,
+			// planSyncMutationRequiredFieldsRepair).
+			Evidence:             mustJSON(map[string]any{"seq": mutation.Seq, "target_key": mutation.TargetKey, "project": mutation.Project, "entity": mutation.Entity, "op": mutation.Op, "entity_key": mutation.EntityKey, "occurred_at": mutation.OccurredAt, "missing_fields": validation.MissingFields}),
 			SafeNextStep:         nextStep,
 			RequiresConfirmation: true,
 		})

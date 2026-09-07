@@ -24,14 +24,21 @@ func TestRankingConfig_DefaultsDisabled(t *testing.T) {
 	if cfg.Recall.Ranking.Enabled {
 		t.Error("Ranking.Enabled: got true, want false by default")
 	}
-	if cfg.Recall.Ranking.Weights.Recency != 1.0 {
-		t.Errorf("Weights.Recency default: got %v, want 1.0", cfg.Recall.Ranking.Weights.Recency)
+	// Relevance-heavy, NOT the equal-weight 1/1/1 these three defaulted to
+	// before the conversational eval harness measured that sum. Under equal
+	// weights relevance is only one third of RankScore, and type-derived
+	// importance plus recency outvote whether a memory answers the question
+	// — measurably worse than leaving ranking off entirely on delta,
+	// open_items and cross_project questions. See applyDefaults' own comment
+	// for the ablation table, and obs #2399 for the full run.
+	if cfg.Recall.Ranking.Weights.Recency != 0.5 {
+		t.Errorf("Weights.Recency default: got %v, want 0.5", cfg.Recall.Ranking.Weights.Recency)
 	}
-	if cfg.Recall.Ranking.Weights.Importance != 1.0 {
-		t.Errorf("Weights.Importance default: got %v, want 1.0", cfg.Recall.Ranking.Weights.Importance)
+	if cfg.Recall.Ranking.Weights.Importance != 0.5 {
+		t.Errorf("Weights.Importance default: got %v, want 0.5", cfg.Recall.Ranking.Weights.Importance)
 	}
-	if cfg.Recall.Ranking.Weights.Relevance != 1.0 {
-		t.Errorf("Weights.Relevance default: got %v, want 1.0", cfg.Recall.Ranking.Weights.Relevance)
+	if cfg.Recall.Ranking.Weights.Relevance != 3.0 {
+		t.Errorf("Weights.Relevance default: got %v, want 3.0", cfg.Recall.Ranking.Weights.Relevance)
 	}
 	// Unlike its three siblings, Salience must NOT be defaulted to 1.0 — its
 	// zero value is the shipped default (Umbral bridge, Tanda T3): a

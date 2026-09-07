@@ -67,19 +67,143 @@ type SemanticRunnerFactory func(name string) (store.SemanticRunner, error)
 // snippets. Injected from cmd/omnia/main.go alongside SemanticRunnerFactory.
 type SemanticPromptBuilder func(a, b store.ObservationSnippet) string
 
-// SearchFunc performs a memory search and returns results in the same shape
-// GET /search has always returned ([]store.SearchResult). Injected from
-// cmd/omnia (SetSearch) so internal/server never has to import
+// SearchRequest carries GET /search's routing filters (the pre-existing
+// store.SearchOptions — type/project/scope/limit, unchanged) plus P0's two
+// post-fusion pipeline knobs (docs/conversational-retrieval-plan.md P0 item
+// 3): MaxTokens routes into mcp.ApplyTokenBudget, Explain routes into
+// mcp.BuildResultReceipt. `type` needs no separate field — it already lives
+// on the embedded SearchOptions and threads straight into
+// mcp.RankPipelineOptions.ExplicitType at the SearchFunc implementation.
+//
+// all_projects is deliberately NOT here: P0 explicitly defers cross-project
+// HTTP wiring to a separate item (P5, docs/conversational-retrieval-plan.md)
+// so this seam doesn't have to be re-widened twice.
+type SearchRequest struct {
+	store.SearchOptions
+	// MaxTokens, when > 0, is the caller's per-request override for the
+	// injection token budget (ApplyTokenBudget) — set regardless of the
+	// server's own injection.budget.enabled config, so a caller can always
+	// cap response size on demand even when the operator left budgeting off
+	// by default. Zero (absent `max_tokens` query param) leaves whatever
+	// config.TokenBudgetConfig the SearchFunc implementation was built with
+	// untouched.
+	MaxTokens int
+	// Explain, when true, asks the SearchFunc implementation to also
+	// populate SearchEnvelope.ScoreBreakdown for every returned result
+	// (mirrors mem_search's own `explain` arg).
+	Explain bool
+}
+
+// SearchEnvelope is SearchFunc's return value: the results plus mem_search's
+// own recall-degradation signal (#226, internal/mcp/recall_degradation.go)
+// ported to HTTP (P0 item 2, docs/conversational-retrieval-plan.md) — Vel
+// (via Hermes) previously had no way to tell a full-quality semantic result
+// set from a blind/lexical-only one, because GET /search never emitted this
+// signal at all.
+//
+// Every degradation field follows this codebase's established
+// present-only-when-notable convention (mem_search's fts_relaxed/
+// budget_trimmed/recall_degraded): a healthy response leaves them at their
+// zero value, and handleSearch's envelope=1 JSON encoding (searchEnvelopeJSON)
+// omits them entirely via `omitempty` rather than emitting `false`/`""`/`0`
+// noise on every call.
+type SearchEnvelope struct {
+	Results              []store.SearchResult
+	RecallDegraded       bool
+	RecallDegradedReason string
+	EmbeddingsStale      bool
+	EmbeddingsBehindBy   int
+	NewestEmbeddedAt     string
+	// ScoreBreakdown holds one mcp.BuildResultReceipt-shaped entry per
+	// result, keyed by its decimal Observation.ID (matching mem_search's
+	// own explain surface), present only when SearchRequest.Explain was
+	// true. nil otherwise.
+	ScoreBreakdown map[string]map[string]any
+	// Intent is P2's classified query intent (docs/conversational-retrieval-
+	// plan.md), ported from mem_search's own "intent" envelope key
+	// (internal/mcp's mcp.RankPipelineOutput.Intent) so GET /search?envelope=1
+	// callers get the same informational signal. Empty string when intent
+	// routing is disabled (the default) or the SearchFunc implementation
+	// never sets it — omitted from JSON either way (see searchEnvelopeJSON's
+	// own `omitempty`), matching this struct's existing present-only-when-
+	// notable convention for every other degradation/explain field above.
+	Intent string
+}
+
+// SearchFunc performs a memory search and returns a SearchEnvelope. Injected
+// from cmd/omnia (SetSearch) so internal/server never has to import
 // internal/recall or internal/mcp directly — mirroring the
 // SemanticRunnerFactory/SemanticPromptBuilder precedent above for
 // internal/llm (issue #86: cmd/omnia is the one place that knows how to
-// build the optional hybrid lexical+semantic recall.Service; this package
-// only needs to call whatever search function it was handed).
+// build the optional hybrid lexical+semantic recall.Service, and now also
+// the one place that runs mcp.RankPipeline; this package only needs to call
+// whatever search function it was handed and shape the response).
 //
 // When unset (s.search == nil, e.g. in tests that don't call SetSearch),
 // handleSearch falls back to calling s.store.Search directly — today's exact
-// FTS5-only behavior, unchanged.
-type SearchFunc func(ctx context.Context, query string, opts store.SearchOptions) ([]store.SearchResult, error)
+// FTS5-only behavior for the `results` payload, unchanged; see
+// handleSearch's own doc for what the degradation fields report on that
+// fallback path.
+type SearchFunc func(ctx context.Context, query string, req SearchRequest) (SearchEnvelope, error)
+
+// AnswerRequest carries GET /answer's query params (P3,
+// docs/conversational-retrieval-plan.md "Answer-shaped context endpoint"):
+// the same project/scope/limit routing filters SearchRequest embeds, plus
+// MaxChars — the char budget AssembleAnswerContext (internal/mcp/answer.go)
+// trims its assembled text to. Unlike SearchRequest.MaxTokens (an optional
+// per-request override), MaxChars has a real default (config.AnswerConfig.
+// MaxChars, 1400 — Hermes' own documented budget) that the AnswerFunc
+// implementation applies when a request omits `?max_chars=` (MaxChars <= 0).
+//
+// `type` is deliberately NOT exposed here (unlike SearchRequest): P3's
+// endpoint is a question-answering surface, not a filtered browse — a
+// caller wanting a type-scoped result should use GET /search instead.
+type AnswerRequest struct {
+	store.SearchOptions
+	MaxChars int
+}
+
+// AnswerSource cites one piece of evidence AnswerResponse.Context was
+// assembled from, by sync ID ONLY — never Observation.ID (P3's explicit
+// anti-goal: an integer id was verified to name different observations
+// across different replicas, e.g. id 1918 naming a session summary in one
+// store and an unrelated cloud-sync investigation in another; sync_id is
+// generated once and stays stable across every sync fan-out). Mirrors
+// mcp.AnswerSource field-for-field but is this package's own copy so
+// internal/server never has to import internal/mcp (see SearchFunc's own
+// doc comment for why that boundary exists) — cmd/omnia's buildHTTPAnswerFunc
+// is the one place that converts between the two.
+type AnswerSource struct {
+	SyncID    string `json:"sync_id"`
+	Title     string `json:"title"`
+	Type      string `json:"type"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// AnswerResponse is GET /answer's JSON response body (P3), returned exactly
+// as-is by handleAnswer — unlike GET /search there is no back-compat bare
+// shape to preserve (this is a brand-new endpoint), so this struct's JSON
+// tags ARE the wire contract.
+type AnswerResponse struct {
+	Context    string         `json:"context"`
+	Confidence string         `json:"confidence"`
+	Intent     string         `json:"intent,omitempty"`
+	Sources    []AnswerSource `json:"sources"`
+	Degraded   bool           `json:"degraded"`
+}
+
+// AnswerFunc computes an answer-shaped, budgeted context for GET /answer.
+// Injected from cmd/omnia (SetAnswer) so internal/server never has to
+// import internal/mcp directly, mirroring SearchFunc's own precedent
+// (issue #86) — cmd/omnia is the one place that knows how to run
+// mcp.RankPipeline, extract structured text via mcp.ExtractAnswerText, and
+// classify confidence via mcp.ClassifyAnswerConfidence.
+//
+// Unlike SearchFunc, there is no legacy fallback when unset: GET /answer is
+// a brand-new endpoint with no pre-existing behavior to preserve, so
+// handleAnswer returns 503 when SetAnswer was never called (see
+// handleAnswer's own doc).
+type AnswerFunc func(ctx context.Context, query string, req AnswerRequest) (AnswerResponse, error)
 
 type Server struct {
 	store      *store.Store
@@ -108,6 +232,22 @@ type Server struct {
 	// SetSearch was never called — handleSearch then calls s.store.Search
 	// directly, byte-for-byte today's FTS5-only behavior.
 	search SearchFunc
+
+	// answer, when non-nil, backs GET /answer (P3,
+	// docs/conversational-retrieval-plan.md). nil means SetAnswer was never
+	// called — handleAnswer returns 503 (see that handler's own doc; unlike
+	// search there is no legacy behavior to fall back to).
+	answer AnswerFunc
+
+	// queryCache, when non-nil, is the P6 (docs/conversational-retrieval-plan.md
+	// "Query embedding cache") CachedSearcher wrapping recall's semantic
+	// Searcher — set only when recall.query_cache.enabled is true in
+	// config.yaml (mirrors autoEmbed's own nil-means-disabled convention
+	// above). nil means the cache is disabled/unconfigured, in which case GET
+	// /health omits the query_cache debug field entirely (see handleHealth)
+	// rather than reporting a zeroed-out stats block that would misleadingly
+	// look like "cache is on but empty".
+	queryCache *embed.CachedSearcher
 
 	// version is reported by GET /health. Defaults to "dev" (matching
 	// cmd/omnia's own build-info fallback); SetVersion wires in the real
@@ -148,6 +288,17 @@ func (s *Server) SetAutoEmbed(w *embed.Worker) { s.autoEmbed = w }
 // Pass nil (or never call this) to keep GET /search on the legacy
 // s.store.Search-only path.
 func (s *Server) SetSearch(fn SearchFunc) { s.search = fn }
+
+// SetAnswer configures the function backing GET /answer (P3,
+// docs/conversational-retrieval-plan.md). Pass nil (or never call this) to
+// leave GET /answer returning 503 (see handleAnswer's own doc).
+func (s *Server) SetAnswer(fn AnswerFunc) { s.answer = fn }
+
+// SetQueryCache configures the P6 query-embedding cache instance GET /health
+// reports stats for (recall.query_cache.enabled in config.yaml). Pass nil
+// (or never call this) to omit the query_cache debug field entirely — see
+// the queryCache field's own doc comment.
+func (s *Server) SetQueryCache(c *embed.CachedSearcher) { s.queryCache = c }
 
 // SetVersion configures the build version reported by GET /health.
 // Pass the real build version (e.g. cmd/omnia's ldflags-injected `version`);
@@ -280,6 +431,9 @@ func (s *Server) routes() {
 	// Search
 	s.mux.HandleFunc("GET /search", s.handleSearch)
 
+	// P3 (docs/conversational-retrieval-plan.md "Answer-shaped context endpoint")
+	s.mux.HandleFunc("GET /answer", s.handleAnswer)
+
 	// Timeline
 	s.mux.HandleFunc("GET /timeline", s.handleTimeline)
 	s.mux.HandleFunc("GET /observations/{id}", s.handleGetObservation)
@@ -326,11 +480,37 @@ func (s *Server) routes() {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"status":  "ok",
 		"service": "omnia",
 		"version": s.version,
-	})
+	}
+
+	// P6 (docs/conversational-retrieval-plan.md "Query embedding cache"):
+	// operator-visible hit-rate instrumentation. Deliberately NOT added to
+	// `omnia doctor` (another agent owns those files) and deliberately NOT on
+	// GET /stats: that endpoint returns *store.Stats directly
+	// (loadServerStats), a type this package does not own, so folding an
+	// unrelated cache-stats block in there would mean either widening
+	// store.Stats itself (out of scope) or shadowing it behind a hand-rolled
+	// response type — GET /health already returns a plain map[string]any,
+	// making an additive debug field here a one-line change with no shape
+	// migration for existing callers. Present only when the cache is
+	// actually wired (see queryCache's own doc) — omitted otherwise, so a
+	// deployment with the cache off/unconfigured sees byte-for-byte the
+	// pre-P6 /health response.
+	if s.queryCache != nil {
+		stats := s.queryCache.Stats()
+		resp["query_cache"] = map[string]any{
+			"hits":     stats.Hits,
+			"misses":   stats.Misses,
+			"entries":  stats.Entries,
+			"capacity": stats.Capacity,
+			"hit_rate": stats.HitRate(),
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -476,6 +656,57 @@ func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request
 	jsonResponse(w, http.StatusOK, obs)
 }
 
+// searchEnvelopeJSON is the wire shape for GET /search?envelope=1 (P0 item
+// 2). Every degradation field is `omitempty` so a healthy response's JSON
+// stays minimal, mirroring mem_search's own present-only-when-notable
+// envelope keys (fts_relaxed/budget_trimmed/recall_degraded).
+type searchEnvelopeJSON struct {
+	Results []store.SearchResult `json:"results"`
+	// RecallDegraded/EmbeddingsStale/EmbeddingsBehindBy are deliberately NOT
+	// omitempty, unlike their siblings below. The entire point of the
+	// envelope (issue #226, plan P3's calibrated "I don't have this") is that
+	// a consumer can tell degraded recall apart from healthy recall — and
+	// omitting `recall_degraded` when it is false makes healthy recall
+	// indistinguishable from an older server that does not emit the field at
+	// all, which is exactly the ambiguity the envelope exists to remove. A
+	// consumer must be able to read `"recall_degraded": false` and believe
+	// it. The string/map fields below stay omitempty because their empty
+	// value carries no such claim.
+	RecallDegraded       bool   `json:"recall_degraded"`
+	RecallDegradedReason string `json:"recall_degraded_reason,omitempty"`
+	EmbeddingsStale      bool   `json:"embeddings_stale"`
+	EmbeddingsBehindBy   int    `json:"embeddings_behind_by"`
+	NewestEmbeddedAt     string                    `json:"newest_embedded_at,omitempty"`
+	ScoreBreakdown       map[string]map[string]any `json:"score_breakdown,omitempty"`
+	// Intent mirrors SearchEnvelope.Intent — see that field's own doc.
+	Intent string `json:"intent,omitempty"`
+}
+
+// handleSearch serves GET /search.
+//
+// CRITICAL BACK-COMPAT (P0, docs/conversational-retrieval-plan.md item 2):
+// Hermes (Vel's voice pipeline) parses this endpoint's response as a bare
+// JSON array today. The DEFAULT response stays exactly that — a bare
+// []store.SearchResult, byte-for-byte what it has always been — regardless
+// of whether a SearchFunc is wired, whether ranking/MMR/budget are enabled,
+// or whether recall is degraded. The widened SearchEnvelope (recall_degraded,
+// embeddings_stale, etc. — the P0 item 2 payload) is opt-in ONLY, via
+// `?envelope=1`, so Hermes can migrate to it on its own schedule instead of
+// being forced to parse a new shape on this deploy. `explain=1` implies
+// envelope=1: a per-row score_breakdown has no field to attach to in the
+// bare-array shape (store.SearchResult carries no such field), so
+// requesting it always widens the response even without an explicit
+// `envelope=1`.
+//
+// A nil SearchFunc (s.search == nil — SetSearch was never called, e.g. in
+// tests) degrades the `results` payload to s.store.Search exactly as it
+// always has. On that fallback path, requesting envelope=1 still gets a
+// results-only-shaped envelope with RecallDegraded=true: this endpoint is
+// definitionally running FTS5-only with no ranking/health signal available,
+// so envelope=1 reports that honestly rather than silently claiming
+// "healthy" (mirrors mem_search's own EvaluateRecallHealth(semanticActive:
+// false, ...) contract in internal/mcp/recall_degradation.go, without this
+// package importing internal/mcp — see SearchFunc's own doc for why).
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -483,33 +714,103 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opts := store.SearchOptions{
-		Type:    r.URL.Query().Get("type"),
-		Project: r.URL.Query().Get("project"),
-		Scope:   r.URL.Query().Get("scope"),
-		Limit:   queryInt(r, "limit", 10),
+	explain := queryBool(r, "explain", false)
+	wantEnvelope := queryBool(r, "envelope", false) || explain
+
+	req := SearchRequest{
+		SearchOptions: store.SearchOptions{
+			Type:    r.URL.Query().Get("type"),
+			Project: r.URL.Query().Get("project"),
+			Scope:   r.URL.Query().Get("scope"),
+			Limit:   queryInt(r, "limit", 10),
+		},
+		MaxTokens: queryInt(r, "max_tokens", 0),
+		Explain:   explain,
 	}
 
-	// Issue #86: when cmd/omnia wired a SearchFunc via SetSearch, it routes
-	// through the same hybrid lexical+semantic recall.Service mem_search
-	// uses (with its own graceful fallback to FTS5 baked in). Unset (s.search
-	// == nil, e.g. tests that never call SetSearch) keeps this byte-for-byte
-	// the legacy s.store.Search-only path — the JSON response shape
-	// ([]store.SearchResult) is identical either way.
-	search := s.store.Search
+	// Issue #86 / P0: when cmd/omnia wired a SearchFunc via SetSearch, it
+	// routes through the same hybrid lexical+semantic recall.Service AND
+	// the same mcp.RankPipeline mem_search uses (with its own graceful
+	// fallback to FTS5 baked in). Unset (s.search == nil) keeps the
+	// `results` payload byte-for-byte the legacy s.store.Search-only path —
+	// see this function's own doc for what envelope=1 reports in that case.
+	var envelope SearchEnvelope
+	var err error
 	if s.search != nil {
-		search = func(query string, opts store.SearchOptions) ([]store.SearchResult, error) {
-			return s.search(r.Context(), query, opts)
-		}
+		envelope, err = s.search(r.Context(), query, req)
+	} else {
+		envelope.Results, err = s.store.Search(query, req.SearchOptions)
+		envelope.RecallDegraded = true
+		envelope.RecallDegradedReason = "no SearchFunc configured (SetSearch was never called); results come from direct FTS5 keyword search with no ranking pipeline"
 	}
-
-	results, err := search(query, opts)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	jsonResponse(w, http.StatusOK, results)
+	if !wantEnvelope {
+		jsonResponse(w, http.StatusOK, envelope.Results)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, searchEnvelopeJSON{
+		Results:              envelope.Results,
+		RecallDegraded:       envelope.RecallDegraded,
+		RecallDegradedReason: envelope.RecallDegradedReason,
+		EmbeddingsStale:      envelope.EmbeddingsStale,
+		EmbeddingsBehindBy:   envelope.EmbeddingsBehindBy,
+		NewestEmbeddedAt:     envelope.NewestEmbeddedAt,
+		ScoreBreakdown:       envelope.ScoreBreakdown,
+		Intent:               envelope.Intent,
+	})
+}
+
+// handleAnswer serves GET /answer (P3, docs/conversational-retrieval-plan.md
+// "Answer-shaped context endpoint") — the endpoint this plan item exists to
+// ship: a deterministic, server-side-assembled, budgeted answer context plus
+// a calibrated confidence signal, so a consumer (Hermes, via Vel) no longer
+// has to reimplement structured-field extraction itself (and, per the
+// plan's own diagnosis, reimplement the raw-character-slice bug that caused
+// a markdown heading to reach an LLM as if it were prose).
+//
+// No back-compat bare-array shape exists for this endpoint (unlike GET
+// /search) — it is new, so AnswerResponse's JSON tags are simply the wire
+// contract from day one.
+//
+// A nil AnswerFunc (SetAnswer was never called, e.g. in tests that only
+// wire SetSearch) returns 503: there is no meaningful FTS5-only fallback
+// for an endpoint whose entire contract is calibrated confidence — silently
+// downgrading to "always none" or "always high" would be actively
+// misleading, unlike GET /search's fallback (which still returns real
+// results, just without the ranking pipeline).
+func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		jsonError(w, http.StatusBadRequest, "q parameter is required")
+		return
+	}
+
+	if s.answer == nil {
+		jsonError(w, http.StatusServiceUnavailable, "GET /answer is not configured (SetAnswer was never called)")
+		return
+	}
+
+	req := AnswerRequest{
+		SearchOptions: store.SearchOptions{
+			Project: r.URL.Query().Get("project"),
+			Scope:   r.URL.Query().Get("scope"),
+			Limit:   queryInt(r, "limit", 10),
+		},
+		MaxChars: queryInt(r, "max_chars", 0),
+	}
+
+	resp, err := s.answer(r.Context(), query, req)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleGetObservation(w http.ResponseWriter, r *http.Request) {

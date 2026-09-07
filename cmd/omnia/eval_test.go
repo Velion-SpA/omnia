@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/velion/omnia/internal/config"
 	"github.com/velion/omnia/internal/eval"
+	"github.com/velion/omnia/internal/store"
 )
 
 // fakeRunSummary builds a minimal eval.RunSummary whose overall accuracy is
@@ -209,5 +215,421 @@ func TestLoadEvalCorpus_ExplicitPathStillLoadsFromDisk(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), path) {
 		t.Fatalf("expected the error to reference the explicit custom path %q (proving it loaded from disk, not the embedded corpus), got: %v", path, err)
+	}
+}
+
+// ─── --profile / --target / --http-base-url (docs/conversational-retrieval-plan.md
+// "Baseline first") ───────────────────────────────────────────────────────
+//
+// cmd/omnia/eval.go gained these three flags plus three fetchers
+// (conversationalStoreFetcher, conversationalPipelineFetcher,
+// conversationalHTTPFetcher) verified only by build + manual smoke test
+// until now. Everything below covers: (1) flag parsing reaches
+// conversationalRunOptions unchanged, (2) --profile/--target validation
+// exits/errors the way --mode's existing tests already prove for the coding
+// profile, and (3) each fetcher's own request/response contract in
+// isolation — mirroring eval_injection_test.go's "pure-function fixture,
+// then real-store integration, then CLI plumbing" layering for the coding
+// profile's --injection flag.
+
+// TestCmdEval_InvalidProfileExitsNonZero guards the --profile flag's
+// contract, mirroring TestCmdEval_InvalidModeExitsNonZero for --mode.
+func TestCmdEval_InvalidProfileExitsNonZero(t *testing.T) {
+	oldExit := exitFunc
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	var exitCode int
+	var exited bool
+	exitFunc = func(code int) { exitCode = code; exited = true }
+
+	cmdEval([]string{"--profile", "bogus"})
+
+	if !exited || exitCode != 1 {
+		t.Errorf("expected exitFunc(1) for an invalid --profile, got exited=%v code=%d", exited, exitCode)
+	}
+}
+
+// TestCmdEval_ConversationalProfile_PassesFlagsToRunner is the "flag
+// parsing reaches the runner unchanged" scenario, mirroring
+// TestCmdEval_InjectionFlagPlumbing for the coding profile's --injection.
+func TestCmdEval_ConversationalProfile_PassesFlagsToRunner(t *testing.T) {
+	oldRun := runConversationalEval
+	t.Cleanup(func() { runConversationalEval = oldRun })
+
+	var called bool
+	var gotOpts conversationalRunOptions
+	runConversationalEval = func(ctx context.Context, opts conversationalRunOptions) (eval.ConversationalRunSummary, error) {
+		called = true
+		gotOpts = opts
+		return eval.ConversationalRunSummary{}, nil
+	}
+
+	cmdEval([]string{
+		"--profile", "conversational",
+		"--target", "http",
+		"--http-base-url", "http://localhost:7799",
+		"--corpus", "/tmp/custom_conversational_cases.json",
+		"--config", "/tmp/custom_config.yaml",
+		"--runs", "3",
+		"--injection",
+	})
+
+	if !called {
+		t.Fatal("expected --profile conversational to call runConversationalEval")
+	}
+	want := conversationalRunOptions{
+		CorpusPath:  "/tmp/custom_conversational_cases.json",
+		ConfigPath:  "/tmp/custom_config.yaml",
+		Runs:        3,
+		Target:      "http",
+		HTTPBaseURL: "http://localhost:7799",
+		Injection:   true,
+	}
+	if gotOpts != want {
+		t.Errorf("runConversationalEval opts = %+v, want %+v", gotOpts, want)
+	}
+}
+
+// TestCmdEval_ConversationalProfile_DefaultsTargetInprocessNoInjection
+// guards the flag defaults (no --target/--injection supplied): current
+// documented defaults (target=inprocess, injection=false) must reach the
+// runner, mirroring TestCmdEval_InjectionFlagDefaultsFalse.
+func TestCmdEval_ConversationalProfile_DefaultsTargetInprocessNoInjection(t *testing.T) {
+	oldRun := runConversationalEval
+	t.Cleanup(func() { runConversationalEval = oldRun })
+
+	gotOpts := conversationalRunOptions{Target: "seeded-nonempty", Injection: true} // seeded non-zero so a wiring bug that never overwrites still fails
+	runConversationalEval = func(ctx context.Context, opts conversationalRunOptions) (eval.ConversationalRunSummary, error) {
+		gotOpts = opts
+		return eval.ConversationalRunSummary{}, nil
+	}
+
+	cmdEval([]string{"--profile", "conversational"})
+
+	if gotOpts.Target != "inprocess" {
+		t.Errorf("Target = %q, want the documented default %q", gotOpts.Target, "inprocess")
+	}
+	if gotOpts.Injection {
+		t.Error("expected --injection to default to false")
+	}
+}
+
+// TestCmdEval_ConversationalProfile_RunnerErrorExitsNonZero mirrors
+// TestCmdEval_HarnessErrorExitsNonZero for the conversational profile: a
+// runner-wiring failure (e.g. --target=http with no --http-base-url) must
+// surface as a non-zero exit, not a silently empty report.
+func TestCmdEval_ConversationalProfile_RunnerErrorExitsNonZero(t *testing.T) {
+	oldRun, oldExit := runConversationalEval, exitFunc
+	t.Cleanup(func() { runConversationalEval, exitFunc = oldRun, oldExit })
+
+	runConversationalEval = func(ctx context.Context, opts conversationalRunOptions) (eval.ConversationalRunSummary, error) {
+		return eval.ConversationalRunSummary{}, errBoomEval
+	}
+	var exited bool
+	var exitCode int
+	exitFunc = func(code int) { exited = true; exitCode = code }
+
+	cmdEval([]string{"--profile", "conversational"})
+
+	if !exited || exitCode != 1 {
+		t.Errorf("expected exitFunc(1) on a conversational runner error, got exited=%v code=%d", exited, exitCode)
+	}
+}
+
+// TestDefaultRunConversationalEval_TargetHTTPRequiresBaseURL proves
+// requirement 5's http target refuses to run against an empty base URL
+// instead of silently building a malformed request.
+func TestDefaultRunConversationalEval_TargetHTTPRequiresBaseURL(t *testing.T) {
+	_, err := defaultRunConversationalEval(context.Background(), conversationalRunOptions{
+		Target:      "http",
+		HTTPBaseURL: "",
+	})
+	if err == nil {
+		t.Fatal("expected an error when --target=http is used without --http-base-url")
+	}
+	if !strings.Contains(err.Error(), "http-base-url") {
+		t.Errorf("expected the error to mention --http-base-url, got: %v", err)
+	}
+}
+
+// TestDefaultRunConversationalEval_InvalidTargetErrors guards --target's
+// enum contract: anything other than inprocess/http/"" must error before
+// touching a store or an HTTP client.
+func TestDefaultRunConversationalEval_InvalidTargetErrors(t *testing.T) {
+	_, err := defaultRunConversationalEval(context.Background(), conversationalRunOptions{
+		Target: "bogus",
+	})
+	if err == nil {
+		t.Fatal("expected an error for an invalid --target")
+	}
+	if !strings.Contains(err.Error(), "target") {
+		t.Errorf("expected the error to mention --target, got: %v", err)
+	}
+}
+
+// ── conversationalHTTPFetcher: real HTTP round-trip against httptest ──────
+
+// TestConversationalHTTPFetcher_DecodesResults proves the fetcher builds
+// GET /search?q=<query>&limit=<rankCandidateDepth> and decodes the bare
+// []store.SearchResult array (the exact shape GET /search returns when no
+// ?envelope=1 is requested — see internal/server's handleSearch), taking
+// the top hit's Content/SyncID and the full ranked SyncID order.
+func TestConversationalHTTPFetcher_DecodesResults(t *testing.T) {
+	var gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		results := []store.SearchResult{
+			{Observation: store.Observation{ID: 1, SyncID: "obs-abc", Content: "Omnia is a memory system"}},
+			{Observation: store.Observation{ID: 2, SyncID: "obs-def", Content: "second hit"}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(results); err != nil {
+			t.Fatalf("encode fake response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL)
+	got, err := fetch(context.Background(), eval.ConversationalCase{Query: "what is omnia"})
+	if err != nil {
+		t.Fatalf("conversationalHTTPFetcher: %v", err)
+	}
+
+	if gotPath != "/search" {
+		t.Errorf("request path = %q, want %q", gotPath, "/search")
+	}
+	if !strings.Contains(gotQuery, "q=what") {
+		t.Errorf("expected the query string to carry the case's Query (q=...), got %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "limit=") {
+		t.Errorf("expected a limit= query param bounding the candidate pool, got %q", gotQuery)
+	}
+
+	// Retrieved must be the assembled top-N context (bugfix: grounding used
+	// to be scored against only the top hit's content, under-reporting
+	// whenever the fact-bearing chunk ranked 2nd-4th — see
+	// conversationalGroundingContextSize's doc comment). Both fixture
+	// results fit within conversationalGroundingContextSize (4), so both
+	// are joined.
+	wantRetrieved := "Omnia is a memory system" + conversationalGroundingContextSeparator + "second hit"
+	if got.Retrieved != wantRetrieved {
+		t.Errorf("Retrieved = %q, want %q (assembled top-N context, not just the top hit)", got.Retrieved, wantRetrieved)
+	}
+	if got.SurfacedObservationID != "obs-abc" {
+		t.Errorf("SurfacedObservationID = %q, want the top hit's sync_id", got.SurfacedObservationID)
+	}
+	if want := []string{"obs-abc", "obs-def"}; len(got.RankedObservationIDs) != len(want) || got.RankedObservationIDs[0] != want[0] || got.RankedObservationIDs[1] != want[1] {
+		t.Errorf("RankedObservationIDs = %v, want %v (order preserved)", got.RankedObservationIDs, want)
+	}
+	if got.Tokens.Total() == 0 {
+		t.Error("expected non-zero token accounting for a non-empty top hit")
+	}
+}
+
+// TestAssembleGroundingContext is the table-driven unit test for the
+// grounding-fix primitive itself: it must join up to
+// conversationalGroundingContextSize results' Content, in order, dropping
+// anything past that cutoff, and degrade to "" for zero results (preserving
+// eval.ScoreAbsence's "nothing above the floor" check).
+func TestAssembleGroundingContext(t *testing.T) {
+	sep := conversationalGroundingContextSeparator
+	mk := func(contents ...string) []store.SearchResult {
+		out := make([]store.SearchResult, len(contents))
+		for i, c := range contents {
+			out[i] = store.SearchResult{Observation: store.Observation{Content: c}}
+		}
+		return out
+	}
+
+	tests := map[string]struct {
+		results []store.SearchResult
+		want    string
+	}{
+		"no results": {
+			results: nil,
+			want:    "",
+		},
+		"fewer than N": {
+			results: mk("a", "b"),
+			want:    "a" + sep + "b",
+		},
+		"exactly N": {
+			results: mk("a", "b", "c", "d"),
+			want:    "a" + sep + "b" + sep + "c" + sep + "d",
+		},
+		"more than N, extras dropped": {
+			results: mk("a", "b", "c", "d", "e (rank 5, must not appear)"),
+			want:    "a" + sep + "b" + sep + "c" + sep + "d",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := assembleGroundingContext(tc.results)
+			if got != tc.want {
+				t.Errorf("assembleGroundingContext = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConversationalGrounding_CatchesFactAtRank2Through4 is the regression
+// test for the bug this change fixes (docs/conversational-retrieval-plan.md,
+// bug 2): grounding used to be scored against ONLY results[0].Content, so an
+// expected fact ranking 2nd-4th — a chunk a real consumer like Hermes would
+// still receive, since it assembles the top 4 — was scored as "not
+// grounded". This reproduces exactly that shape: the top hit does NOT
+// contain the expected fact, a lower-ranked hit does, and grounding must
+// still come back true once scored over the assembled top-N context.
+func TestConversationalGrounding_CatchesFactAtRank2Through4(t *testing.T) {
+	results := []store.SearchResult{
+		{Observation: store.Observation{SyncID: "obs-1", Content: "top hit — installation instructions, no identity fact here"}},
+		{Observation: store.Observation{SyncID: "obs-2", Content: "Persistent memory for AI coding agents — the actual identity fact"}},
+		{Observation: store.Observation{SyncID: "obs-3", Content: "unrelated third hit"}},
+	}
+	c := eval.ConversationalCase{
+		ID:           "identity-1",
+		Kind:         eval.KindIdentity,
+		ExpectedFact: "Persistent memory for AI coding agents",
+	}
+
+	// Sanity check: the fact must NOT be in the top-1 result, or this test
+	// would not actually exercise the fix (the old top-1-only code would
+	// have passed too).
+	if strings.Contains(strings.ToLower(results[0].Content), strings.ToLower(c.ExpectedFact)) {
+		t.Fatal("test setup invalid: expected fact must not be in the top-1 result")
+	}
+
+	rc := eval.RetrievedCase{
+		Retrieved:            assembleGroundingContext(results),
+		RankedObservationIDs: rankedSyncIDs(results),
+	}
+	result, err := eval.ScoreConversationalCase(c, rc)
+	if err != nil {
+		t.Fatalf("ScoreConversationalCase: %v", err)
+	}
+	if result.Grounded == nil || !*result.Grounded {
+		t.Errorf("Grounded = %v, want true (fact present at rank 2 of the assembled top-%d context)", result.Grounded, conversationalGroundingContextSize)
+	}
+}
+
+// TestConversationalHTTPFetcher_EmptyResultsNoError is the "server found
+// nothing" scenario: an empty results array is a genuine outcome (a miss),
+// never an error.
+func TestConversationalHTTPFetcher_EmptyResultsNoError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL)
+	got, err := fetch(context.Background(), eval.ConversationalCase{Query: "nothing matches this"})
+	if err != nil {
+		t.Fatalf("conversationalHTTPFetcher: %v", err)
+	}
+	if got.Retrieved != "" || got.SurfacedObservationID != "" || len(got.RankedObservationIDs) != 0 {
+		t.Errorf("expected a zero-value RetrievedCase for empty results, got %+v", got)
+	}
+}
+
+// TestConversationalHTTPFetcher_NonOKStatusReturnsError proves a non-200
+// response surfaces as a real per-case error instead of being silently
+// treated as "no results".
+func TestConversationalHTTPFetcher_NonOKStatusReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	fetch := conversationalHTTPFetcher(srv.Client(), srv.URL)
+	_, err := fetch(context.Background(), eval.ConversationalCase{Query: "x"})
+	if err == nil {
+		t.Fatal("expected an error for a non-200 GET /search response")
+	}
+}
+
+// ── conversationalStoreFetcher / conversationalPipelineFetcher: real-store
+// fetcher-selection parity, mirroring eval_injection_test.go's
+// TestPipelineBackedFetcher_ParityWhenFlagsOff for the coding profile ─────
+
+// TestConversationalFetchers_ParityWhenInjectionOff proves requirement 5's
+// two in-process fetchers agree on the scoring-relevant fields
+// (Retrieved/SurfacedObservationID) when every injection sub-gate is off —
+// the same parity floor pipelineBackedFetcher already guarantees against
+// storeBackedFetcher for the coding profile, now for their conversational
+// siblings (the fetcher --injection actually selects between, per
+// defaultRunConversationalEval's opts.Injection branch).
+func TestConversationalFetchers_ParityWhenInjectionOff(t *testing.T) {
+	cfg := testConfig(t)
+	mustSeedObservation(t, cfg, "s1", "eval-conversational-parity", "architecture",
+		"Ollama embedding layer", "internal/embed: Ollama HTTP client with unit-normalized vectors", "project")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	c := eval.ConversationalCase{ID: "case-1", Query: "Ollama embedding layer"}
+
+	storeCase, err := conversationalStoreFetcher(s)(context.Background(), c)
+	if err != nil {
+		t.Fatalf("conversationalStoreFetcher: %v", err)
+	}
+	if storeCase.Retrieved == "" {
+		t.Fatal("test setup invalid: conversationalStoreFetcher found nothing")
+	}
+
+	pipelineCase, err := conversationalPipelineFetcher(s, nil, config.InjectionConfig{}, config.RankingConfig{})(context.Background(), c)
+	if err != nil {
+		t.Fatalf("conversationalPipelineFetcher: %v", err)
+	}
+	if pipelineCase.Retrieved != storeCase.Retrieved {
+		t.Errorf("Retrieved = %q, want %q (parity when every injection flag is off)", pipelineCase.Retrieved, storeCase.Retrieved)
+	}
+	if pipelineCase.SurfacedObservationID != storeCase.SurfacedObservationID {
+		t.Errorf("SurfacedObservationID = %q, want %q (parity when every injection flag is off)", pipelineCase.SurfacedObservationID, storeCase.SurfacedObservationID)
+	}
+}
+
+// TestConversationalPipelineFetcher_BudgetActuallyTrims is the "fetcher
+// selection matters" half of the parity test above: with the injection
+// token budget enabled and set tight, conversationalPipelineFetcher must
+// produce a SMALLER ranked candidate list than conversationalStoreFetcher
+// would for the same seeded data — proving --injection routes to a fetcher
+// that actually applies config.InjectionConfig, not a fetcher that ignores it.
+func TestConversationalPipelineFetcher_BudgetActuallyTrims(t *testing.T) {
+	cfg := testConfig(t)
+	for i := 0; i < 5; i++ {
+		mustSeedObservation(t, cfg, "s1", "eval-conversational-budget", "manual",
+			"Budget fixture "+strconv.Itoa(i), "conversational budget wiring fixture content "+strconv.Itoa(i), "project")
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	c := eval.ConversationalCase{ID: "case-1", Query: "conversational budget wiring fixture"}
+
+	storeCase, err := conversationalStoreFetcher(s)(context.Background(), c)
+	if err != nil {
+		t.Fatalf("conversationalStoreFetcher: %v", err)
+	}
+	if len(storeCase.RankedObservationIDs) < 2 {
+		t.Fatalf("test setup invalid: expected multiple ranked hits from conversationalStoreFetcher, got %d", len(storeCase.RankedObservationIDs))
+	}
+
+	tightBudget := config.InjectionConfig{Budget: config.TokenBudgetConfig{Enabled: true, MaxTokens: 1}}
+	pipelineCase, err := conversationalPipelineFetcher(s, nil, tightBudget, config.RankingConfig{})(context.Background(), c)
+	if err != nil {
+		t.Fatalf("conversationalPipelineFetcher: %v", err)
+	}
+	if len(pipelineCase.RankedObservationIDs) >= len(storeCase.RankedObservationIDs) {
+		t.Errorf("conversationalPipelineFetcher RankedObservationIDs len = %d, want fewer than conversationalStoreFetcher's %d (injection.budget.max_tokens=1 must trim)",
+			len(pipelineCase.RankedObservationIDs), len(storeCase.RankedObservationIDs))
 	}
 }

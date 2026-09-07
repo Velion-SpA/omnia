@@ -210,6 +210,33 @@ func cmdDoctorRepair(cfg store.Config) {
 		failDoctorRepair(err.Error())
 		return
 	}
+
+	// Dispatch by check: CheckSyncMutationRequiredFields deletes queue rows
+	// (no session/observation/prompt project fields involved), every other
+	// supported check reclassifies a session's project. Two different store
+	// mutations, same plan/dry-run/apply contract.
+	switch check {
+	case diagnostic.CheckSyncMutationRequiredFields:
+		if err := applySyncMutationDeletionRepair(s, &plan, mode); err != nil {
+			failDoctorRepair(err.Error())
+			return
+		}
+	default:
+		if err := applySessionReclassifyRepair(s, &plan, mode); err != nil {
+			failDoctorRepair(err.Error())
+			return
+		}
+	}
+	writeDoctorRepairJSON(plan)
+}
+
+// applySessionReclassifyRepair executes (or, for plan/dry-run, only
+// estimates) the session-project-reclassification repair shared by
+// CheckSessionProjectDirectoryMismatch and CheckManualSessionNameProjectMismatch.
+// Extracted unchanged from cmdDoctorRepair's original inline body so
+// applySyncMutationDeletionRepair could be added as a sibling without
+// duplicating the plan/dry-run/apply dispatch above it.
+func applySessionReclassifyRepair(s *store.Store, plan *diagnostic.RepairPlan, mode diagnostic.RepairMode) error {
 	actions := make([]store.SessionProjectReclassification, 0, len(plan.Actions))
 	for _, action := range plan.Actions {
 		actions = append(actions, store.SessionProjectReclassification{SessionID: action.SessionID, FromProject: action.FromProject, ToProject: action.ToProject})
@@ -217,38 +244,66 @@ func cmdDoctorRepair(cfg store.Config) {
 	if mode == diagnostic.RepairModeApply && len(actions) > 0 {
 		counts, err := s.EstimateSessionProjectReclassification(actions)
 		if err != nil {
-			failDoctorRepair(err.Error())
-			return
+			return err
 		}
 		plan.Counts.SessionsPlanned = counts.Sessions
 		plan.Counts.ObservationsPlanned = counts.Observations
 		plan.Counts.PromptsPlanned = counts.Prompts
 		result, err := s.ApplySessionProjectReclassification(actions)
 		if err != nil {
-			failDoctorRepair(err.Error())
-			return
+			return err
 		}
 		plan.Status = "applied"
 		plan.BackupPath = result.BackupPath
 		plan.Counts.SessionsApplied = result.Counts.Sessions
 		plan.Counts.ObservationsApplied = result.Counts.Observations
 		plan.Counts.PromptsApplied = result.Counts.Prompts
-	} else {
-		counts, err := s.EstimateSessionProjectReclassification(actions)
-		if err != nil {
-			failDoctorRepair(err.Error())
-			return
-		}
-		plan.Counts.SessionsPlanned = counts.Sessions
-		plan.Counts.ObservationsPlanned = counts.Observations
-		plan.Counts.PromptsPlanned = counts.Prompts
+		return nil
 	}
-	writeDoctorRepairJSON(plan)
+	counts, err := s.EstimateSessionProjectReclassification(actions)
+	if err != nil {
+		return err
+	}
+	plan.Counts.SessionsPlanned = counts.Sessions
+	plan.Counts.ObservationsPlanned = counts.Observations
+	plan.Counts.PromptsPlanned = counts.Prompts
+	return nil
+}
+
+// applySyncMutationDeletionRepair executes (or, for plan/dry-run, only
+// counts) the CheckSyncMutationRequiredFields repair: deleting the pending
+// sync_mutations rows plan.SyncMutationDeletions names. Same plan/dry-run/
+// apply contract as applySessionReclassifyRepair — only --apply mutates the
+// store — but the mutation itself is a row DELETE, not a project UPDATE, so
+// it has no "estimate" step distinct from the plan already built: the plan's
+// SyncMutationDeletions IS the estimate, already computed by
+// diagnostic.BuildRepairPlan from the doctor report.
+//
+// An already-clean plan (zero deletions — a prior --apply already ran, or
+// nothing was ever wrong) is a no-op: plan.Status stays "noop" as set by
+// BuildRepairPlan, and Store.DeletePendingSyncMutations is never called.
+func applySyncMutationDeletionRepair(s *store.Store, plan *diagnostic.RepairPlan, mode diagnostic.RepairMode) error {
+	plan.Counts.SyncMutationsPlanned = int64(len(plan.SyncMutationDeletions))
+	if mode != diagnostic.RepairModeApply || len(plan.SyncMutationDeletions) == 0 {
+		return nil
+	}
+	seqs := make([]int64, len(plan.SyncMutationDeletions))
+	for i, action := range plan.SyncMutationDeletions {
+		seqs[i] = action.Seq
+	}
+	result, err := s.DeletePendingSyncMutations(seqs)
+	if err != nil {
+		return err
+	}
+	plan.Status = "applied"
+	plan.BackupPath = result.BackupPath
+	plan.Counts.SyncMutationsApplied = result.Deleted
+	return nil
 }
 
 func isSupportedDoctorRepairCheck(check string) bool {
 	switch check {
-	case diagnostic.CheckSessionProjectDirectoryMismatch, diagnostic.CheckManualSessionNameProjectMismatch:
+	case diagnostic.CheckSessionProjectDirectoryMismatch, diagnostic.CheckManualSessionNameProjectMismatch, diagnostic.CheckSyncMutationRequiredFields:
 		return true
 	default:
 		return false

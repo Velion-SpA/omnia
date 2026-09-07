@@ -64,6 +64,59 @@ func TestEmbeddingLagCheck_FlagsObservationsNewerThanNewestEmbedding(t *testing.
 	}
 }
 
+// Operational item #2 (docs/conversational-retrieval-plan.md): past the hard
+// threshold, lag must escalate from warning to error — a warning that never
+// escalates trains operators to ignore it exactly while it matters most.
+func TestEmbeddingLagCheck_ErrorsWhenLagExceedsHardThreshold(t *testing.T) {
+	res, err := EmbeddingLagCheck{}.Run(context.Background(), lagScope(t, EmbeddingSnapshot{
+		Enabled:           true,
+		ObservationMaxID:  2000,
+		ObservationCount:  2000,
+		EmbeddingMaxObsID: 1899,
+		EmbeddingCount:    1899,
+		NewestEmbeddedAt:  "2026-08-01 00:00:00",
+	}, nil))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Result != StatusError {
+		t.Fatalf("lag past the hard threshold must error, got result=%q", res.Result)
+	}
+	if len(res.Findings) != 1 {
+		t.Fatalf("want exactly 1 finding, got %d", len(res.Findings))
+	}
+	f := res.Findings[0]
+	if f.Severity != SeverityError {
+		t.Fatalf("severity: got %q, want %q", f.Severity, SeverityError)
+	}
+	var ev map[string]any
+	if err := json.Unmarshal(f.Evidence, &ev); err != nil {
+		t.Fatalf("evidence is not JSON: %v", err)
+	}
+	if ev["behind_by"] != float64(101) {
+		t.Fatalf("evidence must state the magnitude: got %v", ev["behind_by"])
+	}
+}
+
+// Exactly at the threshold must still be a warning — the check must fire on
+// "more than 100", not "100 or more", so the boundary is unambiguous.
+func TestEmbeddingLagCheck_WarnsAtExactlyTheThreshold(t *testing.T) {
+	res, err := EmbeddingLagCheck{}.Run(context.Background(), lagScope(t, EmbeddingSnapshot{
+		Enabled:           true,
+		ObservationMaxID:  2000,
+		ObservationCount:  2000,
+		EmbeddingMaxObsID: 1900,
+		EmbeddingCount:    1900,
+		NewestEmbeddedAt:  "2026-08-01 00:00:00",
+	}, nil))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Result != StatusWarning {
+		t.Fatalf("lag exactly at the threshold must still warn, got result=%q", res.Result)
+	}
+}
+
 func TestEmbeddingLagCheck_OKWhenCaughtUp(t *testing.T) {
 	res, err := EmbeddingLagCheck{}.Run(context.Background(), lagScope(t, EmbeddingSnapshot{
 		Enabled:           true,

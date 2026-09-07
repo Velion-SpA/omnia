@@ -91,6 +91,63 @@ func TestStoreExposureCheck_FlagsLoosePermissions(t *testing.T) {
 	}
 }
 
+// TestStoreExposureCheck_FlagsLooseBackupsDir (operational item #3,
+// docs/conversational-retrieval-plan.md): BackupSQLite's own directory is a
+// full VACUUM INTO copy of the store — same exposure as the primary data
+// dir/db file, but the pre-existing check never looked at it. BackupSQLite
+// itself now creates it at 0700 (see internal/store/diagnostic.go), so this
+// test loosens the mode AFTER creation to simulate a pre-existing, looser
+// backups dir the same way TestStoreExposureCheck_FlagsLoosePermissions does
+// for the data dir.
+func TestStoreExposureCheck_FlagsLooseBackupsDir(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if _, err := s.BackupSQLite(); err != nil {
+		t.Fatalf("BackupSQLite: %v", err)
+	}
+	if err := os.Chmod(s.BackupDir(), 0o755); err != nil {
+		t.Fatalf("chmod loose backups dir: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{
+		Store:   s,
+		Project: "engram",
+	}, CheckStoreExposure)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusWarning {
+		t.Fatalf("status = %s, want %s; report=%+v", report.Status, StatusWarning, report)
+	}
+	found := false
+	for _, f := range report.Checks[0].Findings {
+		if f.ReasonCode == "store_backups_dir_group_or_world_readable" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected store_backups_dir_group_or_world_readable finding, got %+v", report.Checks[0].Findings)
+	}
+}
+
+// TestStoreExposureCheck_OKWhenNoBackupTakenYet: a store that has never had
+// BackupSQLite called has no backups directory at all. That must not be
+// flagged — there is nothing to check permissions on, and the absence of a
+// backup is not itself an exposure.
+func TestStoreExposureCheck_OKWhenNoBackupTakenYet(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{
+		Store:   s,
+		Project: "engram",
+	}, CheckStoreExposure)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusOK {
+		t.Fatalf("status = %s, want %s; report=%+v", report.Status, StatusOK, report)
+	}
+}
+
 // TestStoreExposureCheck_OKWhenLockedDownAndNotCloudSynced
 // (omnia-provenance-foundation, phase 7): a fresh, owner-only store dir
 // outside any recognized cloud-sync folder must report no findings.

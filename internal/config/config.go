@@ -117,6 +117,138 @@ type Config struct {
 	Ranker        RankerConfig        `yaml:"learned_ranker"`
 	Cartridge     CartridgeConfig     `yaml:"cartridge"`
 	VecIndex      VecIndexConfig      `yaml:"vector_index"`
+
+	// IntentRouting gates P2's query-intent classification and ranking
+	// routing (docs/conversational-retrieval-plan.md: "Query intent
+	// classification and routing"), consumed by mcp.RankPipeline
+	// (internal/mcp/rank_pipeline.go). The zero value (Enabled=false) is the
+	// default: RankPipeline never calls intent.Classify at all, so
+	// mem_search/GET /search stay byte-for-byte identical to today's output
+	// even though internal/intent (precision 1.000 on the blind eval gate)
+	// is fully built — mirroring every other Context Economy gate's
+	// off-by-default, rollback-is-a-config-edit convention (RecallRanking,
+	// StructuralForgetting, Injection.*). When enabled, a classified intent
+	// only ever OVERLAYS a per-request clone of RankingConfig/TypeLensConfig
+	// inputs RankPipeline already accepts — it introduces no new ranking
+	// primitive of its own (plan P2: "mostly a lookup table plus wiring").
+	IntentRouting IntentRoutingConfig `yaml:"intent_routing"`
+
+	// Answer configures P3's GET /answer endpoint
+	// (docs/conversational-retrieval-plan.md "Answer-shaped context
+	// endpoint"): the char budget its assembled context is trimmed to, and
+	// the calibrated fused-score threshold ClassifyAnswerConfidence
+	// (internal/mcp/answer.go) uses for its `low` vs `high` split. Unlike
+	// every other gate in this file, GET /answer has no "off = pre-existing
+	// behavior" fallback to preserve (it is a brand-new endpoint, not a
+	// widened existing one) — Answer's fields are always read by
+	// buildHTTPAnswerFunc (cmd/omnia/recall.go), with applyDefaults filling
+	// both to a sane value when config.yaml never mentions `answer` at all.
+	Answer AnswerConfig `yaml:"answer"`
+}
+
+// AnswerConfig tunes P3's GET /answer endpoint.
+//
+// FULL MEASURED GRID (2026-08-14) for NoneScoreFloor's own doc's sweep,
+// live store, `omnia eval --profile conversational --target answer`.
+// ConfidenceThreshold ("floor B") does not move either target metric on its
+// own — both are computed from Confidence=="none" only, which NoneScoreFloor
+// ("floor A") alone controls — so this grid varies floor A (floor B held
+// equal to floor A, i.e. the `low` band is empty; a non-empty `low` band
+// changes neither refusal nor confidence, only how much of the corpus reads
+// `low` vs `high`, which the eval corpus does not currently score):
+//
+//	floorA  | refusal_id (<=0.05) | refusal_status (<=0.05) | confidence_absence (<=0.1)
+//	0.0000  |               0.000 |                   0.000 |                 1.000 (fail)
+//	0.0170  |               0.625 |                   0.100 |                 1.000 (fail)  [verified]
+//	0.0200  |               0.625 |                   0.100 |                 1.000 (fail)
+//	0.0268  |               0.750 |                   0.100 |                 1.000 (fail)
+//	0.0270  |               0.750 |                   0.100 |                 0.900 (fail)
+//	0.0280  |               0.875 |                   0.100 |                 0.700 (fail)
+//	0.0290  |               0.875 |                   0.200 |                 0.600 (fail)
+//	0.0300  |               0.875 |                   0.300 |                 0.200 (fail)  [verified]
+//	0.0310  |               1.000 |                   0.600 |                 0.100 (pass)
+//	0.0330  |               1.000 |                   1.000 |                 0.000 (pass)
+//
+// Row floorA=0.0000 was also verified directly against the live server.
+// CONCLUSION: no point on this grid clears both targets simultaneously —
+// this is not a missed value between grid points, it is a structural
+// property of the underlying signal (see NoneScoreFloor's own doc for why:
+// the absence class's score range sits almost entirely INSIDE the identity/
+// status range). Every floorA above 0 that touches the absence class AT ALL
+// also touches status worse (status refusal reaches >=0.1, double the
+// target, before absence confidence drops below 0.7) because several real
+// identity/status cases score AS LOW AS the lowest absence case. The
+// DEFAULT below (0, 0 — both floors disabled) is chosen because it is the
+// ONLY point that fully clears false_refusal, and the plan's own stated
+// priority is explicit: "a memory system that says 'no sé' when it does
+// know is a worse product than one that guesses" (docs/
+// conversational-retrieval-plan.md, P3). That priority is followed here,
+// not hidden: false_confidence=1.000 at this default means /answer's
+// `none` value is CURRENTLY ONLY reachable via HitCount==0 (a genuinely
+// empty result set) — the endpoint does not, at these defaults, distinguish
+// "found something irrelevant" from "found real evidence" the way its own
+// motivating GitLab-hallucination example needs it to. An operator who
+// wants the opposite trade should raise ConfidenceThreshold toward ~0.031
+// (clears false_confidence, at the cost of failing both refusal targets
+// worse than the plan's original single-threshold design did).
+type AnswerConfig struct {
+	// MaxChars is the default answer-context char budget
+	// (AssembleAnswerContext's maxChars, internal/mcp/answer.go) when a
+	// request omits `?max_chars=`. Defaults to 1400 — Hermes' own documented
+	// response budget (plan P3: "GET /answer?q=…&max_chars=1400"), so an
+	// operator who never touches this config key gets exactly the size the
+	// motivating consumer needs.
+	MaxChars int `yaml:"max_chars"`
+	// NoneScoreFloor ("floor A") and ConfidenceThreshold ("floor B", the
+	// original single-threshold field, kept under its original name/key)
+	// are the two-floor design ClassifyAnswerConfidence uses: HasTopScore &&
+	// TopScore < NoneScoreFloor -> `none`; < ConfidenceThreshold -> `low`;
+	// otherwise `high` (subject to the other structural low-triggers —
+	// SourcesAssembled==0, RecallDegraded — which still apply). Neither is
+	// the same quantity as Recall.StrongFloor/BaseFloor (those are semantic
+	// cosine-similarity floors gating what even ENTERS the fused result
+	// set; these are floors over the post-fusion RRF relevance score of
+	// whatever already got through).
+	//
+	// SUPERSEDED DESIGN, kept for the record: the plan originally used the
+	// FTS relaxation ladder (not a score floor) as the unconditional `none`
+	// trigger. MEASURED (2026-08-14) that design's two configurations
+	// against the live store, `omnia eval --profile conversational --target
+	// answer`, 3 runs each:
+	//
+	//	config                              | refusal id | refusal status | confidence absence
+	//	relaxation -> none unconditionally  |      0.250 |          0.800 |        0.100 (pass)
+	//	relaxation -> low when fusion ran   |      0.000 |          0.000 |        1.000 (fail)
+	//
+	// Neither passed both targets (refusal <=0.05, confidence <=0.1) —
+	// relaxation was the ONLY signal separating the absence class, and
+	// swinging it between "hard none trigger" and "soft low signal" just
+	// traded one failure mode for the exact mirror of the other.
+	//
+	// MEASURED (2026-08-14) the two-floor score-based redesign THIS field
+	// pair implements, sweeping (NoneScoreFloor, ConfidenceThreshold) jointly
+	// against the same corpus — see AnswerConfig's own doc for the full grid
+	// and cmd/omnia/recall.go's `answerFTSDiag`/ClassifyAnswerConfidence's
+	// doc comment for the root cause: the underlying signal (RRF fusion
+	// score) does not separate the classes in this store AT ALL — absence
+	// case scores [0.0268, 0.0313] sit almost entirely inside the identity/
+	// status range [0.0164, 0.0328], so no floor pair on this axis clears
+	// both targets simultaneously. This is a structural property of RRF
+	// (rank-position fusion, not magnitude), not a tuning failure — see the
+	// full grid and recommendation in AnswerConfig's doc comment.
+	NoneScoreFloor      float64 `yaml:"none_score_floor"`
+	ConfidenceThreshold float64 `yaml:"confidence_threshold"`
+}
+
+// IntentRoutingConfig is P2's single gate. Unlike TokenBudgetConfig/
+// DiversityConfig, there is no numeric field to tune here — internal/intent's
+// signal table and internal/intent.ProfileFor's routing table are both
+// fixed, code-level rule lists (mirroring TypeLensConfig's own
+// "Enabled is the entire gate" rationale, see that type's doc comment above)
+// — so Enabled is the whole contract, and its zero value (false) IS the
+// default.
+type IntentRoutingConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // CodeGraphConfig configures the default-off code-to-decision graph capability.
@@ -423,6 +555,32 @@ type RecallConfig struct {
 	// block documents, not because it depends on Enabled/hybrid fusion —
 	// see TestRecall_FTSRelaxOnZero_IndependentOfRecallEnabled.
 	FTSRelaxOnZero bool `yaml:"fts_relax_on_zero"`
+	// QueryCache gates internal/embed.CachedSearcher (P6,
+	// docs/conversational-retrieval-plan.md: "Query embedding cache"): an
+	// in-process LRU from a normalized query string to its embedding vector,
+	// wrapped around the Searcher handed to recall.Service.Semantic at the
+	// composition root. Disabled by default (Enabled=false) — mirroring
+	// every other Context Economy/recall gate's off-by-default convention —
+	// so a fresh install pays zero memory/complexity cost for a cache the
+	// plan itself is explicitly sceptical of (P6: "if the hit rate is under
+	// ~20%, delete the cache"). See QueryCacheConfig's own doc for
+	// MaxEntries' defaulting rule.
+	QueryCache QueryCacheConfig `yaml:"query_cache"`
+}
+
+// QueryCacheConfig configures internal/embed's per-process query-embedding
+// LRU (P6). MaxEntries <= 0 (including the zero value — the default) means
+// "use internal/embed's own defaultQueryCacheCapacity (200)" —
+// deliberately NOT duplicated as a second constant here, mirroring how
+// RecallConfig's own doc explains its RRFK/DenseK/floor defaults are
+// duplicated FROM internal/recall (a leaf package that cannot import
+// internal/config): internal/embed.NewCachedSearcher already implements
+// this exact <=0-means-default zero-check, so config.QueryCacheConfig only
+// ever needs to forward MaxEntries through unchanged, never reimplement or
+// shadow the fallback value itself.
+type QueryCacheConfig struct {
+	Enabled    bool `yaml:"enabled"`
+	MaxEntries int  `yaml:"max_entries"`
 }
 
 // RankingConfig configures Omnia's optional recency x importance x relevance
@@ -498,6 +656,47 @@ type SourcesConfig struct {
 	Discord   DiscordConfig   `yaml:"discord"`
 	GitHub    GitHubConfig    `yaml:"github"`
 	Atlassian AtlassianConfig `yaml:"atlassian"`
+	// RepoDoc configures the repository-documentation source (P1,
+	// docs/conversational-retrieval-plan.md: "Ingest repository documentation
+	// as memories"). Disabled by default, mirroring every other SourcesConfig
+	// entry's own opt-in convention (Discord/GitHub/Jira/Confluence all
+	// default Enabled=false) — a fresh install/upgrade that never mentions
+	// `sources.repodoc` runs zero extra ingestion. See RepoDocConfig's own
+	// doc for the field-by-field defaulting rules.
+	RepoDoc RepoDocConfig `yaml:"repodoc"`
+}
+
+// RepoDocConfig configures internal/source/repodoc's Source (P1): a local,
+// no-network git-working-tree documentation ingester satisfying
+// core.Source. This block only carries the WIRING knobs — repo root,
+// target project, allowlist override — the package itself
+// (internal/source/repodoc) owns everything about HOW a file becomes an
+// Item (chunking, topic-key scheme, staleness anchors); see that package's
+// doc comment for the full design rationale.
+type RepoDocConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// RepoRoot MUST be an absolute path to a git working tree's top level
+	// (repodoc.New's own contract). Empty (the default) means "use the
+	// current working directory at collect time" — the common case for
+	// `omnia collect -source repodoc` run from inside the repo being
+	// documented; an operator running collect from a different cwd (e.g. a
+	// cron job) should set this explicitly.
+	RepoRoot string `yaml:"repo_root"`
+	// Project is the Engram project every emitted Item carries. Empty (the
+	// default) falls back to Engram.DefaultProject, mirroring how every other
+	// SourcesConfig entry ultimately bottoms out at the same fallback via
+	// Router — repodoc has no per-item routing table (unlike GitHub repos or
+	// Discord channels, there is exactly one repo per collect invocation), so
+	// this is a plain field, not a Router lookup.
+	Project string `yaml:"project"`
+	// Allowlist overrides repodoc.DefaultAllowlist (README*/VISION*/
+	// ARCHITECTURE*/CONTRIBUTING*/docs/**/*.md/adr/**/*.md/
+	// openspec/specs/**/*.md) when non-empty. Nil/empty (the default) leaves
+	// repodoc.New to apply its own package-level default — this config layer
+	// does not duplicate that list, so a future default change in
+	// internal/source/repodoc takes effect without a config.yaml edit unless
+	// an operator has explicitly opted into a custom allowlist here.
+	Allowlist []string `yaml:"allowlist"`
 }
 
 // AtlassianConfig holds ONE shared Atlassian Cloud site + Basic-auth
@@ -859,16 +1058,38 @@ func applyDefaults(cfg *Config, data []byte) {
 	// (false) IS the default, mirroring Recall.Enabled's own convention
 	// above. Only the ranking params get defaults, so an operator who opts
 	// in by setting only `recall: { ranking: { enabled: true } }` still gets
-	// an equal-weight sum and a sane 14-day recency half-life instead of
+	// a sane weighting and a 14-day recency half-life instead of
 	// zero-valued weights that would silently zero out every RankScore.
+	//
+	// These defaults were 1.0/1.0/1.0 — an equal-weight sum — until the
+	// conversational eval harness measured what that actually does. Under
+	// equal weights relevance is only ONE THIRD of RankScore, so
+	// type-derived importance and recency together outvote whether a memory
+	// answers the question at all: a delta question wants a `bugfix`
+	// (DefaultImportanceWeight 2) but an `architecture` row (weight 3)
+	// outranks it on type alone. Measured against
+	// internal/eval/testdata/conversational_cases.json over GET /search,
+	// 3 runs each, equal weights vs. these:
+	//
+	//	kind           equal 1/1/1   relevance-heavy 3/.5/.5   ranking off
+	//	delta              0.300              0.600               0.600
+	//	open_items         0.000              0.125               0.125
+	//	cross_project      0.125              0.250               0.250
+	//	rationale          0.875              0.875               0.625
+	//
+	// Equal weights are WORSE than leaving ranking off entirely on three of
+	// four kinds; relevance-heavy matches ranking-off everywhere and keeps
+	// the rationale gain. Relevance stays dominant, with recency and
+	// importance as tie-breakers rather than as co-equal votes. See
+	// engram/omnia memory obs #2399 for the full ablation.
 	if cfg.Recall.Ranking.Weights.Recency == 0 {
-		cfg.Recall.Ranking.Weights.Recency = 1.0
+		cfg.Recall.Ranking.Weights.Recency = 0.5
 	}
 	if cfg.Recall.Ranking.Weights.Importance == 0 {
-		cfg.Recall.Ranking.Weights.Importance = 1.0
+		cfg.Recall.Ranking.Weights.Importance = 0.5
 	}
 	if cfg.Recall.Ranking.Weights.Relevance == 0 {
-		cfg.Recall.Ranking.Weights.Relevance = 1.0
+		cfg.Recall.Ranking.Weights.Relevance = 3.0
 	}
 	// Weights.Salience intentionally has NO default-fill here, unlike its
 	// three siblings above — see RankingWeights' own doc: its zero value
@@ -1012,6 +1233,34 @@ func applyDefaults(cfg *Config, data []byte) {
 	}
 	if cfg.WriteHygiene.MinContentLength == 0 {
 		cfg.WriteHygiene.MinContentLength = 10
+	}
+
+	// P3 (docs/conversational-retrieval-plan.md "Answer-shaped context
+	// endpoint"): MaxChars defaults to Hermes' own documented response
+	// budget (1400 chars, the plan's own example query string) so an
+	// operator who never touches `answer:` in config.yaml still gets the
+	// size the motivating consumer needs.
+	if cfg.Answer.MaxChars == 0 {
+		cfg.Answer.MaxChars = 1400
+	}
+	// NoneScoreFloor/ConfidenceThreshold: see AnswerConfig's own doc for the
+	// full measured grid. Summary: this axis (RRF fusion score) cannot
+	// separate the absence class from identity/status in this store — their
+	// score ranges overlap almost completely — so no (floorA, floorB) pair
+	// clears both P3 targets (refusal <=0.05, confidence <=0.1)
+	// simultaneously. These defaults are kept at the values that clear
+	// false_refusal (the plan's own stated priority: "a memory system that
+	// says 'no sé' when it does know is a worse product than one that
+	// guesses") while documenting, not hiding, that false_confidence fails
+	// at this setting. An operator who wants the opposite trade — favor
+	// false_confidence over false_refusal — should raise ConfidenceThreshold
+	// toward ~0.033 (this store's measured two-leg-agreement ceiling); see
+	// AnswerConfig's doc for that end of the grid.
+	if cfg.Answer.NoneScoreFloor == 0 {
+		cfg.Answer.NoneScoreFloor = 0
+	}
+	if cfg.Answer.ConfidenceThreshold == 0 {
+		cfg.Answer.ConfidenceThreshold = 0
 	}
 }
 

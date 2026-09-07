@@ -23,6 +23,19 @@ type RetrievedCase struct {
 	// top hit leaves this empty, and those cases report as unscoreable rather
 	// than as zeros.
 	RankedObservationIDs []string
+	// Confidence is the P3 (docs/conversational-retrieval-plan.md
+	// "Answer-shaped context endpoint") calibrated confidence value
+	// ("high"/"low"/"none") a fetcher read directly from GET /answer's
+	// response, when it has one — only cmd/omnia/eval.go's
+	// conversationalAnswerFetcher (--profile conversational --target answer)
+	// populates this today. Empty ("") for every other fetcher, meaning "no
+	// explicit confidence signal available" — ScoreConversationalCase falls
+	// back to its presence-based ScoreAbsence/factMatches checks in that
+	// case rather than treating an empty string as a confidence value of its
+	// own. This field is on the SHARED RetrievedCase type (not a
+	// conversational-only one) because it costs nothing for the coding
+	// profile, which never reads it.
+	Confidence string
 }
 
 // RetrievedFetcher is the harness's single retrieval seam: specs EVAL-1

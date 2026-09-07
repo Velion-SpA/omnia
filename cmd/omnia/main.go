@@ -42,7 +42,6 @@ import (
 	"github.com/velion/omnia/internal/obsidian"
 	"github.com/velion/omnia/internal/project"
 	"github.com/velion/omnia/internal/purge"
-	"github.com/velion/omnia/internal/ranker"
 	"github.com/velion/omnia/internal/server"
 	"github.com/velion/omnia/internal/setup"
 	"github.com/velion/omnia/internal/store"
@@ -1099,10 +1098,40 @@ func cmdServe(cfg store.Config) {
 			autoEmbedWorker = worker
 		}
 
+		// P0 (docs/conversational-retrieval-plan.md): GET /search now runs
+		// the SAME post-fusion RankPipeline mem_search does, not just the
+		// fuse-then-hydrate leg — buildHTTPSearchFunc (cmd/omnia/recall.go)
+		// is the shared seam that makes the two consumers impossible to
+		// drift apart, extending issue #86's recallOrFTSSearch precedent
+		// past hydration into ranking itself. autoEmbedWorker is nil when
+		// embeddings are disabled, matching NewWatermarkReader's own
+		// nil-means-unknown contract.
 		recallSvc := buildRecallService(s, appCfg.Recall, appCfg.Embeddings, cfg.DataDir, appCfg.VecIndex.Enabled, appCfg.Encryption)
-		srv.SetSearch(func(ctx context.Context, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
-			return recallOrFTSSearch(ctx, s, recallSvc, query, opts)
-		})
+		srv.SetSearch(buildHTTPSearchFunc(s, recallSvc, appCfg, cfg.DataDir, autoEmbedWorker))
+
+		// P3 (docs/conversational-retrieval-plan.md "Answer-shaped context
+		// endpoint"): GET /answer shares recallSvc/appCfg/autoEmbedWorker
+		// with GET /search above — same retrieval leg, same ranking
+		// pipeline, different final shaping (structured-field extraction +
+		// calibrated confidence instead of a raw result list).
+		srv.SetAnswer(buildHTTPAnswerFunc(s, recallSvc, appCfg, cfg.DataDir, autoEmbedWorker))
+
+		// P6 (docs/conversational-retrieval-plan.md "Query embedding cache"):
+		// GET /health's query_cache debug field (server.go's handleHealth)
+		// reads stats directly off the SAME *embed.CachedSearcher instance
+		// buildRecallService just wrapped recallSvc.Semantic in (when
+		// recall.query_cache.enabled is true) — recall.Service.Semantic is
+		// typed as the embed.Searcher interface, so a type assertion is the
+		// only way to reach the concrete CachedSearcher's Stats() without
+		// widening that interface. recallSvc is nil when recall itself is
+		// disabled, and the assertion is a no-op false when the cache flag is
+		// off — either way srv.queryCache simply stays nil (the field's own
+		// documented "cache disabled/unconfigured" default).
+		if recallSvc != nil {
+			if cs, ok := recallSvc.Semantic.(*embed.CachedSearcher); ok {
+				srv.SetQueryCache(cs)
+			}
+		}
 	}
 
 	// Try to start autosync (opt-in via ENGRAM_CLOUD_AUTOSYNC=1).
@@ -1400,16 +1429,12 @@ func cmdMCP(cfg store.Config) {
 		// handleSearch regardless of whether hybrid recall itself is enabled —
 		// RankResults/explain work over the FTS5-only path too.
 		mcpCfg.RecallRanking = appCfg.Recall.Ranking
-		mcpCfg.LearnedRanker = appCfg.Ranker
-		if appCfg.Ranker.Enabled {
-			dir := appCfg.Ranker.ModelDir
-			if dir == "" {
-				dir = filepath.Join(cfg.DataDir, "ranker")
-			}
-			if model, loadErr := ranker.LoadCurrent(dir); loadErr == nil {
-				mcpCfg.LearnedRankerModel = &model
-			}
-		}
+		// P0 (docs/conversational-retrieval-plan.md): loadLearnedRankerForCLI
+		// (cmd/omnia/recall.go) is now the single place this load logic
+		// lives — GET /search's buildHTTPSearchFunc calls the exact same
+		// helper, so the two consumers can't silently diverge on which
+		// trained model they score against.
+		mcpCfg.LearnedRanker, mcpCfg.LearnedRankerModel = loadLearnedRankerForCLI(appCfg, cfg.DataDir)
 		// memory-structural-forgetting (omnia-structural-forgetting PR2,
 		// Requirement 6): thread structural_forgetting.enabled through so
 		// handleSearch's stale-anchor downrank + receipt is opt-in per the
@@ -1455,6 +1480,13 @@ func cmdMCP(cfg store.Config) {
 		// config.yaml — mirrors CodeGraph's own registration-gate convention
 		// above (zero value = not registered at all).
 		mcpCfg.Enforcement = appCfg.Enforcement
+		// P2 (docs/conversational-retrieval-plan.md): thread intent_routing.*
+		// through so handleSearch's RankPipeline call classifies the query
+		// and overlays a routing profile only when intent_routing.enabled is
+		// true in config.yaml — zero value (false) keeps mem_search
+		// byte-for-byte identical to today, mirroring RecallRanking/
+		// StructuralForgetting's own off-by-default convention above.
+		mcpCfg.IntentRouting = appCfg.IntentRouting
 	}
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
@@ -1598,6 +1630,41 @@ func cmdSearchPrepared(cfg store.Config, plan searchCommandPlan) {
 	if err != nil {
 		fatal(err)
 		return
+	}
+
+	// Run the SAME post-fusion ranking pipeline GET /search runs (P0). Until
+	// this call existed, `omnia search` was the last surface still on raw
+	// fusion output: no ranking, no intent routing, no type lens, no MMR, no
+	// token budget. That mattered far more than "the CLI is a bit worse",
+	// because the CLI is Hermes' FALLBACK path — it shells out to `omnia
+	// search` whenever `omnia serve` is unreachable, and it does so silently.
+	// A voice agent would therefore drop to the weakest retrieval in the
+	// system at exactly the moment something was already wrong, with nothing
+	// in the transcript to say so. This is the same divergence P0 fixed one
+	// layer up: a pipeline wired into one consumer and not its sibling.
+	//
+	// Every stage self-gates on its own config and is a pure no-op when
+	// disabled, so this is byte-for-byte today's output on a default install
+	// (see mcp.RankPipeline's own doc). appCfg failing to load degrades to
+	// the zero-value config — every gate off — matching this file's existing
+	// config graceful-degradation convention rather than failing the search.
+	{
+		rankCfg := &config.Config{}
+		if loaded, cfgErr := loadAppConfigWithRecallAutodetect(); cfgErr == nil {
+			rankCfg = loaded
+		}
+		learnedRankerCfg, learnedRankerModel := loadLearnedRankerForCLI(rankCfg, cfg.DataDir)
+		results = mcp.RankPipeline(results, relevance, mcp.RankPipelineOptions{
+			Ranking:            rankCfg.Recall.Ranking,
+			LearnedRanker:      learnedRankerCfg,
+			LearnedRankerModel: learnedRankerModel,
+			Query:              query,
+			ExplicitType:       opts.Type,
+			TypeLens:           rankCfg.Injection.TypeLens,
+			Diversity:          rankCfg.Injection.Diversity,
+			Budget:             rankCfg.Injection.Budget,
+			IntentRouting:      rankCfg.IntentRouting,
+		}, time.Now()).Results
 	}
 
 	if len(results) == 0 {

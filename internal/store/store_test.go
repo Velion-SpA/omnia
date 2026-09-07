@@ -8383,6 +8383,58 @@ func TestListPendingProjectMutationsAndPayloadValidation(t *testing.T) {
 	}
 }
 
+// A session created by saving a memory by hand has no working directory —
+// there was no repo involved, and that is its correct state, not missing
+// data (#254). Two OTHER validators on the actual push path
+// (chunkcodec.normalizeMutationPayload, cloudserver.validateDirectChunkArrayEntries)
+// were relaxed for exactly this reason; this is the THIRD, independent copy
+// of the same rule — the one `omnia doctor`'s sync_mutation_required_fields
+// check reaches through ValidateSyncMutationPayload — which #254 missed. #255
+// filed the underlying gap: three validators, no shared rules, so a green
+// doctor proves nothing about whether the push will be accepted.
+func TestValidateSyncMutationPayloadSessionDoesNotRequireDirectory(t *testing.T) {
+	payload := `{"id":"manual-save-omnia","project":"omnia","started_at":"2026-08-04 10:00:00"}`
+	validation := ValidateSyncMutationPayload(SyncEntitySession, SyncOpUpsert, payload, "manual-save-omnia")
+	if validation.ReasonCode != "" {
+		t.Fatalf("a directory-less manual-save session must validate cleanly, got %+v", validation)
+	}
+}
+
+// The identity field is a different matter: without an id (or entity_key) the
+// upsert targets nothing, so it stays required.
+func TestValidateSyncMutationPayloadSessionStillRequiresID(t *testing.T) {
+	payload := `{"project":"omnia","directory":"/tmp/x"}`
+	validation := ValidateSyncMutationPayload(SyncEntitySession, SyncOpUpsert, payload, "")
+	if validation.ReasonCode != "sync_mutation_payload_missing_required_fields" || strings.Join(validation.MissingFields, ",") != "id" {
+		t.Fatalf("expected missing id, got %+v", validation)
+	}
+}
+
+// Multi-cloud fan-out (OBL-06) writes one additional sync_mutations row per
+// non-default cloud alias, keyed by "<alias>:<project>" instead of
+// DefaultSyncTargetKey ("cloud"). ListPendingProjectMutations must see those
+// too — a doctor scan that only reads the default target_key silently misses
+// every non-default cloud's stuck mutations and reports a false-clean queue,
+// the same "green doctor proves nothing" shape #255 documented for the
+// push-path validators.
+func TestListPendingProjectMutationsSeesNonDefaultCloudTargetKeys(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.ensureSyncState("work:engram"); err != nil {
+		t.Fatalf("ensureSyncState: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"work:engram", SyncEntityObservation, "obs-work-1", SyncOpUpsert, `{"sync_id":"obs-work-1"}`, SyncSourceLocal, "engram"); err != nil {
+		t.Fatalf("insert fanned-out pending mutation: %v", err)
+	}
+	mutations, err := s.ListPendingProjectMutations("engram")
+	if err != nil {
+		t.Fatalf("ListPendingProjectMutations: %v", err)
+	}
+	if len(mutations) != 1 || mutations[0].TargetKey != "work:engram" {
+		t.Fatalf("mutations=%+v, want the non-default target_key row visible", mutations)
+	}
+}
+
 func TestValidateSyncMutationPayloadRelationRequiresServerFields(t *testing.T) {
 	payload := `{"sync_id":"rel-1","source_id":"obs-a","target_id":"obs-b","relation":"conflicts_with","judgment_status":"judged","project":"engram"}`
 	validation := ValidateSyncMutationPayload(SyncEntityRelation, SyncOpUpsert, payload, "rel-1")
