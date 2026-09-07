@@ -509,6 +509,40 @@ func (m *Manager) push(ctx context.Context) error {
 		return nil
 	}
 
+	// Drop mutations the cloud can never accept, before they poison a batch.
+	//
+	// The server rejects ANY entry with an empty project (BR2-1 in
+	// internal/cloud/cloudserver/mutations.go: an empty project bypasses
+	// per-project auth), so pushing one is guaranteed-doomed work. Worse, the
+	// group loop below returns on the first failing group, so a single such row
+	// aborts the whole cycle and every other project stops replicating.
+	// Measured 2026-09-06 against the personal cloud: `status 400: mutation
+	// entries must specify a project` repeating while 62 other projects' work
+	// sat unsent and last_sync_at never left null.
+	//
+	// Skipping them during grouping would NOT be enough: they stay pending and
+	// keep consuming slots in the fixed-size ListPendingSyncMutations window
+	// forever, so the queue head never advances. They are acked out of the
+	// queue instead. Nothing is removed from the source tables — only the
+	// unsendable queue entry — which matches the store-layer precedent for
+	// empty-content prompts: a row that no validator could ever accept simply
+	// becomes permanently unsyncable, and saying so loudly beats retrying it
+	// until the end of time.
+	if dropped := ackUnsendableMutations(m, pending); dropped > 0 {
+		filtered := make([]store.SyncMutation, 0, len(pending)-dropped)
+		for _, mut := range pending {
+			if strings.TrimSpace(mut.Project) != "" {
+				filtered = append(filtered, mut)
+			}
+		}
+		pending = filtered
+		if len(pending) == 0 {
+			// The whole window was unsendable. Report success so the failure
+			// counter clears — the queue really did advance.
+			return nil
+		}
+	}
+
 	// Group by project (preserve order).
 	groups := make(map[string][]store.SyncMutation)
 	order := make([]string, 0)
@@ -719,4 +753,30 @@ func (m *Manager) releaseLease() {
 	m.leaseHeld = false
 	m.mu.Unlock()
 	_ = m.store.ReleaseSyncLease(m.cfg.TargetKey, m.cfg.LeaseOwner)
+}
+
+// ackUnsendableMutations removes queue entries the cloud can never accept and
+// reports how many it dropped. See the call site in push for why dropping,
+// rather than skipping, is what actually unblocks the queue.
+//
+// An ack failure is logged, not returned: the caller can still make progress on
+// every other project, and turning a cleanup problem into a cycle-wide error
+// would recreate the very stall this function exists to clear.
+func ackUnsendableMutations(m *Manager, pending []store.SyncMutation) int {
+	var seqs []int64
+	for _, mut := range pending {
+		if strings.TrimSpace(mut.Project) == "" {
+			seqs = append(seqs, mut.Seq)
+		}
+	}
+	if len(seqs) == 0 {
+		return 0
+	}
+	log.Printf("[autosync] dropping %d unsendable mutation(s) with an empty project from target %q (seqs=%v); the cloud rejects these with 400 empty_project and they were blocking every other project",
+		len(seqs), m.cfg.TargetKey, seqs)
+	if err := m.store.AckSyncMutationSeqs(m.cfg.TargetKey, seqs); err != nil {
+		log.Printf("[autosync] ERROR: could not drop unsendable mutations from target %q: %v", m.cfg.TargetKey, err)
+		return 0
+	}
+	return len(seqs)
 }
